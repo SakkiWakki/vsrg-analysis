@@ -135,13 +135,21 @@ def _start_osu_with_overlay():
             f'Run `make overlay` from the repo root first.')
         return
 
-    pub = get_publisher()
+    width  = os.environ.get('GAMESCOPE_WIDTH',  '2560')
+    height = os.environ.get('GAMESCOPE_HEIGHT', '1440')
+
+    # Hand the app-wide ConfigStore to the publisher so drag
+    # positions in edit mode (shift+tab) persist across restarts.
+    try:
+        from analysis.config import get_config
+        cfg = get_config()
+    except Exception:
+        cfg = None
+    pub = get_publisher(config_store=cfg,
+                        width=int(width), height=int(height))
     app = QApplication.instance()
     if app is not None:
         app._osu_live_shm_publisher = pub
-
-    width  = os.environ.get('GAMESCOPE_WIDTH',  '2560')
-    height = os.environ.get('GAMESCOPE_HEIGHT', '1440')
     cmd = [
         'gamescope', '-f',
         '-w', width, '-h', height,

@@ -1,195 +1,45 @@
-"""POSIX shared-memory publisher for the gamescope external overlay.
+"""Port of the osu! live HUD to the generic overlay plugin API.
 
-Binary contract lives at
-``analysis/games/osu/gamescope_overlay/shm_layout.h``.
-The two must stay in sync; to catch drift we write a ``magic`` and
-``version`` word and the consumer rejects mismatches.
+Everything osu-specific lives here: we read ``LiveSnapshot`` from the
+shared :class:`OsuLiveClient`, shape it as a widget list, and hand
+that to :class:`plugins.overlay_api.OverlayPublisher`. The overlay
+C binary knows nothing about osu! — it just draws the widgets.
 
-Why shm rather than Unix socket?
---------------------------------
-The overlay renders at 60 Hz and would otherwise have to make a
-read/recv syscall every frame just to pick up values that change
-~30× per second. A single mmap of /dev/shm/osu_live_overlay lets
-the consumer dereference a struct pointer — zero syscalls per
-frame. Writer updates are infrequent (poller is 30 Hz) and cheap
-(one ``struct.pack_into``). The seqlock keeps readers from ever
-seeing a torn write without needing a futex.
+This file used to own a fixed POD struct and a bespoke seqlock; that
+logic now lives in ``plugins/overlay_api.py`` so any plugin can
+publish to the overlay the same way.
 """
 from __future__ import annotations
 
-import mmap
-import os
-import struct
 import threading
-import time
 
 import numpy as np
 
+from plugins.overlay_api import (ANCHOR_TL, BLACK_DIM, BLUE_ACCENT, HIST_BAR,
+                                 WARN_AMBER, WHITE, OverlayPublisher, rgba)
 from plugins.unsafe.osu_live.client import LiveSnapshot, get_client
 
 
-# ─── Constants mirrored from shm_layout.h ────────────────────────────────
-
-_SHM_PATH = '/dev/shm/osu_live_overlay'
-_MAGIC    = 0x4F53554C  # 'OSUL'
-_VERSION  = 1
-_TITLE_LEN = 128
-_HIST_BINS = 41    # ±100 ms in 5 ms bins
-
-# Layout must match the C struct byte-for-byte. Little-endian '<',
-# packed with explicit padding bytes.
-_LAYOUT = struct.Struct(
-    '<'
-    'I I I I'            # magic, version, seq, _pad0
-    'B B B B'            # connected, in_gameplay, keycount, _pad1
-    'i i'                # combo, max_combo
-    'i i i i'            # hits_300, hits_100, hits_50, hits_miss
-    'f f'                # accuracy, unstable_rate
-    f'{_HIST_BINS}I'     # histogram bins
-    f'{_TITLE_LEN}s'     # map_title (null-padded utf-8)
-)
-_TOTAL_SIZE = _LAYOUT.size
-
-# ─── Publisher ───────────────────────────────────────────────────────────
+_PLUGIN_KEY = 'osu_live'
+_HIST_BINS  = 41            # ±100 ms, 5 ms per bin
+_PUBLISH_HZ = 30.0
 
 
-class OsuLiveShmPublisher:
-    """Background thread that polls the shared ``OsuLiveClient`` and
-    mirrors each snapshot into /dev/shm/osu_live_overlay.
-
-    Call :meth:`start` once per process; the publisher survives
-    plugin reloads because :func:`get_publisher` is a module-level
-    singleton gated by a lock.
-    """
-
-    def __init__(self, client=None, *, publish_hz: float = 30.0):
-        self._client = client or get_client()
-        self._interval = 1.0 / max(1.0, publish_hz)
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._fd: int | None = None
-        self._mm: mmap.mmap | None = None
-        self._seq = 0
-
-    def start(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
-            return
-        # /dev/shm is a tmpfs on every modern Linux, so opening a
-        # regular file there gives us the same kernel-backed page
-        # cache that shm_open() would. Using os.open + ftruncate
-        # avoids pulling in posix_ipc as a dependency.
-        fd = os.open(_SHM_PATH, os.O_CREAT | os.O_RDWR, 0o600)
-        os.ftruncate(fd, _TOTAL_SIZE)
-        self._fd = fd
-        self._mm = mmap.mmap(fd, _TOTAL_SIZE,
-                             flags=mmap.MAP_SHARED,
-                             prot=mmap.PROT_READ | mmap.PROT_WRITE)
-        # Zero the region and write the header so a consumer that
-        # attaches before our first publish still sees a valid
-        # magic/version (and seq=0, so it waits for the first real
-        # update rather than reading garbage fields).
-        self._mm[:] = b'\x00' * _TOTAL_SIZE
-        struct.pack_into('<II', self._mm, 0, _MAGIC, _VERSION)
-
-        self._stop.clear()
-        self._thread = threading.Thread(
-            target=self._run, name='OsuLiveShmPublisher', daemon=True)
-        self._thread.start()
-
-    def stop(self, timeout: float = 1.0) -> None:
-        self._stop.set()
-        t = self._thread
-        if t is not None:
-            t.join(timeout=timeout)
-            self._thread = None
-        if self._mm is not None:
-            self._mm.close()
-            self._mm = None
-        if self._fd is not None:
-            try:
-                os.close(self._fd)
-            except OSError:
-                pass
-            self._fd = None
-        # Intentionally do NOT unlink the shm segment — leave it
-        # around so the overlay can come up/down independently.
-
-    # ── Internals ────────────────────────────────────────────────────
-
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            started = time.monotonic()
-            try:
-                self._publish(self._client.snapshot())
-            except Exception:
-                # Never kill the thread on publish errors — the
-                # overlay just sees stale data until we recover.
-                pass
-            elapsed = time.monotonic() - started
-            self._stop.wait(max(0.0, self._interval - elapsed))
-
-    def _publish(self, snap: LiveSnapshot) -> None:
-        mm = self._mm
-        if mm is None:
-            return
-
-        # Seqlock: bump to odd, write fields, bump to next even.
-        # Readers retry if they see odd or if seq changed mid-read.
-        self._seq = (self._seq + 1) & 0xFFFFFFFF  # odd now
-        struct.pack_into('<I', mm, 8, self._seq)
-
-        hist = _offsets_to_histogram(snap.offsets)
-        title = snap.map_title.encode('utf-8')[: _TITLE_LEN - 1]
-
-        _LAYOUT.pack_into(
-            mm, 0,
-            _MAGIC, _VERSION, self._seq, 0,              # header
-            1 if snap.connected else 0,                  # connected
-            1 if snap.in_gameplay else 0,                # in_gameplay
-            int(snap.keycount) & 0xFF,                   # keycount
-            0,                                           # _pad1
-            int(snap.combo),
-            int(snap.max_combo),
-            int(snap.hits_300),
-            int(snap.hits_100),
-            int(snap.hits_50),
-            int(snap.hits_miss),
-            float(snap.accuracy),
-            float(_unstable_rate_ms(snap)),
-            *hist,
-            title,
-        )
-
-        self._seq = (self._seq + 1) & 0xFFFFFFFF  # even now
-        struct.pack_into('<I', mm, 8, self._seq)
-
+# ── Offset helpers (same logic the old native publisher used) ──────
 
 def _offsets_to_histogram(offsets: np.ndarray) -> list[int]:
-    """Bucket hit offsets (seconds) into 41 bins spanning ±100 ms.
-
-    Returns a ``list[int]`` of length :data:`_HIST_BINS` so
-    :data:`_LAYOUT` can splat it with ``*hist``. We clip out-of-range
-    offsets to the edge bins so a stray late hit doesn't disappear.
-    """
     bins = [0] * _HIST_BINS
     if offsets is None or len(offsets) == 0:
         return bins
-    # Convert s → ms, clip to [-100, 100], map to 0..40 bin index.
     ms = np.asarray(offsets, dtype=np.float64) * 1000.0
     ms = np.clip(ms, -100.0, 100.0)
     idx = ((ms + 100.0) / 5.0).astype(np.int32)
     idx = np.clip(idx, 0, _HIST_BINS - 1)
-    # np.bincount is faster than a Python loop for >~30 hits; for
-    # short arrays it's the same. Always use it for a simple path.
     counts = np.bincount(idx, minlength=_HIST_BINS)
-    for i in range(_HIST_BINS):
-        bins[i] = int(counts[i])
-    return bins
+    return [int(counts[i]) for i in range(_HIST_BINS)]
 
 
 def _unstable_rate_ms(snap: LiveSnapshot) -> float:
-    """UR fallback identical to overlay.py's: prefer the source
-    value, else 10× stdev of the ms hit offsets."""
     if snap.unstable_rate and snap.unstable_rate > 0:
         return float(snap.unstable_rate)
     if len(snap.offsets) < 2:
@@ -198,17 +48,115 @@ def _unstable_rate_ms(snap: LiveSnapshot) -> float:
     return float(10.0 * np.std(ms))
 
 
-# ─── Singleton ───────────────────────────────────────────────────────────
+# ── HUD builder: LiveSnapshot → widgets ────────────────────────────
 
-_publisher: OsuLiveShmPublisher | None = None
+# Layout constants expressed in normalized canvas units (0..1).
+# These are the defaults; the user can shift+tab + drag to override,
+# and the override is persisted in the app's ConfigStore.
+#
+# Panel at top-left: combo, accuracy + UR, hit counts, histogram.
+_PANEL_X  = 0.012
+_PANEL_Y  = 0.022
+_PANEL_W  = 0.27
+_PANEL_H  = 0.21
+
+_HIST_X   = _PANEL_X + 0.010
+_HIST_Y   = _PANEL_Y + _PANEL_H - 0.058
+_HIST_W   = _PANEL_W - 0.020
+_HIST_H   = 0.048
+
+
+def _build_hud(pub: OverlayPublisher) -> None:
+    snap: LiveSnapshot = get_client().snapshot()
+
+    # Outside of gameplay the HUD is noise. Emit zero widgets so
+    # the overlay renders a clean, transparent frame (and the
+    # content-hash skips after the first post so we don't spam
+    # commits).
+    if not snap.connected or not snap.in_gameplay:
+        with pub.frame() as f:
+            pass
+        return
+
+    hist = _offsets_to_histogram(snap.offsets)
+    ur   = _unstable_rate_ms(snap)
+    peak = max(1, max(hist))
+
+    with pub.frame() as f:
+        # Everything inside this block shares one group_id so dragging
+        # any part of the HUD moves the whole thing together. The
+        # persisted delta is shared across histogram bars too, which
+        # means new bars appearing mid-play inherit the user's layout.
+        with f.group('osu_live.panel'):
+            f.rect('panel_bg', _PANEL_X, _PANEL_Y, _PANEL_W, _PANEL_H,
+                   color=BLACK_DIM, anchor=ANCHOR_TL)
+            f.rect('panel_accent', _PANEL_X, _PANEL_Y, _PANEL_W, 0.003,
+                   color=BLUE_ACCENT, anchor=ANCHOR_TL)
+
+            # Combo, big.
+            f.text('combo', f'{snap.combo}X',
+                   _PANEL_X + 0.010, _PANEL_Y + 0.018,
+                   px_scale=2.5, color=WHITE, anchor=ANCHOR_TL)
+
+            # Accuracy + UR line.
+            line2 = f'{snap.accuracy:.2f}%  UR {ur:.1f}'
+            f.text('acc_ur', line2,
+                   _PANEL_X + 0.010, _PANEL_Y + 0.065,
+                   px_scale=2.0, color=WHITE, anchor=ANCHOR_TL)
+
+            # Hit counts: 300:100:50:miss.
+            hits_line = (f'{snap.hits_300}:{snap.hits_100}:'
+                         f'{snap.hits_50}:{snap.hits_miss}')
+            f.text('hit_counts', hits_line,
+                   _PANEL_X + 0.010, _PANEL_Y + 0.105,
+                   px_scale=1.6, color=WHITE, anchor=ANCHOR_TL)
+
+            # Histogram baseline.
+            f.rect('hist_base', _HIST_X, _HIST_Y + _HIST_H - 0.001,
+                   _HIST_W, 0.001,
+                   color=rgba(64, 64, 76, 230), anchor=ANCHOR_TL)
+
+            bin_w = _HIST_W / _HIST_BINS
+            for i, count in enumerate(hist):
+                h_norm = (count / peak) * _HIST_H
+                if h_norm <= 0:
+                    continue
+                bar_x = _HIST_X + i * bin_w
+                bar_y = _HIST_Y + (_HIST_H - h_norm)
+                f.rect(f'hist_bar_{i}', bar_x, bar_y,
+                       max(0.0005, bin_w - 0.0008), h_norm,
+                       color=HIST_BAR, anchor=ANCHOR_TL)
+
+            # Zero marker.
+            f.rect('hist_zero', _HIST_X + _HIST_W * 0.5 - 0.0004,
+                   _HIST_Y, 0.0008, _HIST_H,
+                   color=rgba(255, 255, 255, 100), anchor=ANCHOR_TL)
+
+
+# ── Singleton ──────────────────────────────────────────────────────
+
+_publisher: OverlayPublisher | None = None
 _lock = threading.Lock()
+_thread: threading.Thread | None = None
 
 
-def get_publisher() -> OsuLiveShmPublisher:
-    """Return the process-wide publisher, starting it on first call."""
-    global _publisher
+def get_publisher(config_store=None,
+                  width: int = 2560,
+                  height: int = 1440) -> OverlayPublisher:
+    """Return (and lazily start) the osu_live overlay publisher.
+
+    ``config_store`` persists drag positions per (width × height)
+    bucket; pass the app-wide ``ConfigStore`` if you want
+    user-positioned layouts to survive restarts. Omitting it still
+    lets runtime drags work — they just don't persist.
+    """
+    global _publisher, _thread
     with _lock:
         if _publisher is None:
-            _publisher = OsuLiveShmPublisher()
+            _publisher = OverlayPublisher(
+                _PLUGIN_KEY, width=width, height=height,
+                config_store=config_store)
             _publisher.start()
+            _thread = _publisher.run_thread(
+                _build_hud, hz=_PUBLISH_HZ, name='OsuLiveOverlayPublisher')
         return _publisher

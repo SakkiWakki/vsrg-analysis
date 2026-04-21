@@ -1,6 +1,7 @@
-// Minimal 8x8 bitmap font — a hand-curated subset covering the
-// glyphs we need for the HUD (digits, percent, dot, x, space, and
-// the letters U / R / C / M / etc. used in the short labels).
+// Minimal 8x8 bitmap font — covers A-Z, 0-9, and the handful of
+// punctuation the HUD uses (.%:+-x). Case-insensitive (lowercase
+// chars map to the uppercase glyph). Anything not in this set
+// renders as a blank cell.
 //
 // Each glyph is 8 rows; each row is one byte, MSB = leftmost pixel.
 // We draw with GL_POINTS scaled to make the font block-legible at
@@ -124,13 +125,25 @@ static const Glyph8x8 _font_percent = {
     0b01100110,
     0b01000110,
     0 };
+// Full-height letter X. The old 5-row glyph looked like a
+// multiplication sign and read as '×' on the HUD's EDIT-MODE banner.
 static const Glyph8x8 _font_x = {
-    0,0,
-    0b01000010,
-    0b00100100,
+    0b01100110,
+    0b01100110,
+    0b00111100,
     0b00011000,
-    0b00100100,
-    0b01000010,
+    0b00111100,
+    0b01100110,
+    0b01100110,
+    0 };
+static const Glyph8x8 _font_plus = {
+    0,
+    0b00011000,
+    0b00011000,
+    0b01111110,
+    0b00011000,
+    0b00011000,
+    0,
     0 };
 static const Glyph8x8 _font_minus = {
     0,0,0,
@@ -317,6 +330,60 @@ static const Glyph8x8 _font_K = {
     0b01101100,
     0b01100110,
     0 };
+static const Glyph8x8 _font_D = {
+    0b01111100,
+    0b01100110,
+    0b01100110,
+    0b01100110,
+    0b01100110,
+    0b01100110,
+    0b01111100,
+    0 };
+static const Glyph8x8 _font_W = {
+    0b01100110,
+    0b01100110,
+    0b01100110,
+    0b01100110,
+    0b01111110,
+    0b01111110,
+    0b01100110,
+    0 };
+static const Glyph8x8 _font_H = {
+    0b01100110,
+    0b01100110,
+    0b01100110,
+    0b01111110,
+    0b01100110,
+    0b01100110,
+    0b01100110,
+    0 };
+static const Glyph8x8 _font_J = {
+    0b00011110,
+    0b00001100,
+    0b00001100,
+    0b00001100,
+    0b00001100,
+    0b01101100,
+    0b00111000,
+    0 };
+static const Glyph8x8 _font_Q = {
+    0b00111100,
+    0b01100110,
+    0b01100110,
+    0b01100110,
+    0b01101110,
+    0b00111100,
+    0b00000110,
+    0 };
+static const Glyph8x8 _font_Z = {
+    0b01111110,
+    0b00000110,
+    0b00001100,
+    0b00011000,
+    0b00110000,
+    0b01100000,
+    0b01111110,
+    0 };
 
 static const Glyph8x8 *font_glyph(char c) {
     switch (c) {
@@ -335,6 +402,7 @@ static const Glyph8x8 *font_glyph(char c) {
         case 'x': case 'X': return &_font_x;
         case '-': return &_font_minus;
         case ':': return &_font_colon;
+        case '+': return &_font_plus;
         case 'U': case 'u': return &_font_U;
         case 'R': case 'r': return &_font_R;
         case 'O': case 'o': return &_font_O;
@@ -354,6 +422,12 @@ static const Glyph8x8 *font_glyph(char c) {
         case 'F': case 'f': return &_font_F;
         case 'P': case 'p': return &_font_P;
         case 'K': case 'k': return &_font_K;
+        case 'D': case 'd': return &_font_D;
+        case 'W': case 'w': return &_font_W;
+        case 'H': case 'h': return &_font_H;
+        case 'J': case 'j': return &_font_J;
+        case 'Q': case 'q': return &_font_Q;
+        case 'Z': case 'z': return &_font_Z;
         default:  return &_font_blank;
     }
 }

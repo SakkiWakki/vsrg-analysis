@@ -1,30 +1,41 @@
-// Native gamescope external-overlay client.
+// Generic gamescope external-overlay renderer.
 //
-// Runs as a sibling client inside the gamescope nested X server
-// (same one osu!-under-wine is rendering into). We do *not* touch
-// osu!'s render path — gamescope composites our surface on top
-// via the GAMESCOPE_EXTERNAL_OVERLAY window property.
+// This binary is intentionally dumb: it knows how to draw rects
+// and bitmap text from a widget array kept in shared memory. It
+// does NOT know about osu!, mania, combos, accuracy, or any
+// specific game. That semantics lives entirely in the Python
+// publisher (see plugins/overlay_api.py + any plugin-specific
+// consumer, e.g. plugins/unsafe/osu_live/shm_publisher.py).
 //
-// Data is pulled from /dev/shm/osu_live_overlay, a seqlock-guarded
-// POD struct written by plugins/unsafe/osu_live/shm_publisher.py.
-// The overlay polls the region at 60 Hz; if the publisher hasn't
-// touched it yet, we fall back to a "waiting for feed" banner so
-// the user can tell whether the data plumbing or the overlay
-// plumbing is broken.
+// Why: a plugin ecosystem. Any plugin can ship its own publisher
+// and get a HUD in-game without touching C or rebuilding.
 //
-// Rendering: immediate-mode GL, fixed-function pipeline, no
-// shaders / VBOs / textures. Text is an 8x8 bitmap font
-// (font8x8.h) drawn as GL_QUADS per pixel. Fine for tens of
-// glyphs at 60 Hz.
+// Shm contract: analysis/games/osu/gamescope_overlay/overlay_shm.h
+// Launch: osu_overlay --feed /dev/shm/vsrg_overlay_<plugin_key>
+//                     --width W --height H
+//
+// Controls:
+//   Shift+Tab  toggle edit mode. In edit mode, widgets get a dashed
+//              outline, the screen dims, and the user can drag a
+//              widget with the left mouse button. On release we
+//              write the new (x, y) back into the shm slot; the
+//              publisher picks it up on its next frame and persists
+//              via the app's ConfigStore.
+//
+// Rendering: immediate-mode GL, fixed-function pipeline, no shaders
+// or VBOs. The 8x8 bitmap font is drawn as GL_QUADS per lit pixel.
+// Vsync is pinned to the compositor via GLX_EXT_swap_control so we
+// don't beat gamescope's cadence.
 
 #define _GNU_SOURCE
 #include <GL/gl.h>
 #include <GL/glx.h>
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
-#include <X11/extensions/shape.h>
+#include <X11/keysym.h>
 
 #include <fcntl.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,49 +44,53 @@
 #include <unistd.h>
 
 #include "font8x8.h"
-#include "shm_layout.h"
+#include "overlay_shm.h"
+
+// ─── Globals (small, C-program scale) ───────────────────────────────────
+
+static VsrgOverlayShm *g_shm;          // mmap'd shared region
+static const char     *g_feed_path;    // where we're attached
 
 // ─── Shared memory consumer ─────────────────────────────────────────────
 
-static OsuLiveShm *g_shm;
-
 static void shm_attach(void) {
-    int fd = open("/dev/shm/osu_live_overlay", O_RDONLY);
-    if (fd < 0) {
-        // Publisher not up yet — we'll draw a waiting banner.
-        return;
-    }
+    int fd = open(g_feed_path, O_CREAT | O_RDWR, 0600);
+    if (fd < 0) return;
+    // Ensure at least sizeof(VsrgOverlayShm) — we're happy to grow
+    // (or create) the file so the publisher's mmap succeeds too.
     struct stat st;
-    if (fstat(fd, &st) < 0 || st.st_size < (off_t)sizeof(OsuLiveShm)) {
-        close(fd);
-        return;
+    if (fstat(fd, &st) < 0) { close(fd); return; }
+    if (st.st_size < (off_t)sizeof(VsrgOverlayShm)) {
+        if (ftruncate(fd, sizeof(VsrgOverlayShm)) < 0) {
+            close(fd); return;
+        }
     }
-    void *p = mmap(NULL, sizeof(OsuLiveShm), PROT_READ, MAP_SHARED, fd, 0);
+    void *p = mmap(NULL, sizeof(VsrgOverlayShm),
+                   PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     close(fd);
     if (p == MAP_FAILED) return;
-    g_shm = (OsuLiveShm *)p;
+    g_shm = (VsrgOverlayShm *)p;
 }
 
-// Seqlock read: loops until two bracketing reads of `seq` agree
-// and are even. Returns 1 on success (state filled), 0 if shm not
-// attached or the header is wrong.
-static int shm_read(OsuLiveShm *out) {
+// Seqlock read of the full shm into `out`. Returns 1 on success.
+// Re-reads up to 16 times if the writer is mid-update (odd seq).
+static int shm_read(VsrgOverlayShm *out) {
     if (!g_shm) return 0;
     for (int tries = 0; tries < 16; tries++) {
         uint32_t s0 = __atomic_load_n(&g_shm->seq, __ATOMIC_ACQUIRE);
-        if (s0 & 1u) continue;   // writer mid-update; spin
+        if (s0 & 1u) continue;
         memcpy(out, (const void *)g_shm, sizeof(*out));
         __atomic_thread_fence(__ATOMIC_ACQUIRE);
         uint32_t s1 = __atomic_load_n(&g_shm->seq, __ATOMIC_ACQUIRE);
         if (s0 == s1) {
-            return out->magic == OSU_LIVE_SHM_MAGIC
-                && out->version == OSU_LIVE_SHM_VERSION;
+            return out->magic == VSRG_OVERLAY_MAGIC
+                && out->version == VSRG_OVERLAY_VERSION;
         }
     }
     return 0;
 }
 
-// ─── X11 + GL setup ─────────────────────────────────────────────────────
+// ─── X11 setup helpers ──────────────────────────────────────────────────
 
 static void set_cardinal_prop(Display *dpy, Window w,
                               const char *name, unsigned long value) {
@@ -84,28 +99,37 @@ static void set_cardinal_prop(Display *dpy, Window w,
                     (unsigned char *)&value, 1);
 }
 
-// ─── Drawing helpers ────────────────────────────────────────────────────
+// ─── Drawing primitives ─────────────────────────────────────────────────
 
-// Draw a filled 2D rect in current color. Assumes GL_QUADS already
-// begun, or the caller wraps.
-static void rect(float x, float y, float w, float h) {
+static void rect_verts(float x, float y, float w, float h) {
     glVertex2f(x,     y);
     glVertex2f(x + w, y);
     glVertex2f(x + w, y + h);
     glVertex2f(x,     y + h);
 }
 
-// Render a single 8x8 glyph at (x, y) with pixel size `px`.
-// Uses GL_QUADS — caller wraps glBegin/glEnd for throughput.
+static void draw_filled_rect(float x, float y, float w, float h) {
+    glBegin(GL_QUADS);
+    rect_verts(x, y, w, h);
+    glEnd();
+}
+
+static void draw_outline_rect(float x, float y, float w, float h) {
+    glBegin(GL_LINE_LOOP);
+    glVertex2f(x,     y);
+    glVertex2f(x + w, y);
+    glVertex2f(x + w, y + h);
+    glVertex2f(x,     y + h);
+    glEnd();
+}
+
 static void draw_glyph(char c, float x, float y, float px) {
     const Glyph8x8 *g = font_glyph(c);
     for (int row = 0; row < 8; row++) {
         uint8_t bits = (*g)[row];
         for (int col = 0; col < 8; col++) {
             if (bits & (0x80 >> col)) {
-                float gx = x + col * px;
-                float gy = y + row * px;
-                rect(gx, gy, px, px);
+                rect_verts(x + col * px, y + row * px, px, px);
             }
         }
     }
@@ -117,147 +141,208 @@ static void draw_text(const char *s, float x, float y, float px) {
     for (; *s; s++) {
         if (*s == ' ') { cx += 4.0f * px; continue; }
         draw_glyph(*s, cx, y, px);
-        cx += 9.0f * px;   // 8 px glyph + 1 px kerning
+        cx += 9.0f * px;
     }
     glEnd();
 }
 
-static void draw_filled_rect(float x, float y, float w, float h) {
-    glBegin(GL_QUADS);
-    rect(x, y, w, h);
-    glEnd();
-}
-
-// ─── Main overlay layout ────────────────────────────────────────────────
-
-static void format_accuracy(float acc, char *buf, size_t n) {
-    snprintf(buf, n, "%.2f%%", acc);
-}
-
-static void render_hud(int width, int height, const OsuLiveShm *s) {
-    (void)width;
-    // Origin is top-left after the ortho call in main().
-    const float pad = 24.0f;
-
-    // Background panel — subtly dark so text stays legible over
-    // bright maps. Height sized for 3 lines of text + histogram.
-    glColor4f(0.04f, 0.04f, 0.06f, 0.55f);
-    float panel_x = pad;
-    float panel_y = pad;
-    float panel_w = 520.0f;
-    float panel_h = 220.0f;
-    draw_filled_rect(panel_x, panel_y, panel_w, panel_h);
-
-    // Accent bar at top of panel.
-    glColor4f(0.29f, 0.64f, 1.0f, 0.95f);
-    draw_filled_rect(panel_x, panel_y, panel_w, 3.0f);
-
-    // Text lines.
-    glColor4f(0.98f, 0.98f, 0.98f, 1.0f);
-
-    char line[128];
-    float tx = panel_x + 18.0f;
-    float ty = panel_y + 18.0f;
-    float px = 2.5f;   // pixel scale for the 8x8 font
-
-    // Line 1: combo.
-    snprintf(line, sizeof(line), "%dX", s->combo);
-    draw_text(line, tx, ty, px);
-
-    // Line 2: accuracy, UR.
-    ty += 9.0f * px + 6.0f;
-    char acc_buf[32];
-    format_accuracy(s->accuracy, acc_buf, sizeof(acc_buf));
-    snprintf(line, sizeof(line), "%s  UR %.1f", acc_buf, s->unstable_rate);
-    draw_text(line, tx, ty, 2.0f);
-
-    // Line 3: hit counts.
-    ty += 9.0f * 2.0f + 6.0f;
-    snprintf(line, sizeof(line), "%d:%d:%d:%d",
-             s->hits_300, s->hits_100, s->hits_50, s->hits_miss);
-    draw_text(line, tx, ty, 1.6f);
-
-    // Histogram along the bottom of the panel.
-    float hist_x = panel_x + 18.0f;
-    float hist_y = panel_y + panel_h - 60.0f;
-    float hist_w = panel_w - 36.0f;
-    float hist_h = 48.0f;
-
-    // Baseline.
-    glColor4f(0.25f, 0.25f, 0.3f, 0.9f);
-    draw_filled_rect(hist_x, hist_y + hist_h - 1.0f, hist_w, 1.0f);
-
-    // Find the tallest bin to normalize heights.
-    uint32_t peak = 1;
-    for (int i = 0; i < OSU_LIVE_SHM_HIST_BINS; i++) {
-        if (s->hist[i] > peak) peak = s->hist[i];
+// Width in pixels the renderer will use for a text string at scale
+// ``px``. Matches draw_text's per-glyph advance so drag hit-testing
+// can compute the same bounding box.
+static float measure_text(const char *s, float px) {
+    float w = 0.0f;
+    for (; *s; s++) {
+        if (*s == ' ') w += 4.0f * px;
+        else           w += 9.0f * px;
     }
-    float bin_w = hist_w / (float)OSU_LIVE_SHM_HIST_BINS;
-
-    glColor4f(0.29f, 0.64f, 1.0f, 0.9f);
-    glBegin(GL_QUADS);
-    for (int i = 0; i < OSU_LIVE_SHM_HIST_BINS; i++) {
-        float h = ((float)s->hist[i] / (float)peak) * hist_h;
-        rect(hist_x + i * bin_w, hist_y + (hist_h - h),
-             bin_w - 1.0f, h);
-    }
-    glEnd();
-
-    // Zero-offset marker (center of ±100 ms histogram).
-    glColor4f(1.0f, 1.0f, 1.0f, 0.4f);
-    draw_filled_rect(hist_x + hist_w * 0.5f - 0.5f,
-                     hist_y, 1.0f, hist_h);
-    (void)height;
+    return w;
 }
 
-static void render_banner(const char *msg, int width, int height) {
-    (void)width; (void)height;
-    glColor4f(0.04f, 0.04f, 0.06f, 0.55f);
-    draw_filled_rect(24.0f, 24.0f, 520.0f, 48.0f);
-    glColor4f(1.0f, 0.7f, 0.2f, 1.0f);
-    draw_text(msg, 36.0f, 36.0f, 2.0f);
+static void set_color_rgba32(uint32_t c) {
+    // Byte 0 = R, byte 3 = A (see overlay_api.py::rgba).
+    glColor4f(((c >>  0) & 0xff) / 255.0f,
+              ((c >>  8) & 0xff) / 255.0f,
+              ((c >> 16) & 0xff) / 255.0f,
+              ((c >> 24) & 0xff) / 255.0f);
+}
+
+// ─── Widget layout (normalized → pixels) ────────────────────────────────
+
+// Resolve a widget's normalized (x, y) + anchor into a pixel
+// top-left corner. Size is resolved to an on-screen bounding box
+// (for rect: w*canvas_w, h*canvas_h; for text: measured string).
+typedef struct {
+    float px, py;          // top-left in pixels
+    float pw, ph;          // size in pixels (for hit-testing)
+} ResolvedBox;
+
+static ResolvedBox resolve_box(const VsrgOverlayWidget *w,
+                               int canvas_w, int canvas_h) {
+    float pw, ph;
+    if (w->kind == VSRG_OVERLAY_KIND_TEXT) {
+        pw = measure_text(w->text, w->px_scale);
+        ph = 8.0f * w->px_scale;
+    } else {
+        pw = w->w * canvas_w;
+        ph = w->h * canvas_h;
+    }
+    float px = w->x * canvas_w;
+    float py = w->y * canvas_h;
+    switch (w->anchor) {
+        case VSRG_OVERLAY_ANCHOR_TR: px = canvas_w - px - pw; break;
+        case VSRG_OVERLAY_ANCHOR_BL: py = canvas_h - py - ph; break;
+        case VSRG_OVERLAY_ANCHOR_BR: px = canvas_w - px - pw;
+                                     py = canvas_h - py - ph; break;
+        case VSRG_OVERLAY_ANCHOR_C:  px += canvas_w * 0.5f - pw * 0.5f;
+                                     py += canvas_h * 0.5f - ph * 0.5f; break;
+        default: break;  // TL: already correct.
+    }
+    ResolvedBox rb = { px, py, pw, ph };
+    return rb;
+}
+
+// Inverse of resolve_box for the (x, y) field: given the desired
+// on-screen pixel top-left ``(target_px, target_py)``, what
+// *normalized, pre-anchor* (x, y) should we write back so the next
+// resolve yields that pixel position? Used during drag.
+static void reverse_anchor(const VsrgOverlayWidget *w,
+                           int canvas_w, int canvas_h,
+                           float pw, float ph,
+                           float target_px, float target_py,
+                           float *out_nx, float *out_ny) {
+    float ux = target_px, uy = target_py;
+    switch (w->anchor) {
+        case VSRG_OVERLAY_ANCHOR_TR: ux = canvas_w - target_px - pw; break;
+        case VSRG_OVERLAY_ANCHOR_BL: uy = canvas_h - target_py - ph; break;
+        case VSRG_OVERLAY_ANCHOR_BR: ux = canvas_w - target_px - pw;
+                                     uy = canvas_h - target_py - ph; break;
+        case VSRG_OVERLAY_ANCHOR_C:  ux = target_px - (canvas_w * 0.5f - pw * 0.5f);
+                                     uy = target_py - (canvas_h * 0.5f - ph * 0.5f); break;
+        default: break;
+    }
+    *out_nx = ux / (float)canvas_w;
+    *out_ny = uy / (float)canvas_h;
+}
+
+// ─── Rendering ──────────────────────────────────────────────────────────
+
+static void render_widgets(const VsrgOverlayShm *s, int width, int height) {
+    uint32_t n = s->n_widgets;
+    if (n > VSRG_OVERLAY_MAX_WIDGETS) n = VSRG_OVERLAY_MAX_WIDGETS;
+    for (uint32_t i = 0; i < n; i++) {
+        const VsrgOverlayWidget *w = &s->widgets[i];
+        if (w->kind == VSRG_OVERLAY_KIND_UNUSED) continue;
+        ResolvedBox rb = resolve_box(w, width, height);
+        set_color_rgba32(w->color);
+        if (w->kind == VSRG_OVERLAY_KIND_RECT) {
+            draw_filled_rect(rb.px, rb.py, rb.pw, rb.ph);
+        } else if (w->kind == VSRG_OVERLAY_KIND_TEXT) {
+            draw_text(w->text, rb.px, rb.py, w->px_scale);
+        }
+    }
+}
+
+// Edit-mode overlay: dim the whole canvas, then outline every
+// widget. If ``hover_idx`` >= 0, brighten that outline.
+static void render_edit_decorations(const VsrgOverlayShm *s,
+                                    int width, int height,
+                                    int hover_idx) {
+    // Full-screen dim quad so the player notices they're in edit
+    // mode and the widgets stand out.
+    glColor4f(0.0f, 0.0f, 0.0f, 0.45f);
+    draw_filled_rect(0, 0, (float)width, (float)height);
+
+    uint32_t n = s->n_widgets;
+    if (n > VSRG_OVERLAY_MAX_WIDGETS) n = VSRG_OVERLAY_MAX_WIDGETS;
+    for (uint32_t i = 0; i < n; i++) {
+        const VsrgOverlayWidget *w = &s->widgets[i];
+        if (w->kind == VSRG_OVERLAY_KIND_UNUSED) continue;
+        ResolvedBox rb = resolve_box(w, width, height);
+        if ((int)i == hover_idx) {
+            glColor4f(1.0f, 0.85f, 0.2f, 1.0f);
+            glLineWidth(2.5f);
+        } else {
+            glColor4f(1.0f, 1.0f, 1.0f, 0.65f);
+            glLineWidth(1.0f);
+        }
+        // Pad the outline a couple pixels so text widgets don't
+        // have the outline clipped against the glyph pixels.
+        draw_outline_rect(rb.px - 2.0f, rb.py - 2.0f,
+                          rb.pw + 4.0f, rb.ph + 4.0f);
+    }
+    glLineWidth(1.0f);
+
+    // Help strip at top of screen.
+    glColor4f(0.0f, 0.0f, 0.0f, 0.8f);
+    draw_filled_rect(0, 0, (float)width, 28.0f);
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    draw_text("EDIT MODE  DRAG WIDGETS  SHIFT+TAB TO EXIT",
+              12.0f, 6.0f, 1.8f);
+}
+
+// Pick the topmost (last-rendered) widget under a pixel.
+static int hit_test(const VsrgOverlayShm *s, int width, int height,
+                    int mx, int my) {
+    int n = (int)s->n_widgets;
+    if (n > VSRG_OVERLAY_MAX_WIDGETS) n = VSRG_OVERLAY_MAX_WIDGETS;
+    for (int i = n - 1; i >= 0; i--) {
+        const VsrgOverlayWidget *w = &s->widgets[i];
+        if (w->kind == VSRG_OVERLAY_KIND_UNUSED) continue;
+        ResolvedBox rb = resolve_box(w, width, height);
+        // Small margin so thin text is easier to grab.
+        float x0 = rb.px - 2, y0 = rb.py - 2;
+        float x1 = rb.px + rb.pw + 2, y1 = rb.py + rb.ph + 2;
+        if ((float)mx >= x0 && (float)mx <= x1
+            && (float)my >= y0 && (float)my <= y1) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 // ─── Entry point ────────────────────────────────────────────────────────
 
 int main(int argc, char **argv) {
     int width = 1920, height = 1080;
+    const char *feed = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--width") && i + 1 < argc) {
             width = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--height") && i + 1 < argc) {
             height = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--feed") && i + 1 < argc) {
+            feed = argv[++i];
         }
     }
+    if (!feed) {
+        // Back-compat with the old osu_live path so existing
+        // runner scripts keep working during the transition.
+        feed = "/dev/shm/vsrg_overlay_osu_live";
+    }
+    g_feed_path = feed;
 
     Display *dpy = XOpenDisplay(NULL);
     if (!dpy) {
-        fprintf(stderr, "[osu_overlay] XOpenDisplay(NULL) failed. "
-                "Make sure this process is launched inside gamescope "
-                "(DISPLAY=%s)\n", getenv("DISPLAY"));
+        fprintf(stderr, "[overlay] XOpenDisplay(NULL) failed. "
+                "Run this inside gamescope (DISPLAY=%s)\n",
+                getenv("DISPLAY"));
         return 1;
     }
     int screen = DefaultScreen(dpy);
     Window root = RootWindow(dpy, screen);
 
-    // FBConfig with a real 8-bit alpha channel — gamescope blends
-    // us on top of osu!'s frame using this.
     int fb_attribs[] = {
         GLX_X_RENDERABLE,  True,
         GLX_DRAWABLE_TYPE, GLX_WINDOW_BIT,
         GLX_RENDER_TYPE,   GLX_RGBA_BIT,
         GLX_DOUBLEBUFFER,  True,
-        GLX_RED_SIZE,      8,
-        GLX_GREEN_SIZE,    8,
-        GLX_BLUE_SIZE,     8,
-        GLX_ALPHA_SIZE,    8,
-        GLX_DEPTH_SIZE,    0,
-        None
+        GLX_RED_SIZE, 8, GLX_GREEN_SIZE, 8, GLX_BLUE_SIZE, 8,
+        GLX_ALPHA_SIZE, 8, GLX_DEPTH_SIZE, 0, None
     };
     int nfb = 0;
     GLXFBConfig *fbs = glXChooseFBConfig(dpy, screen, fb_attribs, &nfb);
     if (!fbs || nfb == 0) {
-        fprintf(stderr, "[osu_overlay] glXChooseFBConfig returned no configs\n");
+        fprintf(stderr, "[overlay] glXChooseFBConfig returned no configs\n");
         return 1;
     }
     GLXFBConfig fb = 0;
@@ -267,77 +352,55 @@ int main(int argc, char **argv) {
         if (!cand) continue;
         int a = 0;
         glXGetFBConfigAttrib(dpy, fbs[i], GLX_ALPHA_SIZE, &a);
-        if (cand->depth == 32 && a == 8) {
-            fb = fbs[i];
-            vi = cand;
-            break;
-        }
+        if (cand->depth == 32 && a == 8) { fb = fbs[i]; vi = cand; break; }
         XFree(cand);
     }
     XFree(fbs);
     if (!vi) {
-        fprintf(stderr, "[osu_overlay] no 32-bit (RGBA8888) FBConfig found\n");
+        fprintf(stderr, "[overlay] no 32-bit (RGBA8888) FBConfig found\n");
         return 1;
     }
-    printf("[osu_overlay] picked visual 0x%lx depth=%d\n",
-           vi->visualid, vi->depth);
 
     Colormap cmap = XCreateColormap(dpy, root, vi->visual, AllocNone);
-    XSetWindowAttributes swa;
-    memset(&swa, 0, sizeof(swa));
+    XSetWindowAttributes swa = {0};
     swa.colormap = cmap;
     swa.border_pixel = 0;
     swa.background_pixel = 0;
-    swa.event_mask = StructureNotifyMask;
+    // Always select key/pointer events — we need them in edit mode,
+    // and selecting them in normal mode is harmless (we only grab
+    // the pointer when edit mode turns on).
+    swa.event_mask = StructureNotifyMask | KeyPressMask
+                   | ButtonPressMask | ButtonReleaseMask
+                   | PointerMotionMask;
 
     Window win = XCreateWindow(
-        dpy, root,
-        0, 0, width, height, 0,
+        dpy, root, 0, 0, width, height, 0,
         vi->depth, InputOutput, vi->visual,
-        CWColormap | CWBorderPixel | CWBackPixel | CWEventMask,
-        &swa);
+        CWColormap | CWBorderPixel | CWBackPixel | CWEventMask, &swa);
+    XStoreName(dpy, win, "vsrg-analysis overlay");
 
-    XStoreName(dpy, win, "etterna-analysis osu overlay");
-
-    // GAMESCOPE_EXTERNAL_OVERLAY = 1 tags this window for the
-    // overlay layer. GAMESCOPE_NO_FOCUS is harmless on current
-    // gamescope (not read) but is the mangoapp convention — keep
-    // it for forward-compat.
     set_cardinal_prop(dpy, win, "GAMESCOPE_EXTERNAL_OVERLAY", 1);
     set_cardinal_prop(dpy, win, "GAMESCOPE_NO_FOCUS",         1);
 
-    // Make the overlay input-transparent: empty ShapeInput region
-    // means no pointer or keyboard events ever land here. Without
-    // this, gamescope can route focus (and Alt+F4) to the overlay
-    // window, so hitting Alt+F4 in osu! closes our window — which
-    // terminates the gamescope session and kills osu! with it.
-    // With an empty input shape, gamescope sees osu! as the only
-    // viable keyboard target and Alt+F4 goes to osu!.
-    int shape_evt = 0, shape_err = 0;
-    if (XShapeQueryExtension(dpy, &shape_evt, &shape_err)) {
-        XRectangle empty = {0, 0, 0, 0};
-        XShapeCombineRectangles(dpy, win, ShapeInput, 0, 0,
-                                &empty, 0, ShapeSet, Unsorted);
+    // Passive global grab on Shift+Tab so we receive the key chord
+    // regardless of focus. GrabModeAsync for both keyboard and
+    // pointer so other apps keep running normally; we only get the
+    // chord routed to us.
+    KeyCode tab_kc = XKeysymToKeycode(dpy, XK_Tab);
+    if (tab_kc != 0) {
+        XGrabKey(dpy, tab_kc, ShiftMask, root, True,
+                 GrabModeAsync, GrabModeAsync);
     } else {
-        fprintf(stderr, "[osu_overlay] XShape not available — overlay "
-                "may steal keyboard focus from osu!\n");
+        fprintf(stderr, "[overlay] XKeysymToKeycode(XK_Tab) failed; "
+                "Shift+Tab edit toggle will not work\n");
     }
 
     GLXContext ctx = glXCreateNewContext(dpy, fb, GLX_RGBA_TYPE, NULL, True);
-    if (!ctx) {
-        fprintf(stderr, "[osu_overlay] glXCreateNewContext failed\n");
-        return 1;
-    }
-
+    if (!ctx) { fprintf(stderr, "[overlay] glXCreateNewContext failed\n"); return 1; }
     XMapWindow(dpy, win);
     glXMakeCurrent(dpy, win, ctx);
 
-    // Vsync: pin our swaps to gamescope's refresh. Without this we
-    // run a free-running 60 Hz-ish loop that beats against
-    // gamescope's compose cadence and causes visible flicker.
-    // Probe GLX_EXT_swap_control at runtime — the extension string
-    // is the portable way to check (some drivers expose the entry
-    // point but don't implement it).
+    // Vsync.
     typedef void (*PFNGLXSWAPINTERVALEXTPROC)(Display *, GLXDrawable, int);
     const char *glx_exts = glXQueryExtensionsString(dpy, screen);
     if (glx_exts && strstr(glx_exts, "GLX_EXT_swap_control")) {
@@ -347,102 +410,220 @@ int main(int argc, char **argv) {
         if (set_swap) set_swap(dpy, win, 1);
     }
 
-    printf("[osu_overlay] mapped %dx%d on DISPLAY=%s (GL %s)\n",
-           width, height, getenv("DISPLAY"),
+    printf("[overlay] mapped %dx%d  DISPLAY=%s  feed=%s  GL=%s\n",
+           width, height, getenv("DISPLAY"), feed,
            (const char *)glGetString(GL_VERSION));
     fflush(stdout);
 
     shm_attach();
     if (!g_shm) {
-        printf("[osu_overlay] /dev/shm/osu_live_overlay not present yet; "
-               "will retry on each frame\n");
+        printf("[overlay] %s not present yet; will retry on each frame\n",
+               feed);
         fflush(stdout);
     }
 
-    // Content hash of the last frame we actually drew + swapped.
-    // If the next frame's inputs hash to the same value, we skip
-    // rendering AND swapping — gamescope warns ("got the same
-    // buffer committed twice") if we keep posting identical
-    // buffers, and it's also just wasteful on the GPU.
+    // ── Drag state ────────────────────────────────────────────
+    int edit_mode      = 0;
+    int drag_idx       = -1;    // widget slot being dragged, -1 = none
+    int drag_grab_mx   = 0;     // pointer x at mouse-down (in px)
+    int drag_grab_my   = 0;
+    int hover_idx      = -1;
+    int mouse_x        = 0;
+    int mouse_y        = 0;
+
     uint64_t last_hash = 0;
     int      have_drawn = 0;
-
     unsigned long frame = 0;
+
     for (;;) {
+        // ── X events ────────────────────────────────────────
         while (XPending(dpy)) {
             XEvent ev;
             XNextEvent(dpy, &ev);
             if (ev.type == ConfigureNotify) {
                 width  = ev.xconfigure.width;
                 height = ev.xconfigure.height;
+            } else if (ev.type == KeyPress) {
+                KeySym ks = XLookupKeysym(&ev.xkey, 0);
+                if (ks == XK_Tab && (ev.xkey.state & ShiftMask)) {
+                    edit_mode = !edit_mode;
+                    if (g_shm) {
+                        // Expose the flag so Python can gate
+                        // stateful publisher logic on it (e.g.
+                        // keep positions stable while editing).
+                        __atomic_store_n(&g_shm->edit_mode,
+                                         (uint8_t)edit_mode,
+                                         __ATOMIC_RELEASE);
+                    }
+                    if (edit_mode) {
+                        XGrabPointer(dpy, win, True,
+                            ButtonPressMask | ButtonReleaseMask
+                                | PointerMotionMask,
+                            GrabModeAsync, GrabModeAsync,
+                            None, None, CurrentTime);
+                    } else {
+                        XUngrabPointer(dpy, CurrentTime);
+                        drag_idx = -1;
+                        if (g_shm) {
+                            __atomic_store_n(&g_shm->drag_active, 0u,
+                                             __ATOMIC_RELEASE);
+                        }
+                    }
+                }
+            } else if (ev.type == ButtonPress && edit_mode) {
+                mouse_x = ev.xbutton.x;
+                mouse_y = ev.xbutton.y;
+                if (ev.xbutton.button == Button1 && g_shm) {
+                    VsrgOverlayShm snap;
+                    if (shm_read(&snap)) {
+                        int idx = hit_test(&snap, width, height,
+                                           mouse_x, mouse_y);
+                        if (idx >= 0) {
+                            drag_idx     = idx;
+                            drag_grab_mx = mouse_x;
+                            drag_grab_my = mouse_y;
+                            // Tell the publisher: hands off the
+                            // dragged widget's (x, y) until release.
+                            __atomic_store_n(&g_shm->drag_active, 1u,
+                                             __ATOMIC_RELEASE);
+                            __atomic_store_n(&g_shm->dragged_widget_id,
+                                             snap.widgets[idx].widget_id,
+                                             __ATOMIC_RELEASE);
+                        }
+                    }
+                }
+            } else if (ev.type == ButtonRelease && edit_mode) {
+                if (ev.xbutton.button == Button1 && drag_idx >= 0) {
+                    drag_idx = -1;
+                    if (g_shm) {
+                        // Release hand-off: publisher now owns the
+                        // position again and should capture the
+                        // final delta. dragged_seq bumps exactly
+                        // once per drag so the publisher persists
+                        // the result at the end, not every frame.
+                        __atomic_store_n(&g_shm->drag_active, 0u,
+                                         __ATOMIC_RELEASE);
+                        __atomic_add_fetch(&g_shm->dragged_seq, 1,
+                                           __ATOMIC_RELEASE);
+                    }
+                }
+            } else if (ev.type == MotionNotify) {
+                mouse_x = ev.xmotion.x;
+                mouse_y = ev.xmotion.y;
             }
         }
 
-        // Reattach lazily so starting the publisher after the
-        // overlay is fine.
         if (!g_shm) shm_attach();
 
-        OsuLiveShm snap;
+        VsrgOverlayShm snap;
         int have = shm_read(&snap);
 
-        // Pick a branch tag + hash the fields that actually change
-        // the visible output. FNV-1a over the shm bytes is overkill
-        // but trivially cheap and future-proof against adding new
-        // fields to the HUD.
-        // "Not connected" and "not in gameplay" both collapse to
-        // BR_HIDDEN: the HUD only makes sense mid-map anyway, and
-        // the "OSU NOT CONNECTED" banner was distracting when the
-        // user is just browsing menus.
-        enum { BR_WAITING, BR_HIDDEN, BR_HUD } branch;
-        if (!have)                              branch = BR_WAITING;
-        else if (!snap.connected
-                 || !snap.in_gameplay)          branch = BR_HIDDEN;
-        else                                    branch = BR_HUD;
+        // ── Live drag: move the dragged widget's group in shm ───
+        // Group semantics: if the widget under the cursor has
+        // group_id != 0, every widget sharing that group_id moves
+        // by the same *pixel* delta — the user perceives the
+        // composite HUD as one piece. group_id == 0 means drag
+        // only this widget (singleton group keyed by widget_id on
+        // the Python side).
+        if (edit_mode && drag_idx >= 0 && have && g_shm
+                && (uint32_t)drag_idx < snap.n_widgets) {
+            VsrgOverlayWidget w_cur = snap.widgets[drag_idx];
+            float dx_px = (float)(mouse_x - drag_grab_mx);
+            float dy_px = (float)(mouse_y - drag_grab_my);
+            uint32_t group_id = w_cur.group_id;
 
-        uint64_t hash = 0xcbf29ce484222325ull;  // FNV-1a seed
+            uint32_t n = snap.n_widgets;
+            if (n > VSRG_OVERLAY_MAX_WIDGETS) n = VSRG_OVERLAY_MAX_WIDGETS;
+            for (uint32_t i = 0; i < n; i++) {
+                VsrgOverlayWidget wi = snap.widgets[i];
+                if (wi.kind == VSRG_OVERLAY_KIND_UNUSED) continue;
+                int move_this = (group_id == 0)
+                              ? ((int)i == drag_idx)
+                              : (wi.group_id == group_id);
+                if (!move_this) continue;
+
+                ResolvedBox rb_i = resolve_box(&wi, width, height);
+                float new_resolved_x = rb_i.px + dx_px;
+                float new_resolved_y = rb_i.py + dy_px;
+                float nx, ny;
+                reverse_anchor(&wi, width, height, rb_i.pw, rb_i.ph,
+                               new_resolved_x, new_resolved_y, &nx, &ny);
+                if (nx < 0.0f) nx = 0.0f;
+                if (nx > 1.0f) nx = 1.0f;
+                if (ny < 0.0f) ny = 0.0f;
+                if (ny > 1.0f) ny = 1.0f;
+                VsrgOverlayWidget *wi_shm = &g_shm->widgets[i];
+                wi_shm->x = nx;
+                wi_shm->y = ny;
+            }
+
+            // Advance grab point so next frame's delta is
+            // incremental relative to where the cursor is now.
+            drag_grab_mx = mouse_x;
+            drag_grab_my = mouse_y;
+            // Don't bump dragged_seq here — the publisher is told
+            // to ignore us mid-drag via drag_active. We bump once
+            // on ButtonRelease so persistence happens exactly once
+            // per drag (not 60× per second).
+            shm_read(&snap);
+        }
+
+        // ── Hover highlight in edit mode ────────────────────
+        hover_idx = -1;
+        if (edit_mode && have) {
+            hover_idx = hit_test(&snap, width, height, mouse_x, mouse_y);
+        }
+
+        // ── Hash to skip no-op frames ───────────────────────
+        // Hash the visible widgets + edit mode + hover so we
+        // only redraw + swap when the display actually changes.
+        // Skipping both the render and the swap is what fixes
+        // gamescope's "same buffer committed twice" spam.
+        uint64_t hash = 0xcbf29ce484222325ull;
         #define FNV_MIX(b) do { hash ^= (uint8_t)(b); \
                                 hash *= 0x100000001b3ull; } while (0)
-        FNV_MIX((uint8_t)branch);
-        FNV_MIX((uint8_t)(width  & 0xff));
-        FNV_MIX((uint8_t)(width  >> 8));
-        FNV_MIX((uint8_t)(height & 0xff));
-        FNV_MIX((uint8_t)(height >> 8));
-        if (branch == BR_HUD) {
-            // Hash only fields that affect the rendered output.
-            // The seqlock counter bumps by 2 on *every* publish
-            // even when stats don't change, so hashing it (or the
-            // whole struct) would make us swap identical-looking
-            // buffers at publisher rate — that's what triggers
-            // gamescope's "same buffer committed twice" warning.
-            FNV_MIX(snap.keycount);
-            #define FNV_BYTES(ptr, n) do { \
-                const uint8_t *_p = (const uint8_t *)(ptr); \
-                for (size_t _i = 0; _i < (n); _i++) FNV_MIX(_p[_i]); \
-            } while (0)
-            FNV_BYTES(&snap.combo,         sizeof(snap.combo));
-            FNV_BYTES(&snap.max_combo,     sizeof(snap.max_combo));
-            FNV_BYTES(&snap.hits_300,      sizeof(snap.hits_300));
-            FNV_BYTES(&snap.hits_100,      sizeof(snap.hits_100));
-            FNV_BYTES(&snap.hits_50,       sizeof(snap.hits_50));
-            FNV_BYTES(&snap.hits_miss,     sizeof(snap.hits_miss));
-            FNV_BYTES(&snap.accuracy,      sizeof(snap.accuracy));
-            FNV_BYTES(&snap.unstable_rate, sizeof(snap.unstable_rate));
-            FNV_BYTES(snap.hist,           sizeof(snap.hist));
-            #undef FNV_BYTES
+        #define FNV_BYTES(ptr, n) do { \
+            const uint8_t *_p = (const uint8_t *)(ptr); \
+            for (size_t _i = 0; _i < (n); _i++) FNV_MIX(_p[_i]); \
+        } while (0)
+        FNV_MIX((uint8_t)edit_mode);
+        FNV_MIX((uint8_t)(hover_idx + 1));
+        FNV_MIX((uint8_t)(width  & 0xff)); FNV_MIX((uint8_t)(width  >> 8));
+        FNV_MIX((uint8_t)(height & 0xff)); FNV_MIX((uint8_t)(height >> 8));
+        if (have) {
+            uint32_t n = snap.n_widgets;
+            if (n > VSRG_OVERLAY_MAX_WIDGETS) n = VSRG_OVERLAY_MAX_WIDGETS;
+            for (uint32_t i = 0; i < n; i++) {
+                const VsrgOverlayWidget *w = &snap.widgets[i];
+                FNV_MIX(w->kind);
+                FNV_MIX(w->anchor);
+                FNV_BYTES(&w->widget_id, sizeof(w->widget_id));
+                // Quantize floats so 1ulp jitter doesn't flip the
+                // hash. Positions → 1/10 px, sizes → 1/10 px,
+                // px_scale → 1/10 px.
+                int qx = (int)lroundf(w->x * 10000.0f);
+                int qy = (int)lroundf(w->y * 10000.0f);
+                int qw = (int)lroundf(w->w * 10000.0f);
+                int qh = (int)lroundf(w->h * 10000.0f);
+                int qs = (int)lroundf(w->px_scale * 10.0f);
+                FNV_BYTES(&qx, sizeof(qx)); FNV_BYTES(&qy, sizeof(qy));
+                FNV_BYTES(&qw, sizeof(qw)); FNV_BYTES(&qh, sizeof(qh));
+                FNV_BYTES(&qs, sizeof(qs));
+                FNV_BYTES(&w->color, sizeof(w->color));
+                if (w->kind == VSRG_OVERLAY_KIND_TEXT) {
+                    FNV_BYTES(w->text, strnlen(w->text, VSRG_OVERLAY_TEXT_LEN));
+                }
+            }
         }
         #undef FNV_MIX
+        #undef FNV_BYTES
 
-        // Identical to last drawn frame → skip render + skip swap.
-        // This is what fixes gamescope's "same buffer committed
-        // twice" warning. A tiny sleep keeps us off the CPU while
-        // waiting for the next publisher update; with vsync on,
-        // glXSwapBuffers paces drawn frames, but the no-op path
-        // needs its own pacing.
         if (have_drawn && hash == last_hash) {
             usleep(16 * 1000);
             continue;
         }
 
+        // ── Draw ────────────────────────────────────────────
         glViewport(0, 0, width, height);
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -456,19 +637,11 @@ int main(int argc, char **argv) {
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-        switch (branch) {
-            case BR_WAITING:
-                render_banner("WAITING FOR FEED", width, height);
-                break;
-            case BR_HIDDEN:
-                // Clear-only frame: nothing drawn, but we still
-                // swap once so the compositor sees the transition
-                // from HUD → nothing. Subsequent identical frames
-                // will hit the hash skip above.
-                break;
-            case BR_HUD:
-                render_hud(width, height, &snap);
-                break;
+        if (have) {
+            render_widgets(&snap, width, height);
+            if (edit_mode) {
+                render_edit_decorations(&snap, width, height, hover_idx);
+            }
         }
 
         glXSwapBuffers(dpy, win);
@@ -477,19 +650,10 @@ int main(int argc, char **argv) {
         frame++;
 
         if (frame == 1 || frame % 300 == 0) {
-            printf("[osu_overlay] frame %lu  shm=%s  connected=%d  in_gameplay=%d\n",
-                   frame,
-                   g_shm ? "ok" : "none",
-                   have ? snap.connected : -1,
-                   have ? snap.in_gameplay : -1);
+            printf("[overlay] frame %lu  feed=%s  shm=%s  n=%u  edit=%d\n",
+                   frame, feed, g_shm ? "ok" : "none",
+                   have ? snap.n_widgets : 0, edit_mode);
             fflush(stdout);
         }
-
-        // No usleep — with GLX_EXT_swap_control swap interval = 1,
-        // glXSwapBuffers above blocks on vblank and paces the loop.
-        // Falling back to a sleep if vsync wasn't available would
-        // re-introduce the flicker we just fixed; if the driver
-        // can't do swap control, running unpaced is still the
-        // right answer (matches gamescope's compose rate).
     }
 }

@@ -89,6 +89,60 @@ with uppercase token names matching `analysis/player/theme.py`. Missing
 tokens fall through to the built-in defaults. Only one theme is active at
 a time.
 
+## In-game overlay (gamescope)
+
+For games on Linux, we run through `gamescope`, a plugin
+can publish a HUD that renders on top of the game window. The overlay
+architecture is:
+
+- A single C renderer (`analysis/games/osu/gamescope_overlay/osu_overlay`)
+  attaches to a shared-memory widget array and draws rects + bitmap
+  text. It knows nothing about the plugin's semantics.
+- Plugins publish widgets from Python via
+  [`plugins.overlay_api.OverlayPublisher`](overlay_api.py). One
+  publisher = one shm segment = one feed the renderer can attach to.
+
+Each publisher gets its own feed at `/dev/shm/vsrg_overlay_<plugin_key>`,
+so multiple plugins can run side-by-side without trampling each other.
+Launch the renderer with `--feed <path>` to point it at yours.
+
+```python
+from plugins.overlay_api import OverlayPublisher, WHITE, BLACK_DIM
+
+pub = OverlayPublisher('my_plugin', width=2560, height=1440,
+                      config_store=cfg)  # optional; persists drag layout
+pub.start()
+
+def build(pub):
+    with pub.frame() as f:
+        with f.group('panel'):              # drag as one piece
+            f.rect('bg', 0.02, 0.02, 0.30, 0.18, color=BLACK_DIM)
+            f.text('hello', 'HELLO', 0.03, 0.04,
+                   px_scale=2.5, color=WHITE)
+
+pub.run_thread(build, hz=30.0)
+```
+
+Key properties:
+
+- **Normalized coords.** `(x, y, w, h)` are `[0, 1]` of canvas size;
+  `anchor` (TL/TR/BL/BR/C) pins a corner so widgets reposition
+  sensibly across resolutions.
+- **Fixed-slot layout.** Up to 32 widgets per frame. Shrinking frames
+  zero out trailing slots automatically.
+- **Drag-to-reposition.** The renderer's Shift+Tab edit mode lets the
+  user drag widgets. Widgets inside a `group(…)` block drag as one.
+  If a `ConfigStore` is passed to the publisher, drag offsets persist
+  per `(width × height)` bucket across restarts.
+- **Ref publisher:** [`plugins/unsafe/osu_live/shm_publisher.py`](unsafe/osu_live/shm_publisher.py).
+
+The overlay API lives at the bundle top level (`plugins.overlay_api`,
+not under a role directory) because it's a shared runtime that
+individual plugins drive — same idea as `analysis.plugins.host_api`.
+It is **not** reachable from sandboxed bundles: publishing writes to
+`/dev/shm` and needs `os`/`mmap`/`struct`, all blocked by the sandbox.
+Use this API only from `plugins/builtin/` or `plugins/unsafe/`.
+
 ## Trust and sandboxing
 
 Two trust levels:
