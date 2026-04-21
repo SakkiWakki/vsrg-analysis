@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-# `analysis.osu.replay` imports `osrparse` at module load. That dep
+# `analysis.games.osu.replay` imports `osrparse` at module load. That dep
 # isn't installed in every dev venv and these tests only exercise the path
 # override helpers, so stub it with an empty module if missing.
 if 'osrparse' not in sys.modules:

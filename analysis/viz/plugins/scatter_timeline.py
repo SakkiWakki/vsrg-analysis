@@ -13,7 +13,7 @@ def _noterows_to_seconds(rows, replay):
     bpms = replay.get('bpms')
     sm_offset = replay.get('sm_offset', 0.0)
     if bpms is not None:
-        from analysis.etterna.sm_chart import row_to_time
+        from analysis.games.etterna.sm_chart import row_to_time
         return np.array([row_to_time(int(r), bpms, sm_offset) for r in rows])
     # Fallback used elsewhere: 48 rows/beat @ 120 BPM = 96 rows/sec.
     return rows.astype(np.float64) / 96.0

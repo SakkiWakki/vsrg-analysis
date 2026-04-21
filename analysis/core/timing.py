@@ -1,7 +1,7 @@
 """Timing analysis for replays (any key count). All functions take raw arrays."""
 import sys
 import numpy as np
-from analysis.etterna.replay import parse_replay, clean_offsets
+from analysis.games.etterna.replay import parse_replay, clean_offsets
 
 
 def default_hands(keycount):

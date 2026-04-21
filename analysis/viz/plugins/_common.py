@@ -2,7 +2,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-from analysis.etterna.replay import clean_offsets
+from analysis.games.etterna.replay import clean_offsets
 from analysis.core.timing import default_hands
 from analysis.viz.plots import col_colors, LEFT_CLR, RIGHT_CLR, MS
 

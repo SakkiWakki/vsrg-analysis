@@ -7,7 +7,7 @@ import pickle
 from pathlib import Path
 from datetime import datetime
 
-from analysis.etterna.replay import (parse_etterna_xml, find_etterna_dirs,
+from analysis.games.etterna.replay import (parse_etterna_xml, find_etterna_dirs,
                              find_replay_for_score)
 
 
@@ -65,7 +65,7 @@ def scan_etterna():
 
 def _parse_one_osr(p):
     import osrparse
-    from analysis.osu.replay import rate_for_mods
+    from analysis.games.osu.replay import rate_for_mods
     try:
         r = osrparse.Replay.from_path(str(p))
         mode = getattr(r, 'mode', None)
@@ -106,7 +106,7 @@ def _parse_one_osr(p):
 
 def scan_osu(progress=None):
     """Scan osu!mania replays in parallel."""
-    from analysis.osu.replay import find_osu_dirs
+    from analysis.games.osu.replay import find_osu_dirs
     from concurrent.futures import ThreadPoolExecutor
     dirs = find_osu_dirs()
     paths = []
@@ -136,7 +136,7 @@ def _hash_one(p):
 
 def enrich_osu_with_charts(entries, songs_dir=None, progress=None):
     """Resolve song titles for osu entries by hashing .osu files in parallel."""
-    from analysis.osu.replay import find_osu_dirs, parse_osu_file
+    from analysis.games.osu.replay import find_osu_dirs, parse_osu_file
     from concurrent.futures import ThreadPoolExecutor
     if songs_dir is None:
         songs_dir = find_osu_dirs().get('songs_dir')

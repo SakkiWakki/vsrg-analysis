@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 from pathlib import Path
 
-from analysis.etterna.replay import (parse_replay, parse_etterna_xml,
+from analysis.games.etterna.replay import (parse_replay, parse_etterna_xml,
                              find_replay_for_score, find_etterna_dirs, clean_offsets)
 from analysis.core.timing import hand_split, default_hands
 

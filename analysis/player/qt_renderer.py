@@ -389,14 +389,13 @@ class QtPlayerRenderer:
         _rect(painter, (20, 20, 22), (sidebar_x, 0, 210, p.H))
         painter.setFont(self.font)
         y = 14
-        sv_line = ('SV: on' if p.sv_enabled else 'SV: off') \
-            if p.sv_sections else 'SV: n/a'
+        if not p.sv_sections or p.sv_suspended():
+            sv_line = 'SV: n/a'
+        else:
+            sv_line = 'SV: on' if p.sv_enabled else 'SV: off'
         lines = [
             f't = {ctx.t_now:+7.3f}s',
             f'speed = {p.play_rate:.2f}x',
-            (f'scroll = C{int(p.cmod_bpm)} ({int(p.effective_scroll_ms)}ms)'
-             if p.scroll_mode == p.SCROLL_MODE_CMOD
-             else f'scroll = {int(p.effective_scroll_ms)} ms'),
             f'notes = {len(p.times)}',
             f'keycount = {p.keycount}',
             sv_line,
@@ -433,8 +432,84 @@ class QtPlayerRenderer:
 
         y += 12
         y = self._draw_plugin_controls(ctx, painter, sidebar_x, y)
+        # Scroll controls: pinned near the bottom of the sidebar so they land
+        # where the empty space is, regardless of how far the plugin list
+        # extends.
+        self._draw_scroll_controls(ctx, painter, sidebar_x)
         ctx.plugin_data['hud_y'] = y
         ctx.plugin_data['sidebar_x'] = sidebar_x
+
+    def _draw_scroll_controls(self, ctx, painter, sidebar_x):
+        p = ctx.player
+        from analysis.player import scroll as scroll_registry
+        mode = scroll_registry.get(p.scroll_mode)
+        # Block: title + value + (− +) + scroll-type + rate-value + (− +) + game.
+        block_h = 156
+        y = p.H - block_h - 12
+        col_x = sidebar_x + 8
+        col_w = 190
+        half_w = (col_w - 4) // 2
+        btn_left = (col_x, 0, half_w, 20)
+        btn_right = (col_x + half_w + 4, 0, col_w - half_w - 4, 20)
+
+        _text(painter, 'Scroll', (255, 171, 145), col_x, y + 13)
+        y += 20
+        val_str = (mode.format_value(p._current_mode_value())
+                   if mode and mode.format_value
+                   else f'{p._current_mode_value():.2f}')
+        _text(painter, f'{val_str} ({int(p.effective_scroll_ms)}ms)',
+              (220, 220, 220), col_x + 2, y + 13)
+        y += 20
+        for (rx, _ry, rw, rh), label, factor in (
+            (btn_left, 'scroll −', 1 / 1.15),
+            (btn_right, 'scroll +', 1.15),
+        ):
+            rect = (rx, y, rw, rh)
+            _rect(painter, (32, 32, 36), rect)
+            _rect_outline(painter, (68, 68, 76), rect)
+            _text(painter, label, (220, 220, 220), rect[0] + 8, rect[1] + 14)
+            p._hud_hitboxes.append((rect, 'scroll_nudge', factor))
+        y += 24
+        mode_label = f'scroll type: {mode.label if mode else p.scroll_mode}'
+        rect = (col_x, y, col_w, 20)
+        _rect(painter, (32, 32, 36), rect)
+        _rect_outline(painter, (68, 68, 76), rect)
+        _text(painter, mode_label, (220, 220, 220), col_x + 8, y + 14)
+        p._hud_hitboxes.append((rect, 'cycle_scroll_mode', None))
+        y += 24
+        # Rate row: `- {rate}x +` (rate readout is the left column, "+" on right,
+        # "-" on... per spec: "- button {rate}x + button". Put − and + on the
+        # outside, rate text centered between them.
+        minus_rect = (col_x, y, 28, 20)
+        plus_rect = (col_x + col_w - 28, y, 28, 20)
+        _rect(painter, (32, 32, 36), minus_rect)
+        _rect_outline(painter, (68, 68, 76), minus_rect)
+        _text(painter, '−', (220, 220, 220), minus_rect[0] + 10,
+              minus_rect[1] + 14)
+        p._hud_hitboxes.append((minus_rect, 'rate_nudge', -0.1))
+        _rect(painter, (32, 32, 36), plus_rect)
+        _rect_outline(painter, (68, 68, 76), plus_rect)
+        _text(painter, '+', (220, 220, 220), plus_rect[0] + 10,
+              plus_rect[1] + 14)
+        p._hud_hitboxes.append((plus_rect, 'rate_nudge', 0.1))
+        rate_txt = f'{p.play_rate:.2f}x'
+        # crude center: col_w mid minus ~half of text width (6px/char).
+        tx = col_x + (col_w - len(rate_txt) * 6) // 2
+        _text(painter, rate_txt, (220, 220, 220), tx, y + 14)
+        y += 24
+        # Game cycle.
+        try:
+            from analysis.core import game as game_mod
+            games = list(game_mod.all_games().keys())
+        except Exception:
+            games = []
+        game_label = f'game: {p.game}' if p.game in games or not games else f'game: {p.game}'
+        rect = (col_x, y, col_w, 20)
+        _rect(painter, (32, 32, 36), rect)
+        _rect_outline(painter, (68, 68, 76), rect)
+        _text(painter, game_label, (220, 220, 220), col_x + 8, y + 14)
+        if len(games) > 1:
+            p._hud_hitboxes.append((rect, 'cycle_game', None))
 
     def _draw_plugin_controls(self, ctx, painter, sidebar_x, y):
         p = ctx.player
@@ -512,6 +587,16 @@ class QtPlayerRenderer:
         cx = lx + lane_w / 2
         _ellipse_outline(painter, (255, 255, 255), cx, y, r, r)
         _ellipse(painter, (255, 255, 255), cx, y, 2, 2)
+
+
+def _fmt_num(x, decimals=2):
+    """Render a scroll-speed scalar as an int when it's near-integer,
+    else fixed-width decimal. Cross-mode translations produce values
+    like 35.0212 that collapse to '35' but remain distinguishable from
+    an actual 35 after the user nudges."""
+    if abs(x - round(x)) < 1e-6:
+        return str(int(round(x)))
+    return f'{x:.{decimals}f}'
 
 
 def _shorten(text, max_chars):

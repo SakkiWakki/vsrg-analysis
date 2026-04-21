@@ -19,6 +19,7 @@ from pathlib import Path
 
 from analysis.viz.plots import col_colors
 from analysis.player.plugin_loader import PluginManager
+from analysis.player import scroll as scroll_registry
 
 
 # Judgment colors
@@ -85,7 +86,7 @@ def prepare_replay_times(replay, bpms=None, sm_offset=0.0):
         return times, hold_tails, keycount
     # Etterna: use BPM map if available
     if bpms is not None:
-        from analysis.etterna.sm_chart import row_to_time
+        from analysis.games.etterna.sm_chart import row_to_time
         times = np.array([row_to_time(int(r), bpms, sm_offset)
                           for r in replay['noterows']])
     else:
@@ -95,7 +96,7 @@ def prepare_replay_times(replay, bpms=None, sm_offset=0.0):
     for h in replay.get('holds', []):
         if len(h) == 3 and h[2] is not None:
             if bpms is not None:
-                from analysis.etterna.sm_chart import row_to_time
+                from analysis.games.etterna.sm_chart import row_to_time
                 hold_tails[(h[0], h[1])] = row_to_time(int(h[2]), bpms, sm_offset)
             else:
                 hold_tails[(h[0], h[1])] = h[2] / 96.0
@@ -103,18 +104,22 @@ def prepare_replay_times(replay, bpms=None, sm_offset=0.0):
 
 
 class Player:
-    # Scroll-speed modes.
-    #   'linear' — our native convention, inherited from Quaver/pset6 and
-    #              osu!mania's effective behavior: scroll_ms = time (ms) for a
-    #              note to travel from the top of the screen to the judgment
-    #              line. Constant regardless of BPM/SV (SV is layered on top).
-    #   'cmod'   — Etterna's CMOD convention: pixel position =
-    #              secondsUntilNote * (cmod_bpm / 60) * ARROW_SPACING.
-    #              Scroll speed is tied to a target BPM; faster chart sections
-    #              genuinely scroll faster on screen.
-    SCROLL_MODE_LINEAR = 'linear'
+    # Scroll modes live in analysis.player.scroll; each game's adapter.py
+    # registers its own (CMOD/XMOD for Etterna, osu! for osu!mania, etc.).
+    # The core 'ms' mode (time-from-top-to-judgment) is always registered.
+    SCROLL_MODE_MS = 'ms'
     SCROLL_MODE_CMOD = 'cmod'
-    ARROW_SPACING = 64.0  # px per beat at BPM 60, matches Etterna metrics.ini
+    SCROLL_MODE_OSU = 'osu'
+    SCROLL_MODE_XMOD = 'xmod'
+    # Back-compat alias: old persisted settings may still say 'linear'.
+    SCROLL_MODE_LINEAR = SCROLL_MODE_MS
+    # Reference field height shared by Etterna (Til Death / fallback theme
+    # ScreenHeight=480) and osu!mania stable (480-tall logical playfield).
+    # Scroll modes express their formulas in this coordinate system and the
+    # Player scales to window H so the fraction-of-screen-per-second matches
+    # the source game — making cross-game comparisons like Etterna C952 ≈
+    # osu SS 30 hold (empirically matching cmodcalc.com's SS×31.75 mapping).
+    REFERENCE_FIELD_H = 480.0
     SKINS = ('bar', 'circle')
 
 
@@ -122,7 +127,7 @@ class Player:
                  bpms=None, sm_offset=0.0, audio_path=None,
                  window_w=900, window_h=900, headless=False,
                  sv_sections=None, scroll_ms=400.0, scroll_mode=None,
-                 cmod_bpm=600.0, skin='bar', press_hide=False):
+                 cmod_bpm=600.0, osu_speed=20, skin='bar', press_hide=False):
         self.headless = headless
         self.W, self.H = window_w, window_h
 
@@ -158,13 +163,49 @@ class Player:
         self.palette = [tuple(int(c[i:i + 2], 16) for i in (1, 3, 5))
                         for c in col_colors(self.keycount)]
 
-        # Scroll speed: linear mode uses scroll_ms (time from top → judgment);
-        # CMOD mode uses cmod_bpm to match Etterna. Default mode is CMOD for
-        # Etterna replays (native convention), linear everywhere else.
-        self.scroll_ms = float(scroll_ms)
-        self.cmod_bpm = float(cmod_bpm)
+        # Scroll state: every mode the registry knows about gets its own
+        # sub-dict in `self._mode_state`, holding the native scalar, a copy
+        # of the mode's default options, plus whatever lifecycle hooks want
+        # to stash there (e.g. CMOD's SV-suspend bookkeeping). All scroll
+        # logic (speed lookup, nudge, mode switch) routes through the
+        # registry so adding a mode is a registry write, not a branch here.
+        scroll_registry.ensure_loaded()
+        self._mode_state: dict[str, dict] = {}
+        for m in scroll_registry.all_modes():
+            self._mode_state[m.key] = {
+                'value': m.default_value,
+                'options': dict(m.options),
+            }
+        # Seed defaults from legacy kwargs so existing call-sites (library
+        # tab, tests) don't need to change: scroll_ms → ms, cmod_bpm →
+        # cmod, osu_speed → osu.
+        self._mode_state[self.SCROLL_MODE_MS]['value'] = float(scroll_ms)
+        if self.SCROLL_MODE_CMOD in self._mode_state:
+            self._mode_state[self.SCROLL_MODE_CMOD]['value'] = float(cmod_bpm)
+        if self.SCROLL_MODE_OSU in self._mode_state:
+            self._mode_state[self.SCROLL_MODE_OSU]['value'] = max(
+                0.1, min(60.0, float(osu_speed)))
+        # XMOD reference BPM: picked from the first bpm in the chart if any,
+        # else 120. XMOD's to_pxps reads this off the player.
+        if bpms:
+            try:
+                self._xmod_reference_bpm = float(bpms[0][1])
+            except (IndexError, TypeError, ValueError):
+                self._xmod_reference_bpm = 120.0
+        else:
+            self._xmod_reference_bpm = 120.0
+
         if scroll_mode is None:
-            scroll_mode = self.SCROLL_MODE_CMOD if game == 'etterna' else self.SCROLL_MODE_LINEAR
+            try:
+                from analysis.core import game as game_mod
+                scroll_mode = game_mod.get(game).default_scroll_mode()
+            except Exception:
+                scroll_mode = self.SCROLL_MODE_MS
+        # Back-compat: accept the old 'linear' spelling from saved settings.
+        if scroll_mode == 'linear':
+            scroll_mode = self.SCROLL_MODE_MS
+        if scroll_mode not in self._mode_state:
+            scroll_mode = self.SCROLL_MODE_MS
         self.scroll_mode = scroll_mode
         self.play_rate = 1.0
         self.paused = True
@@ -263,27 +304,76 @@ class Player:
             sv_sections = replay.get('sv_sections') or []
         self.sv_sections = list(sv_sections)
         self.sv_enabled = bool(self.sv_sections)
+        # Fire the active mode's on_enter so e.g. CMOD's SV-suspend runs on
+        # the initial load too, not just on subsequent mode switches.
+        mode_desc = scroll_registry.get(self.scroll_mode)
+        if mode_desc and mode_desc.on_enter:
+            mode_desc.on_enter(self, self._mode_state[self.scroll_mode])
         self._build_cumulative_sv()
         self._build_ghost_sv_caches()
         self.plugins = PluginManager.discover()
         self.plugin_panel_open = False
         self._hud_hitboxes = []
+        # Subscribers notified when scroll mode / speed changes via HUD
+        # hitboxes — used by the surrounding Qt tab to persist settings and
+        # refresh Qt widget state (SV button, scroll-edit placeholder).
+        self._scroll_change_listeners = []
+
+    # --- Scroll abstraction ------------------------------------------------
+    # All scroll logic is delegated to analysis.player.scroll; this Player
+    # only knows about the registry key and a state dict per mode. Adding a
+    # new mode means adding a scroll.register(...) call in a game's
+    # adapter.py — no branches here.
+    def _mode(self, key=None):
+        return scroll_registry.get(key or self.scroll_mode)
+
+    def _state(self, key=None):
+        return self._mode_state[key or self.scroll_mode]
+
+    def _pxps_from_unit(self, mode_key, value, options=None):
+        m = scroll_registry.get(mode_key)
+        if m is None:
+            return 0.0
+        opts = options if options is not None else self._mode_state.get(
+            mode_key, {}).get('options', m.options)
+        return m.to_pxps(float(value), opts, self)
+
+    def _unit_from_pxps(self, mode_key, pxps, options=None):
+        m = scroll_registry.get(mode_key)
+        if m is None:
+            return 0.0
+        opts = options if options is not None else self._mode_state.get(
+            mode_key, {}).get('options', m.options)
+        return m.from_pxps(float(pxps), opts, self)
+
+    def _current_mode_value(self):
+        return self._state()['value']
+
+    def _set_current_mode_value(self, value):
+        m = self._mode()
+        if m is None:
+            return
+        lo, hi = m.value_bounds
+        self._state()['value'] = max(lo, min(hi, float(value)))
+
+    def get_mode_option(self, mode_key, option_key, default=None):
+        return self._mode_state.get(mode_key, {}).get('options', {}).get(
+            option_key, default)
+
+    def set_mode_option(self, mode_key, option_key, value):
+        st = self._mode_state.get(mode_key)
+        if st is None or option_key not in st['options']:
+            return
+        st['options'][option_key] = value
 
     @property
     def scroll_speed(self):
         """Effective px/sec for converting *chart-time* deltas to on-screen
-        distance. We divide by play_rate so that increasing rate doesn't
-        visually speed up the notes — the chart scrolls at the same apparent
-        speed, just with more notes per real second. This is the convention
-        the user prefers for practice playback."""
-        if self.scroll_mode == self.SCROLL_MODE_CMOD:
-            base = (self.cmod_bpm / 60.0) * self.ARROW_SPACING
-        else:
-            base = (self.H * self.hit_line_y_frac) / max(0.001, self.scroll_ms / 1000.0)
-        # Decouple visual scroll speed from playback rate: dividing by rate
-        # keeps pixels-per-real-second constant as rate changes, so the chart
-        # doesn't visually speed up with 1.2x/1.5x rates.
-        return base / max(0.01, self.play_rate)
+        distance. Dividing by play_rate matches Etterna CMOD (ArrowEffects.cpp
+        fBPS = BPM/60/musicRate): at higher rate, the same chart-second
+        covers fewer pixels."""
+        pxps = self._pxps_from_unit(self.scroll_mode, self._current_mode_value())
+        return pxps / max(0.01, self.play_rate)
 
     @property
     def effective_scroll_ms(self):
@@ -293,14 +383,13 @@ class Player:
         return (self.H * self.hit_line_y_frac) / sps * 1000.0
 
     def set_scroll_ms(self, ms):
-        """Set scroll speed in ms-to-judgment. In CMOD mode, back-solves
-        cmod_bpm from the requested ms + current window height."""
+        """Set scroll speed expressed as ms-to-judgment. Routes through the
+        abstraction so e.g. switching mode while keeping visual speed works
+        uniformly."""
         ms = max(50.0, min(3000.0, float(ms)))
-        if self.scroll_mode == self.SCROLL_MODE_CMOD:
-            sps = (self.H * self.hit_line_y_frac) / (ms / 1000.0)
-            self.cmod_bpm = sps * 60.0 / self.ARROW_SPACING
-        else:
-            self.scroll_ms = ms
+        pxps = self._pxps_from_unit(self.SCROLL_MODE_MS, ms)
+        self._set_current_mode_value(
+            self._unit_from_pxps(self.scroll_mode, pxps))
 
     def set_skin(self, skin):
         self.skin = skin if skin in self.SKINS else 'bar'
@@ -318,15 +407,23 @@ class Player:
         return self.press_hide
 
     def set_scroll_mode(self, mode):
-        """Switch between linear (osu!mania-style) and CMOD (Etterna-style)
-        while preserving the currently-visible ms-to-judgment."""
-        if mode not in (self.SCROLL_MODE_LINEAR, self.SCROLL_MODE_CMOD):
+        """Switch scroll modes while preserving visual px/sec. Lifecycle
+        callbacks on the registered mode handle side effects — e.g. CMOD's
+        on_enter suspends SV and stashes the prior state in the mode's
+        `_mode_state` entry; on_exit restores it."""
+        if mode == 'linear':
+            mode = self.SCROLL_MODE_MS
+        if mode not in self._mode_state or mode == self.scroll_mode:
             return
-        if mode == self.scroll_mode:
-            return
-        current_ms = self.effective_scroll_ms
+        pxps = self._pxps_from_unit(self.scroll_mode, self._current_mode_value())
+        prev_mode = self._mode(self.scroll_mode)
+        if prev_mode and prev_mode.on_exit:
+            prev_mode.on_exit(self, self._mode_state[self.scroll_mode])
         self.scroll_mode = mode
-        self.set_scroll_ms(current_ms)
+        self._set_current_mode_value(self._unit_from_pxps(mode, pxps))
+        new_mode = self._mode(mode)
+        if new_mode and new_mode.on_enter:
+            new_mode.on_enter(self, self._mode_state[mode])
 
     def _lane_geom(self):
         margin_l = 60
@@ -421,7 +518,11 @@ class Player:
         return self._sv_cumulative[idx] + (t - self._sv_times[idx]) * self._sv_values[idx]
 
     def _sv_distance(self, t_from, t_to):
-        """SV-weighted time delta (returns plain delta if SV is off/empty)."""
+        """SV-weighted time delta (returns plain delta if SV is off/empty).
+        `sv_enabled` is the single source of truth; CMOD's on_enter forces
+        it off (matching Etterna's ArrowEffects.cpp CMOD branch, which
+        never calls GetDisplayedSpeedPercent). ms/xmod/osu modes layer SV
+        on top when enabled."""
         if not self.sv_enabled or not self.sv_sections:
             return t_to - t_from
         return self._cumulative_sv_at(t_to) - self._cumulative_sv_at(t_from)
@@ -431,9 +532,22 @@ class Player:
         return judge_y - self._sv_distance(t_now, t) * self.scroll_speed
 
     def toggle_sv(self):
-        if self.sv_sections:
-            self.sv_enabled = not self.sv_enabled
+        """Toggle SV. If the current mode has suspended SV via on_enter (its
+        state dict has a sv_enabled_saved slot), flip that saved value so
+        the user's intent survives leaving the mode — but don't actually
+        enable SV while still in a mode that ignores it."""
+        if not self.sv_sections:
+            return False
+        st = self._state()
+        if 'sv_enabled_saved' in st:
+            st['sv_enabled_saved'] = not st['sv_enabled_saved']
+            return False
+        self.sv_enabled = not self.sv_enabled
         return self.sv_enabled
+
+    def sv_suspended(self) -> bool:
+        """True when the active mode has force-disabled SV (e.g. CMOD)."""
+        return 'sv_enabled_saved' in self._state()
 
     def handle_mouse_down(self, x, y):
         for rect, action, payload in reversed(getattr(self, '_hud_hitboxes', [])):
@@ -446,7 +560,73 @@ class Player:
             if action == 'toggle_plugin':
                 self.plugins.toggle_enabled(payload)
                 return True
+            if action == 'scroll_nudge':
+                self.nudge_scroll(payload)
+                self._notify_scroll_change()
+                return True
+            if action == 'cycle_scroll_mode':
+                keys = self._available_mode_keys()
+                if not keys:
+                    return True
+                cur = self.scroll_mode if self.scroll_mode in keys else keys[0]
+                self.set_scroll_mode(keys[(keys.index(cur) + 1) % len(keys)])
+                self._notify_scroll_change()
+                return True
+            if action == 'rate_nudge':
+                self.nudge_rate(payload)
+                self._notify_scroll_change()
+                return True
+            if action == 'cycle_game':
+                self.cycle_game()
+                self._notify_scroll_change()
+                return True
         return False
+
+    def _available_mode_keys(self) -> list[str]:
+        """Modes visible in the scroll-type cycle for the current game.
+        Core (game=None) modes like ms are always included; per-game modes
+        are included when their game matches `self.game`."""
+        out = []
+        for m in scroll_registry.all_modes():
+            if m.game is None or m.game == self.game:
+                out.append(m.key)
+        return out
+
+    def set_game(self, game: str) -> None:
+        """Switch the active game. Picks that game's default scroll mode
+        (Etterna → cmod, osu → osu). Core modes like ms remain available."""
+        if game == self.game:
+            return
+        self.game = game
+        try:
+            from analysis.core import game as game_mod
+            new_mode = game_mod.get(game).default_scroll_mode()
+        except Exception:
+            new_mode = self.SCROLL_MODE_MS
+        if new_mode in self._mode_state:
+            self.set_scroll_mode(new_mode)
+
+    def cycle_game(self) -> None:
+        """Walk through all discovered games in registration order."""
+        try:
+            from analysis.core import game as game_mod
+            names = list(game_mod.all_games().keys())
+        except Exception:
+            return
+        if not names:
+            return
+        cur = self.game if self.game in names else names[0]
+        self.set_game(names[(names.index(cur) + 1) % len(names)])
+
+    def add_scroll_change_listener(self, cb):
+        self._scroll_change_listeners.append(cb)
+
+    def _notify_scroll_change(self):
+        for cb in list(self._scroll_change_listeners):
+            try:
+                cb()
+            except Exception:
+                pass
 
     def advance(self, dt_s):
         if not self.paused:
@@ -467,12 +647,16 @@ class Player:
         self._toggle_pause()
 
     def nudge_scroll(self, factor):
-        # factor > 1 means "faster" (bigger px/sec).
-        if self.scroll_mode == self.SCROLL_MODE_CMOD:
-            self.cmod_bpm = max(60.0, min(5000.0, self.cmod_bpm * factor))
-        else:
-            # In ms-to-judgment units, faster = smaller ms, so invert.
-            self.scroll_ms = max(50.0, min(3000.0, self.scroll_ms / factor))
+        """factor > 1 means faster. The active mode's nudge callback owns
+        the behavior (multiplicative for CMOD/XMOD/ms, integer-step for
+        osu). Values are clamped to the mode's declared bounds."""
+        m = self._mode()
+        if m is None or m.nudge is None:
+            return
+        st = self._state()
+        new_val = m.nudge(st['value'], factor, st['options'])
+        lo, hi = m.value_bounds
+        st['value'] = max(lo, min(hi, float(new_val)))
 
     def nudge_rate(self, d):
         self.play_rate = max(0.1, min(4.0, self.play_rate + d))
@@ -492,7 +676,7 @@ class Player:
 
 def launch_from_replay(replay, game='etterna', od=8, bpms=None, sm_offset=0,
                        audio_path=None, sv_sections=None, scroll_ms=400.0,
-                       scroll_mode=None, cmod_bpm=600.0):
+                       scroll_mode=None, cmod_bpm=600.0, osu_speed=20):
     from PySide6.QtWidgets import QApplication
     from analysis.gui.player_tab import PlayerTab
 
@@ -500,7 +684,7 @@ def launch_from_replay(replay, game='etterna', od=8, bpms=None, sm_offset=0,
     tab = PlayerTab(replay, game=game, od=od, bpms=bpms,
                     sm_offset=sm_offset, audio_path=audio_path,
                     scroll_ms=scroll_ms, scroll_mode=scroll_mode,
-                    cmod_bpm=cmod_bpm)
+                    cmod_bpm=cmod_bpm, osu_speed=osu_speed)
     tab.resize(1200, 900)
     tab.setWindowTitle('Replay Player')
     tab.show()
@@ -517,7 +701,7 @@ if __name__ == '__main__':
     audio = args[args.index('--audio') + 1] if '--audio' in args else None
 
     if path.endswith('.osr') or '--osu' in args:
-        from analysis.osu.replay import parse_replay as parse_osu, find_osu_dirs
+        from analysis.games.osu.replay import parse_replay as parse_osu, find_osu_dirs
         osu_path = args[args.index('--osu') + 1] if '--osu' in args else None
         songs = find_osu_dirs().get('songs_dir')
         rep = parse_osu(path, osu_path=osu_path, songs_dir=songs)
@@ -525,7 +709,7 @@ if __name__ == '__main__':
             af = Path(rep['chart_path']).parent / rep['chart_meta'].get('version', '')
             # try to resolve audio in same folder as .osu
             osu_dir = Path(rep['chart_path']).parent
-            from analysis.osu.replay import parse_osu_file
+            from analysis.games.osu.replay import parse_osu_file
             chart = parse_osu_file(rep['chart_path'])
             if chart.get('audio'):
                 cand = osu_dir / chart['audio']
@@ -533,14 +717,14 @@ if __name__ == '__main__':
                     audio = str(cand)
         launch_from_replay(rep, game='osu', od=od, audio_path=audio)
     else:
-        from analysis.etterna.replay import parse_replay as parse_ett, find_etterna_dirs
+        from analysis.games.etterna.replay import parse_replay as parse_ett, find_etterna_dirs
         rep = parse_ett(path)
         bpms = None
         sm_off = 0.0
         if '--bpm' in args:
             bpms = [(0.0, float(args[args.index('--bpm') + 1]))]
         if '--sm' in args:
-            from analysis.etterna.sm_chart import parse_sm, parse_ssc
+            from analysis.games.etterna.sm_chart import parse_sm, parse_ssc
             smp = args[args.index('--sm') + 1]
             data = parse_ssc(smp) if smp.endswith('.ssc') else parse_sm(smp)
             bpms = data['bpms']

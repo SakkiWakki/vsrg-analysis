@@ -7,7 +7,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 
-from analysis.etterna.replay import parse_replay, clean_offsets, summary
+from analysis.games.etterna.replay import parse_replay, clean_offsets, summary
 from analysis.core.timing import (
     hand_split, per_column_stats, timing_drift,
     coupling_analysis, chord_vs_single, rolling_stability, full_analysis,

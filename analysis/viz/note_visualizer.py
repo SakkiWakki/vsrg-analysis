@@ -14,7 +14,7 @@ from matplotlib.patches import Rectangle
 from matplotlib.collections import PatchCollection
 from matplotlib.widgets import Slider
 
-from analysis.etterna.replay import parse_replay as parse_etterna
+from analysis.games.etterna.replay import parse_replay as parse_etterna
 from analysis.viz.plots import col_colors
 
 plt.style.use('dark_background')
@@ -378,7 +378,7 @@ if __name__ == '__main__':
         rpm = float(args[args.index('--rows-per-ms') + 1])
 
     if '--osu' in args or path.endswith('.osr'):
-        from analysis.osu.replay import parse_replay as parse_osu, find_osu_dirs
+        from analysis.games.osu.replay import parse_replay as parse_osu, find_osu_dirs
         osu_path = args[args.index('--osu') + 1] if '--osu' in args else None
         songs = find_osu_dirs().get('songs_dir')
         rep = parse_osu(path, osu_path=osu_path, songs_dir=songs)

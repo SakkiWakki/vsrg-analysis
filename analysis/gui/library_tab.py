@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                                QMessageBox, QFileDialog, QHeaderView, QMenu,
                                QProgressDialog)
 
-from analysis.etterna.replay import find_etterna_dirs
+from analysis.games.etterna.replay import find_etterna_dirs
 from analysis.gui.settings import get_settings
 from analysis.gui.loaders import (Worker, resolve_etterna_chart,
                                   resolve_osu_audio)
@@ -173,8 +173,8 @@ class LibraryTab(QWidget):
         from analysis.gui.paths_dialog import PathsDialog
         # Pass the *currently resolved* paths as autodetect hints so the
         # dialog pre-fills even if the user hasn't set overrides yet.
-        from analysis.etterna.replay import find_etterna_dirs
-        from analysis.osu.replay import find_osu_dirs
+        from analysis.games.etterna.replay import find_etterna_dirs
+        from analysis.games.osu.replay import find_osu_dirs
         dlg = PathsDialog(self, autodetect_etterna=find_etterna_dirs().get('save_dir'),
                           autodetect_osu=find_osu_dirs().get('songs_dir'))
         if dlg.exec():
@@ -365,7 +365,7 @@ class LibraryTab(QWidget):
         if not needs:
             return
         try:
-            from analysis.osu.replay import parse_osu_file
+            from analysis.games.osu.replay import parse_osu_file
             chart = parse_osu_file(rep['chart_path'])
         except Exception:
             return

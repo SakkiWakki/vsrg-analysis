@@ -100,7 +100,7 @@ def test_validate_osu(tmp_path):
 def test_find_etterna_dirs_uses_override(tmp_path):
     save = _make_etterna_tree(tmp_path)
     S.set_etterna_save_override(str(save))
-    from analysis.etterna.replay import find_etterna_dirs
+    from analysis.games.etterna.replay import find_etterna_dirs
     got = find_etterna_dirs()
     assert got['save_dir'] == str(save)
     assert got['replays_dir'] == str(save / 'ReplaysV2')
@@ -112,7 +112,7 @@ def test_find_etterna_dirs_skips_bad_override(tmp_path):
     # to autodetection. We can't easily assert what autodetect returns on the
     # dev box, but we can at least check we didn't echo the bogus override.
     S.set_etterna_save_override(str(tmp_path / 'does-not-exist'))
-    from analysis.etterna.replay import find_etterna_dirs
+    from analysis.games.etterna.replay import find_etterna_dirs
     got = find_etterna_dirs()
     assert got['save_dir'] != str(tmp_path / 'does-not-exist')
 
@@ -120,7 +120,7 @@ def test_find_etterna_dirs_skips_bad_override(tmp_path):
 def test_find_osu_dirs_uses_override(tmp_path):
     songs, data_r = _make_osu_tree(tmp_path)
     S.set_osu_songs_override(str(songs))
-    from analysis.osu.replay import find_osu_dirs
+    from analysis.games.osu.replay import find_osu_dirs
     got = find_osu_dirs()
     assert got['songs_dir'] == str(songs)
     # Replay dir adjacent to Songs/ should get picked up automatically.
@@ -129,7 +129,7 @@ def test_find_osu_dirs_uses_override(tmp_path):
 
 def test_find_osu_dirs_ignores_missing_override(tmp_path):
     S.set_osu_songs_override(str(tmp_path / 'missing'))
-    from analysis.osu.replay import find_osu_dirs
+    from analysis.games.osu.replay import find_osu_dirs
     got = find_osu_dirs()
     assert got['songs_dir'] != str(tmp_path / 'missing')
 

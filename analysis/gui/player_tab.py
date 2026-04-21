@@ -14,7 +14,8 @@ class PlayerTab(QWidget):
     """Embedded replay player with a native QPainter chart canvas."""
     def __init__(self, replay, game='etterna', od=None, judge=None, bpms=None,
                  sm_offset=0.0, audio_path=None, scroll_ms=400.0,
-                 scroll_mode=None, play_rate=1.0, cmod_bpm=600.0):
+                 scroll_mode=None, play_rate=1.0, cmod_bpm=600.0,
+                 osu_speed=20):
         super().__init__()
         from analysis.player.player import Player
         from analysis.core import game as game_mod
@@ -26,7 +27,7 @@ class PlayerTab(QWidget):
                              sm_offset=sm_offset, audio_path=None,
                              window_w=900, window_h=800,
                              scroll_ms=scroll_ms, scroll_mode=scroll_mode,
-                             cmod_bpm=cmod_bpm,
+                             cmod_bpm=cmod_bpm, osu_speed=osu_speed,
                              skin=skin, press_hide=press_hide, **player_kwargs)
         # Replay's original playback rate (Etterna "Rate" from XML, osu!
         # "ModRate"). The chart + offsets are in chart-time, but the audio
@@ -80,8 +81,6 @@ class PlayerTab(QWidget):
 
         ctl = QHBoxLayout()
         for label, fn in [
-            ('scroll −', lambda: self.player.nudge_scroll(1 / 1.15)),
-            ('scroll +', lambda: self.player.nudge_scroll(1.15)),
             ('rate −', lambda: self._nudge_rate(-0.1)),
             ('rate +', lambda: self._nudge_rate(0.1)),
             ('restart', self._restart),
@@ -96,16 +95,6 @@ class PlayerTab(QWidget):
         self._refresh_sv_btn()
         self.sv_btn.clicked.connect(lambda _checked=False: self._toggle_sv())
         ctl.addWidget(self.sv_btn)
-
-        self.mode_btn = QPushButton()
-        self.mode_btn.setFocusPolicy(Qt.NoFocus)
-        self.mode_btn.setToolTip(
-            'Linear: constant ms from top to judgment (osu!mania-style).\n'
-            'CMOD: scroll locked to a BPM (Etterna CMOD-style) — higher-BPM '
-            'sections scroll faster on screen.')
-        self.mode_btn.clicked.connect(lambda _checked=False: self._toggle_mode())
-        ctl.addWidget(self.mode_btn)
-        self._refresh_mode_btn()
 
         self.skin_btn = QPushButton()
         self.skin_btn.setFocusPolicy(Qt.NoFocus)
@@ -167,6 +156,8 @@ class PlayerTab(QWidget):
         self.player.paused = False
         self.play_btn.setText('⏸')
         self._sync_audio()
+        self.player.add_scroll_change_listener(self._on_scroll_change)
+        self._refresh_mode_btn()
 
     def _sync_audio(self):
         if self._audio_ready:
@@ -187,7 +178,9 @@ class PlayerTab(QWidget):
         self._sync_audio()
 
     def _refresh_sv_btn(self):
-        if not self.player.sv_sections:
+        if not self.player.sv_sections or self.player.sv_suspended():
+            # The active scroll mode ignores SV (e.g. CMOD) — surface "n/a"
+            # instead of a toggle that would do nothing.
             self.sv_btn.setText('SV: n/a')
             self.sv_btn.setEnabled(False)
         else:
@@ -199,14 +192,13 @@ class PlayerTab(QWidget):
         self._refresh_sv_btn()
 
     def _refresh_mode_btn(self):
-        if self.player.scroll_mode == self.player.SCROLL_MODE_CMOD:
-            self.mode_btn.setText('Mode: CMOD')
-            if hasattr(self, 'scroll_edit'):
-                self.scroll_edit.setPlaceholderText('CMOD BPM')
-        else:
-            self.mode_btn.setText('Mode: Linear')
-            if hasattr(self, 'scroll_edit'):
-                self.scroll_edit.setPlaceholderText('ms')
+        # Scroll-type button lives in the painted HUD sidebar; this just
+        # keeps the scroll-edit placeholder in sync with the current mode.
+        from analysis.player import scroll as scroll_registry
+        m = scroll_registry.get(self.player.scroll_mode)
+        placeholder = f'{m.label} value' if m else 'ms'
+        if hasattr(self, 'scroll_edit'):
+            self.scroll_edit.setPlaceholderText(placeholder)
 
     def _refresh_skin_btn(self):
         self.skin_btn.setText(f'Skin: {self.player.skin}')
@@ -261,13 +253,15 @@ class PlayerTab(QWidget):
         self._muted = not self._muted
         self._audio.set_volume(0.0 if self._muted else 0.5)
 
-    def _toggle_mode(self):
-        new_mode = (self.player.SCROLL_MODE_LINEAR
-                    if self.player.scroll_mode == self.player.SCROLL_MODE_CMOD
-                    else self.player.SCROLL_MODE_CMOD)
-        self.player.set_scroll_mode(new_mode)
+    def _on_scroll_change(self):
+        """Called by the player when the painted-HUD scroll controls cycle
+        the mode, nudge the speed, switch the game, or nudge play rate.
+        Keeps Qt widgets + persisted settings in sync and re-syncs audio
+        so rate nudges from the HUD actually retime the music."""
         self._refresh_mode_btn()
-        get_settings().setValue('player/scroll_mode', new_mode)
+        self._refresh_sv_btn()
+        self._sync_audio()
+        get_settings().setValue('player/scroll_mode', self.player.scroll_mode)
 
     def _apply_scroll_edit(self):
         raw = self.scroll_edit.text().strip()
@@ -278,10 +272,9 @@ class PlayerTab(QWidget):
         except ValueError:
             self.scroll_edit.clear()
             return
-        if self.player.scroll_mode == self.player.SCROLL_MODE_CMOD:
-            self.player.cmod_bpm = max(60.0, min(5000.0, val))
-        else:
-            self.player.set_scroll_ms(val)
+        # Route through the player's abstraction so the raw entered value is
+        # treated as this mode's native unit (float-accepting).
+        self.player._set_current_mode_value(val)
         self.scroll_edit.clear()
 
     def _restart(self):

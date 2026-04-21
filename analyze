@@ -9,12 +9,12 @@ sys.path.insert(0, str(HERE))
 
 
 def cmd_replay(args):
-    from analysis.etterna.replay import parse_replay as parse_ett
+    from analysis.games.etterna.replay import parse_replay as parse_ett
     from analysis.core.timing import full_analysis, print_analysis
     from analysis.viz.plots import plot_full_report
 
     if args.file.endswith('.osr') or args.osu:
-        from analysis.osu.replay import parse_replay as parse_osu, find_osu_dirs
+        from analysis.games.osu.replay import parse_replay as parse_osu, find_osu_dirs
         songs = args.songs or find_osu_dirs().get('songs_dir')
         rep = parse_osu(args.file, osu_path=args.osu, songs_dir=songs)
     else:
@@ -31,7 +31,7 @@ def cmd_replay(args):
 
 
 def cmd_score(args):
-    from analysis.etterna.replay import (find_etterna_dirs,
+    from analysis.games.etterna.replay import (find_etterna_dirs,
                                                find_replay_for_score,
                                                parse_etterna_xml)
     dirs = find_etterna_dirs()
@@ -76,13 +76,13 @@ def cmd_batch(args):
 
 
 def cmd_report(args):
-    from analysis.etterna.replay import (parse_replay as parse_ett,
+    from analysis.games.etterna.replay import (parse_replay as parse_ett,
                                                parse_etterna_xml,
                                                find_etterna_dirs)
     from analysis.viz.plots import generate_html_report
 
     if args.file.endswith('.osr') or args.osu:
-        from analysis.osu.replay import parse_replay as parse_osu, find_osu_dirs
+        from analysis.games.osu.replay import parse_replay as parse_osu, find_osu_dirs
         songs = args.songs or find_osu_dirs().get('songs_dir')
         rep = parse_osu(args.file, osu_path=args.osu, songs_dir=songs)
         meta = {'song': rep['chart_meta'].get('title'),
@@ -116,12 +116,12 @@ def cmd_viz(args):
     import matplotlib.pyplot as plt
 
     if args.file.endswith('.osr') or args.osu:
-        from analysis.osu.replay import parse_replay as parse_osu, find_osu_dirs
+        from analysis.games.osu.replay import parse_replay as parse_osu, find_osu_dirs
         songs = args.songs or find_osu_dirs().get('songs_dir')
         rep = parse_osu(args.file, osu_path=args.osu, songs_dir=songs)
         game = 'osu'
     else:
-        from analysis.etterna.replay import parse_replay as parse_ett
+        from analysis.games.etterna.replay import parse_replay as parse_ett
         rep = parse_ett(args.file)
         game = 'etterna'
 

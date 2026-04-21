@@ -160,8 +160,8 @@ def prompt_if_first_run(parent=None):
         mark_first_run_done()
         return False
     # Preload autodetect results so the user gets pre-filled suggestions.
-    from analysis.etterna.replay import find_etterna_dirs
-    from analysis.osu.replay import find_osu_dirs
+    from analysis.games.etterna.replay import find_etterna_dirs
+    from analysis.games.osu.replay import find_osu_dirs
     ett = find_etterna_dirs().get('save_dir')
     osu = find_osu_dirs().get('songs_dir')
     dlg = PathsDialog(parent, first_run=True,
