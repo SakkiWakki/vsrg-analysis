@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                                QPushButton, QLabel, QLineEdit, QComboBox,
                                QCheckBox, QTreeWidget, QTreeWidgetItem,
                                QMessageBox, QFileDialog, QHeaderView, QMenu,
-                               QProgressDialog)
+                               QProgressDialog, QToolButton)
 
 from analysis.games.etterna.replay import find_etterna_dirs
 from analysis.gui.settings import get_settings
@@ -74,18 +74,22 @@ class LibraryTab(QWidget):
         self.filter_edit = QLineEdit()
         self.filter_edit.textChanged.connect(self._refresh_tree)
         row1.addWidget(self.filter_edit, 1)
-        # Built-in toolbar actions first, then plugin-contributed ones.
-        # Plugin actions live in a trailing container so we can wipe and
-        # rebuild them when the registry changes without disturbing the
-        # built-ins or the search box.
+        # Built-in toolbar actions first. Plugin-contributed actions live
+        # behind one menu button so discovery does not keep appending
+        # extra top-level toolbar controls.
         for label, cb in [('Scan library', self._load_library),
                           ('Refresh cache', lambda: self._load_library(refresh=True)),
                           ('Enrich osu titles', lambda: self._load_library(refresh=True, enrich=True)),
                           ('Plugins…', self._open_plugins_dialog),
                           ('Paths…', self._open_paths_dialog)]:
             b = QPushButton(label); b.clicked.connect(cb); row1.addWidget(b)
-        self._plugin_actions_row = row1
-        self._plugin_action_buttons: list[QPushButton] = []
+        self._plugin_actions_btn = QToolButton()
+        self._plugin_actions_btn.setText('Plugin actions')
+        self._plugin_actions_btn.setPopupMode(QToolButton.InstantPopup)
+        self._plugin_actions_menu = QMenu(self._plugin_actions_btn)
+        self._plugin_actions_btn.setMenu(self._plugin_actions_menu)
+        self._plugin_actions_btn.setVisible(False)
+        row1.addWidget(self._plugin_actions_btn)
         # Discover plugins up-front so bundle-contributed library-toolbar
         # buttons appear on first paint.
         from analysis.player.plugin_loader import PluginManager
@@ -190,30 +194,27 @@ class LibraryTab(QWidget):
 
     # ---------- plugin toolbar actions ----------
     def _rebuild_plugin_actions(self):
-        """Tear down and re-add plugin-contributed toolbar buttons.
+        """Rebuild the plugin-contributed action menu.
 
         Called at build time and any time the registry changes. We
-        rebuild rather than diff because the set is small and the
-        visual order depends on registration order; a full rebuild keeps
-        the logic obvious.
+        rebuild rather than diff because the set is small and registration
+        order is the intended visual order.
         """
-        row = getattr(self, '_plugin_actions_row', None)
-        if row is None:
+        menu = getattr(self, '_plugin_actions_menu', None)
+        btn = getattr(self, '_plugin_actions_btn', None)
+        if menu is None or btn is None:
             return
-        for btn in getattr(self, '_plugin_action_buttons', []):
-            row.removeWidget(btn)
-            btn.setParent(None)
-            btn.deleteLater()
-        self._plugin_action_buttons = []
+        menu.clear()
         from analysis.gui.library_actions import get_registry
-        for action in get_registry().actions():
-            btn = QPushButton(action.label)
+        actions = get_registry().actions()
+        for action in actions:
             # Capture the callback in the closure; the action object may
             # be replaced if the plugin re-registers with the same key.
             cb = action.callback
-            btn.clicked.connect(lambda _=False, fn=cb: self._invoke_plugin_action(fn))
-            row.addWidget(btn)
-            self._plugin_action_buttons.append(btn)
+            item = menu.addAction(action.label)
+            item.triggered.connect(
+                lambda _checked=False, fn=cb: self._invoke_plugin_action(fn))
+        btn.setVisible(bool(actions))
 
     def _invoke_plugin_action(self, fn):
         try:

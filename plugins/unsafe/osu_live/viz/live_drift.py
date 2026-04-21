@@ -146,8 +146,14 @@ def _start_osu_with_overlay():
     except Exception:
         cfg = None
     overlays = discover_overlays(config=cfg)
-    pub = overlays.start('osu_live', width=int(width), height=int(height),
-                         config_store=cfg)
+    try:
+        pub = overlays.start('osu_live', width=int(width), height=int(height),
+                             config_store=cfg)
+    except RuntimeError as exc:
+        QMessageBox.warning(
+            parent, 'Start osu (with overlay)',
+            f'{exc}\n\nEnable the overlay in the Plugins dialog and try again.')
+        return
     app = QApplication.instance()
     if app is not None:
         app._osu_live_overlay_registry = overlays

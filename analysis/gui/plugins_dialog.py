@@ -2,7 +2,7 @@
 
 Invoked from the library toolbar's "Plugins" button. Shows each bundle
 with its trust tag (trusted/sandboxed/refused), and under each bundle
-the registered replay plugins and sidebar sections. Each leaf row has
+the registered replay plugins, sidebar sections, and overlay feeds. Each leaf row has
 a checkbox; toggling it writes through the shared
 :class:`analysis.config.ConfigStore`, which both persists the change
 to ``~/.config/vsrg-analysis/config.json`` and fans it out to every
@@ -27,7 +27,7 @@ _TRUST_LABELS = {
 }
 
 # QTreeWidgetItem user-data roles for dispatching checkbox changes.
-_ROLE_KIND = Qt.UserRole + 1    # 'replay' | 'sidebar'
+_ROLE_KIND = Qt.UserRole + 1    # 'replay' | 'sidebar' | 'overlay'
 _ROLE_KEY = Qt.UserRole + 2     # plugin / section key
 
 
@@ -84,18 +84,26 @@ class PluginsDialog(QDialog):
         v.addWidget(btns)
 
         self._mgr = None
+        self._overlay_registry = None
         self._suspend_signals = False
         self._populate()
 
     def _rediscover(self):
         from analysis.player.plugin_loader import PluginManager
+        from analysis.overlay.publisher import discover_overlays
         self._mgr = PluginManager.discover()
+        self._overlay_registry = discover_overlays(
+            config=getattr(self._mgr, '_config', None))
         self._populate()
 
     def _populate(self):
         from analysis.player.plugin_loader import PluginManager
+        from analysis.overlay.publisher import discover_overlays
         mgr = self._mgr or PluginManager.discover()
         self._mgr = mgr
+        overlay_registry = self._overlay_registry or discover_overlays(
+            config=getattr(mgr, '_config', None))
+        self._overlay_registry = overlay_registry
 
         self._suspend_signals = True
         try:
@@ -110,6 +118,11 @@ class PluginsDialog(QDialog):
             for s in mgr.sidebar.all_sections():
                 sidebar_by_bundle.setdefault(
                     _bundle_key_of(s.module), []).append(s)
+
+            overlay_by_bundle: dict[str, list] = {}
+            for o in overlay_registry.all_overlays():
+                overlay_by_bundle.setdefault(
+                    _bundle_key_of(o.module), []).append(o)
 
             for bundle in mgr.bundles:
                 trust = _bundle_trust(bundle)
@@ -127,6 +140,9 @@ class PluginsDialog(QDialog):
                 for s in sidebar_by_bundle.get(bundle.key, []):
                     self._add_leaf(root, s.name, 'sidebar', s.key, s.enabled)
 
+                for o in overlay_by_bundle.get(bundle.key, []):
+                    self._add_leaf(root, o.name, 'overlay', o.key, o.enabled)
+
                 if bundle.load_errors:
                     for role, fname, exc in bundle.load_errors:
                         reason = f'refused: {type(exc).__name__}'
@@ -137,6 +153,7 @@ class PluginsDialog(QDialog):
 
                 if (not replay_by_bundle.get(bundle.key)
                         and not sidebar_by_bundle.get(bundle.key)
+                        and not overlay_by_bundle.get(bundle.key)
                         and not bundle.load_errors):
                     QTreeWidgetItem(root, ['(empty)', ''])
 
@@ -165,3 +182,5 @@ class PluginsDialog(QDialog):
             self._mgr.set_enabled(key, enabled)
         elif kind == 'sidebar':
             self._mgr.sidebar.set_enabled(key, enabled)
+        elif kind == 'overlay':
+            self._overlay_registry.set_enabled(key, enabled)

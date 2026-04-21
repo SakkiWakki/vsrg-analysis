@@ -585,3 +585,50 @@ def test_sandboxed_overlay_role_registers_and_draws(tmp_path, monkeypatch):
             os.unlink('/dev/shm/vsrg_overlay_overlay_demo_hud')
         except FileNotFoundError:
             pass
+
+
+def test_disabling_overlay_stops_running_publisher(tmp_path):
+    from analysis.config.store import ConfigStore
+    from analysis.overlay.publisher import OverlayRegistry
+
+    key = f'overlay_stop_{uuid.uuid4().hex[:8]}'
+    store = ConfigStore(tmp_path / 'config.json', autosave=False)
+    store.load()
+
+    def draw(frame):
+        frame.rect('r', 0.1, 0.1, 0.1, 0.1, color=BLACK_DIM)
+
+    running = OverlayRegistry(config=store)
+    running.add('Stop test', draw, key=key, hz=1)
+    pub = running.start(key)
+
+    toggler = OverlayRegistry(config=store)
+    toggler.add('Stop test', draw, key=key, hz=1)
+    try:
+        assert pub._mm is not None
+        assert running.get(key).enabled is True
+        with pub.frame() as frame:
+            draw(frame)
+        assert struct.unpack_from('<I', pub._mm, 12)[0] == 1
+
+        assert toggler.set_enabled(key, False) is True
+
+        assert running.get(key).enabled is False
+        assert pub._mm is None
+        with open(f'/dev/shm/vsrg_overlay_{key}', 'rb') as f:
+            data = f.read(_TOTAL_SIZE)
+        assert struct.unpack_from('<I', data, 12)[0] == 0
+        assert data[_HEADER_SIZE:] == b'\x00' * (_WIDGET_SIZE * MAX_WIDGETS)
+
+        assert toggler.set_enabled(key, True) is True
+        assert running.get(key).enabled is True
+        restarted_pub = running._runtime[key][0]
+        assert restarted_pub is not pub
+        assert restarted_pub._mm is not None
+    finally:
+        toggler.close()
+        running.close()
+        try:
+            os.unlink(f'/dev/shm/vsrg_overlay_{key}')
+        except FileNotFoundError:
+            pass

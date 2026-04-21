@@ -256,6 +256,10 @@ class OverlayPublisher:
 
     def stop(self) -> None:
         if self._mm is not None:
+            # Leave the feed in an empty-but-valid state so an attached
+            # renderer clears any previously drawn widgets after the
+            # publisher stops.
+            self._commit([])
             self._mm.close()
             self._mm = None
         if self._fd is not None:
@@ -542,6 +546,10 @@ class OverlayRegistry:
         self._config = config if config is not None else get_config()
         self._overlays: list[OverlaySpec] = []
         self._runtime: dict[str, tuple[OverlayPublisher, threading.Thread]] = {}
+        self._last_start: dict[str, tuple[int | None, int | None, object]] = {}
+        self._restart_on_enable: set[str] = set()
+        self._config_sub = self._config.subscribe(
+            'plugins', self._on_config_change)
 
     def add(self, name, draw, *, key=None, hz: float = 30.0,
             width: int = 2560, height: int = 1440, enabled: bool = True,
@@ -556,7 +564,7 @@ class OverlayRegistry:
             width=int(width),
             height=int(height),
             module=str(module),
-            enabled=bool(enabled),
+            enabled=bool(enabled) and not self._is_disabled(spec_key),
         ))
         self._overlays.sort(key=lambda o: (o.name, o.key))
 
@@ -575,9 +583,12 @@ class OverlayRegistry:
         spec = self.get(key)
         if spec is None:
             raise KeyError(f'unknown overlay: {key}')
+        if not spec.enabled:
+            raise RuntimeError(f'overlay is disabled: {key}')
         existing = self._runtime.get(spec.key)
         if existing is not None:
             return existing[0]
+        self._last_start[spec.key] = (width, height, config_store)
         pub = OverlayPublisher(
             spec.key,
             width=spec.width if width is None else int(width),
@@ -607,6 +618,51 @@ class OverlayRegistry:
     def stop_all(self) -> None:
         for key in list(self._runtime):
             self.stop(key)
+
+    def set_enabled(self, key: str, enabled: bool) -> bool:
+        key = str(key)
+        if not any(o.key == key for o in self._overlays):
+            return False
+        self._config.set(
+            f'plugins.{_escape_config_key(key)}.overlay_disabled',
+            not bool(enabled))
+        for spec in self._overlays:
+            if spec.key == key:
+                spec.enabled = bool(enabled)
+        if not enabled:
+            self.stop(key)
+        return True
+
+    def close(self) -> None:
+        if self._config_sub is not None:
+            self._config.unsubscribe(self._config_sub)
+            self._config_sub = None
+        self.stop_all()
+
+    def _is_disabled(self, key: str) -> bool:
+        return bool(self._config.get(
+            f'plugins.{_escape_config_key(key)}.overlay_disabled', False))
+
+    def _on_config_change(self, path, old, new) -> None:
+        if len(path) < 3 or path[-1] != 'overlay_disabled':
+            return
+        escaped = path[1]
+        disabled = bool(new) if new is not None else False
+        for spec in self._overlays:
+            if _escape_config_key(spec.key) != escaped:
+                continue
+            spec.enabled = not disabled
+            if disabled:
+                if spec.key in self._runtime:
+                    self._restart_on_enable.add(spec.key)
+                self.stop(spec.key)
+            elif spec.key in self._restart_on_enable:
+                self._restart_on_enable.discard(spec.key)
+                width, height, config_store = self._last_start.get(
+                    spec.key, (None, None, None))
+                self.start(spec.key, width=width, height=height,
+                           config_store=config_store)
+            break
 
 
 def discover_overlays(extra_paths=None, config=None) -> OverlayRegistry:
@@ -645,3 +701,7 @@ def _default_overlay_key(module: str, name: str) -> str:
             chars.append('_')
     key = ''.join(chars).strip('_')
     return key or f'overlay_{widget_id(raw):08x}'
+
+
+def _escape_config_key(key: str) -> str:
+    return str(key).replace('.', '_')

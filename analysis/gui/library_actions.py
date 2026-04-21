@@ -1,4 +1,4 @@
-"""Registry for plugin-contributed buttons on the library tab's toolbar.
+"""Registry for plugin-contributed actions on the library tab.
 
 Plugins expose actions by adding a top-level ``register_library_actions``
 to any bundle module::
@@ -14,8 +14,7 @@ a toolbar, not a full menu system. If a plugin needs richer UX
 The registry is process-wide: a single instance holds every plugin's
 actions and fires a listener whenever a plugin adds or removes one.
 ``library_tab`` subscribes so that actions registered *after* the tab
-builds (e.g. by a plugin enabled via the Plugins dialog) show up on the
-next scan-library interaction — and, if the tab supports it, without a
+builds (e.g. by a plugin enabled via the Plugins dialog) show up without
 restart.
 """
 from __future__ import annotations
