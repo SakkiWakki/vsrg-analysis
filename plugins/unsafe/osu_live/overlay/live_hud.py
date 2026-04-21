@@ -4,8 +4,9 @@ from __future__ import annotations
 import numpy as np
 
 from analysis.overlay.api import (ANCHOR_TL, BLACK_DIM, BLUE_ACCENT, HIST_BAR,
-                                  WHITE, rgba)
-from plugins.unsafe.osu_live.client import LiveSnapshot, get_client
+                                  WHITE, OverlayGameState, rgba)
+from plugins.unsafe.osu_live.client import get_client
+from plugins.unsafe.osu_live.state import snapshot_to_overlay_state
 
 
 _HIST_BINS = 41            # +/-100 ms, 5 ms per bin
@@ -25,12 +26,12 @@ def _offsets_to_histogram(offsets: np.ndarray) -> list[int]:
     return [int(counts[i]) for i in range(_HIST_BINS)]
 
 
-def _unstable_rate_ms(snap: LiveSnapshot) -> float:
-    if snap.unstable_rate and snap.unstable_rate > 0:
-        return float(snap.unstable_rate)
-    if len(snap.offsets) < 2:
+def _unstable_rate_ms(state: OverlayGameState) -> float:
+    if state.unstable_rate and state.unstable_rate > 0:
+        return float(state.unstable_rate)
+    if len(state.hit_offsets_s) < 2:
         return 0.0
-    ms = np.asarray(snap.offsets, dtype=np.float64) * 1000.0
+    ms = np.asarray(state.hit_offsets_s, dtype=np.float64) * 1000.0
     return float(10.0 * np.std(ms))
 
 
@@ -52,32 +53,39 @@ def draw(frame) -> None:
     The registry owns ``OverlayPublisher.frame()`` and commits after this
     returns. Emitting no widgets clears the overlay on the next frame.
     """
-    snap: LiveSnapshot = get_client().snapshot()
+    state = snapshot_to_overlay_state(get_client().snapshot())
 
-    if not snap.connected or not snap.in_gameplay:
+    if not state.is_playing:
         return
 
-    hist = _offsets_to_histogram(snap.offsets)
-    ur = _unstable_rate_ms(snap)
+    draw_state(frame, state)
+
+
+def draw_state(frame, state: OverlayGameState) -> None:
+    """Render the reusable HUD from game-agnostic live state."""
+    hist = _offsets_to_histogram(np.asarray(state.hit_offsets_s))
+    ur = _unstable_rate_ms(state)
     peak = max(1, max(hist))
 
-    with frame.group('osu_live.panel'):
+    group_name = 'osu_live.panel' if state.game == 'osu' \
+        else f'{state.game}.live.panel'
+    with frame.group(group_name):
         frame.rect('panel_bg', _PANEL_X, _PANEL_Y, _PANEL_W, _PANEL_H,
                    color=BLACK_DIM, anchor=ANCHOR_TL)
         frame.rect('panel_accent', _PANEL_X, _PANEL_Y, _PANEL_W, 0.003,
                    color=BLUE_ACCENT, anchor=ANCHOR_TL)
 
-        frame.text('combo', f'{snap.combo}X',
+        frame.text('combo', f'{state.combo}X',
                    _PANEL_X + 0.010, _PANEL_Y + 0.018,
                    px_scale=2.5, color=WHITE, anchor=ANCHOR_TL)
 
-        line2 = f'{snap.accuracy:.2f}%  UR {ur:.1f}'
+        line2 = f'{state.accuracy:.2f}%  UR {ur:.1f}'
         frame.text('acc_ur', line2,
                    _PANEL_X + 0.010, _PANEL_Y + 0.065,
                    px_scale=2.0, color=WHITE, anchor=ANCHOR_TL)
 
-        hits_line = (f'{snap.hits_300}:{snap.hits_100}:'
-                     f'{snap.hits_50}:{snap.hits_miss}')
+        hits_line = (f'{state.judgment("300")}:{state.judgment("100")}:'
+                     f'{state.judgment("50")}:{state.judgment("miss")}')
         frame.text('hit_counts', hits_line,
                    _PANEL_X + 0.010, _PANEL_Y + 0.105,
                    px_scale=1.6, color=WHITE, anchor=ANCHOR_TL)

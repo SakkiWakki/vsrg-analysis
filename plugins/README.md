@@ -110,6 +110,15 @@ def register_overlay(add):
 Use a stable, filesystem-safe `key` because it becomes the feed name
 (`/dev/shm/vsrg_overlay_<key>`) and the persisted layout bucket.
 
+For live game data, adapters should translate game-specific state into
+`analysis.overlay.api.OverlayGameState`. That model carries common fields
+such as phase (`playing`, `paused`, `results`), song identity, keycount,
+combo, accuracy, judgments, hit offsets, pressed lanes, and zero-based lane
+events. `OverlayStateTracker` can derive generic events such as
+`song_started`, `song_ended`, `key_pressed`, and `key_released` from
+successive states. The osu live bundle is the first adapter; Etterna can
+join later by producing the same state model.
+
 This role is designed to be sandbox-friendly: plugin code never needs to
 open `/dev/shm`, create threads, or import the publisher runtime. Use
 `analysis.overlay.api` for safe constants and helpers. Trusted host code
