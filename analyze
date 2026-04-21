@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""Entry point dispatcher for the VSRG (Etterna / osu!mania) analysis toolkit."""
+import sys
+import argparse
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+
+
+def cmd_replay(args):
+    from analysis.etterna.replay import parse_replay as parse_ett
+    from analysis.core.timing import full_analysis, print_analysis
+    from analysis.viz.plots import plot_full_report
+
+    if args.file.endswith('.osr') or args.osu:
+        from analysis.osu.replay import parse_replay as parse_osu, find_osu_dirs
+        songs = args.songs or find_osu_dirs().get('songs_dir')
+        rep = parse_osu(args.file, osu_path=args.osu, songs_dir=songs)
+    else:
+        rep = parse_ett(args.file)
+
+    res = full_analysis(rep)
+    print(f"File: {rep['filepath']}  (keycount={rep.get('keycount') or '?'})")
+    print(f"Notes: {res['total_notes']}, misses: {res['misses']}\n")
+    print_analysis(res)
+    if not args.no_plot:
+        plot_full_report(rep, save_path=args.out or 'report.png',
+                         show=not args.no_show,
+                         title=rep['filepath'].split('/')[-1])
+
+
+def cmd_score(args):
+    from analysis.etterna.replay import (find_etterna_dirs,
+                                               find_replay_for_score,
+                                               parse_etterna_xml)
+    dirs = find_etterna_dirs()
+    if not dirs['replays_dir']:
+        print("can't find ReplaysV2 directory")
+        sys.exit(1)
+    replay_path = find_replay_for_score(args.scorekey, dirs['replays_dir'])
+    if not replay_path:
+        print(f"no replay for scorekey {args.scorekey}")
+        sys.exit(1)
+
+    meta = None
+    if dirs['xml_path']:
+        for s in parse_etterna_xml(dirs['xml_path']):
+            if s['scorekey'] == args.scorekey:
+                meta = s
+                break
+    if meta:
+        print(f"Song : {meta.get('song')}  ({meta.get('pack')})")
+        print(f"Rate : {meta.get('rate')}, wife%: {meta.get('ssrnormpercent', 0)*100:.2f}")
+        print(f"Date : {meta.get('datetime')}\n")
+
+    args.file = replay_path
+    args.osu = None
+    args.songs = None
+    cmd_replay(args)
+
+
+def cmd_batch(args):
+    from analysis.core.batch import (analyze_all_scores, print_leaderboard,
+                                     compare_hands_over_time, compare_by_skillset)
+    filters = {}
+    if args.min_wife is not None:
+        filters['min_wife'] = args.min_wife
+    if args.min_notes is not None:
+        filters['min_notes'] = args.min_notes
+    scores = analyze_all_scores(filters=filters)
+    print_leaderboard(scores, n=args.top)
+    if not args.no_plot:
+        compare_hands_over_time(scores, save_path='batch_hands_over_time.png', show=not args.no_show)
+        compare_by_skillset(scores, save_path='batch_by_skillset.png', show=not args.no_show)
+
+
+def cmd_report(args):
+    from analysis.etterna.replay import (parse_replay as parse_ett,
+                                               parse_etterna_xml,
+                                               find_etterna_dirs)
+    from analysis.viz.plots import generate_html_report
+
+    if args.file.endswith('.osr') or args.osu:
+        from analysis.osu.replay import parse_replay as parse_osu, find_osu_dirs
+        songs = args.songs or find_osu_dirs().get('songs_dir')
+        rep = parse_osu(args.file, osu_path=args.osu, songs_dir=songs)
+        meta = {'song': rep['chart_meta'].get('title'),
+                'pack': rep['chart_meta'].get('artist'),
+                'steps': rep['chart_meta'].get('version'),
+                'rate': 1.0,
+                'maxcombo': rep['meta']['max_combo'],
+                'datetime': rep['meta']['timestamp']}
+    else:
+        rep = parse_ett(args.file)
+        meta = None
+        dirs = find_etterna_dirs()
+        if dirs.get('xml_path'):
+            key = Path(args.file).name
+            for s in parse_etterna_xml(dirs['xml_path']):
+                if s['scorekey'] == key:
+                    meta = s
+                    break
+
+    out = args.out or 'report.html'
+    path = generate_html_report(rep, score_meta=meta, output_path=out)
+    print(f"wrote {path}")
+
+
+def cmd_viz(args):
+    """Note-by-note visualizer (Quaver-style)."""
+    from analysis.viz.note_visualizer import (render_chart, render_chart_full,
+                                              interactive, etterna_windows,
+                                              osu_mania_windows, _legend_axes,
+                                              _judgment_counts)
+    import matplotlib.pyplot as plt
+
+    if args.file.endswith('.osr') or args.osu:
+        from analysis.osu.replay import parse_replay as parse_osu, find_osu_dirs
+        songs = args.songs or find_osu_dirs().get('songs_dir')
+        rep = parse_osu(args.file, osu_path=args.osu, songs_dir=songs)
+        game = 'osu'
+    else:
+        from analysis.etterna.replay import parse_replay as parse_ett
+        rep = parse_ett(args.file)
+        game = 'etterna'
+
+    if args.interactive:
+        interactive(rep, game=game, od=args.od)
+    elif args.full:
+        render_chart_full(rep, save_path=args.out or 'chart_full.png',
+                          game=game, od=args.od, show=not args.no_show)
+    else:
+        win = 8000 if game == 'osu' else 2400
+        windows = osu_mania_windows(od=args.od) if game == 'osu' else etterna_windows('J4')
+        unit_label = 'time (ms)' if game == 'osu' else 'noterow'
+        rpm = None if game == 'osu' else 0.37
+
+        fig = plt.figure(figsize=(10, 11))
+        gs = fig.add_gridspec(1, 3, width_ratios=[3, 0.08, 1])
+        ax = fig.add_subplot(gs[0, 0])
+        legend = fig.add_subplot(gs[0, 2])
+        render_chart(rep, window_units=win, start=args.start, ax=ax,
+                     windows=windows, unit_label=unit_label,
+                     rows_per_ms=rpm)
+        _legend_axes(legend, windows, _judgment_counts(rep, windows))
+        if args.out:
+            plt.savefig(args.out, dpi=120, bbox_inches='tight')
+            print(f"saved: {args.out}")
+        if not args.no_show:
+            plt.show()
+
+
+def cmd_gui(args):
+    from analysis.gui.app import main as gui_main
+    gui_main()
+
+
+def main():
+    p = argparse.ArgumentParser(prog='analyze', description='VSRG (Etterna / osu!mania) replay analyzer')
+    sub = p.add_subparsers(dest='command', required=True)
+
+    p_rep = sub.add_parser('replay', help='single replay analysis + plots')
+    p_rep.add_argument('file')
+    p_rep.add_argument('--osu', help='path to chart .osu (osu replays)')
+    p_rep.add_argument('--songs', help='osu! Songs dir')
+    p_rep.add_argument('-o', '--out', default=None)
+    p_rep.add_argument('--no-plot', action='store_true')
+    p_rep.add_argument('--no-show', action='store_true')
+    p_rep.set_defaults(func=cmd_replay)
+
+    p_sc = sub.add_parser('score', help='analyze by Etterna scorekey')
+    p_sc.add_argument('scorekey')
+    p_sc.add_argument('-o', '--out', default=None)
+    p_sc.add_argument('--no-plot', action='store_true')
+    p_sc.add_argument('--no-show', action='store_true')
+    p_sc.set_defaults(func=cmd_score)
+
+    p_b = sub.add_parser('batch', help='batch analysis across the profile')
+    p_b.add_argument('--min-wife', type=float, default=None)
+    p_b.add_argument('--min-notes', type=int, default=None)
+    p_b.add_argument('--top', type=int, default=15)
+    p_b.add_argument('--no-plot', action='store_true')
+    p_b.add_argument('--no-show', action='store_true')
+    p_b.set_defaults(func=cmd_batch)
+
+    p_rep2 = sub.add_parser('report', help='generate HTML report')
+    p_rep2.add_argument('file')
+    p_rep2.add_argument('--osu')
+    p_rep2.add_argument('--songs')
+    p_rep2.add_argument('-o', '--out', default='report.html')
+    p_rep2.set_defaults(func=cmd_report)
+
+    p_v = sub.add_parser('viz', help='note-by-note replay visualizer (Quaver-style)')
+    p_v.add_argument('file')
+    p_v.add_argument('--osu')
+    p_v.add_argument('--songs')
+    p_v.add_argument('--od', type=float, default=8)
+    p_v.add_argument('--start', type=int, default=0)
+    p_v.add_argument('--interactive', action='store_true')
+    p_v.add_argument('--full', action='store_true')
+    p_v.add_argument('-o', '--out', default=None)
+    p_v.add_argument('--no-show', action='store_true')
+    p_v.set_defaults(func=cmd_viz)
+
+    p_g = sub.add_parser('gui', help='launch the GUI')
+    p_g.set_defaults(func=cmd_gui)
+
+    args = p.parse_args()
+    args.func(args)
+
+
+if __name__ == '__main__':
+    main()

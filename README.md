@@ -1,0 +1,199 @@
+This is entirely vibecoded because I'm just making this as a side project to analyze my own gameplay and what I can change to accommodate my RSI. Though I made the clanker model some of its code based off previous work I had made. I also designed the architecture for the program and just told the clanker what to do. Specifically I told the clanker to allow user analysis plugins using python files and also to make implementation game-agnostic.
+
+DO NOT USE THIS IN PRODUCTION SYSTEMS. I REPEAT, DO NOT USE THIS IN PRODUCTION SYSTEMS. THE CODE IS NOT VERY MODULAR AND PROBABLY HAS A TON OF BUGS FROM THE CLANKER VIBE CODING.
+
+Use it for personal use if you want lol. I might rewrite parts by hand if really necessary, I just wanted something working rather than clean and correct.
+
+---
+
+# Clanker README
+
+A Python toolkit for offline analysis of **Etterna** and **osu!mania** replays. It reads replay files directly off disk, aligns them against the source chart, and produces timing statistics, plots, HTML reports, and a scrollable + playable replay viewer. Works with any keycount (4K, 7K, 9K, …).
+
+## Features
+
+- **Unified replay library** — auto-discovers Etterna profiles (`ReplaysV2` + `Etterna.xml`) and osu! installs (`Data/r/*.osr` + Songs dir), merging scores into one searchable list. First-run prompt lets you point it at custom install paths, and you can change them later from the Library tab's **Paths…** button.
+- **Per-note timing analysis** — mean/std offset, judgments, hand splits, per-column drift, rolling stability, chord-size timing, coupling (solo vs paired notes).
+- **Plugin visualizations** — drop a `.py` file into `visualizations/` and it shows up in the GUI automatically (see below).
+- **Embedded replay player** — pygame-rendered chart streamed into a Qt tab, with audio sync, playbar scrubbing, scroll/rate controls, swappable note skins (bar/circle), and **SV (scroll velocity)** support for osu!mania.
+- **HTML report export** — single-file self-contained summary report with all plots embedded as base64.
+- **Batch mode** — run analysis across every score in a profile and produce leaderboards / cross-chart comparisons.
+
+## Previews
+
+Embedded replay player (osu!mania 10K):
+
+![Player preview](player_preview.png)
+
+Full-report export (osu!mania 10K — *xi - Aragami*):
+
+![Example report](report.png)
+
+## Requirements
+
+- **Python 3.10+**
+- [`numpy`](https://numpy.org/) — array math
+- [`matplotlib`](https://matplotlib.org/) — plotting + report generation
+- [`pygame`](https://www.pygame.org/) — replay player rendering + audio
+- [`osrparse`](https://pypi.org/project/osrparse/) — osu! `.osr` parser
+- [`PySide6`](https://pypi.org/project/PySide6/) — Qt GUI
+
+Install with pip:
+
+```bash
+pip install numpy matplotlib pygame osrparse PySide6
+```
+
+Or in a venv (recommended, since PySide6 drags in a lot):
+
+```bash
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install numpy matplotlib pygame osrparse PySide6
+```
+
+## Running
+
+```bash
+# GUI (recommended — library browser, embedded player, all plugins)
+./run-gui                                            # convenience shell script
+python -m analysis.gui.app                           # direct
+
+# CLI dispatcher (analysis without the GUI)
+./analyze --help
+./analyze replay /path/to/replay.osr                 # stats + plots for one replay
+./analyze batch                                      # leaderboard across a profile
+
+# Replay player standalone (headful pygame)
+python -m analysis.player.player /path/to/replay.osr                 # osu!mania
+python -m analysis.player.player /path/to/replay.bin --sm chart.sm   # Etterna
+```
+
+Settings (scroll speed, scroll mode, note skin, filter/sort choices, window
+geometry, install paths) are persisted via `QSettings` and restored on next
+launch — no config file to edit by hand.
+
+### First run
+
+On first launch you'll get a dialog asking for your **Etterna Save folder** and
+**osu! Songs folder**. Both are optional:
+
+- Leaving a field blank falls back to the usual autodetect paths (`~/.etterna/Save`,
+  `~/osu!/Songs`, `~/.local/share/osu-wine/osu!/Songs`, etc.).
+- Either field can be re-edited any time via **Library → Paths…**; changing it
+  triggers a cache refresh so the library re-scans the new root.
+- osu! replays are picked up from the `Data/r/` folder adjacent to the configured
+  Songs dir, plus the default Wine/native locations.
+
+## Testing
+
+A pytest suite lives under [tests/](tests/). Tests run against an isolated
+`XDG_CONFIG_HOME` so they don't touch your real `QSettings`.
+
+```bash
+QT_QPA_PLATFORM=offscreen python -m pytest tests/ -q
+```
+
+Currently covered: install-path overrides, validators, `find_*_dirs` override
+precedence, `PathsDialog` save/clear/prefill behavior, and first-run prompt gating.
+
+## Project layout
+
+```
+analysis/                         (Python package)
+├── etterna/                      Etterna-specific parsers
+│   ├── replay.py                 .bin parser + Etterna.xml score rows + save-dir discovery
+│   └── sm_chart.py               .sm / .ssc parser (BPMs, offset, row→sec)
+├── osu/                          osu!-specific parsers
+│   └── replay.py                 .osr parser + .osu alignment + SV extraction + songs-dir discovery
+├── core/                         cross-game logic
+│   ├── game.py                   per-game adapter (resolve audio, chart, judgment windows)
+│   ├── search.py                 unified library scan across both games
+│   ├── timing.py                 per-column/hand stats, chord detection, drift, rolling std
+│   └── batch.py                  leaderboard-style analysis across a profile
+├── viz/                          plotting
+│   ├── plots.py                  matplotlib plotters, HTML report, plot_full_report(selection=…)
+│   ├── note_visualizer.py        scrollable chart renderer (used by Note Viewer plugin)
+│   └── plugins/                  drop-in plugin registry (see below)
+├── player/
+│   ├── player.py                 pygame replay player (headless-capable; streamed into Qt)
+│   └── skin.py                   swappable note skins (BarSkin, CircleSkin)
+└── gui/
+    ├── app.py                    PySide6 main app — library, tabs, embedded player, plot viewer
+    ├── settings.py               QSettings wrapper + install-path overrides
+    ├── paths_dialog.py           first-run / edit-anytime install-path prompt
+    ├── library_tab.py            Library tab: score tree, filters, open-viz/player flows
+    └── player_tab.py             embedded replay player tab
+
+tests/                            pytest suite (path overrides, dialog, prompt)
+analyze                           CLI entry point
+run-gui                           GUI launcher script
+```
+
+## Visualization plugins
+
+Anything dropped into [visualizations/](visualizations/) with a `register()` function is picked up on startup. Minimum contract:
+
+```python
+# visualizations/my_plot.py
+from ._common import clean_arrays, new_fig
+
+def build(replay, game='etterna', on_play=None, **_):
+    rows, offs, cols = clean_arrays(replay)
+    fig, ax = new_fig(10, 5)
+    ax.plot(rows, offs * 1000)
+    return fig  # or return a QWidget for interactive plugins
+
+def register(add):
+    add('My custom plot', build, category='chart')  # or category='widget' for QWidget
+```
+
+- `category='chart'` — `build` returns a matplotlib `Figure`; GUI wraps it in an `MplTab` with toolbar + Play button.
+- `category='widget'` — `build` returns a `QWidget` (for interactive plugins like the Note Viewer or the customizable Full Report).
+- Set `widget._has_play_btn = True` on your widget if you handle `on_play` yourself; otherwise the GUI will append a Play-replay bar.
+- **All plugins must be keycount-agnostic.** Use helpers in [visualizations/_common.py](visualizations/_common.py) (`keycount_of(replay)`, `hand_masks(replay)`) rather than hardcoding 4K.
+
+Current plugins: timing scatter, offset distribution, per-column means, per-hand drift, coupling, rolling stability, chord sizes, column×offset heatmap, note viewer, full report (3×3 grid with plot picker).
+
+## Replay data format
+
+Both parsers emit the same dict shape so everything downstream is game-agnostic:
+
+```python
+{
+    'noterows':  np.int64[n],    # osu: ms; Etterna: noterows (48/beat)
+    'offsets':   np.float64[n],  # seconds, signed (negative = early)
+    'columns':   np.int32[n],
+    'notetypes': np.int32[n],
+    'misses':    np.bool_[n],
+    'holds':     [(start_row, col, end_row), …],
+    'keycount':  int,
+    'filepath':  str,
+    # osu only:
+    'chart_path':   str,
+    'sv_sections':  [(time_sec, sv_multiplier), …],  # empty if chart has no SV
+}
+```
+
+## Replay player
+
+Keys (when the chart view has focus):
+
+| Key | Action |
+| --- | --- |
+| Space / P | pause / resume |
+| Left / Right | seek ±2s (Shift for ±10s) |
+| Up / Down | scroll speed |
+| + / - | playback rate |
+| R | restart |
+| mouse wheel | seek ±0.5s (Shift for ±5s) |
+
+Bottom controls: play/pause, playbar (click anywhere to jump), scroll ±, rate ±, restart, and **SV toggle** (osu!mania only — disabled when the chart has no SV).
+
+## Known limitations / caveats
+
+- Etterna `.bin` offsets are quantized relative to judgment; parsing replicates the game's `GetOffset` interpretation but may disagree with in-game grade display at the edges.
+- osu!mania note→press alignment is greedy-nearest within a ±188ms window. Heavily ghost-tapping scores may misattribute presses.
+- At non-1x rates the audio is resampled (not time-stretched) so it plays in sync with the chart but pitches up/down with rate — same behavior as Etterna/osu!mania built-in rate mods without a pitch-correction plugin.
+- No Windows-style file lock handling for `Etterna.xml` — close the game before scanning.
+- This is a personal side project. See the warning above.
