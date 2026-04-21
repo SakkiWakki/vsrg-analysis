@@ -12,7 +12,14 @@ MISS_SENTINEL = 1.000000
 
 def parse_replay(filepath):
     noterows, offsets, columns, notetypes = [], [], [], []
-    holds = []
+    # Hold heads come from two sources depending on the Etterna version
+    # that wrote this replay:
+    #   - Older builds wrote a separate `H <row> <col>` line per hold.
+    #   - Current builds just tag the regular note row with notetype=2
+    #     (TapNoteType_HoldHead) and skip the H line entirely.
+    # We collect both and dedupe so either flavor works. Neither carries
+    # the tail row — that's always joined from the chart downstream.
+    holds_from_h = []
     with open(filepath) as f:
         for line in f:
             line = line.strip()
@@ -21,7 +28,7 @@ def parse_replay(filepath):
             if line.startswith('H '):
                 parts = line.split()
                 if len(parts) >= 3:
-                    holds.append((int(parts[1]), int(parts[2])))
+                    holds_from_h.append((int(parts[1]), int(parts[2])))
                 continue
             parts = line.split()
             if len(parts) < 3:
@@ -44,13 +51,21 @@ def parse_replay(filepath):
     notetypes = np.array(notetypes, dtype=np.int32)
     misses = np.isclose(offsets, MISS_SENTINEL)
 
+    # TapNoteType_HoldHead == 2; modern replays flag hold heads this way.
+    holds_seen = {h for h in holds_from_h}
+    for i in np.flatnonzero(notetypes == 2):
+        key = (int(noterows[i]), int(columns[i]))
+        if key not in holds_seen:
+            holds_from_h.append(key)
+            holds_seen.add(key)
+
     return {
         'noterows': noterows,
         'offsets': offsets,
         'columns': columns,
         'notetypes': notetypes,
         'misses': misses,
-        'holds': holds,
+        'holds': holds_from_h,
         'filepath': str(filepath),
     }
 

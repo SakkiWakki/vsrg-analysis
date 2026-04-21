@@ -60,7 +60,12 @@ class EtternaAdapter(GameAdapter):
 
     def resolve_all(self, replay, entry=None, progress=None):
         """Single-pass combined resolver — avoids parsing the .sm/.ssc twice.
-        Returns (bpms, offset, audio_path)."""
+        Returns (bpms, offset, audio_path).
+
+        Side effect: enriches `replay['holds']` from 2-tuples `(head_row,
+        col)` (all the .bin replay file records) into 3-tuples `(head_row,
+        col, end_row)` by joining with the matched chart's hold spans. The
+        LN renderer relies on the 3-tuple shape to draw tails."""
         found = self._find_chart(replay, entry=entry, progress=progress)
         if not found:
             return None, 0.0, None
@@ -72,7 +77,41 @@ class EtternaAdapter(GameAdapter):
             cand = Path(found['file']).parent / music
             if cand.exists():
                 audio = str(cand)
+        self._attach_chart_hold_ends(replay, found)
         return bpms, offset, audio
+
+    @staticmethod
+    def _attach_chart_hold_ends(replay, found):
+        """Merge chart-derived hold end-rows into the replay's hold list.
+
+        Etterna's .bin only records `(head_row, col)` for each hold; the
+        tail row lives in the .sm/.ssc. Idempotent — a second call with
+        already-3-tuple holds is a no-op."""
+        from analysis.games.etterna.sm_chart import parse_notes_block
+        chart = (found or {}).get('chart') or {}
+        notedata = chart.get('notedata')
+        if not notedata:
+            return
+        replay_holds = replay.get('holds') or []
+        if not replay_holds:
+            return
+        if all(len(h) == 3 for h in replay_holds):
+            return
+        try:
+            _, chart_holds = parse_notes_block(notedata)
+        except Exception:
+            return
+        ends = {(head, col): end for (head, col, end) in chart_holds}
+        merged = []
+        for h in replay_holds:
+            if len(h) == 3:
+                merged.append(h)
+                continue
+            head, col = int(h[0]), int(h[1])
+            end = ends.get((head, col))
+            merged.append((head, col, end) if end is not None
+                          else (head, col))
+        replay['holds'] = merged
 
     def judgement_windows(self, replay, judge=None, **_):
         from analysis.games.etterna.judgment import windows_for
