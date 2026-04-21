@@ -6,6 +6,7 @@ import bisect
 import hashlib
 from pathlib import Path
 
+# Note: This is the worst implementation for anything I've ever seen. Why does Etterna do this???
 
 ROWS_PER_BEAT = 48  # SM stores 192 subdivisions per measure (4 beats) = 48 rows per beat
 # NOTE: Etterna uses noterow = row_in_measure * 4 scale. In SM files, each measure
@@ -196,6 +197,109 @@ def parse_notes_block(notedata, keycount_hint=None):
     return notes, holds
 
 
+# --- Etterna-compatible chartkey generation ---------------------------------
+# Mirrors Steps::GenerateChartKey in upstream Etterna (Steps.cpp:549). The key
+# is a SHA-1 over a per-row string: for each non-empty row, walk every track
+# in column order and append TapNoteType.type as a decimal int, then append
+# int(BPM_at_row + 0.374643). Prepend "X" and hex-encode.
+#
+# Reproducing this for .sm files lets us skip the fingerprint fallback — the
+# XML's chartkey resolves deterministically to the right chart file even
+# when multiple charts share an identical first-N-notes prefix.
+#
+# TapNoteType enum (Etterna NoteTypes.h):
+#   0 Empty, 1 Tap, 2 HoldHead, 3 HoldTail, 4 Mine, 5 Lift,
+#   6 AutoKeysound, 7 Fake
+# Our .sm parser uses different ad-hoc codes in parse_notes_block; the map
+# below converts the file character directly to Etterna's enum value. Hold
+# interior rows (between '2'/'4' and '3') are Empty in Etterna's NoteData,
+# matching AddHoldNote behavior.
+_ETT_TAPTYPE = {
+    '1': 1,  # Tap
+    '2': 2,  # HoldHead (hold)
+    '4': 2,  # HoldHead (roll) — same enum value in Etterna
+    'M': 4,  # Mine
+    'L': 5,  # Lift
+    'F': 7,  # Fake
+    'K': 6,  # AutoKeysound (rare; still non-empty)
+}
+
+
+def _iter_chart_rows(notedata, num_tracks):
+    """Yield (row, [taptype_0..taptype_{num_tracks-1}]) for every row that
+    has at least one non-Empty tap. Follows Etterna's row semantics: a hold
+    head goes at the start row; cells between head and tail are Empty; the
+    tail row itself is Empty for chartkey purposes.
+
+    Row computation mirrors Etterna's `BeatToNoteRow((m + l/size) * 4)`:
+    a round-to-nearest based on float position into the measure, not plain
+    integer division. This matters for measures whose line count doesn't
+    divide 192 evenly (quintuplets, 7-lets, etc.) — otherwise the rows
+    drift and the BPM-at-row / per-row types end up at different indices
+    than Etterna's, changing the chartkey."""
+    measures = notedata.strip().split(',')
+    for mi, measure in enumerate(measures):
+        lines = [ln.strip() for ln in measure.strip().split('\n')
+                 if ln.strip() and not ln.strip().startswith('//')]
+        if not lines:
+            continue
+        subdiv = len(lines)
+        base = mi * (ROWS_PER_BEAT * 4)  # rows in one measure = 48*4 = 192
+        span = ROWS_PER_BEAT * 4
+        for li, line in enumerate(lines):
+            # BeatToNoteRow's lrintf rounds half away-from-zero; since values
+            # are non-negative, round-half-up matches.
+            row = base + int(span * li / subdiv + 0.5)
+            tracks = [0] * num_tracks
+            any_nonempty = False
+            for col, ch in enumerate(line[:num_tracks]):
+                t = _ETT_TAPTYPE.get(ch, 0)
+                if t:
+                    tracks[col] = t
+                    any_nonempty = True
+            if any_nonempty:
+                yield row, tracks
+
+
+def _bpm_at_row(row, bpm_segments):
+    """Return the BPM active at `row`. `bpm_segments` is a list of
+    (beat, bpm); Etterna's lookup returns the most recent segment whose row
+    is <= the query row."""
+    if not bpm_segments:
+        return 120.0
+    segs = sorted(bpm_segments)
+    target_beat = row / float(ROWS_PER_BEAT)
+    cur = segs[0][1]
+    for b, v in segs:
+        if b <= target_beat + 1e-6:
+            cur = v
+        else:
+            break
+    return cur
+
+
+def generate_chartkey(notedata, bpms, stepstype):
+    """Compute Etterna's chartkey for a single chart. Matches the C++
+    Steps::GenerateChartKey byte-for-byte so the resulting "X…" hash equals
+    the one Etterna writes to Etterna.xml and to .ssc files' #CHARTKEY tag.
+    Returns 'X' + 40 hex chars, or None if the notedata is empty."""
+    num_tracks = stepstype_keycount(stepstype)
+    buf = []
+    any_row = False
+    for row, tracks in _iter_chart_rows(notedata, num_tracks):
+        any_row = True
+        for t in tracks:
+            buf.append(str(t))
+        # The +0.374643 nudge biases near-integer BPMs to round up, matching
+        # the C++ cast int(bpm + 0.374643F). Without this, BPMs like 119.999
+        # stored in some packs would hash differently from 120.000.
+        bpm = _bpm_at_row(row, bpms)
+        buf.append(str(int(bpm + 0.374643)))
+    if not any_row:
+        return None
+    return 'X' + hashlib.sha1(''.join(buf).encode('utf-8')).hexdigest()
+
+
 def stepstype_keycount(stepstype):
     mapping = {
         'dance-single': 4, 'dance-solo': 6, 'dance-double': 8,
@@ -213,46 +317,96 @@ def chart_hash(stepstype, notedata):
     return hashlib.md5((stepstype + notedata).encode()).hexdigest()[:16]
 
 
-CHARTKEY_INDEX_PATH = Path.home() / '.cache' / 'etterna-analysis' / 'chartkey_index.pkl'
+# v2: indexes .sm files too, via Etterna-compatible chartkey synthesis. Bump
+# the filename so v1 caches (which only had .ssc #CHARTKEY: hits) get rebuilt.
+CHARTKEY_INDEX_PATH = Path.home() / '.cache' / 'etterna-analysis' / 'chartkey_index_v2.pkl'
 
 
-def _scan_one_ssc(p):
-    """Extract (path_str, [(chartkey, chart_index), ...]) from one .ssc file.
-    Returns None on I/O error. Pure CPU/IO — safe under ThreadPoolExecutor."""
+def _scan_one_chartfile(p):
+    """Extract (path_str, [(chartkey, chart_index), ...]) for one .ssc or
+    .sm file. For .ssc we prefer the file's stored #CHARTKEY: tag (fast and
+    exactly what Etterna itself wrote); .sm files and .ssc blocks missing
+    the tag fall back to computing the chartkey from notedata + BPMs via
+    Steps::GenerateChartKey. Pure CPU/IO — safe under ThreadPoolExecutor."""
+    p_str = str(p)
     try:
-        with open(p, encoding='utf-8', errors='replace') as f:
-            text = _strip_comments(f.read())
-    except OSError:
+        if p_str.endswith('.ssc'):
+            data = parse_ssc(p)
+        else:
+            data = parse_sm(p)
+    except Exception:
         return None
-    sections = re.split(r'#NOTEDATA:\s*;', text)
+    # For .ssc, try the fast path first: read stored #CHARTKEY: tags by
+    # chart index. Any chart missing one (or every chart in a .sm) falls
+    # through to the compute path below.
+    stored_by_idx = {}
+    if p_str.endswith('.ssc'):
+        try:
+            with open(p, encoding='utf-8', errors='replace') as f:
+                text = _strip_comments(f.read())
+            sections = re.split(r'#NOTEDATA:\s*;', text)
+            for ci, sec in enumerate(sections[1:]):
+                m = re.search(r'#CHARTKEY:([^;]+);', sec)
+                if m:
+                    stored_by_idx[ci] = m.group(1).strip()
+        except OSError:
+            pass
     out = []
-    for ci, sec in enumerate(sections[1:]):
-        m = re.search(r'#CHARTKEY:([^;]+);', sec)
-        if m:
-            out.append((m.group(1).strip(), ci))
-    return str(p), out
+    for ci, ch in enumerate(data['charts']):
+        key = stored_by_idx.get(ci)
+        if not key:
+            bpms = ch.get('bpms') or data['bpms']
+            try:
+                key = generate_chartkey(ch['notedata'], bpms,
+                                         ch.get('stepstype', 'dance-single'))
+            except Exception:
+                key = None
+        if key:
+            out.append((key, ci))
+    return p_str, out
 
 
 def _build_chartkey_index(songs_dir, progress=None):
-    """Walk Songs once, extract every chart's (chartkey, file, chart_index)
-    from .ssc files' #CHARTKEY lines. Returns dict[chartkey] = (file, idx).
-    Only .ssc files carry chartkeys; .sm charts can't be indexed this way.
-    Parses .ssc files in parallel — the scan is IO-bound but each file is
-    big enough that threading still helps meaningfully."""
-    from concurrent.futures import ThreadPoolExecutor
+    """Walk Songs once, extract or synthesize every chart's chartkey, and
+    build `{chartkey: (file, chart_index)}`. Covers both .ssc (stored or
+    computed) and .sm (computed).
+
+    Uses processes, not threads: SHA-1 + notedata walks are CPU-bound and
+    Python's GIL caps thread parallelism to ~1 core. Across 22k files this
+    is the difference between ~30s and ~90s on the first run. Cached
+    afterwards so subsequent launches are instant."""
+    from concurrent.futures import ProcessPoolExecutor
+    import time
     index = {}
     root = Path(songs_dir)
-    paths = list(root.rglob('*.ssc'))
-    max_workers = min(32, (os.cpu_count() or 4) * 4)
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for i, res in enumerate(ex.map(_scan_one_ssc, paths, chunksize=16)):
-            if progress and i % 200 == 0:
-                progress(f'indexing {i}/{len(paths)} charts…')
-            if res is None:
-                continue
-            path_str, entries = res
-            for chartkey, ci in entries:
-                index[chartkey] = (path_str, ci)
+    if progress:
+        progress('scanning Songs directory…')
+    paths = list(root.rglob('*.ssc')) + list(root.rglob('*.sm'))
+    total = len(paths)
+    if progress:
+        progress(f'indexing charts 0/{total} (0%)')
+    max_workers = max(2, (os.cpu_count() or 4))
+    # Emit ~every 200 files or 0.25s, whichever is sparser, so the status
+    # line tracks the scan without flooding the Qt event loop.
+    step = max(50, total // 200) if total else 1
+    last_emit = time.monotonic()
+    with ProcessPoolExecutor(max_workers=max_workers) as ex:
+        for i, res in enumerate(ex.map(_scan_one_chartfile, paths,
+                                        chunksize=32), start=1):
+            if res is not None:
+                path_str, entries = res
+                for chartkey, ci in entries:
+                    # First match wins. Duplicate chartkeys across files
+                    # are rare and mean identical notes+BPMs.
+                    index.setdefault(chartkey, (path_str, ci))
+            now = time.monotonic()
+            if progress and (i % step == 0 or i == total) and \
+                    (now - last_emit) > 0.25:
+                pct = int(100 * i / total) if total else 100
+                progress(f'indexing charts {i}/{total} ({pct}%)')
+                last_emit = now
+    if progress:
+        progress(f'indexed {total}/{total} (100%)')
     return index
 
 
@@ -300,23 +454,29 @@ def get_chartkey_index(songs_dir, refresh=False, progress=None):
     return index
 
 
-def find_chart_by_key(chartkey, songs_dir):
+def find_chart_by_key(chartkey, songs_dir, progress=None):
     """Fast lookup via cached chartkey index. Returns dict like
-    find_chart_for_replay or None."""
+    find_chart_for_replay or None. The index now covers .sm files too, so
+    the loader picks the right parser based on the stored path.
+
+    `progress` is forwarded so the first-run scan can surface ticks to
+    the caller instead of looking like a 30-second stall."""
     if not chartkey:
         return None
-    idx = get_chartkey_index(songs_dir)
+    idx = get_chartkey_index(songs_dir, progress=progress)
     hit = idx.get(chartkey)
     if hit is None:
         return None
-    ssc_file, chart_idx = hit
+    chart_file, chart_idx = hit
     try:
-        data = parse_ssc(ssc_file)
+        data = (parse_ssc(chart_file) if chart_file.endswith('.ssc')
+                else parse_sm(chart_file))
     except Exception:
         return None
     if chart_idx >= len(data['charts']):
         return None
-    return {'file': ssc_file, 'data': data, 'chart': data['charts'][chart_idx]}
+    return {'file': chart_file, 'data': data,
+            'chart': data['charts'][chart_idx]}
 
 
 FINGERPRINT_N = 50

@@ -29,7 +29,7 @@ class EtternaAdapter(GameAdapter):
             try:
                 if progress:
                     progress('chartkey lookup…')
-                hit = find_chart_by_key(chartkey, songs)
+                hit = find_chart_by_key(chartkey, songs, progress=progress)
                 if hit:
                     return hit
             except Exception:
