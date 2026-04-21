@@ -30,8 +30,8 @@ try:
 except Exception:
     _sd = None
 
-# pygame is still used elsewhere for chart rendering; we load its Sound
-# reader to decode the audio file without a second decoder dependency.
+# pygame is used here only as a lightweight decoder so we do not add another
+# dependency for mp3/ogg/wav loading.
 try:
     import pygame
 except Exception:

@@ -19,7 +19,7 @@ A Python toolkit for offline analysis of **Etterna** and **osu!mania** replays. 
 - **Unified replay library** — auto-discovers Etterna profiles (`ReplaysV2` + `Etterna.xml`) and osu! installs (`Data/r/*.osr` + Songs dir), merging scores into one searchable list. First-run prompt lets you point it at custom install paths, and you can change them later from the Library tab's **Paths…** button.
 - **Per-note timing analysis** — mean/std offset, judgments, hand splits, per-column drift, rolling stability, chord-size timing, coupling (solo vs paired notes).
 - **Plugin visualizations** — drop a `.py` file into `visualizations/` and it shows up in the GUI automatically (see below).
-- **Embedded replay player** — pygame-rendered chart streamed into a Qt tab, with audio sync, playbar scrubbing, scroll/rate controls, swappable note skins (bar/circle), draw-stage plugins, and **SV (scroll velocity)** support for osu!mania.
+- **Embedded replay player** — native Qt/QPainter chart view, with audio sync, playbar scrubbing, scroll/rate controls, swappable note skins (bar/circle), draw-stage plugins, and **SV (scroll velocity)** support for osu!mania.
 - **HTML report export** — single-file self-contained summary report with all plots embedded as base64.
 - **Batch mode** — run analysis across every score in a profile and produce leaderboards / cross-chart comparisons.
 
@@ -38,7 +38,7 @@ Full-report export (osu!mania 10K — *xi - Aragami*):
 - **Python 3.10+**
 - [`numpy`](https://numpy.org/) — array math
 - [`matplotlib`](https://matplotlib.org/) — plotting + report generation
-- [`pygame`](https://www.pygame.org/) — replay player rendering + audio
+- [`pygame`](https://www.pygame.org/) — audio-file decoding helper used by the player
 - [`osrparse`](https://pypi.org/project/osrparse/) — osu! `.osr` parser
 - [`PySide6`](https://pypi.org/project/PySide6/) — Qt GUI
 
@@ -80,9 +80,10 @@ Save folder — both optional, both editable later via **Library → Paths…**.
 
 **Platform notes:**
 
-- **Linux** — `pygame` needs SDL2 runtime libraries. Most distros bundle them
-  already; if audio fails, install your distro's `sdl2` / `libsdl2-2.0-0`
-  package.
+- **Linux** — the player UI is native Qt, but `pygame` is still used for
+  audio-file decoding and may need SDL2 runtime libraries. Most distros
+  bundle them already; if audio decode fails, install your distro's `sdl2` /
+  `libsdl2-2.0-0` package.
 - **macOS** — everything installs via pip directly. On Apple Silicon make
   sure you're on Python 3.11+ so the arm64 PySide6 wheels are used.
 - **Windows** — no extra system deps; all wheels ship with their DLLs. Use
@@ -111,7 +112,7 @@ python -m analysis.gui.app                           # direct
 ./analyze replay /path/to/replay.osr                 # stats + plots for one replay
 ./analyze batch                                      # leaderboard across a profile
 
-# Replay player standalone (headful pygame)
+# Replay player standalone (Qt)
 python -m analysis.player.player /path/to/replay.osr                 # osu!mania
 python -m analysis.player.player /path/to/replay.bin --sm chart.sm   # Etterna
 ```
@@ -163,12 +164,13 @@ analysis/                         (Python package)
 │   ├── note_visualizer.py        scrollable chart renderer (used by Note Viewer plugin)
 │   └── plugins/                  drop-in plugin registry (see below)
 ├── player/
-│   ├── player.py                 pygame replay player (headless-capable; streamed into Qt)
-│   ├── renderer.py               ordered player draw pipeline + plugin hook dispatch
-│   ├── layers/                   built-in player draw layers
+│   ├── player.py                 replay player state/model + standalone launcher
+│   ├── qt_renderer.py            native Qt/QPainter draw pipeline + plugin hook dispatch
+│   ├── render_context.py         per-frame context passed to player draw plugins
+│   ├── culling.py                visible-window selection for notes/holds
 │   ├── draw_plugins/             bundled player draw plugins
 │   ├── plugin_api.py             public Stage enum for player draw plugins
-│   └── skin.py                   swappable note skins (BarSkin, CircleSkin)
+│   └── plugin_loader.py          plugin discovery, persistence, and dispatch
 └── gui/
     ├── app.py                    PySide6 main app — library, tabs, embedded player, plot viewer
     ├── settings.py               QSettings wrapper + install-path overrides
@@ -251,7 +253,9 @@ from analysis.player.plugin_api import Stage
 
 
 def draw(ctx, stage):
-    # ctx exposes pygame, screen, t_now, keycount, lane geometry, candidates,
+    # ctx exposes ctx.painter for native Qt drawing, plus a small pygame-like
+    # adapter (ctx.pygame + ctx.screen) for simple plugin compatibility.
+    # It also exposes t_now, keycount, lane geometry, candidates,
     # visible_ghost_holds, and helpers such as time_to_y()/lane_center().
     if stage != Stage.AFTER_JUDGMENT:
         return
@@ -275,6 +279,6 @@ are stored in `~/.config/vsrg-analysis/player_plugins.json`.
 
 - Etterna `.bin` offsets are quantized relative to judgment; parsing replicates the game's `GetOffset` interpretation but may disagree with in-game grade display at the edges.
 - osu!mania note→press alignment is greedy-nearest within a ±188ms window. Heavily ghost-tapping scores may misattribute presses.
-- At non-1x rates the audio is resampled (not time-stretched) so it plays in sync with the chart but pitches up/down with rate — same behavior as Etterna/osu!mania built-in rate mods without a pitch-correction plugin.
+- At non-1x rates, pitch correction is handled by a small numpy phase vocoder. Turning pitch correction off falls back to simple resampling, so pitch shifts with rate.
 - No Windows-style file lock handling for `Etterna.xml` — close the game before scanning.
 - This is a personal side project. See the warning above.

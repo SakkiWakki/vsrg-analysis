@@ -11,17 +11,14 @@ Controls:
   M               toggle music
   Q / Esc         quit
 """
-import os
 import sys
 import math
 import bisect
-import pygame
 import numpy as np
 from pathlib import Path
 
 from analysis.viz.plots import col_colors
-from analysis.player import skin as skin_module
-from analysis.player.renderer import PlayerRenderer
+from analysis.player.plugin_loader import PluginManager
 
 
 # Judgment colors
@@ -118,6 +115,7 @@ class Player:
     SCROLL_MODE_LINEAR = 'linear'
     SCROLL_MODE_CMOD = 'cmod'
     ARROW_SPACING = 64.0  # px per beat at BPM 60, matches Etterna metrics.ini
+    SKINS = ('bar', 'circle')
 
 
     def __init__(self, replay, game='etterna', od=8, ett_judge='J4',
@@ -126,18 +124,7 @@ class Player:
                  sv_sections=None, scroll_ms=400.0, scroll_mode=None,
                  cmod_bpm=600.0, skin='bar', press_hide=False):
         self.headless = headless
-        if headless:
-            # Render into an offscreen Surface; no display, no audio.
-            pygame.font.init()
-            self.screen = pygame.Surface((window_w, window_h))
-        else:
-            pygame.init()
-            pygame.display.set_caption('Replay Player')
-            self.screen = pygame.display.set_mode((window_w, window_h), pygame.RESIZABLE)
         self.W, self.H = window_w, window_h
-        self.clock = pygame.time.Clock()
-        self.font = pygame.font.SysFont('monospace', 14)
-        self.big_font = pygame.font.SysFont('monospace', 20, bold=True)
 
         self.replay = replay
         self.times, self.hold_tails, self.keycount = prepare_replay_times(
@@ -181,21 +168,9 @@ class Player:
         self.scroll_mode = scroll_mode
         self.play_rate = 1.0
         self.paused = True
-        self.music_on = bool(audio_path)
         self.t = 0.0                 # current playback time (s)
         self._last_tick = None
-
         self.audio_path = audio_path
-        if audio_path and os.path.exists(audio_path) and not headless:
-            try:
-                pygame.mixer.init()
-                pygame.mixer.music.load(audio_path)
-                pygame.mixer.music.set_volume(0.5)
-            except Exception as e:
-                print(f"audio load failed: {e}")
-                self.audio_path = None
-        elif headless:
-            self.audio_path = None
 
         # Precompute judgment colors
         self.note_judges = []
@@ -205,8 +180,7 @@ class Player:
         self.t_max = float(self.times[-1]) + 5.0 if len(self.times) else 10.0
         self.t_min = -2.0
         self.hit_line_y_frac = 0.80  # judgment line position
-        self.skin_obj = skin_module.get(skin)
-        self.skin = self.skin_obj.name
+        self.skin = skin if skin in self.SKINS else 'bar'
         # Press-hide mode: once a note is actually pressed (t_now >= press_t)
         # stop drawing it. For LNs, hide everything once past release_t.
         # Missed notes stay visible so the red X is still informative.
@@ -291,7 +265,7 @@ class Player:
         self.sv_enabled = bool(self.sv_sections)
         self._build_cumulative_sv()
         self._build_ghost_sv_caches()
-        self.renderer = PlayerRenderer()
+        self.plugins = PluginManager.discover()
         self.plugin_panel_open = False
         self._hud_hitboxes = []
 
@@ -329,11 +303,10 @@ class Player:
             self.scroll_ms = ms
 
     def set_skin(self, skin):
-        self.skin_obj = skin_module.get(skin)
-        self.skin = self.skin_obj.name
+        self.skin = skin if skin in self.SKINS else 'bar'
 
     def toggle_skin(self):
-        names = skin_module.names()
+        names = list(self.SKINS)
         idx = names.index(self.skin) if self.skin in names else 0
         self.set_skin(names[(idx + 1) % len(names)])
 
@@ -462,9 +435,6 @@ class Player:
             self.sv_enabled = not self.sv_enabled
         return self.sv_enabled
 
-    def _draw(self, t_now):
-        self.renderer.draw(self, t_now)
-
     def handle_mouse_down(self, x, y):
         for rect, action, payload in reversed(getattr(self, '_hud_hitboxes', [])):
             rx, ry, rw, rh = rect
@@ -474,28 +444,21 @@ class Player:
                 self.plugin_panel_open = not self.plugin_panel_open
                 return True
             if action == 'toggle_plugin':
-                self.renderer.plugins.toggle_enabled(payload)
+                self.plugins.toggle_enabled(payload)
                 return True
         return False
 
-    def tick(self, dt_s):
-        """Headless: advance time and redraw. Returns raw RGB bytes + (w,h).
-
-        We do NOT clamp at t_max while playing — t_max is just "a bit past the
-        last note"; the underlying audio file often continues (outros, silence).
-        The audio engine stops on its own when the sound ends, and the GUI
-        auto-pauses once the audio has finished and we're past the chart end."""
+    def advance(self, dt_s):
         if not self.paused:
             self.t = max(self.t_min, self.t + dt_s * self.play_rate)
-        self._draw(self.t)
-        return pygame.image.tobytes(self.screen, 'RGB'), (self.W, self.H)
+
+    def tick(self, dt_s):
+        """Advance playback state. Rendering is owned by Qt widgets."""
+        self.advance(dt_s)
+        return None, (self.W, self.H)
 
     def resize(self, w, h):
         self.W, self.H = max(200, int(w)), max(200, int(h))
-        if self.headless:
-            self.screen = pygame.Surface((self.W, self.H))
-        else:
-            self.screen = pygame.display.set_mode((self.W, self.H), pygame.RESIZABLE)
 
     def seek_rel(self, dt):
         self._seek(dt)
@@ -519,111 +482,29 @@ class Player:
 
     def _seek(self, dt):
         self.t = max(self.t_min, min(self.t_max, self.t + dt))
-        if self.music_on and self.audio_path and not self.paused:
-            try:
-                pygame.mixer.music.stop()
-                pygame.mixer.music.play(start=max(0, self.t))
-            except pygame.error:
-                pass
 
     def _toggle_pause(self):
         self.paused = not self.paused
-        if self.music_on and self.audio_path:
-            try:
-                if self.paused:
-                    pygame.mixer.music.pause()
-                else:
-                    if not pygame.mixer.music.get_busy():
-                        pygame.mixer.music.play(start=max(0, self.t))
-                    else:
-                        pygame.mixer.music.unpause()
-            except pygame.error:
-                pass
 
     def run(self):
-        running = True
-        while running:
-            now_ms = pygame.time.get_ticks()
-            if self._last_tick is None:
-                self._last_tick = now_ms
-            dt_ms = now_ms - self._last_tick
-            self._last_tick = now_ms
-            if not self.paused:
-                self.t += (dt_ms / 1000.0) * self.play_rate
-
-            for ev in pygame.event.get():
-                if ev.type == pygame.QUIT:
-                    running = False
-                elif ev.type == pygame.VIDEORESIZE:
-                    self.W, self.H = ev.w, ev.h
-                    self.screen = pygame.display.set_mode((self.W, self.H),
-                                                           pygame.RESIZABLE)
-                elif ev.type == pygame.KEYDOWN:
-                    mods = pygame.key.get_mods()
-                    shift = mods & pygame.KMOD_SHIFT
-                    if ev.key in (pygame.K_q, pygame.K_ESCAPE):
-                        running = False
-                    elif ev.key in (pygame.K_SPACE, pygame.K_p):
-                        self._toggle_pause()
-                    elif ev.key == pygame.K_LEFT:
-                        self._seek(-10 if shift else -2)
-                    elif ev.key == pygame.K_RIGHT:
-                        self._seek(10 if shift else 2)
-                    elif ev.key == pygame.K_UP:
-                        self.nudge_scroll(1.15)
-                    elif ev.key == pygame.K_DOWN:
-                        self.nudge_scroll(1 / 1.15)
-                    elif ev.key in (pygame.K_PLUS, pygame.K_EQUALS):
-                        self.play_rate = min(4.0, self.play_rate + 0.1)
-                    elif ev.key == pygame.K_MINUS:
-                        self.play_rate = max(0.1, self.play_rate - 0.1)
-                    elif ev.key == pygame.K_r:
-                        self.t = self.t_min
-                        if self.music_on and self.audio_path:
-                            try:
-                                pygame.mixer.music.play(start=0)
-                                if self.paused:
-                                    pygame.mixer.music.pause()
-                            except pygame.error:
-                                pass
-                    elif ev.key == pygame.K_m:
-                        self.music_on = not self.music_on
-                        if self.audio_path:
-                            try:
-                                if self.music_on and not self.paused:
-                                    pygame.mixer.music.play(start=max(0, self.t))
-                                else:
-                                    pygame.mixer.music.stop()
-                            except pygame.error:
-                                pass
-                    elif ev.key == pygame.K_LEFTBRACKET and self.paused:
-                        self.t = max(self.t_min, self.t - 0.25)
-                    elif ev.key == pygame.K_RIGHTBRACKET and self.paused:
-                        self.t = min(self.t_max, self.t + 0.25)
-                elif ev.type == pygame.MOUSEWHEEL:
-                    self.t = max(self.t_min, min(self.t_max, self.t - ev.y * 0.5))
-                elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
-                    x, y = ev.pos
-                    if self.handle_mouse_down(x, y):
-                        continue
-                    pb_y = self.H - 18
-                    if pb_y <= y <= pb_y + 8 and 10 <= x <= self.W - 220:
-                        frac = (x - 10) / max(1, (self.W - 230))
-                        self.t = self.t_min + frac * (self.t_max - self.t_min)
-
-            self._draw(self.t)
-            self.clock.tick(60)
-
-        pygame.quit()
+        raise RuntimeError('Player.run() was replaced by the Qt player UI.')
 
 
 def launch_from_replay(replay, game='etterna', od=8, bpms=None, sm_offset=0,
                        audio_path=None, sv_sections=None, scroll_ms=400.0,
                        scroll_mode=None, cmod_bpm=600.0):
-    p = Player(replay, game=game, od=od, bpms=bpms, sm_offset=sm_offset,
-               audio_path=audio_path, sv_sections=sv_sections,
-               scroll_ms=scroll_ms, scroll_mode=scroll_mode, cmod_bpm=cmod_bpm)
-    p.run()
+    from PySide6.QtWidgets import QApplication
+    from analysis.gui.player_tab import PlayerTab
+
+    app = QApplication.instance() or QApplication(sys.argv[:1])
+    tab = PlayerTab(replay, game=game, od=od, bpms=bpms,
+                    sm_offset=sm_offset, audio_path=audio_path,
+                    scroll_ms=scroll_ms, scroll_mode=scroll_mode,
+                    cmod_bpm=cmod_bpm)
+    tab.resize(1200, 900)
+    tab.setWindowTitle('Replay Player')
+    tab.show()
+    return app.exec()
 
 
 if __name__ == '__main__':

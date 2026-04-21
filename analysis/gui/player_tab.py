@@ -1,20 +1,20 @@
-"""Embedded replay player tab: pygame Surface streamed into a QLabel."""
+"""Embedded replay player tab: native Qt canvas + transport controls."""
 import time
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-                               QLabel, QLineEdit, QSizePolicy)
+                               QLabel, QLineEdit)
 
+from analysis.gui.player_canvas import PlayerCanvas
 from analysis.gui.settings import get_settings
 from analysis.gui.widgets import JumpSlider
 
 
 class PlayerTab(QWidget):
-    """Embedded replay player: pygame Surface streamed into a QLabel."""
+    """Embedded replay player with a native QPainter chart canvas."""
     def __init__(self, replay, game='etterna', od=None, judge=None, bpms=None,
                  sm_offset=0.0, audio_path=None, scroll_ms=400.0,
-                 scroll_mode=None, play_rate=1.0):
+                 scroll_mode=None, play_rate=1.0, cmod_bpm=600.0):
         super().__init__()
         from analysis.player.player import Player
         from analysis.core import game as game_mod
@@ -24,8 +24,9 @@ class PlayerTab(QWidget):
         press_hide = bool(get_settings().value('player/press_hide', False, type=bool))
         self.player = Player(replay, game=game, bpms=bpms,
                              sm_offset=sm_offset, audio_path=None,
-                             window_w=900, window_h=800, headless=True,
+                             window_w=900, window_h=800,
                              scroll_ms=scroll_ms, scroll_mode=scroll_mode,
+                             cmod_bpm=cmod_bpm,
                              skin=skin, press_hide=press_hide, **player_kwargs)
         # Replay's original playback rate (Etterna "Rate" from XML, osu!
         # "ModRate"). The chart + offsets are in chart-time, but the audio
@@ -40,15 +41,12 @@ class PlayerTab(QWidget):
         self._audio_ready = False
         self._audio_path = audio_path
         self._music_started_at = None
+        self._muted = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self.view = QLabel()
-        self.view.setAlignment(Qt.AlignCenter)
-        self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.view.setMinimumSize(400, 400)
-        self.view.setFocusPolicy(Qt.StrongFocus)
+        self.view = PlayerCanvas(self.player)
         self.view.installEventFilter(self)
         layout.addWidget(self.view, 1)
 
@@ -257,6 +255,12 @@ class PlayerTab(QWidget):
         self._refresh_pitch_btn()
         self._sync_audio()
 
+    def _toggle_mute(self):
+        if not self._audio_ready:
+            return
+        self._muted = not self._muted
+        self._audio.set_volume(0.0 if self._muted else 0.5)
+
     def _toggle_mode(self):
         new_mode = (self.player.SCROLL_MODE_LINEAR
                     if self.player.scroll_mode == self.player.SCROLL_MODE_CMOD
@@ -346,13 +350,12 @@ class PlayerTab(QWidget):
             # Freeze chart clock while scrubbing; the playbar drives t directly
             # via _on_playbar_changed.
             dt = 0
-        buf, (w, h) = self.player.tick(dt)
+        self.player.advance(dt)
         if (not self.player.paused and self._audio_ready
                 and getattr(self._audio, '_ended', False)):
             self.player.paused = True
             self.play_btn.setText('▶')
-        img = QImage(buf, w, h, w * 3, QImage.Format_RGB888)
-        self.view.setPixmap(QPixmap.fromImage(img))
+        self.view.update()
 
         if not self._scrubbing:
             self._suppress_playbar = True
@@ -363,7 +366,7 @@ class PlayerTab(QWidget):
         self.dur_lbl.setText(self._fmt_time(self.player.t_max))
         self.hud.setText(
             f'rate={self.player.play_rate:.2f}x  '
-            f'scroll={int(self.player.scroll_ms)}ms')
+            f'scroll={int(self.player.effective_scroll_ms)}ms')
         if not self._scrubbing:
             self._sync_audio()
 
@@ -385,11 +388,15 @@ class PlayerTab(QWidget):
                 if k == Qt.Key_Down:
                     self.player.nudge_scroll(1 / 1.15); return True
                 if k in (Qt.Key_Plus, Qt.Key_Equal):
-                    self.player.nudge_rate(0.1); return True
+                    self._nudge_rate(0.1); return True
                 if k == Qt.Key_Minus:
-                    self.player.nudge_rate(-0.1); return True
+                    self._nudge_rate(-0.1); return True
+                if k == Qt.Key_M:
+                    self._toggle_mute(); return True
                 if k == Qt.Key_R:
                     self._restart(); return True
+                if k in (Qt.Key_Q, Qt.Key_Escape):
+                    self.window().close(); return True
             elif t == ev.Type.Wheel:
                 step = ev.angleDelta().y() / 120.0 * 0.5
                 if ev.modifiers() & Qt.ShiftModifier:
@@ -410,3 +417,7 @@ class PlayerTab(QWidget):
                 self._audio.stop()
             except Exception:
                 pass
+
+    def closeEvent(self, ev):
+        self.cleanup()
+        super().closeEvent(ev)

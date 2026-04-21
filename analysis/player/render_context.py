@@ -1,4 +1,4 @@
-"""Per-frame drawing context shared by core layers and user plugins."""
+"""Per-frame drawing context shared by the Qt renderer and user plugins."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -14,6 +14,7 @@ class RenderContext:
     x0: float
     lane_w: float
     judge_y: int
+    painter: object | None = None
     note_h: int = 14
     screen_margin: int = 80
     target_lo: float = 0.0
