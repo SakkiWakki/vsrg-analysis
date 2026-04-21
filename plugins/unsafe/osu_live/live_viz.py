@@ -34,7 +34,7 @@ class LiveFigureWidget(QWidget):
         self._client = client
         self._build_fn = build_fn
 
-        self._status = QLabel('Connecting to tosu…')
+        self._status = QLabel('Connecting to osu!…')
         self._canvas: FigureCanvasQTAgg | None = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -55,7 +55,7 @@ class LiveFigureWidget(QWidget):
         snap = self._client.snapshot()
         if not snap.connected and len(snap.offsets) == 0:
             self._set_status(
-                'Not connected to tosu (is it running on 24050?)')
+                'Not connected to osu! — is the game running?')
             return
         if len(snap.offsets) == 0:
             self._set_status(

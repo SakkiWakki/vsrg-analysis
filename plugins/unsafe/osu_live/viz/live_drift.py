@@ -68,8 +68,8 @@ def _open_live_stats_window():
         QMessageBox.warning(
             None, 'Live stats',
             'No live visualizations could be built.\n\n'
-            'Make sure either the native osu! reader is built or '
-            'tosu is running on http://127.0.0.1:24050.')
+            'Make sure osu! is running and the native reader is built '
+            '(run `make native` from the repo root).')
         return
 
     window.show()

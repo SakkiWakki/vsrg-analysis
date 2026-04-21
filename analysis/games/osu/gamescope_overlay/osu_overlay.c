@@ -332,6 +332,21 @@ int main(int argc, char **argv) {
     XMapWindow(dpy, win);
     glXMakeCurrent(dpy, win, ctx);
 
+    // Vsync: pin our swaps to gamescope's refresh. Without this we
+    // run a free-running 60 Hz-ish loop that beats against
+    // gamescope's compose cadence and causes visible flicker.
+    // Probe GLX_EXT_swap_control at runtime — the extension string
+    // is the portable way to check (some drivers expose the entry
+    // point but don't implement it).
+    typedef void (*PFNGLXSWAPINTERVALEXTPROC)(Display *, GLXDrawable, int);
+    const char *glx_exts = glXQueryExtensionsString(dpy, screen);
+    if (glx_exts && strstr(glx_exts, "GLX_EXT_swap_control")) {
+        PFNGLXSWAPINTERVALEXTPROC set_swap =
+            (PFNGLXSWAPINTERVALEXTPROC)glXGetProcAddressARB(
+                (const GLubyte *)"glXSwapIntervalEXT");
+        if (set_swap) set_swap(dpy, win, 1);
+    }
+
     printf("[osu_overlay] mapped %dx%d on DISPLAY=%s (GL %s)\n",
            width, height, getenv("DISPLAY"),
            (const char *)glGetString(GL_VERSION));
@@ -343,6 +358,14 @@ int main(int argc, char **argv) {
                "will retry on each frame\n");
         fflush(stdout);
     }
+
+    // Content hash of the last frame we actually drew + swapped.
+    // If the next frame's inputs hash to the same value, we skip
+    // rendering AND swapping — gamescope warns ("got the same
+    // buffer committed twice") if we keep posting identical
+    // buffers, and it's also just wasteful on the GPU.
+    uint64_t last_hash = 0;
+    int      have_drawn = 0;
 
     unsigned long frame = 0;
     for (;;) {
@@ -359,6 +382,67 @@ int main(int argc, char **argv) {
         // overlay is fine.
         if (!g_shm) shm_attach();
 
+        OsuLiveShm snap;
+        int have = shm_read(&snap);
+
+        // Pick a branch tag + hash the fields that actually change
+        // the visible output. FNV-1a over the shm bytes is overkill
+        // but trivially cheap and future-proof against adding new
+        // fields to the HUD.
+        // "Not connected" and "not in gameplay" both collapse to
+        // BR_HIDDEN: the HUD only makes sense mid-map anyway, and
+        // the "OSU NOT CONNECTED" banner was distracting when the
+        // user is just browsing menus.
+        enum { BR_WAITING, BR_HIDDEN, BR_HUD } branch;
+        if (!have)                              branch = BR_WAITING;
+        else if (!snap.connected
+                 || !snap.in_gameplay)          branch = BR_HIDDEN;
+        else                                    branch = BR_HUD;
+
+        uint64_t hash = 0xcbf29ce484222325ull;  // FNV-1a seed
+        #define FNV_MIX(b) do { hash ^= (uint8_t)(b); \
+                                hash *= 0x100000001b3ull; } while (0)
+        FNV_MIX((uint8_t)branch);
+        FNV_MIX((uint8_t)(width  & 0xff));
+        FNV_MIX((uint8_t)(width  >> 8));
+        FNV_MIX((uint8_t)(height & 0xff));
+        FNV_MIX((uint8_t)(height >> 8));
+        if (branch == BR_HUD) {
+            // Hash only fields that affect the rendered output.
+            // The seqlock counter bumps by 2 on *every* publish
+            // even when stats don't change, so hashing it (or the
+            // whole struct) would make us swap identical-looking
+            // buffers at publisher rate — that's what triggers
+            // gamescope's "same buffer committed twice" warning.
+            FNV_MIX(snap.keycount);
+            #define FNV_BYTES(ptr, n) do { \
+                const uint8_t *_p = (const uint8_t *)(ptr); \
+                for (size_t _i = 0; _i < (n); _i++) FNV_MIX(_p[_i]); \
+            } while (0)
+            FNV_BYTES(&snap.combo,         sizeof(snap.combo));
+            FNV_BYTES(&snap.max_combo,     sizeof(snap.max_combo));
+            FNV_BYTES(&snap.hits_300,      sizeof(snap.hits_300));
+            FNV_BYTES(&snap.hits_100,      sizeof(snap.hits_100));
+            FNV_BYTES(&snap.hits_50,       sizeof(snap.hits_50));
+            FNV_BYTES(&snap.hits_miss,     sizeof(snap.hits_miss));
+            FNV_BYTES(&snap.accuracy,      sizeof(snap.accuracy));
+            FNV_BYTES(&snap.unstable_rate, sizeof(snap.unstable_rate));
+            FNV_BYTES(snap.hist,           sizeof(snap.hist));
+            #undef FNV_BYTES
+        }
+        #undef FNV_MIX
+
+        // Identical to last drawn frame → skip render + skip swap.
+        // This is what fixes gamescope's "same buffer committed
+        // twice" warning. A tiny sleep keeps us off the CPU while
+        // waiting for the next publisher update; with vsync on,
+        // glXSwapBuffers paces drawn frames, but the no-op path
+        // needs its own pacing.
+        if (have_drawn && hash == last_hash) {
+            usleep(16 * 1000);
+            continue;
+        }
+
         glViewport(0, 0, width, height);
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -372,20 +456,24 @@ int main(int argc, char **argv) {
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-        OsuLiveShm snap;
-        int have = shm_read(&snap);
-        if (!have) {
-            render_banner("WAITING FOR FEED", width, height);
-        } else if (!snap.connected) {
-            render_banner("OSU NOT CONNECTED", width, height);
-        } else if (!snap.in_gameplay) {
-            // Outside of gameplay the overlay is useless clutter;
-            // show nothing (osu!'s own UI is already on-screen).
-        } else {
-            render_hud(width, height, &snap);
+        switch (branch) {
+            case BR_WAITING:
+                render_banner("WAITING FOR FEED", width, height);
+                break;
+            case BR_HIDDEN:
+                // Clear-only frame: nothing drawn, but we still
+                // swap once so the compositor sees the transition
+                // from HUD → nothing. Subsequent identical frames
+                // will hit the hash skip above.
+                break;
+            case BR_HUD:
+                render_hud(width, height, &snap);
+                break;
         }
 
         glXSwapBuffers(dpy, win);
+        last_hash  = hash;
+        have_drawn = 1;
         frame++;
 
         if (frame == 1 || frame % 300 == 0) {
@@ -397,6 +485,11 @@ int main(int argc, char **argv) {
             fflush(stdout);
         }
 
-        usleep(16 * 1000);
+        // No usleep — with GLX_EXT_swap_control swap interval = 1,
+        // glXSwapBuffers above blocks on vblank and paces the loop.
+        // Falling back to a sleep if vsync wasn't available would
+        // re-introduce the flicker we just fixed; if the driver
+        // can't do swap control, running unpaced is still the
+        // right answer (matches gamescope's compose rate).
     }
 }
