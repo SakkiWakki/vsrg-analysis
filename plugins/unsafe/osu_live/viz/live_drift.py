@@ -85,9 +85,7 @@ def _open_live_stats_window():
 
 
 def register_library_actions(add):
-    from plugins.unsafe.osu_live.overlay import open_overlay
     add('Live stats', _open_live_stats_window)
-    add('Live overlay', open_overlay)
     add('Start osu (with overlay)', _start_osu_with_overlay)
 
 
