@@ -38,7 +38,6 @@ Full-report export (osu!mania 10K — *xi - Aragami*):
 - **Python 3.10+**
 - [`numpy`](https://numpy.org/) — array math
 - [`matplotlib`](https://matplotlib.org/) — plotting + report generation
-- [`pygame`](https://www.pygame.org/) — audio-file decoding helper used by the player
 - [`osrparse`](https://pypi.org/project/osrparse/) — osu! `.osr` parser
 - [`PySide6`](https://pypi.org/project/PySide6/) — Qt GUI
 
@@ -80,10 +79,9 @@ Save folder — both optional, both editable later via **Library → Paths…**.
 
 **Platform notes:**
 
-- **Linux** — the player UI is native Qt, but `pygame` is still used for
-  audio-file decoding and may need SDL2 runtime libraries. Most distros
-  bundle them already; if audio decode fails, install your distro's `sdl2` /
-  `libsdl2-2.0-0` package.
+- **Linux** — the GUI uses Qt. Most desktop distros work with the PySide6
+  wheels directly; on minimal installs, add your distro's Qt/XCB runtime
+  packages if the app fails to create a window.
 - **macOS** — everything installs via pip directly. On Apple Silicon make
   sure you're on Python 3.11+ so the arm64 PySide6 wheels are used.
 - **Windows** — no extra system deps; all wheels ship with their DLLs. Use
@@ -253,16 +251,19 @@ from analysis.player.plugin_api import Stage
 
 
 def draw(ctx, stage):
-    # ctx exposes ctx.painter for native Qt drawing, plus a small pygame-like
-    # adapter (ctx.pygame + ctx.screen) for simple plugin compatibility.
-    # It also exposes t_now, keycount, lane geometry, candidates,
-    # visible_ghost_holds, and helpers such as time_to_y()/lane_center().
+    # ctx exposes ctx.painter for native Qt drawing, plus t_now, keycount,
+    # lane geometry, candidates, visible_ghost_holds, and helpers such as
+    # time_to_y()/lane_center().
     if stage != Stage.AFTER_JUDGMENT:
         return
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QColor, QPen
+
+    ctx.painter.setPen(QPen(QColor(255, 255, 255), 1))
     for col in range(ctx.keycount):
         x = int(ctx.lane_center(col))
         y = int(ctx.judge_y)
-        ctx.pygame.draw.circle(ctx.screen, (255, 255, 255), (x, y), 5, 1)
+        ctx.painter.drawEllipse(QPointF(x, y), 5, 5)
 
 
 def register(add):
