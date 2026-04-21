@@ -58,8 +58,8 @@ same everywhere — the bundled Makefile also builds optional native pieces
 (osu memory reader, gamescope overlay) on Linux.
 
 ```bash
-git clone https://github.com/<you>/etterna-analysis.git
-cd etterna-analysis
+git clone https://github.com/<you>/vsrg-analysis.git
+cd vsrg-analysis
 
 # --- Option A: Linux one-shot via Makefile -------------------------------
 # Builds venv + installs deps + compiles the native osu memory reader + the

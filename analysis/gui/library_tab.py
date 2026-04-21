@@ -502,7 +502,8 @@ class LibraryTab(QWidget):
             else:
                 tab = PlayerTab(r, game='etterna', bpms=bpms, sm_offset=sm_off,
                                 audio_path=audio, scroll_ms=default_ms,
-                                scroll_mode=scroll_mode, play_rate=rate)
+                                scroll_mode=scroll_mode, play_rate=rate,
+                                xml_judgments=entry.get('judgments'))
             title = (entry.get('song') or 'play')[:40]
             self._add_tab(tab, f'▶ {title}')
             if worker in self._viz_workers:

@@ -72,9 +72,16 @@ class Player:
                  bpms=None, sm_offset=0.0, audio_path=None,
                  window_w=900, window_h=900, headless=False,
                  sv_sections=None, scroll_ms=400.0, scroll_mode=None,
-                 cmod_bpm=600.0, osu_speed=20, skin='bar', press_hide=False):
+                 cmod_bpm=600.0, osu_speed=20, skin='bar', press_hide=False,
+                 xml_judgments=None):
         self.headless = headless
         self.W, self.H = window_w, window_h
+
+        # XML-sourced aggregate judgments from Etterna.xml's TapNoteScores:
+        # includes HitMine / AvoidMine and per-window W1..W5 counts. The
+        # .bin replay can't tell us which mines were hit, so this dict is
+        # the only place the sidebar can surface mine-hit info from.
+        self.xml_judgments = dict(xml_judgments or {})
 
         self.replay = replay
         from analysis.core import game as game_mod
@@ -265,6 +272,20 @@ class Player:
     def _miss_first_ghost_hold(self): return self.notes.miss_first_ghost_hold
     @property
     def _ghost_hold_extends_miss(self): return self.notes.ghost_hold_extends_miss
+    @property
+    def _mine_times(self): return self.notes.mine_times
+    @property
+    def _mine_cols(self): return self.notes.mine_cols
+    @property
+    def _lift_times(self): return self.notes.lift_times
+    @property
+    def _lift_cols(self): return self.notes.lift_cols
+    @property
+    def _fake_times(self): return self.notes.fake_times
+    @property
+    def _fake_cols(self): return self.notes.fake_cols
+    @property
+    def _roll_head_keys(self): return self.notes.roll_head_keys
 
     def _mode(self, key=None):
         return scroll_registry.get(key or self.scroll_mode)
@@ -674,8 +695,7 @@ if __name__ == '__main__':
             bpms = data['bpms']
             sm_off = data['offset']
             if audio is None:
-                cand = Path(smp).parent / data['music']
-                if cand.exists():
-                    audio = str(cand)
+                from analysis.games.etterna.adapter import EtternaAdapter
+                audio = EtternaAdapter._resolve_music_asset(smp, data['music'])
         launch_from_replay(rep, game='etterna', bpms=bpms, sm_offset=sm_off,
                            audio_path=audio)

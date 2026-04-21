@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "osu_memory_native"
 version = "0.1.0"
-description = "Direct osu! memory reader for the etterna-analysis osu_live bundle."
+description = "Direct osu! memory reader for the vsrg-analysis osu_live bundle."
 requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Rust",

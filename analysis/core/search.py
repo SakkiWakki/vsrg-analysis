@@ -7,11 +7,12 @@ import pickle
 from pathlib import Path
 from datetime import datetime
 
+from analysis import cache_dir
 from analysis.games.etterna.replay import (parse_etterna_xml, find_etterna_dirs,
                              find_replay_for_score)
 
 
-CACHE_PATH = Path.home() / '.cache' / 'etterna-analysis' / 'library.pkl'
+CACHE_PATH = cache_dir() / 'library.pkl'
 
 
 def _ensure_cache_dir():
@@ -59,6 +60,11 @@ def scan_etterna():
             'keycount': _etterna_keycount_from_stepstype(
                 s.get('stepstype', 'dance-single')),
             'judgescale': float(s.get('judgescale', 1.0)),
+            # Etterna.xml's TapNoteScores block — includes HitMine /
+            # AvoidMine alongside the tap counts. The replay .bin
+            # doesn't record which mines were hit, so this is the only
+            # way to surface mine-hit info in the player.
+            'judgments': dict(s.get('judgments') or {}),
         })
     return out
 

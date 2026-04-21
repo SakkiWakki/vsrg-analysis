@@ -6,6 +6,12 @@ call `find_etterna_dirs` / `find_osu_dirs`, which consult these overrides
 before falling back to autodetection — so a user-configured path wins
 even though the core modules don't depend on Qt.
 
+The overrides now store **install roots** (e.g. `~/etterna/`, not
+`~/etterna/Save/`). Resolution into Save/Songs/Replays/XML happens in the
+game-specific replay modules, which also read `Preferences.ini` and
+`osu!.<user>.cfg` to honor user-configured subpaths (AdditionalSongFolders,
+BeatmapDirectory, picked profile).
+
 Player-settings validators live at the bottom: every persisted player
 preference declares whether it's game-agnostic or game-dependent and
 provides a validator. `load_player_settings(game)` returns a dict with
@@ -31,13 +37,23 @@ def get_settings():
 
 
 # ---- install-path overrides ------------------------------------------------
-# Stored as strings under paths/etterna_save and paths/osu_songs. Empty/None
-# means "fall back to autodetect". We expose simple getters/setters so that
-# core modules can consult them without importing Qt widgets.
+# Stored as strings under paths/etterna_root, paths/osu_root. Empty/None means
+# "fall back to autodetect". Legacy keys paths/etterna_save and paths/osu_songs
+# are migrated transparently on read: if the old value pointed at Save/ or
+# Songs/, we fold it up to the install root.
+#
+# osu! profiles: a single install can have multiple per-user configs
+# (osu!.<USER>.cfg). If the user has >1 we persist the chosen one under
+# paths/osu_profile so later launches remember the selection.
 
-ETTERNA_SAVE_KEY = 'paths/etterna_save'
-OSU_SONGS_KEY = 'paths/osu_songs'
+ETTERNA_ROOT_KEY = 'paths/etterna_root'
+OSU_ROOT_KEY = 'paths/osu_root'
+OSU_PROFILE_KEY = 'paths/osu_profile'
 FIRST_RUN_KEY = 'paths/first_run_done'
+
+# Legacy keys — read once, migrated, then removed.
+_LEGACY_ETTERNA_KEY = 'paths/etterna_save'
+_LEGACY_OSU_KEY = 'paths/osu_songs'
 
 
 def _str_or_none(v):
@@ -47,30 +63,78 @@ def _str_or_none(v):
     return s or None
 
 
-def get_etterna_save_override():
-    return _str_or_none(get_settings().value(ETTERNA_SAVE_KEY))
+def _fold_to_install_root(path, subdir_names):
+    """If `path` ends in one of `subdir_names` (case-insensitive), return its
+    parent — otherwise return `path` unchanged. Used to migrate legacy
+    Save/Songs paths to install roots."""
+    p = Path(path)
+    if p.name.lower() in {s.lower() for s in subdir_names}:
+        return str(p.parent)
+    return str(p)
 
 
-def set_etterna_save_override(path):
+def _migrate_legacy(old_key, new_key, fold_names):
+    """One-shot read of the legacy key. If present and new key is empty, fold
+    to install root and write to new key. Legacy key is left in place — we
+    don't delete it so a downgrade can still read it."""
+    s = get_settings()
+    if s.value(new_key) is not None:
+        return
+    legacy = _str_or_none(s.value(old_key))
+    if legacy:
+        s.setValue(new_key, _fold_to_install_root(legacy, fold_names))
+
+
+def get_etterna_root_override():
+    _migrate_legacy(_LEGACY_ETTERNA_KEY, ETTERNA_ROOT_KEY, ['Save'])
+    return _str_or_none(get_settings().value(ETTERNA_ROOT_KEY))
+
+
+def set_etterna_root_override(path):
     s = get_settings()
     p = _str_or_none(path)
     if p is None:
-        s.remove(ETTERNA_SAVE_KEY)
+        s.remove(ETTERNA_ROOT_KEY)
     else:
-        s.setValue(ETTERNA_SAVE_KEY, p)
+        s.setValue(ETTERNA_ROOT_KEY, p)
 
 
-def get_osu_songs_override():
-    return _str_or_none(get_settings().value(OSU_SONGS_KEY))
+def get_osu_root_override():
+    _migrate_legacy(_LEGACY_OSU_KEY, OSU_ROOT_KEY, ['Songs'])
+    return _str_or_none(get_settings().value(OSU_ROOT_KEY))
 
 
-def set_osu_songs_override(path):
+def set_osu_root_override(path):
     s = get_settings()
     p = _str_or_none(path)
     if p is None:
-        s.remove(OSU_SONGS_KEY)
+        s.remove(OSU_ROOT_KEY)
     else:
-        s.setValue(OSU_SONGS_KEY, p)
+        s.setValue(OSU_ROOT_KEY, p)
+
+
+def get_osu_profile_override():
+    """The selected osu!.<user>.cfg filename (not a path). None means 'pick
+    automatically' — resolver falls back to newest-mtime cfg."""
+    return _str_or_none(get_settings().value(OSU_PROFILE_KEY))
+
+
+def set_osu_profile_override(name):
+    s = get_settings()
+    p = _str_or_none(name)
+    if p is None:
+        s.remove(OSU_PROFILE_KEY)
+    else:
+        s.setValue(OSU_PROFILE_KEY, p)
+
+
+# Back-compat shims — migrate.py and any external callers still refer to these
+# names. They now return/accept install roots, which is what callers want
+# anyway (migrate.py just echoes the value into the config tree).
+get_etterna_save_override = get_etterna_root_override
+set_etterna_save_override = set_etterna_root_override
+get_osu_songs_override = get_osu_root_override
+set_osu_songs_override = set_osu_root_override
 
 
 def is_first_run_done():
@@ -81,24 +145,46 @@ def mark_first_run_done():
     get_settings().setValue(FIRST_RUN_KEY, True)
 
 
-def validate_etterna_save(path):
-    """A valid Etterna save dir either has a LocalProfiles/ subtree or a
-    direct Etterna.xml. We don't require ReplaysV2/ because some users only
-    have XML-only imports from older installs."""
+def validate_etterna_root(path):
+    """A valid Etterna install root contains a Save/ directory that itself
+    looks like an Etterna save (LocalProfiles/ or Etterna.xml). We accept a
+    bare Save dir too — users who point at Save directly still work."""
     if not path:
         return False
     p = Path(path)
     if not p.is_dir():
         return False
+    # Install root: Save/ exists and looks right.
+    save = p / 'Save'
+    if save.is_dir() and ((save / 'LocalProfiles').is_dir()
+                          or (save / 'Etterna.xml').is_file()):
+        return True
+    # Direct Save path: accept for back-compat.
     return (p / 'LocalProfiles').is_dir() or (p / 'Etterna.xml').is_file()
 
 
-def validate_osu_songs(path):
-    """A valid osu! songs dir is any existing directory — mania beatmap folders
-    don't have a consistent marker, but the dir itself must exist."""
+def validate_osu_root(path):
+    """A valid osu! install root contains at least one osu!.<user>.cfg file.
+    We don't require Songs/ to exist because BeatmapDirectory can point
+    elsewhere."""
     if not path:
         return False
-    return Path(path).is_dir()
+    p = Path(path)
+    if not p.is_dir():
+        return False
+    try:
+        for entry in p.iterdir():
+            n = entry.name.lower()
+            if n.startswith('osu!.') and n.endswith('.cfg'):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+# Back-compat shims for validators — same semantics as above.
+validate_etterna_save = validate_etterna_root
+validate_osu_songs = validate_osu_root
 
 
 # ---- player settings: typed, optionally game-scoped ------------------------

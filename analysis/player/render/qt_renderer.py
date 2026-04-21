@@ -156,6 +156,7 @@ class QtPlayerRenderer:
         self.plugins.draw(Stage.AFTER_JUDGMENT, ctx)
 
         self._draw_notes(ctx, painter)
+        self._draw_chart_extras(ctx, painter)
         self.plugins.draw(Stage.AFTER_NOTES, ctx)
 
         self._draw_ghost_holds(ctx, painter)
@@ -229,23 +230,34 @@ class QtPlayerRenderer:
             miss_tap_color = (77, 77, 77)
             miss_ln_color = (38, 38, 38)
 
+            # Rolls ('4'→'3') share the replay/noterow stream with holds
+            # but Etterna's noteskins color them green. Only the body
+            # and tail swap — the head still uses the lane palette so
+            # the player can tell what column it's in.
+            is_roll = (is_ln and p._roll_head_keys
+                       and (p._noterows_list[i], c) in p._roll_head_keys)
+            roll_body_color = (90, 210, 90)
+            roll_tail_color = (60, 160, 60)
+
             if is_ln:
                 y_end = ctx.time_to_y(end_t)
+                held_body = roll_body_color if is_roll else note_color
+                released_body = roll_tail_color if is_roll else dim_color
                 if miss:
                     body_top, body_bot, body_color = y_end, y, miss_ln_color
                 elif ln_state == 'upcoming':
-                    body_top, body_bot, body_color = y_end, y, note_color
+                    body_top, body_bot, body_color = y_end, y, held_body
                 elif ln_state == 'held':
                     if p.press_hide:
-                        body_top, body_bot, body_color = y_end, ctx.judge_y, note_color
+                        body_top, body_bot, body_color = y_end, ctx.judge_y, held_body
                     else:
-                        body_top, body_bot, body_color = y_end, y, note_color
+                        body_top, body_bot, body_color = y_end, y, held_body
                 elif ln_state == 'released':
                     if p.press_hide:
                         body_top = body_bot = None
                         body_color = None
                     else:
-                        body_top, body_bot, body_color = y_end, ctx.judge_y, dim_color
+                        body_top, body_bot, body_color = y_end, ctx.judge_y, released_body
                 else:
                     body_top = body_bot = None
                     body_color = None
@@ -259,7 +271,12 @@ class QtPlayerRenderer:
                 tail_on_screen = (-ctx.screen_margin <= y_end
                                   <= p.H + ctx.screen_margin)
                 if tail_visible and tail_on_screen:
-                    tail_color = miss_ln_color if miss else dim_color
+                    if miss:
+                        tail_color = miss_ln_color
+                    elif is_roll:
+                        tail_color = roll_tail_color
+                    else:
+                        tail_color = dim_color
                     self._draw_ln_tail(painter, p.skin, lx, y_end,
                                        ctx.lane_w, ctx.note_h, tail_color)
 
@@ -320,6 +337,51 @@ class QtPlayerRenderer:
                       (cx + 10, y + 10), 2)
                 _line(painter, jcolor, (cx - 10, y + 10),
                       (cx + 10, y - 10), 2)
+
+    def _draw_chart_extras(self, ctx, painter):
+        """Mines, lifts, fakes — chart-only notes that never hit the
+        replay stream. Each sweep is a pair of bisects into the
+        time-sorted arrays; we keep them in separate calls so adding
+        a new type doesn't touch the hot tap/LN loop above."""
+        import bisect
+        p = ctx.player
+
+        mines_t = p._mine_times
+        if mines_t.size:
+            lo = bisect.bisect_left(mines_t, ctx.target_lo)
+            hi = bisect.bisect_right(mines_t, ctx.target_hi)
+            for k in range(lo, hi):
+                col = int(p._mine_cols[k])
+                if col >= p.keycount:
+                    continue
+                y = ctx.time_to_y(float(mines_t[k]))
+                self._draw_mine(painter, ctx.lane_x(col), y, ctx.lane_w)
+
+        lifts_t = p._lift_times
+        if lifts_t.size:
+            lo = bisect.bisect_left(lifts_t, ctx.target_lo)
+            hi = bisect.bisect_right(lifts_t, ctx.target_hi)
+            for k in range(lo, hi):
+                col = int(p._lift_cols[k])
+                if col >= p.keycount:
+                    continue
+                y = ctx.time_to_y(float(lifts_t[k]))
+                self._draw_lift(painter, p.skin, ctx.lane_x(col), y,
+                                ctx.lane_w, ctx.note_h,
+                                p.palette[col])
+
+        fakes_t = p._fake_times
+        if fakes_t.size:
+            lo = bisect.bisect_left(fakes_t, ctx.target_lo)
+            hi = bisect.bisect_right(fakes_t, ctx.target_hi)
+            for k in range(lo, hi):
+                col = int(p._fake_cols[k])
+                if col >= p.keycount:
+                    continue
+                y = ctx.time_to_y(float(fakes_t[k]))
+                self._draw_fake(painter, p.skin, ctx.lane_x(col), y,
+                                ctx.lane_w, ctx.note_h,
+                                p.palette[col])
 
     def _draw_ghost_holds(self, ctx, painter):
         import bisect
@@ -505,6 +567,51 @@ class QtPlayerRenderer:
         cx = lx + lane_w / 2
         _ellipse_outline(painter, (255, 255, 255), cx, y, r, r)
         _ellipse(painter, (255, 255, 255), cx, y, 2, 2)
+
+    @staticmethod
+    def _draw_mine(painter, lx, y, lane_w):
+        """Per user spec: radius = col/4 for the whitish-gray outer
+        shell, radius = col/8 for the red inner dot. Drawn filled so
+        they stand out against the note palette."""
+        cx = lx + lane_w / 2
+        r_outer = max(4, int(lane_w / 4))
+        r_inner = max(2, int(lane_w / 8))
+        _ellipse(painter, (210, 210, 210), cx, y, r_outer, r_outer)
+        _ellipse(painter, (220, 60, 60), cx, y, r_inner, r_inner)
+
+    @staticmethod
+    def _draw_lift(painter, skin, lx, y, lane_w, note_h, color):
+        """Lifts score on release, not press. Draw as a hollow ring /
+        rect outline so the player can tell them from filled taps at
+        a glance. Keeps the lane color for column identity."""
+        if skin == 'circle':
+            r = max(6, int((lane_w - 4) * 0.46))
+            cx = lx + lane_w / 2
+            _ellipse_outline(painter, color, cx, y, r, r, 2)
+            _ellipse_outline(painter, (255, 255, 255), cx, y,
+                             max(2, r // 3), max(2, r // 3))
+        else:
+            rect = (lx + 4, y - note_h // 2, lane_w - 8, note_h)
+            _rect_outline(painter, color, rect, 2)
+            _rect_outline(painter, (255, 255, 255),
+                          (lx + 8, y - note_h // 4,
+                           lane_w - 16, note_h // 2), 1)
+
+    @staticmethod
+    def _draw_fake(painter, skin, lx, y, lane_w, note_h, color):
+        """Fakes never judge; Etterna renders them at 25% opacity. We
+        match that by dimming the lane color to ~1/4 and drawing a
+        regular tap shape so the player still sees the gimmick."""
+        dim = tuple(v // 4 for v in color)
+        if skin == 'circle':
+            r = max(6, int((lane_w - 4) * 0.46))
+            cx = lx + lane_w / 2
+            _ellipse(painter, dim, cx, y, r, r)
+            _ellipse_outline(painter, (90, 90, 90), cx, y, r, r)
+        else:
+            rect = (lx + 4, y - note_h // 2, lane_w - 8, note_h)
+            _rect(painter, dim, rect)
+            _rect_outline(painter, (90, 90, 90), rect)
 
 
 def _fmt_num(x, decimals=2):

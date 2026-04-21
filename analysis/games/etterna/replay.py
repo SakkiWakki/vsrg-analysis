@@ -11,15 +11,36 @@ MISS_SENTINEL = 1.000000
 
 
 def parse_replay(filepath):
+    """Parse an Etterna .bin replay file. Handles V1 and V2 interchangeably.
+
+    Format (per Replay.cpp in etternagame/etterna):
+
+    V2 — one line per judged tap:
+        <noterow> <offset> <track> [<TapNoteType>]
+            The 4th field is only written when it's not TapNoteType_Tap
+            (=1); in particular HoldHead=2 flags the row as the head of
+            a hold/roll. HoldTail=3 shows up for the tails that produce
+            a judgment too.
+
+        H <noterow> <track> [<HoldNoteScore>]
+            One line per *dropped* hold (HoldReplayResult). These are
+            NOT hold-head declarations — every hold gets its head
+            encoded via TapNoteType above. The dropped-hold list is the
+            v2 equivalent of "player let go mid-hold".
+
+    V1 — the legacy basic format:
+        <noterow> <offset>
+            Only two tokens per line; no track column, no note type,
+            no H lines. Detected by `len(parts) < 3`. Etterna falls
+            back to LoadReplayDataBasic() for these files. Column is
+            unknown so we can't draw per-lane judgments, but timing
+            stats (histogram/mean/stdev) still work.
+
+    Hold-head tails aren't in the replay at all; they come from the
+    chart and are joined in later (see EtternaAdapter.resolve_all)."""
     noterows, offsets, columns, notetypes = [], [], [], []
-    # Hold heads come from two sources depending on the Etterna version
-    # that wrote this replay:
-    #   - Older builds wrote a separate `H <row> <col>` line per hold.
-    #   - Current builds just tag the regular note row with notetype=2
-    #     (TapNoteType_HoldHead) and skip the H line entirely.
-    # We collect both and dedupe so either flavor works. Neither carries
-    # the tail row — that's always joined from the chart downstream.
-    holds_from_h = []
+    dropped_holds = []
+    is_v1 = False
     with open(filepath) as f:
         for line in f:
             line = line.strip()
@@ -28,18 +49,29 @@ def parse_replay(filepath):
             if line.startswith('H '):
                 parts = line.split()
                 if len(parts) >= 3:
-                    holds_from_h.append((int(parts[1]), int(parts[2])))
+                    dropped_holds.append((int(parts[1]), int(parts[2])))
                 continue
             parts = line.split()
-            if len(parts) < 3:
+            if len(parts) < 2:
                 continue
             try:
                 nr = int(parts[0])
                 off = float(parts[1])
-                col = int(parts[2])
             except ValueError:
                 continue
-            nt = int(parts[3]) if len(parts) >= 4 else 0
+            if len(parts) < 3:
+                # V1 basic format: no column info. Use sentinel -1 so the
+                # downstream filters can still compute per-row stats; the
+                # lane-aware renderer will skip these.
+                is_v1 = True
+                col = -1
+                nt = 0
+            else:
+                try:
+                    col = int(parts[2])
+                except ValueError:
+                    continue
+                nt = int(parts[3]) if len(parts) >= 4 else 0
             noterows.append(nr)
             offsets.append(off)
             columns.append(col)
@@ -51,13 +83,9 @@ def parse_replay(filepath):
     notetypes = np.array(notetypes, dtype=np.int32)
     misses = np.isclose(offsets, MISS_SENTINEL)
 
-    # TapNoteType_HoldHead == 2; modern replays flag hold heads this way.
-    holds_seen = {h for h in holds_from_h}
-    for i in np.flatnonzero(notetypes == 2):
-        key = (int(noterows[i]), int(columns[i]))
-        if key not in holds_seen:
-            holds_from_h.append(key)
-            holds_seen.add(key)
+    # TapNoteType_HoldHead == 2 — one entry per hold head actually judged.
+    holds = [(int(noterows[i]), int(columns[i]))
+             for i in np.flatnonzero(notetypes == 2)]
 
     return {
         'noterows': noterows,
@@ -65,7 +93,9 @@ def parse_replay(filepath):
         'columns': columns,
         'notetypes': notetypes,
         'misses': misses,
-        'holds': holds_from_h,
+        'holds': holds,
+        'dropped_holds': dropped_holds,
+        'replay_version': 1 if is_v1 else 2,
         'filepath': str(filepath),
     }
 
@@ -170,22 +200,48 @@ def find_replay_for_score(scorekey, replays_dir):
     return None
 
 
-def _etterna_save_override():
-    """Read a user-set save-dir override from the GUI settings layer, if any.
-    Done via lazy import so the core module stays importable without Qt."""
+def _etterna_root_override():
+    """Read a user-set install-root override from the GUI settings layer, if
+    any. Done via lazy import so the core module stays importable without Qt."""
     try:
-        from analysis.gui.settings import get_etterna_save_override
+        from analysis.gui.settings import get_etterna_root_override
     except Exception:
         return None
     try:
-        return get_etterna_save_override()
+        return get_etterna_root_override()
     except Exception:
         return None
+
+
+def _parse_additional_song_folders(save):
+    """Read AdditionalSongFolders / AdditionalFolders from Preferences.ini.
+    Etterna writes these semicolon-separated; we also accept commas defensively.
+    Returns a list of absolute path strings — only dirs that actually exist."""
+    prefs = Path(save) / 'Preferences.ini'
+    if not prefs.is_file():
+        return []
+    out = []
+    try:
+        for line in prefs.read_text(errors='ignore').splitlines():
+            s = line.strip()
+            if not s or '=' not in s:
+                continue
+            key, _, val = s.partition('=')
+            if key.strip() not in ('AdditionalSongFolders', 'AdditionalFolders'):
+                continue
+            for part in val.replace(',', ';').split(';'):
+                p = part.strip()
+                if p and Path(p).is_dir():
+                    out.append(str(Path(p)))
+    except OSError:
+        return []
+    return out
 
 
 def _resolve_etterna_save(save):
-    """Build the (save_dir, replays_dir, xml_path) dict for an existing save
-    directory. Returns None if the dir is missing."""
+    """Build the dirs dict for an existing save directory. Returns None if
+    missing. `save` must point at the Save folder itself (not the install
+    root) — callers handle install-root → Save resolution."""
     save = Path(save)
     if not save.exists():
         return None
@@ -205,27 +261,44 @@ def _resolve_etterna_save(save):
         'save_dir': str(save),
         'replays_dir': str(replays) if replays.exists() else None,
         'xml_path': str(xml) if xml else None,
+        'extra_songs_dirs': _parse_additional_song_folders(save),
     }
 
 
+def _resolve_etterna_root(root):
+    """Accept either an install root (contains Save/) or a bare Save dir.
+    Returns the resolved dirs dict or None."""
+    root = Path(root)
+    if not root.exists():
+        return None
+    save = root / 'Save'
+    if save.is_dir() and ((save / 'LocalProfiles').is_dir()
+                          or (save / 'Etterna.xml').is_file()):
+        return _resolve_etterna_save(save)
+    # Back-compat: user pointed directly at Save/.
+    return _resolve_etterna_save(root)
+
+
 def find_etterna_dirs():
-    """Returns dict with save_dir, replays_dir, xml_path. User override from
-    GUI settings wins over autodetection."""
-    override = _etterna_save_override()
+    """Returns dict with save_dir, replays_dir, xml_path, extra_songs_dirs.
+    User override from GUI settings wins over autodetection."""
+    override = _etterna_root_override()
     if override:
-        resolved = _resolve_etterna_save(override)
+        resolved = _resolve_etterna_root(override)
         if resolved is not None:
             return resolved
     candidates = [
-        Path.home() / '.etterna' / 'Save',
-        Path.home() / '.stepmania-5.0' / 'Save',
-        Path.home() / '.stepmania-5.1' / 'Save',
+        Path.home() / '.etterna',
+        Path.home() / 'etterna',
+        Path.home() / '.stepmania-5.0',
+        Path.home() / '.stepmania-5.1',
     ]
-    for save in candidates:
-        resolved = _resolve_etterna_save(save)
+    for root in candidates:
+        resolved = _resolve_etterna_root(root)
         if resolved is not None:
             return resolved
-    return {'save_dir': None, 'replays_dir': None, 'xml_path': None}
+    return {'save_dir': None, 'replays_dir': None, 'xml_path': None,
+            'extra_songs_dirs': []}
 
 
 def summary(replay):

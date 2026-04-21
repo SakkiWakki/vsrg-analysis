@@ -757,28 +757,109 @@ def find_osu_by_hash(md5_hash, songs_dir):
     return None
 
 
-def _osu_songs_override():
-    """User-set Songs dir override from the GUI settings layer, if any.
+def _osu_root_override():
+    """User-set install-root override from the GUI settings layer, if any.
     Lazy-imported so the core module stays usable without Qt."""
     try:
-        from analysis.gui.settings import get_osu_songs_override
+        from analysis.gui.settings import get_osu_root_override
     except Exception:
         return None
     try:
-        return get_osu_songs_override()
+        return get_osu_root_override()
     except Exception:
         return None
 
 
-def _osu_replays_for(songs_dir):
-    """Given an osu! Songs dir (or override), derive the sibling Data/r replay
-    dir if present — osu! stores replays at <install>/Data/r. We also keep
-    the traditional default Wine/native locations so a user who only set a
-    custom Songs path still gets their replays picked up."""
+def _osu_profile_override():
+    try:
+        from analysis.gui.settings import get_osu_profile_override
+    except Exception:
+        return None
+    try:
+        return get_osu_profile_override()
+    except Exception:
+        return None
+
+
+def list_osu_profiles(root):
+    """Return `osu!.<user>.cfg` filenames in `root`, sorted by mtime (newest
+    first). Used by the paths dialog to offer a profile picker."""
+    try:
+        entries = []
+        for e in Path(root).iterdir():
+            n = e.name
+            nl = n.lower()
+            if nl.startswith('osu!.') and nl.endswith('.cfg'):
+                try:
+                    entries.append((e.stat().st_mtime, n))
+                except OSError:
+                    continue
+        entries.sort(reverse=True)
+        return [n for _, n in entries]
+    except OSError:
+        return []
+
+
+def _pick_osu_cfg(root):
+    """Pick which osu!.<user>.cfg to read. Honors the saved profile override
+    if it still exists, else newest-mtime."""
+    profiles = list_osu_profiles(root)
+    if not profiles:
+        return None
+    want = _osu_profile_override()
+    if want and want in profiles:
+        return str(Path(root) / want)
+    return str(Path(root) / profiles[0])
+
+
+def _read_beatmap_directory(cfg_path):
+    """Parse `BeatmapDirectory = ...` from an osu!.<user>.cfg. Returns the raw
+    string (may be relative) or None if unset."""
+    try:
+        for line in Path(cfg_path).read_text(errors='ignore').splitlines():
+            s = line.strip()
+            if not s or s.startswith('#') or s.startswith(';'):
+                continue
+            if '=' not in s:
+                continue
+            key, _, val = s.partition('=')
+            if key.strip() == 'BeatmapDirectory':
+                return val.strip() or None
+    except OSError:
+        return None
+    return None
+
+
+def _resolve_songs_from_root(root):
+    """Given an install root, derive the effective Songs dir by reading
+    BeatmapDirectory from the picked profile cfg. Falls back to `{root}/Songs`
+    when the cfg is absent or BeatmapDirectory is unset."""
+    root = Path(root)
+    cfg = _pick_osu_cfg(root)
+    if cfg:
+        bmd = _read_beatmap_directory(cfg)
+        if bmd:
+            p = Path(bmd)
+            if not p.is_absolute():
+                p = root / bmd
+            if p.is_dir():
+                return str(p)
+    default = root / 'Songs'
+    return str(default) if default.is_dir() else None
+
+
+def _osu_replays_for(root, songs_dir=None):
+    """Replay directories. osu! stores replays at `<root>/Data/r`; that's the
+    primary. We keep the traditional default locations as fallback so a stock
+    Wine/native install still gets picked up when nothing else is configured."""
     out = []
+    if root:
+        primary = Path(root) / 'Data' / 'r'
+        if primary.exists():
+            out.append(str(primary))
     if songs_dir:
         sibling = Path(songs_dir).parent / 'Data' / 'r'
-        if sibling.exists():
+        if sibling.exists() and str(sibling) not in out:
             out.append(str(sibling))
     home = Path.home()
     for base in [home / 'osu!' / 'Data' / 'r',
@@ -789,27 +870,42 @@ def _osu_replays_for(songs_dir):
 
 
 def find_osu_dirs():
-    """Returns dict with songs_dir, replays_dirs. User override wins over
-    autodetection; replay dirs are derived from the Songs dir's sibling and
-    merged with the usual default locations."""
-    override = _osu_songs_override()
+    """Returns dict with songs_dir, replays_dirs, root. User override wins
+    over autodetection; songs_dir is resolved from BeatmapDirectory in the
+    selected profile cfg."""
+    override = _osu_root_override()
     if override and Path(override).exists():
-        return {'songs_dir': str(override),
-                'replays_dirs': _osu_replays_for(override)}
+        songs = _resolve_songs_from_root(override)
+        return {'root': str(override),
+                'songs_dir': songs,
+                'replays_dirs': _osu_replays_for(override, songs)}
     home = Path.home()
-    candidates = [
-        home / 'osu!' / 'Songs',
-        home / 'Games' / 'osu!' / 'Songs',
-        home / '.local' / 'share' / 'osu-wine' / 'osu!' / 'Songs',
-        home / '.local' / 'share' / 'osu!' / 'Songs',
-        home / 'Documents' / 'osu!' / 'Songs',
-        home / '.wine' / 'drive_c' / 'users' / os.environ.get('USER', '') / 'AppData' / 'Local' / 'osu!' / 'Songs',
-        Path('/mnt/c/Users') / os.environ.get('USER', '') / 'AppData' / 'Local' / 'osu!' / 'Songs',
+    root_candidates = [
+        home / 'osu!',
+        home / 'Games' / 'osu!',
+        home / '.local' / 'share' / 'osu-wine' / 'osu!',
+        home / '.local' / 'share' / 'osu!',
+        home / 'Documents' / 'osu!',
+        home / '.wine' / 'drive_c' / 'users' / os.environ.get('USER', '') / 'AppData' / 'Local' / 'osu!',
+        Path('/mnt/c/Users') / os.environ.get('USER', '') / 'AppData' / 'Local' / 'osu!',
     ]
-    for c in candidates:
-        if c.exists():
-            return {'songs_dir': str(c), 'replays_dirs': _osu_replays_for(str(c))}
-    return {'songs_dir': None, 'replays_dirs': _osu_replays_for(None)}
+    for root in root_candidates:
+        if root.is_dir() and list_osu_profiles(root):
+            songs = _resolve_songs_from_root(root)
+            return {'root': str(root), 'songs_dir': songs,
+                    'replays_dirs': _osu_replays_for(str(root), songs)}
+    # Last resort: scan for a stock Songs/ dir without a cfg. Keeps the old
+    # autodetect behavior for users who only have songs.
+    songs_only = [
+        home / 'osu!' / 'Songs',
+        home / '.local' / 'share' / 'osu-wine' / 'osu!' / 'Songs',
+    ]
+    for c in songs_only:
+        if c.is_dir():
+            return {'root': str(c.parent), 'songs_dir': str(c),
+                    'replays_dirs': _osu_replays_for(str(c.parent), str(c))}
+    return {'root': None, 'songs_dir': None,
+            'replays_dirs': _osu_replays_for(None)}
 
 
 if __name__ == '__main__':

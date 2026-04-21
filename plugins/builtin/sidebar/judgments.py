@@ -46,6 +46,21 @@ def _draw_judgments(sctx):
     sctx.draw_text(f'miss             n={counts["miss"]}',
                    color=p.judge_colors['miss'])
 
+    # Mines: hit count is XML-only (.bin replay doesn't record which
+    # mines were triggered), total is chart-derived. We fold both into
+    # the same list so the player sees mines alongside the regular
+    # judgments instead of a separate section. "n=hit/total" mirrors
+    # the in-game results screen ("Mines 012/1337").
+    xml_j = getattr(p, 'xml_judgments', None) or {}
+    hit = xml_j.get('HitMine')
+    total_mines = len(p.replay.get('chart_mines') or [])
+    if hit is not None or total_mines:
+        if total_mines:
+            line = f'mines hit        n={int(hit or 0)}/{total_mines}'
+        else:
+            line = f'mines hit        n={int(hit or 0)}'
+        sctx.draw_text(line, color=p.judge_colors.get('miss', (220, 60, 60)))
+
 
 def register_sidebar(add):
     add('Judgments', _draw_judgments, priority=200, key='builtin:judgments')

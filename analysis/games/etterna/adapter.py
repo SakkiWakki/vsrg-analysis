@@ -47,10 +47,7 @@ class EtternaAdapter(GameAdapter):
         if not found:
             return None
         music = found['data'].get('music', '')
-        if not music:
-            return None
-        cand = Path(found['file']).parent / music
-        return str(cand) if cand.exists() else None
+        return self._resolve_music_asset(found['file'], music)
 
     def resolve_chart_timing(self, replay, entry=None, progress=None):
         found = self._find_chart(replay, entry=entry, progress=progress)
@@ -74,11 +71,122 @@ class EtternaAdapter(GameAdapter):
         audio = None
         music = found['data'].get('music', '')
         if music:
-            cand = Path(found['file']).parent / music
-            if cand.exists():
-                audio = str(cand)
+            audio = self._resolve_music_asset(found['file'], music)
         self._attach_chart_hold_ends(replay, found)
+        self._attach_chart_extras(replay, found)
         return bpms, offset, audio
+
+    @staticmethod
+    def _resolve_music_asset(chart_file, music):
+        """Resolve #MUSIC the way Etterna does, returning an OS path.
+
+        Etterna first applies Song::GetSongAssetPath. If that does not point
+        at a file, Song::TidyUpData scans the song folder and uses the first
+        sound file it finds.
+        """
+        resolved = EtternaAdapter._resolve_song_asset(chart_file, music)
+        if resolved:
+            return resolved
+        song_dir = Path(chart_file).parent
+        try:
+            files = sorted(
+                (p for p in song_dir.iterdir() if p.is_file()),
+                key=lambda p: p.name.casefold(),
+            )
+        except OSError:
+            return None
+        for p in files:
+            if p.suffix[1:].casefold() in {'mp3', 'oga', 'ogg', 'wav'}:
+                return str(p)
+        return None
+
+    @staticmethod
+    def _resolve_song_asset(chart_file, asset):
+        """Resolve a simfile asset path using Etterna's asset path rules.
+
+        Etterna's FilenameDB resolves paths case-insensitively and replaces
+        them with the real on-disk case before opening. We mirror that final
+        canonicalization so Python decoders receive a path that exists.
+        """
+        candidate = EtternaAdapter._song_asset_path(chart_file, asset)
+        if candidate is None:
+            return None
+        ci = EtternaAdapter._case_insensitive_existing_path(candidate)
+        return str(ci) if ci is not None else None
+
+    @staticmethod
+    def _song_asset_path(chart_file, asset):
+        if not asset:
+            return None
+        asset = str(asset).strip().replace('\\', '/')
+        if not asset:
+            return None
+        base = Path(chart_file).parent
+        rel_candidate = base / asset
+        if EtternaAdapter._case_insensitive_existing_path(rel_candidate) is not None:
+            return rel_candidate
+        if '/' not in asset:
+            return rel_candidate
+
+        root = EtternaAdapter._simfile_root_for_chart(chart_file)
+        if asset.startswith('../'):
+            candidate = rel_candidate
+        else:
+            # Etterna treats paths with slashes as relative to the top SM
+            # directory, not the song folder.
+            candidate = root / asset
+        try:
+            collapsed = candidate.resolve(strict=False)
+            collapsed.relative_to(root.resolve(strict=False))
+        except ValueError:
+            return None
+        return collapsed
+
+    @staticmethod
+    def _simfile_root_for_chart(chart_file):
+        chart = Path(chart_file).resolve(strict=False)
+        for parent in chart.parents:
+            if parent.name == 'Songs':
+                return parent.parent
+        # External AdditionalSongFolders do not expose Etterna's mount root
+        # here; the song folder's parent is the closest equivalent.
+        song_dir = Path(chart_file).parent
+        return song_dir.parent
+
+    @staticmethod
+    def _case_insensitive_existing_path(path):
+        path = Path(path)
+        if path.exists():
+            return path
+        if path.is_absolute():
+            cur = Path(path.anchor)
+            parts = path.parts[1:]
+        else:
+            cur = Path.cwd()
+            parts = path.parts
+        for part in parts:
+            if part in ('', '.'):
+                continue
+            if part == '..':
+                cur = cur.parent
+                continue
+            exact = cur / part
+            if exact.exists():
+                cur = exact
+                continue
+            if not cur.is_dir():
+                return None
+            try:
+                matches = [
+                    child for child in cur.iterdir()
+                    if child.name.casefold() == part.casefold()
+                ]
+            except OSError:
+                return None
+            if not matches:
+                return None
+            cur = sorted(matches, key=lambda p: p.name)[0]
+        return cur if cur.exists() else None
 
     @staticmethod
     def _attach_chart_hold_ends(replay, found):
@@ -113,6 +221,52 @@ class EtternaAdapter(GameAdapter):
                           else (head, col))
         replay['holds'] = merged
 
+    @staticmethod
+    def _attach_chart_extras(replay, found):
+        """Pull chart-only note types (mines, lifts, fakes, roll heads)
+        off the .sm/.ssc and stash them on the replay dict.
+
+        These notes never show up in the .bin replay stream: mines and
+        fakes aren't judged (PlayerReplay.cpp excludes them), lifts score
+        on key release but Etterna's replay writer doesn't emit a row
+        for them either, and roll heads are encoded as HoldHead (enum 2)
+        in the replay — indistinguishable from regular holds without the
+        chart. So the renderer gets them from here or not at all.
+
+        Writes:
+          ``chart_mines``  — list of (row, col)
+          ``chart_lifts``  — list of (row, col)
+          ``chart_fakes``  — list of (row, col)
+          ``roll_heads``   — set of (row, col); lets the LN renderer
+                             flip holds to roll-colored tails."""
+        from analysis.games.etterna.sm_chart import (parse_notes_block,
+                                                      NT_MINE, NT_LIFT,
+                                                      NT_FAKE, NT_ROLL_HEAD)
+        chart = (found or {}).get('chart') or {}
+        notedata = chart.get('notedata')
+        if not notedata:
+            return
+        if 'chart_mines' in replay:
+            return  # idempotent
+        try:
+            notes, _ = parse_notes_block(notedata)
+        except Exception:
+            return
+        mines, lifts, fakes, rolls = [], [], [], set()
+        for (row, col, nt) in notes:
+            if nt == NT_MINE:
+                mines.append((row, col))
+            elif nt == NT_LIFT:
+                lifts.append((row, col))
+            elif nt == NT_FAKE:
+                fakes.append((row, col))
+            elif nt == NT_ROLL_HEAD:
+                rolls.add((row, col))
+        replay['chart_mines'] = mines
+        replay['chart_lifts'] = lifts
+        replay['chart_fakes'] = fakes
+        replay['roll_heads'] = rolls
+
     def judgement_windows(self, replay, judge=None, **_):
         from analysis.games.etterna.judgment import windows_for
         return windows_for(judge or 'J4')
@@ -136,20 +290,41 @@ class EtternaAdapter(GameAdapter):
         import numpy as np
         from analysis.games.etterna.sm_chart import row_to_time
         from analysis.player.timing import infer_keycount
+
+        def _r2t(row):
+            if bpms is not None:
+                return row_to_time(int(row), bpms, sm_offset)
+            # 120bpm, 48 rows/beat => 96 rows/sec
+            return float(row) / 96.0
+
         if bpms is not None:
             times = np.array([row_to_time(int(r), bpms, sm_offset)
                               for r in replay['noterows']])
         else:
-            # 120bpm, 48 rows/beat => 96 rows/sec
             times = replay['noterows'].astype(np.float64) / 96.0
         hold_tails = {}
         for h in replay.get('holds', []):
             if len(h) == 3 and h[2] is not None:
-                if bpms is not None:
-                    hold_tails[(h[0], h[1])] = row_to_time(
-                        int(h[2]), bpms, sm_offset)
-                else:
-                    hold_tails[(h[0], h[1])] = h[2] / 96.0
+                hold_tails[(h[0], h[1])] = _r2t(h[2])
+
+        # Chart-derived mines/lifts/fakes — converted to time-space once
+        # here so the renderer can read prebuilt arrays instead of
+        # redoing row→time per frame. Absent when resolve_all never ran
+        # (e.g. the chart file couldn't be found); renderer tolerates
+        # missing keys.
+        for src_key, t_key, c_key in (
+                ('chart_mines', 'mine_times', 'mine_cols'),
+                ('chart_lifts', 'lift_times', 'lift_cols'),
+                ('chart_fakes', 'fake_times', 'fake_cols')):
+            src = replay.get(src_key)
+            if not src:
+                continue
+            ts = np.array([_r2t(r) for (r, _c) in src], dtype=np.float64)
+            cs = np.array([c for (_r, c) in src], dtype=np.int32)
+            order = np.argsort(ts, kind='stable')
+            replay[t_key] = ts[order]
+            replay[c_key] = cs[order]
+
         return times, hold_tails, infer_keycount(replay)
 
     def judge_label(self, replay, judge=None, **_):

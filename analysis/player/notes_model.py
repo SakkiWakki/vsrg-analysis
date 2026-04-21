@@ -62,6 +62,26 @@ class NotesModel:
         default_factory=lambda: np.empty(0, dtype=np.float64))
     ghost_hold_max_sv_dur: float = 0.0
 
+    # SM note streams. Mines, lifts, and fakes never
+    # appear in the .bin replay — the adapter pulls them off the
+    # matched .sm/.ssc and stashes time-converted arrays on the replay
+    # dict. Empty for osu!mania.
+    mine_times: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float64))
+    mine_cols: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.int32))
+    lift_times: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float64))
+    lift_cols: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.int32))
+    fake_times: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float64))
+    fake_cols: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.int32))
+    # (head_row, col) for rolls — same key shape as hold_tails. The
+    # renderer uses this to tint LN tails green for rolls.
+    roll_head_keys: set = field(default_factory=set)
+
 
 def build_notes_model(replay, times, hold_tails, game) -> NotesModel:
     """Populate a NotesModel from a parsed replay. Ghost taps/holds are
@@ -110,6 +130,21 @@ def build_notes_model(replay, times, hold_tails, game) -> NotesModel:
         # still get picked up.
         m.ghost_hold_max_dur = float(
             np.max(gh_rel - gh_press)) if gh_press.size else 0.0
+
+    # Etterna chart-only streams. The adapter populates replay['mine_times']
+    # etc. during prepare_replay_times when a chart match was found.
+    for t_key, c_key, dst_t, dst_c in (
+            ('mine_times', 'mine_cols', 'mine_times', 'mine_cols'),
+            ('lift_times', 'lift_cols', 'lift_times', 'lift_cols'),
+            ('fake_times', 'fake_cols', 'fake_times', 'fake_cols')):
+        ts = replay.get(t_key)
+        cs = replay.get(c_key)
+        if ts is not None and cs is not None:
+            setattr(m, dst_t, np.asarray(ts, dtype=np.float64))
+            setattr(m, dst_c, np.asarray(cs, dtype=np.int32))
+    roll_heads = replay.get('roll_heads')
+    if roll_heads:
+        m.roll_head_keys = set(roll_heads)
     return m
 
 

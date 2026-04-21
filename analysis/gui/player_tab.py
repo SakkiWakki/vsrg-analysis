@@ -16,7 +16,7 @@ class PlayerTab(QWidget):
     def __init__(self, replay, game='etterna', od=None, judge=None, bpms=None,
                  sm_offset=0.0, audio_path=None, scroll_ms=400.0,
                  scroll_mode=None, play_rate=1.0, cmod_bpm=600.0,
-                 osu_speed=20):
+                 osu_speed=20, xml_judgments=None):
         super().__init__()
         from analysis.player.player import Player
         from analysis.core import game as game_mod
@@ -33,6 +33,7 @@ class PlayerTab(QWidget):
                              cmod_bpm=cmod_bpm, osu_speed=osu_speed,
                              skin=prefs['skin'],
                              press_hide=prefs['press_hide'],
+                             xml_judgments=xml_judgments,
                              **player_kwargs)
         # Replay's original playback rate (Etterna "Rate" from XML, osu!
         # "ModRate"). The chart + offsets are in chart-time, but the audio
