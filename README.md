@@ -160,15 +160,17 @@ analysis/                         (Python package)
 ├── viz/                          plotting
 │   ├── plots.py                  matplotlib plotters, HTML report, plot_full_report(selection=…)
 │   ├── note_visualizer.py        scrollable chart renderer (used by Note Viewer plugin)
-│   └── plugins/                  drop-in plugin registry (see below)
+│   └── plugins/                  viz registry entry-point (delegates to analysis.plugins)
 ├── player/
 │   ├── player.py                 replay player state/model + standalone launcher
 │   ├── qt_renderer.py            native Qt/QPainter draw pipeline + plugin hook dispatch
 │   ├── render_context.py         per-frame context passed to player draw plugins
 │   ├── culling.py                visible-window selection for notes/holds
-│   ├── draw_plugins/             bundled player draw plugins
 │   ├── plugin_api.py             public Stage enum for player draw plugins
+│   ├── sidebar_api.py            sidebar-section API + SidebarContext helpers
+│   ├── theme.py                  UI design tokens (proxies the active theme)
 │   └── plugin_loader.py          plugin discovery, persistence, and dispatch
+├── plugins/                      bundle-discovery orchestration (see plugins/README.md)
 └── gui/
     ├── app.py                    PySide6 main app — library, tabs, embedded player, plot viewer
     ├── settings.py               QSettings wrapper + install-path overrides

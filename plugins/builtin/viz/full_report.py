@@ -1,28 +1,13 @@
 """The combined summary grid. Users can pick which plots to include."""
-from PySide6.QtCore import Qt, QEvent, QObject
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QCheckBox, QDialog, QDialogButtonBox,
                                QSizePolicy, QScrollArea)
 
-
-class _WheelToScroll(QObject):
-    """Forward wheel events from a child (e.g. a matplotlib canvas that would
-    otherwise eat them) to a QScrollArea's vertical scrollbar."""
-    def __init__(self, scroll_area):
-        super().__init__(scroll_area)
-        self.scroll_area = scroll_area
-
-    def eventFilter(self, obj, ev):
-        if ev.type() == QEvent.Wheel:
-            bar = self.scroll_area.verticalScrollBar()
-            # Prefer pixelDelta on touchpads; fall back to angleDelta/8.
-            px = ev.pixelDelta().y()
-            dy = px if px else int(ev.angleDelta().y() / 2)
-            bar.setValue(bar.value() - dy)
-            return True
-        return False
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavToolbar
+
+from analysis.gui.widgets import WheelToScroll as _WheelToScroll
 
 from analysis.viz.plots import (plot_full_report, FULL_REPORT_PLOTS,
                          FULL_REPORT_DEFAULT_SELECTION)

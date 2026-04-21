@@ -1,10 +1,27 @@
 """Small reusable Qt widgets: JumpSlider, MplTab, HtmlTab, _viz_toolbar."""
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QEvent, QObject
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QSizePolicy, QSlider, QStyle,
                                QStyleOptionSlider, QScrollArea)
+
+
+class WheelToScroll(QObject):
+    """Forward wheel events from a child (e.g. a matplotlib canvas that
+    would otherwise eat them) to a QScrollArea's vertical scrollbar."""
+    def __init__(self, scroll_area):
+        super().__init__(scroll_area)
+        self.scroll_area = scroll_area
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Wheel:
+            bar = self.scroll_area.verticalScrollBar()
+            px = ev.pixelDelta().y()
+            dy = px if px else int(ev.angleDelta().y() / 2)
+            bar.setValue(bar.value() - dy)
+            return True
+        return False
 
 import matplotlib
 matplotlib.use('QtAgg')
@@ -65,7 +82,7 @@ class MplTab(QWidget):
     Canvas sits inside a vertical-only QScrollArea so tall figures don't clip."""
     def __init__(self, fig, on_play=None):
         super().__init__()
-        from analysis.viz.plugins.full_report import _WheelToScroll
+        _WheelToScroll = WheelToScroll
         self.fig = fig
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)

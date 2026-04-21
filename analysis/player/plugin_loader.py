@@ -1,11 +1,14 @@
-"""Discovery and dispatch for replay-player draw plugins."""
+"""Discovery and dispatch for replay-player draw plugins.
+
+Draw plugins and sidebar sections are loaded from bundles (see
+``analysis.plugins`` for the bundle layout). A bundle's ``replay/`` folder
+contributes lane-space draw plugins; its ``sidebar/`` folder contributes
+HUD sections. Legacy single-file plugin paths are still honored for
+backwards compatibility.
+"""
 from __future__ import annotations
 
-import importlib
-import importlib.util
 import json
-import os
-import pkgutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +32,7 @@ class PluginManager:
         self._plugins: list[DrawPlugin] = []
         self._disabled_keys = self._load_disabled_keys()
         self.sidebar = SidebarSectionRegistry()
+        self.bundles = []
 
     def add(self, name, draw, stages=None, priority=100, enabled=True,
             module='', key=None):
@@ -91,74 +95,61 @@ class PluginManager:
         return False
 
     @classmethod
-    def discover(cls, extra_paths=None):
+    def discover(cls, extra_paths=None, active_theme_key=None):
+        from analysis.plugins import discover_bundles
+        from analysis.player import theme as theme_mod
         mgr = cls()
-        mgr._discover_builtin()
-        mgr._discover_paths(extra_paths)
+        mgr.bundles = discover_bundles(extra_paths)
+        for bundle in mgr.bundles:
+            for mod in bundle.replay_modules:
+                mgr._register_replay(mod, bundle)
+            for mod in bundle.sidebar_modules:
+                mgr._register_sidebar(mod, bundle)
+        # Activate the user-chosen theme if the owning bundle was found.
+        for bundle in mgr.bundles:
+            if bundle.theme_module and bundle.key == active_theme_key:
+                theme_mod.set_active(bundle.theme_module, bundle.key)
+                break
+        else:
+            theme_mod.set_active(None)
         return mgr
 
-    def _register_module(self, mod):
-        module_name = getattr(mod, '__player_plugin_source__',
-                              getattr(mod, '__name__', ''))
-        handled = False
+    def available_themes(self):
+        """Return [(bundle_key, bundle_name)] for bundles that ship a theme,
+        plus the built-in default entry."""
+        themes = [('builtin', 'Built-in')]
+        for bundle in self.bundles:
+            if bundle.theme_module and bundle.key != 'builtin':
+                themes.append((bundle.key, bundle.name))
+        return themes
 
-        if hasattr(mod, 'register'):
-            def add(name, draw, stages=None, priority=100, enabled=True,
-                    key=None):
-                self.add(name, draw, stages=stages, priority=priority,
-                         enabled=enabled, module=module_name, key=key)
+    def _register_replay(self, mod, bundle):
+        if not hasattr(mod, 'register'):
+            return
+        module_name = f'{bundle.key}/{getattr(mod, "__name__", "")}'
+
+        def add(name, draw, stages=None, priority=100, enabled=True,
+                key=None):
+            self.add(name, draw, stages=stages, priority=priority,
+                     enabled=enabled, module=module_name, key=key)
+        try:
             mod.register(add)
-            handled = True
+        except Exception as exc:
+            print(f'replay plugin register failed: {module_name}: {exc}')
 
-        if hasattr(mod, 'register_sidebar'):
-            def add_section(name, draw, *, priority=1000, key=None,
-                            pin_bottom=False):
-                self.sidebar.add(name, draw, priority=priority, key=key,
-                                 module=module_name, pin_bottom=pin_bottom)
+    def _register_sidebar(self, mod, bundle):
+        if not hasattr(mod, 'register_sidebar'):
+            return
+        module_name = f'{bundle.key}/{getattr(mod, "__name__", "")}'
+
+        def add_section(name, draw, *, priority=1000, key=None,
+                        pin_bottom=False):
+            self.sidebar.add(name, draw, priority=priority, key=key,
+                             module=module_name, pin_bottom=pin_bottom)
+        try:
             mod.register_sidebar(add_section)
-            handled = True
-
-        if not handled:
-            return
-
-    def _discover_builtin(self):
-        pkg_name = 'analysis.player.draw_plugins'
-        try:
-            pkg = importlib.import_module(pkg_name)
         except Exception as exc:
-            print(f'player plugin package unavailable: {exc}')
-            return
-        pkg_dir = Path(pkg.__file__).parent
-        for info in pkgutil.iter_modules([str(pkg_dir)]):
-            if info.name.startswith('_'):
-                continue
-            try:
-                mod = importlib.import_module(f'{pkg_name}.{info.name}')
-                self._register_module(mod)
-            except Exception as exc:
-                print(f'player plugin import failed: {info.name}: {exc}')
-
-    def _discover_paths(self, extra_paths=None):
-        for path in self._plugin_paths(extra_paths):
-            if not path.is_dir():
-                continue
-            for file_path in sorted(path.glob('*.py')):
-                if file_path.name.startswith('_'):
-                    continue
-                self._load_file(file_path)
-
-    def _load_file(self, file_path):
-        mod_name = f'_ea_player_plugin_{abs(hash(str(file_path.resolve())))}'
-        spec = importlib.util.spec_from_file_location(mod_name, file_path)
-        if spec is None or spec.loader is None:
-            return
-        mod = importlib.util.module_from_spec(spec)
-        try:
-            mod.__player_plugin_source__ = str(file_path.resolve())
-            spec.loader.exec_module(mod)
-            self._register_module(mod)
-        except Exception as exc:
-            print(f'player plugin import failed: {file_path}: {exc}')
+            print(f'sidebar plugin register failed: {module_name}: {exc}')
 
     @staticmethod
     def _state_path():
@@ -180,29 +171,3 @@ class PluginManager:
             path.write_text(json.dumps(data, indent=2) + '\n')
         except Exception as exc:
             print(f'player plugin state save failed: {exc}')
-
-    @staticmethod
-    def _plugin_paths(extra_paths=None):
-        paths = []
-        env = os.environ.get('ETTERNA_ANALYSIS_PLAYER_PLUGINS', '')
-        for raw in env.split(os.pathsep):
-            if raw.strip():
-                paths.append(Path(raw).expanduser())
-        if extra_paths:
-            paths.extend(Path(p).expanduser() for p in extra_paths)
-        cwd = Path.cwd()
-        repo_root = Path(__file__).resolve().parents[2]
-        paths.extend([
-            cwd / 'draw_extensions',
-            cwd / 'player_plugins',
-            repo_root / 'draw_extensions',
-            repo_root / 'player_plugins',
-            Path.home() / '.config' / 'vsrg-analysis' / 'player_plugins',
-        ])
-        seen = set()
-        for p in paths:
-            rp = str(p)
-            if rp in seen:
-                continue
-            seen.add(rp)
-            yield p

@@ -1,14 +1,13 @@
-"""Visualization plugin registry. Drop a .py file in this folder with a
-top-level `register(add)` function that calls `add(name, builder)` for each
-visualization you want to expose. `builder(replay, game, **kw)` must return a
-matplotlib Figure (for static plots) or a QWidget (for interactive ones).
+"""Visualization registry. Modules that expose a top-level
+``register(add)`` function in a bundle's ``viz/`` folder are discovered
+through ``analysis.plugins.discover_bundles``.
 
-Everything discovered here shows up in the GUI's "Visualize" menu and works
-for any number of keys — builders should derive keycount from the replay.
+``builder(replay, game, **kw)`` must return a matplotlib Figure (static) or
+a QWidget (interactive). Everything discovered here shows up in the GUI's
+"Visualize" menu and works for any number of keys — builders should derive
+keycount from the replay.
 """
-import importlib
-import pkgutil
-from pathlib import Path
+from __future__ import annotations
 
 
 _REGISTRY = []  # [(name, builder, category)]
@@ -19,15 +18,17 @@ def add(name, builder, category='chart'):
 
 
 def discover():
-    """Import every sibling module; modules with a `register(add)` add themselves."""
+    """Import viz modules from every discovered bundle."""
+    from analysis.plugins import discover_bundles
     _REGISTRY.clear()
-    pkg_dir = Path(__file__).parent
-    for info in pkgutil.iter_modules([str(pkg_dir)]):
-        if info.name.startswith('_'):
-            continue
-        mod = importlib.import_module(f'{__name__}.{info.name}')
-        if hasattr(mod, 'register'):
-            mod.register(add)
+    for bundle in discover_bundles():
+        for mod in bundle.viz_modules:
+            if hasattr(mod, 'register'):
+                try:
+                    mod.register(add)
+                except Exception as exc:
+                    src = getattr(mod, '__name__', '?')
+                    print(f'viz plugin register failed: {bundle.key}/{src}: {exc}')
     return list(_REGISTRY)
 
 
