@@ -26,14 +26,3 @@ class Worker(QThread):
 
 def load_replay(path, game, chart_path=None):
     return game_mod.get(game).parse_replay(path, chart_path=chart_path)
-
-
-def resolve_etterna_chart(rep, chartkey=None, progress=None):
-    """Return (bpms, offset, audio_path) for an etterna replay."""
-    entry = {'chart_key': chartkey} if chartkey else None
-    return game_mod.get('etterna').resolve_all(
-        rep, entry=entry, progress=progress)
-
-
-def resolve_osu_audio(rep):
-    return game_mod.get('osu').resolve_audio(rep)

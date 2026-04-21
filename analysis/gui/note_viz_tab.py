@@ -16,25 +16,16 @@ class NoteVizTab(QWidget):
     def __init__(self, replay, game='etterna', od=None, judge=None, on_play=None):
         super().__init__()
         from matplotlib.figure import Figure
-        from analysis.viz.note_visualizer import (render_chart, etterna_windows,
-                                      osu_mania_windows, _judgment_counts,
-                                      _legend_axes, effective_osu_od)
+        from analysis.viz.note_visualizer import (render_chart, _judgment_counts,
+                                      _legend_axes)
+        from analysis.core import gui_adapter as gui_mod
         self.replay = replay
         self.game = game
-        if game == 'osu':
-            base_od = od if od is not None else float(replay.get('od', 8.0))
-            mods = int(replay.get('mods', 0))
-            eff_od = effective_osu_od(base_od, mods)
-            self.windows = osu_mania_windows(od=eff_od)
-            self.unit_label = f'time (ms)  —  OD {eff_od:.1f}'
-            self.rpm = None
-            self.win = 8000
-        else:
-            j = judge or 'J4'
-            self.windows = etterna_windows(j)
-            self.unit_label = f'noterow  —  {j}'
-            self.rpm = 0.37
-            self.win = 2400
+        cfg = gui_mod.get(game).note_viz_config(replay, judge=judge, od=od)
+        self.windows = cfg['windows']
+        self.unit_label = cfg['unit_label']
+        self.rpm = cfg['rows_per_ms']
+        self.win = cfg['win']
         self._render_chart = render_chart
 
         fig = Figure(figsize=(10, 10))

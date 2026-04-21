@@ -237,13 +237,20 @@ def qapp():
     yield app
 
 
+def _row_for(dlg, game):
+    for row in dlg.rows:
+        if row.adapter.name == game:
+            return row
+    raise AssertionError(f'no row for {game}')
+
+
 def test_paths_dialog_saves_on_accept(qapp, tmp_path):
     ett_install = _make_etterna_install(tmp_path / 'ett')
     osu_install = _make_osu_install(tmp_path / 'osu')
     from analysis.gui.paths_dialog import PathsDialog
     dlg = PathsDialog()
-    dlg.ett_edit.setText(str(ett_install))
-    dlg.osu_edit.setText(str(osu_install))
+    _row_for(dlg, 'etterna').edit.setText(str(ett_install))
+    _row_for(dlg, 'osu').edit.setText(str(osu_install))
     dlg._accept()
     assert S.get_etterna_root_override() == str(ett_install)
     assert S.get_osu_root_override() == str(osu_install)
@@ -254,35 +261,41 @@ def test_paths_dialog_blank_clears(qapp, tmp_path):
     S.set_osu_root_override(str(tmp_path))
     from analysis.gui.paths_dialog import PathsDialog
     dlg = PathsDialog()
-    dlg.ett_edit.setText('')
-    dlg.osu_edit.setText('')
+    _row_for(dlg, 'etterna').edit.setText('')
+    _row_for(dlg, 'osu').edit.setText('')
     dlg._accept()
     assert S.get_etterna_root_override() is None
     assert S.get_osu_root_override() is None
-
-
-def test_paths_dialog_prefills_from_autodetect(qapp, tmp_path):
-    install = _make_etterna_install(tmp_path)
-    from analysis.gui.paths_dialog import PathsDialog
-    dlg = PathsDialog(autodetect_etterna=str(install), autodetect_osu='/foo/bar')
-    assert dlg.ett_edit.text() == str(install)
-    assert dlg.osu_edit.text() == '/foo/bar'
 
 
 def test_paths_dialog_prefers_saved_over_autodetect(qapp, tmp_path):
     install = _make_etterna_install(tmp_path)
     S.set_etterna_root_override(str(install))
     from analysis.gui.paths_dialog import PathsDialog
-    dlg = PathsDialog(autodetect_etterna='/somewhere/else')
-    assert dlg.ett_edit.text() == str(install)
+    dlg = PathsDialog()
+    assert _row_for(dlg, 'etterna').edit.text() == str(install)
+
+
+def test_paths_dialog_prefills_from_autodetect(qapp, tmp_path, monkeypatch):
+    install = _make_etterna_install(tmp_path)
+    from analysis.core import gui_adapter as gui_mod
+    monkeypatch.setattr(gui_mod.get('etterna'), 'default_install_hint',
+                        lambda: str(install))
+    monkeypatch.setattr(gui_mod.get('osu'), 'default_install_hint',
+                        lambda: '/foo/bar')
+    from analysis.gui.paths_dialog import PathsDialog
+    dlg = PathsDialog()
+    assert _row_for(dlg, 'etterna').edit.text() == str(install)
+    assert _row_for(dlg, 'osu').edit.text() == '/foo/bar'
 
 
 def test_paths_dialog_profile_picker_hidden_with_single_cfg(qapp, tmp_path):
     install = _make_osu_install(tmp_path)
     from analysis.gui.paths_dialog import PathsDialog
     dlg = PathsDialog()
-    dlg.osu_edit.setText(str(install))
-    assert dlg.osu_profile_combo.isVisible() is False
+    row = _row_for(dlg, 'osu')
+    row.edit.setText(str(install))
+    assert row.profile_combo.isVisible() is False
 
 
 def test_paths_dialog_profile_picker_shown_with_multiple_cfg(qapp, tmp_path):
@@ -292,9 +305,10 @@ def test_paths_dialog_profile_picker_shown_with_multiple_cfg(qapp, tmp_path):
     dlg = PathsDialog()
     # Dialog needs to be shown (or at least laid out) for visibility flags to
     # register under Qt's headless test backend — use a direct state check.
-    dlg.osu_edit.setText(str(install))
+    row = _row_for(dlg, 'osu')
+    row.edit.setText(str(install))
     # After refresh, combo holds both entries.
-    assert dlg.osu_profile_combo.count() == 2
+    assert row.profile_combo.count() == 2
 
 
 # ---- prompt_if_first_run ---------------------------------------------------

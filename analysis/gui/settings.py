@@ -145,44 +145,18 @@ def mark_first_run_done():
     get_settings().setValue(FIRST_RUN_KEY, True)
 
 
+# Validators live on the per-game GuiAdapter; these are thin wrappers so
+# pre-existing callers / tests keep working.
 def validate_etterna_root(path):
-    """A valid Etterna install root contains a Save/ directory that itself
-    looks like an Etterna save (LocalProfiles/ or Etterna.xml). We accept a
-    bare Save dir too — users who point at Save directly still work."""
-    if not path:
-        return False
-    p = Path(path)
-    if not p.is_dir():
-        return False
-    # Install root: Save/ exists and looks right.
-    save = p / 'Save'
-    if save.is_dir() and ((save / 'LocalProfiles').is_dir()
-                          or (save / 'Etterna.xml').is_file()):
-        return True
-    # Direct Save path: accept for back-compat.
-    return (p / 'LocalProfiles').is_dir() or (p / 'Etterna.xml').is_file()
+    from analysis.core import gui_adapter as gui_mod
+    return gui_mod.get('etterna').validate_root(path)
 
 
 def validate_osu_root(path):
-    """A valid osu! install root contains at least one osu!.<user>.cfg file.
-    We don't require Songs/ to exist because BeatmapDirectory can point
-    elsewhere."""
-    if not path:
-        return False
-    p = Path(path)
-    if not p.is_dir():
-        return False
-    try:
-        for entry in p.iterdir():
-            n = entry.name.lower()
-            if n.startswith('osu!.') and n.endswith('.cfg'):
-                return True
-    except OSError:
-        return False
-    return False
+    from analysis.core import gui_adapter as gui_mod
+    return gui_mod.get('osu').validate_root(path)
 
 
-# Back-compat shims for validators — same semantics as above.
 validate_etterna_save = validate_etterna_root
 validate_osu_songs = validate_osu_root
 

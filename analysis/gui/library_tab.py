@@ -12,10 +12,9 @@ from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                                QMessageBox, QFileDialog, QHeaderView, QMenu,
                                QProgressDialog, QToolButton)
 
-from analysis.games.etterna.replay import find_etterna_dirs
+from analysis.core import gui_adapter as gui_mod
 from analysis.gui.settings import get_settings, load_player_settings
-from analysis.gui.loaders import (Worker, resolve_etterna_chart,
-                                  resolve_osu_audio)
+from analysis.gui.loaders import Worker
 from analysis.gui.replay_cache import ReplayCache
 from analysis.gui.widgets import MplTab, HtmlTab, _viz_toolbar
 from analysis.gui.player_tab import PlayerTab
@@ -38,7 +37,6 @@ class LibraryTab(QWidget):
         to the host QTabWidget."""
         super().__init__()
         self._add_tab = add_tab
-        self.dirs = find_etterna_dirs()
         self.library = []
         self._replay_cache = ReplayCache(max_size=16)
         self._scan_worker = None
@@ -227,17 +225,10 @@ class LibraryTab(QWidget):
     # ---------- paths dialog ----------
     def _open_paths_dialog(self):
         from analysis.gui.paths_dialog import PathsDialog
-        # Pass the *currently resolved* paths as autodetect hints so the
-        # dialog pre-fills even if the user hasn't set overrides yet.
-        from analysis.games.etterna.replay import find_etterna_dirs
-        from analysis.games.osu.replay import find_osu_dirs
-        dlg = PathsDialog(self, autodetect_etterna=find_etterna_dirs().get('save_dir'),
-                          autodetect_osu=find_osu_dirs().get('songs_dir'))
+        dlg = PathsDialog(self)
         if dlg.exec():
-            # Re-resolve Etterna dirs (used for e.g. replay file lookup) and
-            # re-scan. Using refresh=True so the cache is rebuilt against the
-            # new library root.
-            self.dirs = find_etterna_dirs()
+            # Rescan against the new library root. Using refresh=True so the
+            # cache is rebuilt against the updated paths.
             self._load_library(refresh=True)
 
     # ---------- library scan ----------
@@ -253,7 +244,8 @@ class LibraryTab(QWidget):
 
         def job(progress):
             lib = build_library(refresh=refresh, enrich_osu=enrich, progress=progress)
-            if not enrich and any(e['game'] == 'osu' and not e.get('keycount') for e in lib):
+            if not enrich and any(gui_mod.get(e['game']).needs_enrichment(e)
+                                  for e in lib):
                 progress('auto-enriching osu charts…')
                 enrich_osu_with_charts(lib, progress=progress)
                 import pickle
@@ -273,9 +265,11 @@ class LibraryTab(QWidget):
 
     def _on_library_loaded(self, lib):
         self.library = lib
-        n_e = sum(1 for e in lib if e['game'] == 'etterna')
-        n_o = sum(1 for e in lib if e['game'] == 'osu')
-        self.status_lbl.setText(f'{len(lib)} entries ({n_e} Etterna, {n_o} osu!mania)')
+        from collections import Counter
+        counts = Counter(e['game'] for e in lib)
+        parts = [f'{counts.get(name, 0)} {adapter.label.split()[0]}'
+                 for name, adapter in gui_mod.all_games().items()]
+        self.status_lbl.setText(f'{len(lib)} entries ({", ".join(parts)})')
         self._refresh_tree()
 
     # ---------- context menu ----------
@@ -411,27 +405,14 @@ class LibraryTab(QWidget):
 
     # ---------- library-level mutations (main thread only) ----------
     def _maybe_backfill_entry(self, entry, rep):
-        if entry.get('game') != 'osu':
-            return
-        if not rep.get('chart_path'):
-            return
-        needs = (not entry.get('keycount')
-                 or not entry.get('chart_path')
-                 or (entry.get('song') or '').startswith('['))
-        if not needs:
-            return
-        try:
-            from analysis.games.osu.replay import parse_osu_file
-            chart = parse_osu_file(rep['chart_path'])
-        except Exception:
-            return
-        entry['song'] = f"{chart.get('artist','?')} - {chart.get('title','?')}"
-        entry['steps'] = chart.get('version', '')
-        entry['pack'] = chart.get('creator', entry.get('pack', ''))
-        entry['keycount'] = chart.get('keycount')
-        entry['chart_path'] = rep['chart_path']
-        self._persist_library()
-        self._refresh_tree()
+        # Propagate chart_path from the parsed replay so the adapter has
+        # something to read from; the adapter itself decides whether any
+        # field needs filling in.
+        if rep.get('chart_path') and not entry.get('chart_path'):
+            entry['chart_path'] = rep['chart_path']
+        if gui_mod.get(entry['game']).enrich_entry(entry):
+            self._persist_library()
+            self._refresh_tree()
 
     def _persist_library(self):
         try:
@@ -467,14 +448,10 @@ class LibraryTab(QWidget):
         def job(progress):
             progress('parsing replay…')
             r = rep if rep is not None else self._replay_cache.get(entry)
-            if entry['game'] == 'etterna':
-                progress('finding chart in Songs…')
-                bpms, sm_off, audio = resolve_etterna_chart(
-                    r, chartkey=entry.get('chart_key'), progress=progress)
-                return ('etterna', r, bpms, sm_off, audio)
-            progress('resolving audio…')
-            audio = resolve_osu_audio(r)
-            return ('osu', r, None, 0.0, audio)
+            progress('resolving chart/audio…')
+            bpms, sm_off, audio = gui_mod.get(entry['game']).resolve_chart_context(
+                r, entry=entry, progress=progress)
+            return (r, bpms, sm_off, audio)
 
         worker = Worker(job)
         self._viz_workers.append(worker)
@@ -487,7 +464,7 @@ class LibraryTab(QWidget):
             dlg.deleteLater()
 
         def on_done(payload):
-            kind, r, bpms, sm_off, audio = payload
+            r, bpms, sm_off, audio = payload
             self._maybe_backfill_entry(entry, r)
             # Etterna stores the score's music rate in Etterna.xml; osu! stores
             # rate-like mods on the replay itself (handled in osu_replay.py).
@@ -495,7 +472,7 @@ class LibraryTab(QWidget):
             # the replay was actually played at — otherwise the audio plays at
             # 1.0x against a chart that was originally at e.g. 1.15x.
             rate = float(entry.get('rate') or 1.0)
-            if kind == 'osu':
+            if entry['game'] == 'osu':
                 tab = PlayerTab(r, game='osu', audio_path=audio,
                                 scroll_ms=default_ms, scroll_mode=scroll_mode,
                                 play_rate=rate)
