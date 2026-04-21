@@ -395,20 +395,71 @@ class QtPlayerRenderer:
         top = self.plugins.sidebar.top_sections()
         bottom = self.plugins.sidebar.bottom_sections()
 
-        top_ctx = SidebarContext(ctx, painter, self, sidebar_x,
-                                 theme.SIDEBAR_WIDTH, theme.SIDEBAR_TOP)
+        # Measure bottom first — top viewport ends where bottom starts, so
+        # we need bottom's total height to figure out the top viewport's
+        # max y and thus the clamp for the top scroll offset.
+        bottom_h = 0
+        if bottom:
+            measure_bot = SidebarContext(ctx, painter, self, sidebar_x,
+                                         theme.SIDEBAR_WIDTH, 0,
+                                         measure_only=True)
+            self._run_sections(bottom, measure_bot)
+            bottom_h = measure_bot.y
+
+        bottom_start_y = (p.H - bottom_h - theme.SIDEBAR_BOTTOM_MARGIN
+                          if bottom_h else p.H)
+        top_viewport_bottom = max(theme.SIDEBAR_TOP, bottom_start_y)
+        top_viewport_h = max(0, top_viewport_bottom - theme.SIDEBAR_TOP)
+
+        # Measure top sections to know whether they need scrolling.
+        measure_top = SidebarContext(ctx, painter, self, sidebar_x,
+                                     theme.SIDEBAR_WIDTH, theme.SIDEBAR_TOP,
+                                     measure_only=True)
+        self._run_sections(top, measure_top)
+        top_content_h = max(0, measure_top.y - theme.SIDEBAR_TOP)
+
+        # Clamp the player-owned scroll offset to the legal range so the
+        # Qt wheel handler can write to it freely without knowing the
+        # layout. Max scroll is "content_h - viewport_h" (zero when the
+        # content already fits).
+        overflow = max(0, top_content_h - top_viewport_h)
+        p.sidebar_scroll_max = overflow
+        if p.sidebar_scroll < 0:
+            p.sidebar_scroll = 0
+        elif p.sidebar_scroll > overflow:
+            p.sidebar_scroll = overflow
+        scroll = p.sidebar_scroll
+
+        # Clip the top region so scrolled-off content can't draw over the
+        # pinned-bottom area or bleed above the top margin. Hitboxes
+        # registered outside the clip still get recorded, but the wheel
+        # handler ignores clicks outside the sidebar anyway.
+        painter.save()
+        painter.setClipRect(QRectF(sidebar_x, theme.SIDEBAR_TOP,
+                                   theme.SIDEBAR_WIDTH, top_viewport_h))
+        top_ctx = SidebarContext(
+            ctx, painter, self, sidebar_x,
+            theme.SIDEBAR_WIDTH, theme.SIDEBAR_TOP - scroll,
+            hitbox_clip=(theme.SIDEBAR_TOP, top_viewport_bottom))
         self._run_sections(top, top_ctx)
+        painter.restore()
 
         if bottom:
-            measure = SidebarContext(ctx, painter, self, sidebar_x,
-                                     theme.SIDEBAR_WIDTH, 0,
-                                     measure_only=True)
-            self._run_sections(bottom, measure)
-            start_y = max(theme.SIDEBAR_TOP,
-                          p.H - measure.y - theme.SIDEBAR_BOTTOM_MARGIN)
             real = SidebarContext(ctx, painter, self, sidebar_x,
-                                  theme.SIDEBAR_WIDTH, start_y)
+                                  theme.SIDEBAR_WIDTH, bottom_start_y)
             self._run_sections(bottom, real)
+
+        # Scroll indicator: thin vertical bar on the sidebar's left edge
+        # when content overflows. Skipped when everything fits so it
+        # doesn't add visual noise.
+        if overflow > 0 and top_viewport_h > 0:
+            thumb_h = max(20, int(top_viewport_h * top_viewport_h
+                                  / max(1, top_content_h)))
+            max_thumb_y = top_viewport_h - thumb_h
+            thumb_y = (theme.SIDEBAR_TOP
+                       + int(max_thumb_y * scroll / max(1, overflow)))
+            _rect(painter, (120, 120, 120),
+                  (sidebar_x + 1, thumb_y, 3, thumb_h))
 
         ctx.plugin_data['hud_y'] = top_ctx.y
         ctx.plugin_data['sidebar_x'] = sidebar_x

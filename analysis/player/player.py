@@ -314,6 +314,13 @@ class Player:
         self.plugins = PluginManager.discover()
         self.plugin_panel_open = False
         self._hud_hitboxes = []
+        # Vertical scroll offset (px) applied to the top-pinned sidebar
+        # region when its content is taller than the viewport. Bottom-
+        # pinned sections ignore this and stay anchored. Clamped each
+        # frame in the renderer; the surrounding Qt tab writes to it on
+        # mouse-wheel events that land over the sidebar.
+        self.sidebar_scroll = 0
+        self.sidebar_scroll_max = 0
         # Subscribers notified when scroll mode / speed changes via HUD
         # hitboxes — used by the surrounding Qt tab to persist settings and
         # refresh Qt widget state (SV button, scroll-edit placeholder).

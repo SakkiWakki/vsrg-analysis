@@ -77,6 +77,7 @@ class LibraryTab(QWidget):
         for label, cb in [('Scan library', self._load_library),
                           ('Refresh cache', lambda: self._load_library(refresh=True)),
                           ('Enrich osu titles', lambda: self._load_library(refresh=True, enrich=True)),
+                          ('Plugins…', self._open_plugins_dialog),
                           ('Paths…', self._open_paths_dialog)]:
             b = QPushButton(label); b.clicked.connect(cb); row1.addWidget(b)
         v.addLayout(row1)
@@ -167,6 +168,11 @@ class LibraryTab(QWidget):
         if saved_viz and self.viz_cb.findText(saved_viz) >= 0:
             self.viz_cb.setCurrentText(saved_viz)
         self.default_scroll_edit.setText(s.value('library/default_scroll_ms', '400'))
+
+    # ---------- plugins dialog ----------
+    def _open_plugins_dialog(self):
+        from analysis.gui.plugins_dialog import PluginsDialog
+        PluginsDialog(self).exec()
 
     # ---------- paths dialog ----------
     def _open_paths_dialog(self):

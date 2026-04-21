@@ -43,6 +43,7 @@ class SidebarSection:
     priority: int = 1000
     module: str = ''
     pin_bottom: bool = False
+    enabled: bool = True
 
 
 class SidebarContext:
@@ -58,7 +59,7 @@ class SidebarContext:
     """
 
     def __init__(self, render_ctx, painter, renderer, sidebar_x, sidebar_w,
-                 y, *, measure_only=False):
+                 y, *, measure_only=False, hitbox_clip=None):
         self.render_ctx = render_ctx
         self.painter = painter
         self.renderer = renderer
@@ -66,6 +67,10 @@ class SidebarContext:
         self.sidebar_w = int(sidebar_w)
         self.y = int(y)
         self.measure_only = bool(measure_only)
+        # (y_min, y_max) in screen coords: hitboxes fully outside this
+        # band are dropped so scrolled-off rows don't catch clicks. None
+        # disables the clip (default, for pinned-bottom sections etc.).
+        self.hitbox_clip = hitbox_clip
 
     # ── Geometry ─────────────────────────────────────────────────────────
     @property
@@ -120,6 +125,11 @@ class SidebarContext:
     def add_hitbox(self, rect, action, payload=None):
         if self.measure_only:
             return
+        if self.hitbox_clip is not None:
+            rx, ry, rw, rh = rect
+            ymin, ymax = self.hitbox_clip
+            if ry + rh <= ymin or ry >= ymax:
+                return
         self.player._hud_hitboxes.append((tuple(rect), action, payload))
 
     # ── Cursor-advancing rows ────────────────────────────────────────────
@@ -187,10 +197,15 @@ class SidebarContext:
 
 
 class SidebarSectionRegistry:
-    """Holds registered sidebar sections and yields them in draw order."""
+    """Holds registered sidebar sections and yields them in draw order.
+    Tracks which sections the user has disabled; disabled sections are
+    excluded from ``top_sections`` / ``bottom_sections`` (the draw loop
+    sources), so the HUD skips them. Persistence state lives alongside
+    the replay plugins' disabled-keys JSON."""
 
     def __init__(self):
         self._sections: list[SidebarSection] = []
+        self._disabled_keys: set[str] = self._load_disabled_keys()
 
     def add(self, name, draw, *, priority=1000, key=None, module='',
             pin_bottom=False):
@@ -202,14 +217,64 @@ class SidebarSectionRegistry:
             priority=int(priority),
             module=str(module),
             pin_bottom=bool(pin_bottom),
+            enabled=key not in self._disabled_keys,
         ))
         self._sections.sort(key=lambda s: (s.priority, s.name))
 
     def top_sections(self):
-        return [s for s in self._sections if not s.pin_bottom]
+        return [s for s in self._sections
+                if s.enabled and not s.pin_bottom]
 
     def bottom_sections(self):
-        return [s for s in self._sections if s.pin_bottom]
+        return [s for s in self._sections
+                if s.enabled and s.pin_bottom]
 
     def all_sections(self):
         return list(self._sections)
+
+    def set_enabled(self, key, enabled, persist=True):
+        key = str(key)
+        changed = False
+        for s in self._sections:
+            if s.key == key:
+                s.enabled = bool(enabled)
+                changed = True
+        if not changed:
+            return False
+        if persist:
+            if enabled:
+                self._disabled_keys.discard(key)
+            else:
+                self._disabled_keys.add(key)
+            self._save_disabled_keys()
+        return True
+
+    def toggle_enabled(self, key):
+        for s in self._sections:
+            if s.key == key:
+                return self.set_enabled(key, not s.enabled)
+        return False
+
+    @staticmethod
+    def _state_path():
+        from pathlib import Path
+        return (Path.home() / '.config' / 'vsrg-analysis'
+                / 'sidebar_sections.json')
+
+    def _load_disabled_keys(self):
+        import json
+        try:
+            data = json.loads(self._state_path().read_text())
+        except Exception:
+            return set()
+        return set(str(k) for k in data.get('disabled', []))
+
+    def _save_disabled_keys(self):
+        import json
+        path = self._state_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            data = {'disabled': sorted(self._disabled_keys)}
+            path.write_text(json.dumps(data, indent=2) + '\n')
+        except Exception as exc:
+            print(f'sidebar section state save failed: {exc}')

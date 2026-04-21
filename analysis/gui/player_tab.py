@@ -335,6 +335,21 @@ class PlayerTab(QWidget):
                 if k in (Qt.Key_Q, Qt.Key_Escape):
                     self.window().close(); return True
             elif t == ev.Type.Wheel:
+                # Route wheel events over the sidebar to sidebar-scroll
+                # instead of seeking — otherwise scrolling through an
+                # overflowing plugin panel would also scrub the replay.
+                pos = ev.position() if hasattr(ev, 'position') else ev.pos()
+                from analysis.player import theme
+                sidebar_x = self.player.W - theme.SIDEBAR_WIDTH
+                if pos.x() >= sidebar_x:
+                    # One wheel notch = 120 angleDelta; scroll ~40 px per
+                    # notch, enough to move a row or two at a time.
+                    dy = ev.angleDelta().y()
+                    self.player.sidebar_scroll = max(
+                        0,
+                        min(self.player.sidebar_scroll_max,
+                            self.player.sidebar_scroll - dy // 3))
+                    return True
                 step = ev.angleDelta().y() / 120.0 * 0.5
                 if ev.modifiers() & Qt.ShiftModifier:
                     step *= 10
