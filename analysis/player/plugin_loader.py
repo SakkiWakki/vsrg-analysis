@@ -8,12 +8,10 @@ backwards compatibility.
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
-from pathlib import Path
 
 from analysis.player.plugin_api import Stage, normalize_stage
-from analysis.player.sidebar_api import SidebarSectionRegistry
+from analysis.player.sidebar_api import SidebarSectionRegistry, _escape_key
 
 
 @dataclass
@@ -28,11 +26,26 @@ class DrawPlugin:
 
 
 class PluginManager:
-    def __init__(self):
+    """Owns replay-draw plugins + the sidebar registry for one window.
+
+    Enabled/disabled state (and future plugin-owned settings) lives in
+    the process-wide :class:`analysis.config.ConfigStore`; this manager
+    subscribes to ``plugins`` so toggles from another window's Plugins
+    dialog propagate to the renderer without restart."""
+
+    def __init__(self, config=None):
+        from analysis.config import get_config
+        self._config = config if config is not None else get_config()
         self._plugins: list[DrawPlugin] = []
-        self._disabled_keys = self._load_disabled_keys()
-        self.sidebar = SidebarSectionRegistry()
+        self.sidebar = SidebarSectionRegistry(config=self._config)
         self.bundles = []
+        self._config_sub = self._config.subscribe(
+            'plugins', self._on_config_change)
+        # Runtime failures (an exception inside a draw callable) force
+        # the plugin off regardless of config — these keys stay off
+        # even if the user flips the dialog checkbox back on. Cleared
+        # on rediscovery.
+        self._runtime_disabled: set[str] = set()
 
     def add(self, name, draw, stages=None, priority=100, enabled=True,
             module='', key=None):
@@ -48,7 +61,7 @@ class PluginManager:
             stages=tuple(normalize_stage(s) for s in stages),
             priority=int(priority),
             module=str(module),
-            enabled=bool(enabled) and key not in self._disabled_keys,
+            enabled=bool(enabled) and not self._is_disabled(key),
         )
         self._plugins.append(spec)
         self._plugins.sort(key=lambda p: (p.priority, p.name))
@@ -62,6 +75,7 @@ class PluginManager:
                 plugin.draw(ctx, stage)
             except Exception as exc:
                 plugin.enabled = False
+                self._runtime_disabled.add(plugin.key)
                 src = f' ({plugin.module})' if plugin.module else ''
                 print(f'player plugin disabled: {plugin.name}{src}: {exc}')
 
@@ -71,21 +85,28 @@ class PluginManager:
     def enabled_count(self):
         return sum(1 for p in self._plugins if p.enabled)
 
-    def set_enabled(self, key, enabled, persist=True):
+    def set_enabled(self, key, enabled):
+        """Flip a plugin on/off through the config store. Returns True
+        if the key matches a known plugin."""
         key = str(key)
-        changed = False
-        for plugin in self._plugins:
-            if plugin.key == key:
-                plugin.enabled = bool(enabled)
-                changed = True
-        if not changed:
+        if not any(p.key == key for p in self._plugins):
             return False
-        if persist:
-            if enabled:
-                self._disabled_keys.discard(key)
-            else:
-                self._disabled_keys.add(key)
-            self._save_disabled_keys()
+        cleared_latch = False
+        if enabled and key in self._runtime_disabled:
+            # User explicitly re-enabled — forget the runtime-failure
+            # latch so the plugin gets another chance.
+            self._runtime_disabled.discard(key)
+            cleared_latch = True
+        changed = self._config.set(
+            f'plugins.{_escape_key(key)}.replay_disabled',
+            not bool(enabled))
+        if not changed and cleared_latch:
+            # Config value already matched the target; the fanout
+            # handler wouldn't fire, but we still need to honor the
+            # latch clear on this manager's plugins.
+            for p in self._plugins:
+                if p.key == key:
+                    p.enabled = bool(enabled)
         return True
 
     def toggle_enabled(self, key):
@@ -94,11 +115,42 @@ class PluginManager:
                 return self.set_enabled(key, not plugin.enabled)
         return False
 
+    def close(self):
+        """Drop the config subscription + close the sidebar registry."""
+        if self._config_sub is not None:
+            self._config.unsubscribe(self._config_sub)
+            self._config_sub = None
+        try:
+            self.sidebar.close()
+        except Exception:
+            pass
+
+    def _is_disabled(self, key: str) -> bool:
+        return bool(self._config.get(
+            f'plugins.{_escape_key(key)}.replay_disabled', False))
+
+    def _on_config_change(self, path, old, new):
+        if len(path) < 3 or path[-1] != 'replay_disabled':
+            return
+        escaped = path[1]
+        disabled = bool(new) if new is not None else False
+        for p in self._plugins:
+            if _escape_key(p.key) != escaped:
+                continue
+            if disabled:
+                p.enabled = False
+            elif p.key in self._runtime_disabled:
+                # Config says "on" but the plugin crashed earlier — keep
+                # it off until discover() resets.
+                pass
+            else:
+                p.enabled = True
+
     @classmethod
-    def discover(cls, extra_paths=None, active_theme_key=None):
+    def discover(cls, extra_paths=None, active_theme_key=None, config=None):
         from analysis.plugins import discover_bundles
         from analysis.player import theme as theme_mod
-        mgr = cls()
+        mgr = cls(config=config)
         mgr.bundles = discover_bundles(extra_paths)
         for bundle in mgr.bundles:
             for mod in bundle.replay_modules:
@@ -151,23 +203,3 @@ class PluginManager:
         except Exception as exc:
             print(f'sidebar plugin register failed: {module_name}: {exc}')
 
-    @staticmethod
-    def _state_path():
-        return Path.home() / '.config' / 'vsrg-analysis' / 'player_plugins.json'
-
-    def _load_disabled_keys(self):
-        path = self._state_path()
-        try:
-            data = json.loads(path.read_text())
-        except Exception:
-            return set()
-        return set(str(k) for k in data.get('disabled', []))
-
-    def _save_disabled_keys(self):
-        path = self._state_path()
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            data = {'disabled': sorted(self._disabled_keys)}
-            path.write_text(json.dumps(data, indent=2) + '\n')
-        except Exception as exc:
-            print(f'player plugin state save failed: {exc}')

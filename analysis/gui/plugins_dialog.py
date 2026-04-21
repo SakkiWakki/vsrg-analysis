@@ -3,9 +3,11 @@
 Invoked from the library toolbar's "Plugins" button. Shows each bundle
 with its trust tag (trusted/sandboxed/refused), and under each bundle
 the registered replay plugins and sidebar sections. Each leaf row has
-a checkbox; toggling it enables/disables that plugin and persists the
-decision (replay plugins → ``~/.config/vsrg-analysis/player_plugins.json``,
-sidebar sections → ``sidebar_sections.json`` alongside it).
+a checkbox; toggling it writes through the shared
+:class:`analysis.config.ConfigStore`, which both persists the change
+to ``~/.config/vsrg-analysis/config.json`` and fans it out to every
+running window's plugin registry via subscription — a disabled plugin
+vanishes from a replay in progress on the next frame.
 
 The dialog does not have an Apply step — toggles take effect
 immediately and survive app restart.

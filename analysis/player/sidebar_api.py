@@ -196,16 +196,29 @@ class SidebarContext:
         return box
 
 
+def _escape_key(key: str) -> str:
+    """Plugin keys may contain dots; the config store uses dots as a path
+    separator. Rewrite dots to underscores for the on-disk path. Matches
+    :func:`analysis.config.migrate._escape` so legacy files line up."""
+    return key.replace('.', '_')
+
+
 class SidebarSectionRegistry:
     """Holds registered sidebar sections and yields them in draw order.
-    Tracks which sections the user has disabled; disabled sections are
-    excluded from ``top_sections`` / ``bottom_sections`` (the draw loop
-    sources), so the HUD skips them. Persistence state lives alongside
-    the replay plugins' disabled-keys JSON."""
 
-    def __init__(self):
+    Enabled/disabled state is owned by the process-wide
+    :class:`analysis.config.ConfigStore` (read from
+    ``plugins.<key>.sidebar_disabled``). Every registry instance
+    subscribes to ``plugins`` so that a toggle in one window's Plugins
+    dialog reaches the sidebar of every other window on the next
+    frame."""
+
+    def __init__(self, config=None):
+        from analysis.config import get_config
+        self._config = config if config is not None else get_config()
         self._sections: list[SidebarSection] = []
-        self._disabled_keys: set[str] = self._load_disabled_keys()
+        self._config_sub = self._config.subscribe(
+            'plugins', self._on_config_change)
 
     def add(self, name, draw, *, priority=1000, key=None, module='',
             pin_bottom=False):
@@ -217,7 +230,7 @@ class SidebarSectionRegistry:
             priority=int(priority),
             module=str(module),
             pin_bottom=bool(pin_bottom),
-            enabled=key not in self._disabled_keys,
+            enabled=not self._is_disabled(key),
         ))
         self._sections.sort(key=lambda s: (s.priority, s.name))
 
@@ -232,21 +245,16 @@ class SidebarSectionRegistry:
     def all_sections(self):
         return list(self._sections)
 
-    def set_enabled(self, key, enabled, persist=True):
+    def set_enabled(self, key, enabled):
+        """Flip a section on/off. Writes through the config store so
+        every other window's registry sees the change via its
+        subscription. Returns True if the key exists."""
         key = str(key)
-        changed = False
-        for s in self._sections:
-            if s.key == key:
-                s.enabled = bool(enabled)
-                changed = True
-        if not changed:
+        if not any(s.key == key for s in self._sections):
             return False
-        if persist:
-            if enabled:
-                self._disabled_keys.discard(key)
-            else:
-                self._disabled_keys.add(key)
-            self._save_disabled_keys()
+        self._config.set(
+            f'plugins.{_escape_key(key)}.sidebar_disabled',
+            not bool(enabled))
         return True
 
     def toggle_enabled(self, key):
@@ -255,26 +263,25 @@ class SidebarSectionRegistry:
                 return self.set_enabled(key, not s.enabled)
         return False
 
-    @staticmethod
-    def _state_path():
-        from pathlib import Path
-        return (Path.home() / '.config' / 'vsrg-analysis'
-                / 'sidebar_sections.json')
+    def close(self):
+        """Unsubscribe from the config store. Call when the owning
+        player tab is being disposed to avoid stale handlers firing
+        against a dead registry."""
+        if self._config_sub is not None:
+            self._config.unsubscribe(self._config_sub)
+            self._config_sub = None
 
-    def _load_disabled_keys(self):
-        import json
-        try:
-            data = json.loads(self._state_path().read_text())
-        except Exception:
-            return set()
-        return set(str(k) for k in data.get('disabled', []))
+    def _is_disabled(self, key: str) -> bool:
+        return bool(self._config.get(
+            f'plugins.{_escape_key(key)}.sidebar_disabled', False))
 
-    def _save_disabled_keys(self):
-        import json
-        path = self._state_path()
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            data = {'disabled': sorted(self._disabled_keys)}
-            path.write_text(json.dumps(data, indent=2) + '\n')
-        except Exception as exc:
-            print(f'sidebar section state save failed: {exc}')
+    def _on_config_change(self, path, old, new):
+        """Config changed somewhere under ``plugins``. Refresh the
+        enabled flag on any section whose key matches."""
+        # path shape: ('plugins', <escaped_key>, <field>, ...)
+        if len(path) < 3 or path[-1] != 'sidebar_disabled':
+            return
+        escaped = path[1]
+        for s in self._sections:
+            if _escape_key(s.key) == escaped:
+                s.enabled = not bool(new) if new is not None else True

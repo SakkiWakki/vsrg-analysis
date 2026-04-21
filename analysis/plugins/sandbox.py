@@ -66,6 +66,11 @@ _HOST_API_ALLOW = frozenset({
     'analysis.player.plugin_api',
     'analysis.player.events',
     'analysis.plugins.host_api',
+    # host_api.plugin_config resolves the store lazily via this module.
+    # Plugins don't import it directly, but the import graph passes
+    # through it on first call from sandboxed code.
+    'analysis.config',
+    'analysis.config.store',
     'analysis.ui',
     'analysis.ui.components',
     'analysis.ui.render_sidebar',

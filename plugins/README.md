@@ -114,8 +114,8 @@ imported:
 - **Third-party:** `numpy`.
 - **Host API:** `analysis.player.theme`, `analysis.player.sidebar_api`,
   `analysis.player.plugin_api`, `analysis.player.events`,
-  `analysis.plugins.host_api`, `analysis.ui` (+ `analysis.ui.components`,
-  `analysis.ui.render_sidebar`).
+  `analysis.plugins.host_api` (includes `plugin_config` — see below),
+  `analysis.ui` (+ `analysis.ui.components`, `analysis.ui.render_sidebar`).
 
 Anything else — notably `os`, `sys`, `pathlib`, `subprocess`, `socket`,
 `urllib`, `requests`, `ctypes`, `threading`, `pickle`, `importlib` — is
@@ -137,6 +137,50 @@ skip the sandbox. The directory name is deliberate: naming it `unsafe`
 makes the trust decision visible to anyone browsing the plugin layout.
 Promote to `builtin/` once the plugin is ready, or request new host-API
 surface if you're writing something for general distribution.
+
+## Persistent per-plugin config
+
+A plugin can persist its own settings through the shared config store.
+All app config lives in one file — `~/.config/vsrg-analysis/config.json`
+— under a nested tree:
+
+```json
+{
+  "paths": {...},
+  "plugins": {
+    "mybundle:hello": {
+      "replay_disabled": false,
+      "settings": { "volume": 0.5, "colors": {"fg": "#fff"} }
+    }
+  }
+}
+```
+
+Your plugin's settings live under `plugins.<your_key>.settings`. Reach
+them through a scoped handle:
+
+```python
+from analysis.plugins.host_api import plugin_config
+
+_cfg = plugin_config('mybundle:hello')
+_cfg.set('volume', 0.7)        # persist a field
+_cfg.get('volume', 0.5)        # read with default
+
+def _on_change(field, old, new):
+    print(f'{field} changed: {old!r} → {new!r}')
+
+_cfg.subscribe(_on_change)     # fires when your settings change
+```
+
+Writes are debounced (bursts coalesce into one disk write) and fan out
+to every running window — a config change made from one window's
+dialog reaches the same plugin's instance in another window on the
+next frame, with no restart.
+
+The handle is scoped: one plugin can't reach another plugin's settings
+or the top-level `paths.*` tree. This is a convenience boundary, not a
+security boundary — trusted plugins could bypass it by touching the
+store directly, but shouldn't.
 
 ## Minimal example
 
