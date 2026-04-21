@@ -125,6 +125,15 @@ class PlayerTab(QWidget):
         ctl.addWidget(self.press_btn)
         self._refresh_press_btn()
 
+        self.pitch_btn = QPushButton()
+        self.pitch_btn.setFocusPolicy(Qt.NoFocus)
+        self.pitch_btn.setToolTip(
+            'Pitch correction: when on, rate changes speed but not pitch '
+            '(like osu! DoubleTime). When off, pitch shifts with rate '
+            '(like Nightcore / Etterna stock rate-mod).')
+        self.pitch_btn.clicked.connect(lambda _checked=False: self._toggle_pitch())
+        ctl.addWidget(self.pitch_btn)
+
         ctl.addWidget(QLabel('scroll:'))
         self.scroll_edit = QLineEdit()
         self.scroll_edit.setMaximumWidth(70)
@@ -139,13 +148,16 @@ class PlayerTab(QWidget):
 
         self._last_ms = None
         self.timer = QTimer(self)
-        self.timer.setInterval(1000 // 60)
+        self.timer.setInterval(1000 // 120)
         self.timer.timeout.connect(self._tick)
         self.timer.start()
 
         from analysis.player.audio import AudioEngine
-        self._audio = AudioEngine(audio_path)
+        pitch_correct = bool(get_settings().value(
+            'player/pitch_correct', True, type=bool))
+        self._audio = AudioEngine(audio_path, pitch_correct=pitch_correct)
         self._audio_ready = self._audio.ready
+        self._refresh_pitch_btn()
         if self._audio_ready:
             self._audio.prewarm_rates([0.8, 0.9, 1.1, 1.2, 1.3, 1.5])
 
@@ -213,6 +225,22 @@ class PlayerTab(QWidget):
         self.player.toggle_press_hide()
         self._refresh_press_btn()
         get_settings().setValue('player/press_hide', self.player.press_hide)
+
+    def _refresh_pitch_btn(self):
+        if not hasattr(self, 'pitch_btn'):
+            return
+        on = self._audio_ready and getattr(self._audio, '_pitch_correct', True)
+        self.pitch_btn.setText(f'Pitch-correct: {"on" if on else "off"}')
+        self.pitch_btn.setEnabled(self._audio_ready)
+
+    def _toggle_pitch(self):
+        if not self._audio_ready:
+            return
+        new = not self._audio._pitch_correct
+        self._audio.set_pitch_correct(new)
+        get_settings().setValue('player/pitch_correct', new)
+        self._refresh_pitch_btn()
+        self._sync_audio()
 
     def _toggle_mode(self):
         new_mode = (self.player.SCROLL_MODE_LINEAR

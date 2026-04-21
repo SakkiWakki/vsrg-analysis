@@ -65,12 +65,15 @@ def scan_etterna():
 
 def _parse_one_osr(p):
     import osrparse
+    from analysis.osu.replay import rate_for_mods
     try:
         r = osrparse.Replay.from_path(str(p))
         mode = getattr(r, 'mode', None)
         mode_int = mode.value if hasattr(mode, 'value') else int(mode or 0)
         if mode_int != 3:
             return None
+        mods = int(r.mods.value) if hasattr(r.mods, 'value') else int(r.mods or 0)
+        rate = rate_for_mods(mods)
         total = (getattr(r, 'count_300', 0) + getattr(r, 'count_100', 0) +
                  getattr(r, 'count_50', 0) + getattr(r, 'count_miss', 0) +
                  getattr(r, 'count_geki', 0) + getattr(r, 'count_katu', 0))
@@ -88,7 +91,8 @@ def _parse_one_osr(p):
             'song': f'[{r.beatmap_hash[:8]}]',
             'pack': r.username,
             'steps': '',
-            'rate': 1.0,
+            'rate': rate,
+            'mods': mods,
             'wife': acc / 100.0,
             'grade': '',
             'datetime': str(r.timestamp),

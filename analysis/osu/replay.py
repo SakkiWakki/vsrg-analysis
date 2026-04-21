@@ -458,6 +458,22 @@ def _judge_tail(per, idx, release_t, tail_windows, meh_w):
 
 
 OSU_MOD_RANDOM = 1 << 11
+OSU_MOD_DOUBLETIME = 1 << 6
+OSU_MOD_HALFTIME = 1 << 8
+OSU_MOD_NIGHTCORE = 1 << 9   # always set alongside DT; NC = DT | NC
+
+
+def rate_for_mods(mods):
+    """Return playback rate multiplier from osu mod bitfield.
+
+    DoubleTime and Nightcore both run at 1.5x (NC also sets the DT bit and
+    adds pitch-shift on top). HalfTime runs at 0.75x. Everything else is 1.0x."""
+    m = int(mods)
+    if m & (OSU_MOD_DOUBLETIME | OSU_MOD_NIGHTCORE):
+        return 1.5
+    if m & OSU_MOD_HALFTIME:
+        return 0.75
+    return 1.0
 
 
 class _LegacyRandom:

@@ -4,6 +4,8 @@ DO NOT USE THIS IN PRODUCTION SYSTEMS. I REPEAT, DO NOT USE THIS IN PRODUCTION S
 
 Use it for personal use if you want lol. I might rewrite parts by hand if really necessary, I just wanted something working rather than clean and correct.
 
+Lemme know if the clanker somehow made a buffer overflow in python code lol
+
 ---
 
 # Clanker README
@@ -38,19 +40,62 @@ Full-report export (osu!mania 10K — *xi - Aragami*):
 - [`osrparse`](https://pypi.org/project/osrparse/) — osu! `.osr` parser
 - [`PySide6`](https://pypi.org/project/PySide6/) — Qt GUI
 
+Pitch-preserving rate changes use an in-house numpy phase vocoder — no
+extra audio deps.
+
 Install with pip:
 
 ```bash
-pip install numpy matplotlib pygame osrparse PySide6
+pip install -r requirements.txt
 ```
 
-Or in a venv (recommended, since PySide6 drags in a lot):
+### Setup from a fresh clone
+
+The toolkit runs on Linux, macOS, and Windows. The steps are the same
+everywhere — only the venv-activate command differs.
 
 ```bash
+git clone https://github.com/<you>/etterna-analysis.git
+cd etterna-analysis
+
+# 1. Create a virtualenv (PySide6 + librosa are chunky — keep them isolated)
 python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install numpy matplotlib pygame osrparse PySide6
+
+# 2. Activate it
+source .venv/bin/activate            # Linux / macOS
+# .venv\Scripts\activate             # Windows (cmd)
+# .venv\Scripts\Activate.ps1         # Windows (PowerShell)
+
+# 3. Install Python deps
+pip install -r requirements.txt
+
+# 4. Launch the GUI
+python -m analysis.gui.app
 ```
+
+On first launch you'll be prompted for your osu! Songs folder and Etterna
+Save folder — both optional, both editable later via **Library → Paths…**.
+
+**Platform notes:**
+
+- **Linux** — `pygame` needs SDL2 runtime libraries. Most distros bundle them
+  already; if audio fails, install your distro's `sdl2` / `libsdl2-2.0-0`
+  package.
+- **macOS** — everything installs via pip directly. On Apple Silicon make
+  sure you're on Python 3.11+ so the arm64 PySide6 wheels are used.
+- **Windows** — no extra system deps; all wheels ship with their DLLs. Use
+  the `python` launcher or `py -3.11 -m venv .venv` to pin a specific
+  Python version if you have multiple installed.
+- **osu!-on-Wine (Linux)** — the autodetect looks in `~/.local/share/osu-wine/`
+  and the standard Lutris/Bottles paths, but if yours is elsewhere just
+  point Library → Paths… at it manually.
+
+### Optional: convenience launchers
+
+The repo ships with a `run-gui.sh` shell script for Linux/macOS and an
+`analyze` CLI entrypoint. Both call `python3` — make sure your venv is
+activated, or invoke them through the venv's Python directly
+(`.venv/bin/python -m analysis.gui.app` / `.venv\Scripts\python -m analysis.gui.app`).
 
 ## Running
 

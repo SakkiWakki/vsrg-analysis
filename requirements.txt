@@ -3,3 +3,4 @@ matplotlib
 pygame
 osrparse
 PySide6
+sounddevice
