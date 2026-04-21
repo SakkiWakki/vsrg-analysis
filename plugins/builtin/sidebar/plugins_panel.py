@@ -34,11 +34,11 @@ def _draw_plugins_panel(sctx):
 
     sctx.spacer()
     sctx.draw_button(
-        f'{"[-]" if p.plugin_panel_open else "[+]"} '
+        f'{"[-]" if p.hud.plugin_panel_open else "[+]"} '
         f'Plugins {enabled}/{total}',
         'toggle_plugin_panel',
     )
-    if not p.plugin_panel_open:
+    if not p.hud.plugin_panel_open:
         return
 
     # Bundle header rows (trust tag) precede the plugin list so users can

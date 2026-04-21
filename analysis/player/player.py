@@ -312,23 +312,16 @@ class Player:
         self._build_cumulative_sv()
         self._build_ghost_sv_caches()
         self.plugins = PluginManager.discover()
-        self.plugin_panel_open = False
-        self._hud_hitboxes = []
-        # Vertical scroll offset (px) applied to the top-pinned sidebar
-        # region when its content is taller than the viewport. Bottom-
-        # pinned sections ignore this and stay anchored. Clamped each
-        # frame in the renderer; the surrounding Qt tab writes to it on
-        # mouse-wheel events that land over the sidebar.
-        self.sidebar_scroll = 0
-        self.sidebar_scroll_max = 0
-        # Subscribers notified when scroll mode / speed changes via HUD
-        # hitboxes — used by the surrounding Qt tab to persist settings and
-        # refresh Qt widget state (SV button, scroll-edit placeholder).
-        self._scroll_change_listeners = []
-        # Subscribers notified for generic HUD hitbox actions that the tab
-        # needs to react to (audio re-sync, settings persistence, pop-up
-        # overlays). Receives (action, payload).
-        self._hud_action_listeners = []
+        # HUD-overlay state (sidebar scroll, panel toggles, hitboxes).
+        # Separated from replay state so the player core doesn't grow
+        # every time the HUD does; see analysis/player/hud_state.py.
+        from analysis.player.hud_state import HudState
+        self.hud = HudState()
+        # Event bus for host/plugin notifications. Kinds documented in
+        # analysis/player/events.py; the Qt tab subscribes to
+        # ``scroll_changed`` and ``hud_action``.
+        from analysis.player.events import EventBus
+        self.events = EventBus()
         # Tab-owned runtime flags the painted HUD needs to render toggle
         # labels without holding a reference to the AudioEngine.
         # Keys: 'audio_ready' (bool), 'pitch_correct' (bool). Populated by
@@ -566,12 +559,12 @@ class Player:
         return 'sv_enabled_saved' in self._state()
 
     def handle_mouse_down(self, x, y):
-        for rect, action, payload in reversed(getattr(self, '_hud_hitboxes', [])):
+        for rect, action, payload in reversed(self.hud.hitboxes):
             rx, ry, rw, rh = rect
             if not (rx <= x <= rx + rw and ry <= y <= ry + rh):
                 continue
             if action == 'toggle_plugin_panel':
-                self.plugin_panel_open = not self.plugin_panel_open
+                self.hud.plugin_panel_open = not self.hud.plugin_panel_open
                 return True
             if action == 'toggle_plugin':
                 self.plugins.toggle_enabled(payload)
@@ -640,25 +633,11 @@ class Player:
         cur = self.game if self.game in names else names[0]
         self.set_game(names[(names.index(cur) + 1) % len(names)])
 
-    def add_scroll_change_listener(self, cb):
-        self._scroll_change_listeners.append(cb)
-
     def _notify_scroll_change(self):
-        for cb in list(self._scroll_change_listeners):
-            try:
-                cb()
-            except Exception:
-                pass
-
-    def add_hud_action_listener(self, cb):
-        self._hud_action_listeners.append(cb)
+        self.events.emit('scroll_changed')
 
     def _notify_hud_action(self, action, payload):
-        for cb in list(self._hud_action_listeners):
-            try:
-                cb(action, payload)
-            except Exception:
-                pass
+        self.events.emit('hud_action', (action, payload))
 
     def advance(self, dt_s):
         if not self.paused:

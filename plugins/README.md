@@ -54,10 +54,21 @@ author = "you@example.com"
 ### `sidebar/*.py`
 Each module exposes `register_sidebar(add)` and calls
 `add(name, draw_fn, priority=…, pin_bottom=…)`. The draw function receives
-a `SidebarContext` — see `analysis/player/sidebar_api.py` for the full
-drawing vocabulary (`draw_button`, `draw_text`, `checkbox`, `split_row`,
-…). Lower priority renders higher in the sidebar; pinned-bottom sections
-hug `p.H`.
+a `SidebarContext`. Lower priority renders higher in the sidebar;
+pinned-bottom sections hug `p.H`.
+
+Two drawing styles are available:
+
+- **Declarative (recommended for plugins):** build a `Component` tree
+  from `analysis.ui` (`Column`, `Row`, `Heading`, `Text`, `Button`,
+  `Checkbox`, `Spacer`, `Box`) and hand it to
+  `analysis.ui.render_sidebar.render(sctx, tree)`. This is the only
+  drawing surface reachable from sandboxed bundles.
+- **Imperative:** call `SidebarContext` primitives directly
+  (`draw_button`, `draw_text`, `checkbox`, `split_row`, …). This is how
+  the built-in sections draw; it gives finer control but requires full
+  Python access, so it's only available to trusted bundles
+  (`builtin/`, `unsafe/`).
 
 ### `replay/*.py`
 Each module exposes `register(add)` and calls
@@ -102,7 +113,9 @@ imported:
   `__future__`.
 - **Third-party:** `numpy`.
 - **Host API:** `analysis.player.theme`, `analysis.player.sidebar_api`,
-  `analysis.player.plugin_api`, `analysis.plugins.host_api`.
+  `analysis.player.plugin_api`, `analysis.player.events`,
+  `analysis.plugins.host_api`, `analysis.ui` (+ `analysis.ui.components`,
+  `analysis.ui.render_sidebar`).
 
 Anything else — notably `os`, `sys`, `pathlib`, `subprocess`, `socket`,
 `urllib`, `requests`, `ctypes`, `threading`, `pickle`, `importlib` — is
@@ -133,13 +146,23 @@ plugins/sussy_baka/
   sidebar/hello.py
 ```
 
-`sidebar/hello.py`:
+`sidebar/hello.py` (declarative — works in sandboxed bundles):
 
 ```python
+from analysis.ui import Button, Column, Heading, Spacer
+from analysis.ui.render_sidebar import render
+
+
+def _build():
+    return Column((
+        Spacer(),
+        Heading('Sussy'),
+        Button('Click me', 'hello_click'),
+    ))
+
+
 def _draw(sctx):
-    sctx.spacer()
-    sctx.draw_heading('Sussy')
-    sctx.draw_button('Click me', 'hello_click')
+    render(sctx, _build())
 
 
 def register_sidebar(add):

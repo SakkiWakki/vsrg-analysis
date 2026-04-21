@@ -387,7 +387,7 @@ class QtPlayerRenderer:
         from analysis.player.sidebar_api import SidebarContext
         p = ctx.player
         sidebar_x = p.W - theme.SIDEBAR_WIDTH
-        p._hud_hitboxes = []
+        p.hud.clear_hitboxes()
         _rect(painter, theme.SIDEBAR_BG,
               (sidebar_x, 0, theme.SIDEBAR_WIDTH, p.H))
         painter.setFont(self.font)
@@ -423,12 +423,12 @@ class QtPlayerRenderer:
         # layout. Max scroll is "content_h - viewport_h" (zero when the
         # content already fits).
         overflow = max(0, top_content_h - top_viewport_h)
-        p.sidebar_scroll_max = overflow
-        if p.sidebar_scroll < 0:
-            p.sidebar_scroll = 0
-        elif p.sidebar_scroll > overflow:
-            p.sidebar_scroll = overflow
-        scroll = p.sidebar_scroll
+        p.hud.sidebar_scroll_max = overflow
+        if p.hud.sidebar_scroll < 0:
+            p.hud.sidebar_scroll = 0
+        elif p.hud.sidebar_scroll > overflow:
+            p.hud.sidebar_scroll = overflow
+        scroll = p.hud.sidebar_scroll
 
         # Clip the top region so scrolled-off content can't draw over the
         # pinned-bottom area or bleed above the top margin. Hitboxes

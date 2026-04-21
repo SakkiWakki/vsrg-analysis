@@ -64,7 +64,11 @@ _HOST_API_ALLOW = frozenset({
     'analysis.player.theme',
     'analysis.player.sidebar_api',
     'analysis.player.plugin_api',
+    'analysis.player.events',
     'analysis.plugins.host_api',
+    'analysis.ui',
+    'analysis.ui.components',
+    'analysis.ui.render_sidebar',
 })
 
 # Explicit deny-list for obviously dangerous modules. The allow-list is

@@ -107,8 +107,16 @@ class PlayerTab(QWidget):
         self.player.paused = False
         self.play_btn.setText('⏸')
         self._sync_audio()
-        self.player.add_scroll_change_listener(self._on_scroll_change)
-        self.player.add_hud_action_listener(self._on_hud_action)
+        self.player.events.on('scroll_changed', self._on_scroll_change)
+        self.player.events.on('hud_action', self._on_hud_action)
+
+        # Positional-input router: each region owns its own wheel/mouse
+        # handling. Registered first-to-last; the first region whose
+        # ``contains`` returns True gets the event.
+        from analysis.gui.region import InputRouter, SidebarRegion, LanesRegion
+        self.input_router = InputRouter()
+        self.input_router.add(SidebarRegion(self.player))
+        self.input_router.add(LanesRegion(self.player, self._seek))
 
     def _sync_audio(self):
         # Mirror audio-engine status onto the player so the painted HUD
@@ -335,30 +343,17 @@ class PlayerTab(QWidget):
                 if k in (Qt.Key_Q, Qt.Key_Escape):
                     self.window().close(); return True
             elif t == ev.Type.Wheel:
-                # Route wheel events over the sidebar to sidebar-scroll
-                # instead of seeking — otherwise scrolling through an
-                # overflowing plugin panel would also scrub the replay.
                 pos = ev.position() if hasattr(ev, 'position') else ev.pos()
-                from analysis.player import theme
-                sidebar_x = self.player.W - theme.SIDEBAR_WIDTH
-                if pos.x() >= sidebar_x:
-                    # One wheel notch = 120 angleDelta; scroll ~40 px per
-                    # notch, enough to move a row or two at a time.
-                    dy = ev.angleDelta().y()
-                    self.player.sidebar_scroll = max(
-                        0,
-                        min(self.player.sidebar_scroll_max,
-                            self.player.sidebar_scroll - dy // 3))
+                if self.input_router.dispatch_wheel(
+                        int(pos.x()), int(pos.y()),
+                        ev.angleDelta().y(), ev.modifiers()):
                     return True
-                step = ev.angleDelta().y() / 120.0 * 0.5
-                if ev.modifiers() & Qt.ShiftModifier:
-                    step *= 10
-                self._seek(step)
-                return True
             elif t == ev.Type.MouseButtonPress and ev.button() == Qt.LeftButton:
                 self.view.setFocus(Qt.MouseFocusReason)
                 pos = ev.position() if hasattr(ev, 'position') else ev.pos()
-                if self.player.handle_mouse_down(int(pos.x()), int(pos.y())):
+                if self.input_router.dispatch_mouse_down(
+                        int(pos.x()), int(pos.y()),
+                        ev.button(), ev.modifiers()):
                     return True
         return super().eventFilter(obj, ev)
 

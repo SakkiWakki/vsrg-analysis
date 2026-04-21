@@ -130,7 +130,7 @@ class SidebarContext:
             ymin, ymax = self.hitbox_clip
             if ry + rh <= ymin or ry >= ymax:
                 return
-        self.player._hud_hitboxes.append((tuple(rect), action, payload))
+        self.player.hud.add_hitbox(rect, action, payload)
 
     # ── Cursor-advancing rows ────────────────────────────────────────────
     def spacer(self, h=theme.SECTION_SPACER):
