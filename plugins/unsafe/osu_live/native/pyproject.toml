@@ -1,0 +1,20 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "osu_memory_native"
+version = "0.1.0"
+description = "Direct osu! memory reader for the etterna-analysis osu_live bundle."
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Rust",
+    "Private :: Do Not Upload",
+]
+
+[tool.maturin]
+# Single-file extension; nothing to bundle beyond the .so itself.
+bindings = "pyo3"
+# The .so imports as ``osu_memory_native`` — match the crate name so
+# Python can load it directly.
+module-name = "osu_memory_native"

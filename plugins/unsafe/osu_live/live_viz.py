@@ -29,7 +29,7 @@ class LiveFigureWidget(QWidget):
                  parent=None):
         super().__init__(parent)
         if client is None:
-            from plugins.unsafe.osu_live.tosu_client import get_client
+            from plugins.unsafe.osu_live.client import get_client
             client = get_client()
         self._client = client
         self._build_fn = build_fn

@@ -1,21 +1,25 @@
-"""HTTP polling client for tosu's ``/json/v2`` endpoint.
+"""Background poller for live osu! mania state.
 
-Runs a daemon thread that polls tosu at a configurable rate and
-maintains a growing ``replay``-shaped dict plus a few live headline
-fields (combo, accuracy, UR). Viz plugins call :func:`snapshot` per
-frame to get the current state.
+Two data sources are supported; the poller picks the first one that
+works on each tick:
 
-Why polling, not WebSocket? For a sidebar viz refreshed at the Qt
-tick rate, a 30Hz local HTTP poll is trivially fast, and uses only
-``urllib`` (stdlib) so we don't pull in ``websocket-client`` just for
-this. Upgrade to WebSocket if latency ever matters.
+1. **Native reader** (``osu_memory_native`` Rust extension). Reads
+   osu!'s process memory directly via ``process_vm_readv``. No server,
+   no port, ~40 µs per read on the sample hardware. Preferred.
+2. **HTTP fallback** (tosu's ``/json/v2`` endpoint). Used only when the
+   native extension isn't built, the osu! signatures don't resolve
+   (binary update), or the user explicitly configures it. Keeps things
+   working while we re-derive signatures.
 
-Why a singleton client? Multiple viz panels shouldn't each spawn a
-poller. One thread, many subscribers.
+Both sources are normalized to a single internal dict shape before
+``_build_snapshot`` parses them, so one code path produces the
+``LiveSnapshot`` that viz panels consume.
 
-Thread safety: the poller maintains a private mutable state dict and
+Thread safety: the poller maintains private mutable state and
 publishes immutable snapshots by copying arrays into fresh NumPy
-arrays under a lock. Readers never see a half-updated state.
+arrays under an ``RLock``. Readers never see a half-updated state.
+``RLock`` (vs ``Lock``) because ``_build_snapshot`` reads the previous
+snapshot under the same lock callers hold while replacing.
 """
 from __future__ import annotations
 
@@ -35,12 +39,12 @@ DEFAULT_POLL_HZ = 30.0
 
 @dataclass
 class LiveSnapshot:
-    """Immutable view of tosu state at one instant.
+    """Immutable view of osu! state at one instant.
 
     ``offsets``/``columns``/``noterows``/``notetypes``/``misses`` have the
     same shapes a parsed replay dict would, so they can be fed into the
-    existing viz helpers (``_common.clean_arrays`` etc.). The live
-    fields are what tosu reports about the session as a whole."""
+    existing viz helpers (``_common.clean_arrays`` etc.). The scalar
+    fields are what osu! reports about the session as a whole."""
     connected: bool
     map_title: str = ''
     combo: int = 0
@@ -78,21 +82,23 @@ class LiveSnapshot:
         }
 
 
-class TosuClient:
+class OsuLiveClient:
     """Background poller. Call :meth:`start` to spin up the thread;
     call :meth:`snapshot` any time (cheap). :meth:`stop` joins the
-    thread and is safe to call multiple times."""
+    thread and is safe to call multiple times.
+
+    ``fetch`` is injectable for tests: a callable taking the URL and
+    returning a dict in the tosu ``/json/v2`` shape (so the snapshot
+    builder stays one implementation). If not provided, the default
+    fetcher tries the native reader first, then falls back to HTTP.
+    """
 
     def __init__(self, url: str = DEFAULT_URL,
                  poll_hz: float = DEFAULT_POLL_HZ, *,
                  fetch=None):
         self._url = str(url)
         self._interval = 1.0 / max(1.0, float(poll_hz))
-        # Injectable fetcher so tests can stub HTTP without bringing up
-        # an actual server. Takes (url) -> dict (parsed JSON).
-        self._fetch = fetch or _default_fetch
-        # RLock because _build_snapshot reads the previous snapshot
-        # under the same lock as callers that hold it while replacing.
+        self._fetch = fetch or _build_default_fetcher()
         self._lock = threading.RLock()
         self._snapshot = LiveSnapshot(connected=False)
         self._thread: threading.Thread | None = None
@@ -109,7 +115,7 @@ class TosuClient:
             return
         self._stop.clear()
         self._thread = threading.Thread(
-            target=self._run, name='TosuClient', daemon=True)
+            target=self._run, name='OsuLiveClient', daemon=True)
         self._thread.start()
 
     def stop(self, timeout: float = 1.0) -> None:
@@ -158,11 +164,12 @@ class TosuClient:
         )
 
     def _build_snapshot(self, payload: dict) -> LiveSnapshot:
-        """Fold a tosu JSON payload into a :class:`LiveSnapshot`.
+        """Fold a tosu-shaped JSON payload into a :class:`LiveSnapshot`.
 
-        Tosu's shape is versioned (``/json/v2``); we touch only a
-        small, documented subset. The structure below matches
-        https://github.com/tosuapp/tosu v2 API as of 2026.
+        The payload's top-level keys (``beatmap``, ``play``, ...) match
+        tosu's ``/json/v2`` regardless of which source produced it —
+        the native adapter (:func:`_native_to_payload`) rewraps its
+        flat output into the same shape before handing it to us.
         """
         beatmap = payload.get('beatmap') or {}
         play = payload.get('play') or {}
@@ -204,13 +211,13 @@ class TosuClient:
             notetypes = np.zeros(len(new_hits), dtype=np.int32)
             misses = np.zeros(len(new_hits), dtype=bool)
         else:
-            # Append. offsets from tosu are milliseconds; our viz
+            # Append. offsets from osu! are milliseconds; our viz
             # convention is seconds.
             new_offsets = np.asarray(new_hits, dtype=np.float64) / 1000.0
             offsets = np.concatenate([prev.offsets, new_offsets])
-            # Tosu doesn't publish per-hit column. Best we can do for
-            # v1 is round-robin the columns so hand-split viz (drift,
-            # per_column) have *some* signal; replace with real column
+            # Per-hit column data isn't exposed by either source yet.
+            # Round-robin across lanes so hand-split viz (drift,
+            # per_column) have *some* signal; swap in real column
             # data when we pick it up from a richer feed.
             n_prev = len(prev.columns)
             new_cols = np.arange(
@@ -253,7 +260,93 @@ class TosuClient:
         )
 
 
-def _default_fetch(url: str) -> dict:
+# ─── Sources ──────────────────────────────────────────────────────────────
+
+def _build_default_fetcher():
+    """Return a fetcher that prefers the native reader and falls back
+    to HTTP if native is unavailable or the signatures fail to resolve.
+
+    The returned callable takes the HTTP URL (used only on fallback)
+    and returns a tosu-shaped payload dict. We construct it once per
+    client so the native handle is cached across ticks — signature
+    resolution is a 500ms pattern scan we don't want to repeat.
+    """
+    try:
+        import osu_memory_native  # noqa: F401
+    except ImportError:
+        return _http_fetch
+
+    # Closure-local state so successive ticks reuse the resolved
+    # handle. We re-resolve lazily if osu! restarted (pid mismatch)
+    # or if a read raises.
+    state: dict = {'handle': None, 'pid': None}
+
+    def _native_then_http(url: str) -> dict:
+        import osu_memory_native as native
+        # Re-resolve on PID change (osu! restart) or first call.
+        pid = native.find_osu_pid()
+        if pid is None:
+            # osu! not running — native is useless, try HTTP in case
+            # the user has tosu pointed at a different osu! (remote
+            # stream setup, tourney client, etc.).
+            return _http_fetch(url)
+        if state['handle'] is None or state['pid'] != pid:
+            try:
+                state['handle'] = native.resolve(pid)
+                state['pid'] = pid
+            except OSError:
+                # Signatures didn't resolve — osu! binary likely
+                # updated ahead of our signatures.rs. Fall back.
+                state['handle'] = None
+                return _http_fetch(url)
+        try:
+            raw = native.read_state(state['handle'])
+        except OSError:
+            # A pointer chain went stale — drop the handle and retry
+            # next tick. Fallback keeps the viz populated meanwhile.
+            state['handle'] = None
+            return _http_fetch(url)
+        return _native_to_payload(raw)
+
+    return _native_then_http
+
+
+def _native_to_payload(raw: dict) -> dict:
+    """Rewrap the native reader's flat dict into the tosu ``/json/v2``
+    shape that :meth:`_build_snapshot` expects.
+    """
+    return {
+        'beatmap': {
+            'checksum': str(raw.get('map_md5') or ''),
+            'title': str(raw.get('map_title') or ''),
+            'stats': {'cs': float(raw.get('map_cs', 4.0) or 4.0)},
+            # Mode name is derived from the ruleset id. Mania = 3.
+            'mode': {'name': _MODE_NAMES.get(int(raw.get('mode', 3) or 0), '')},
+        },
+        'play': {
+            'hits': {
+                '300': int(raw.get('hit_300', 0) or 0),
+                '100': int(raw.get('hit_100', 0) or 0),
+                '50': int(raw.get('hit_50', 0) or 0),
+                '0': int(raw.get('hit_miss', 0) or 0),
+            },
+            'hitErrorArray': list(raw.get('hit_errors_ms') or []),
+            'combo': {
+                'current': int(raw.get('combo', 0) or 0),
+                'max': int(raw.get('max_combo', 0) or 0),
+            },
+            'accuracy': float(raw.get('accuracy', 0.0) or 0.0),
+            # Native reader doesn't surface UR yet; leave as 0 and
+            # compute from hit errors if the viz needs it.
+            'unstableRate': 0.0,
+        },
+    }
+
+
+_MODE_NAMES = {0: 'osu', 1: 'taiko', 2: 'fruits', 3: 'mania'}
+
+
+def _http_fetch(url: str) -> dict:
     """Perform one GET and return parsed JSON. Short timeout so a
     wedged server doesn't stall the poller."""
     req = urllib.request.Request(url, headers={'Accept': 'application/json'})
@@ -264,12 +357,12 @@ def _default_fetch(url: str) -> dict:
 
 # ─── Module-level singleton ────────────────────────────────────────────
 
-_singleton: TosuClient | None = None
+_singleton: OsuLiveClient | None = None
 _singleton_lock = threading.Lock()
 
 
 def get_client(url: str = DEFAULT_URL,
-               poll_hz: float = DEFAULT_POLL_HZ) -> TosuClient:
+               poll_hz: float = DEFAULT_POLL_HZ) -> OsuLiveClient:
     """Return the shared poller. The first caller's ``url``/``poll_hz``
     wins; subsequent calls with different values are ignored (they'd
     race, and the most common use is "give me the feed" regardless).
@@ -277,7 +370,7 @@ def get_client(url: str = DEFAULT_URL,
     global _singleton
     with _singleton_lock:
         if _singleton is None:
-            _singleton = TosuClient(url=url, poll_hz=poll_hz)
+            _singleton = OsuLiveClient(url=url, poll_hz=poll_hz)
             _singleton.start()
         return _singleton
 

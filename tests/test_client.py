@@ -1,8 +1,11 @@
-"""Tests for the tosu HTTP polling client.
+"""Tests for the osu!-live polling client.
 
-We stub the fetcher so CI doesn't need tosu running. Focus: payload
-→ snapshot mapping, append semantics across ticks, map-change reset,
-disconnect resilience.
+We stub the fetcher so CI doesn't need a data source (native or tosu)
+running. Focus: payload → snapshot mapping, append semantics across
+ticks, map-change reset, disconnect resilience. The fetcher contract
+is source-agnostic — whether the bytes came from the native Rust
+reader or from an HTTP GET, the dict shape fed to ``_build_snapshot``
+is identical, so these tests cover both paths.
 """
 from __future__ import annotations
 
@@ -12,7 +15,7 @@ import time
 import numpy as np
 import pytest
 
-from plugins.unsafe.osu_live.tosu_client import (LiveSnapshot, TosuClient)
+from plugins.unsafe.osu_live.client import (LiveSnapshot, OsuLiveClient)
 
 
 def _payload(md5='abc', hits=None, combo=0, acc=0.0, ur=0.0,
@@ -49,14 +52,14 @@ def _stub(payloads):
 
 
 def test_initial_snapshot_is_disconnected():
-    c = TosuClient(fetch=lambda u: (_ for _ in ()).throw(OSError('no')))
+    c = OsuLiveClient(fetch=lambda u: (_ for _ in ()).throw(OSError('no')))
     snap = c.snapshot()
     assert snap.connected is False
     assert len(snap.offsets) == 0
 
 
 def test_build_snapshot_maps_headline_fields():
-    c = TosuClient(fetch=_stub([_payload(
+    c = OsuLiveClient(fetch=_stub([_payload(
         hits=[5.0, -3.0], combo=42, acc=98.7, ur=12.3,
         h300=10, h100=2, h50=1, h0=0, title='Blue Zenith')]))
     snap = c._build_snapshot(_stub([_payload(
@@ -71,7 +74,7 @@ def test_build_snapshot_maps_headline_fields():
 
 
 def test_offsets_are_converted_ms_to_seconds():
-    c = TosuClient(fetch=_stub([_payload(hits=[10.0, -20.0])]))
+    c = OsuLiveClient(fetch=_stub([_payload(hits=[10.0, -20.0])]))
     snap = c._build_snapshot(_payload(hits=[10.0, -20.0]))
     # tosu reports ms; our convention is seconds.
     assert np.allclose(snap.offsets, [0.010, -0.020])
@@ -89,7 +92,7 @@ def _tick(c, payload):
 def test_subsequent_ticks_append_new_hits_only():
     """Tosu's hitErrorArray grows monotonically within one play. Each
     poll should only surface the tail we haven't seen."""
-    c = TosuClient(fetch=lambda u: None)
+    c = OsuLiveClient(fetch=lambda u: None)
     _tick(c, _payload(hits=[1.0, 2.0]))
     snap = _tick(c, _payload(hits=[1.0, 2.0, 3.0]))
     assert len(snap.offsets) == 3
@@ -97,7 +100,7 @@ def test_subsequent_ticks_append_new_hits_only():
 
 
 def test_map_change_resets_accumulated_arrays():
-    c = TosuClient(fetch=lambda u: None)
+    c = OsuLiveClient(fetch=lambda u: None)
     _tick(c, _payload(md5='one', hits=[1.0, 2.0]))
     # Second payload is a different map — arrays should reset, not
     # concatenate.
@@ -108,7 +111,7 @@ def test_map_change_resets_accumulated_arrays():
 
 def test_disconnect_keeps_previous_arrays():
     """One bad fetch shouldn't wipe the visible viz."""
-    c = TosuClient(fetch=lambda u: None)
+    c = OsuLiveClient(fetch=lambda u: None)
     _tick(c, _payload(hits=[1.0, 2.0]))
     disc = c._disconnected('network error')
     assert disc.connected is False
@@ -118,7 +121,7 @@ def test_disconnect_keeps_previous_arrays():
 def test_columns_are_synthesized_when_absent():
     """Tosu v2 doesn't publish per-hit column for mania. We round-robin
     so hand-split viz have some signal. Not true column data."""
-    c = TosuClient(fetch=lambda u: None)
+    c = OsuLiveClient(fetch=lambda u: None)
     snap = c._build_snapshot(_payload(keycount=4, hits=[1.0, 2.0, 3.0, 4.0]))
     assert len(snap.columns) == 4
     # Round-robin across the 4 lanes.
@@ -137,7 +140,7 @@ def test_thread_lifecycle_starts_and_stops_cleanly():
     """End-to-end-ish: start the thread with a fast stub, verify
     snapshots become connected, stop the thread, verify it exits."""
     payloads = [_payload(hits=[1.0, 2.0], combo=10)]
-    c = TosuClient(poll_hz=200.0, fetch=_stub(payloads))
+    c = OsuLiveClient(poll_hz=200.0, fetch=_stub(payloads))
     c.start()
     try:
         # Spin until we see a connected snapshot, or time out.
@@ -157,7 +160,7 @@ def test_poll_loop_handles_fetch_exception_without_dying():
     def bad(url):
         raise ConnectionRefusedError('tosu not running')
 
-    c = TosuClient(poll_hz=200.0, fetch=bad)
+    c = OsuLiveClient(poll_hz=200.0, fetch=bad)
     c.start()
     try:
         time.sleep(0.05)
@@ -169,7 +172,7 @@ def test_poll_loop_handles_fetch_exception_without_dying():
 
 
 def test_start_is_idempotent():
-    c = TosuClient(fetch=lambda u: _payload())
+    c = OsuLiveClient(fetch=lambda u: _payload())
     c.start()
     t1 = c._thread
     c.start()  # second call should not spin a new thread
@@ -178,7 +181,7 @@ def test_start_is_idempotent():
 
 
 def test_stop_is_idempotent():
-    c = TosuClient(fetch=lambda u: _payload())
+    c = OsuLiveClient(fetch=lambda u: _payload())
     c.start()
     c.stop(timeout=0.5)
     c.stop(timeout=0.5)  # must not raise

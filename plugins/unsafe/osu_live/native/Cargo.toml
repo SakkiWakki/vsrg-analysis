@@ -1,0 +1,28 @@
+[package]
+name = "osu_memory_native"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+# Built as a PyO3 extension module (importable from Python as
+# ``osu_memory_native``). Linked dynamically against libpython via
+# PyO3's ``extension-module`` feature so the same build works across
+# Python 3.10+.
+[lib]
+name = "osu_memory_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["extension-module"] }
+thiserror = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# process_vm_readv lives in libc.
+libc = "0.2"
+
+# ``maturin develop`` will drop the built .so into the active venv's
+# site-packages. For now we build in debug; live reading is I/O-bound
+# on the syscall so release optimizations are a nice-to-have, not a
+# bottleneck.
+[profile.release]
+lto = "thin"
