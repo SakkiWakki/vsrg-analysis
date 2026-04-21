@@ -1,0 +1,226 @@
+"""Tests for the plugin sandbox.
+
+Two layers are tested:
+
+  1. ``_is_allowed`` decisions — the policy table.
+  2. End-to-end loader behavior via a temp-dir bundle — does a real
+     ``import`` statement in a sandboxed module actually get blocked?
+"""
+from __future__ import annotations
+
+import textwrap
+from pathlib import Path
+
+import pytest
+
+from analysis.plugins import discover_bundles
+from analysis.plugins.sandbox import (
+    SandboxViolation,
+    _is_allowed,
+    is_trusted_bundle,
+)
+
+
+# ─── Policy table ──────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize('module', [
+    'math', 'random', 'collections', 'collections.abc',
+    'itertools', 'functools', 're', 'json', 'dataclasses',
+    'numpy', 'numpy.linalg',
+    'analysis.player.theme', 'analysis.player.sidebar_api',
+    'analysis.plugins.host_api',
+    # Parent of an allow-listed submodule — required for
+    # ``from analysis.player import theme`` (__import__ fetches parent).
+    'analysis.player',
+])
+def test_allowed_modules(module):
+    assert _is_allowed(module)
+
+
+@pytest.mark.parametrize('module', [
+    # FS / process
+    'os', 'os.path', 'sys', 'pathlib', 'subprocess', 'shutil',
+    'tempfile', 'io', 'mmap',
+    # Network
+    'socket', 'ssl', 'http', 'http.client', 'urllib', 'urllib.request',
+    'requests', 'httpx', 'aiohttp', 'ftplib', 'smtplib',
+    # Memory / FFI
+    'ctypes', 'ctypes.util', 'cffi',
+    # Threading / async
+    'threading', '_thread', 'multiprocessing', 'asyncio',
+    # Code-loading
+    'importlib', 'importlib.util', 'pickle', 'marshal', 'ast', 'code',
+    # Random non-allow-listed stdlib
+    'logging', 'unittest', 'argparse',
+    # Third-party not on the allow-list
+    'pytest', 'matplotlib', 'PySide6',
+])
+def test_denied_modules(module):
+    assert not _is_allowed(module)
+
+
+def test_explicit_deny_beats_allow():
+    """If someone accidentally adds ``urllib`` to the allow-list, the
+    explicit deny should still refuse it. (Regression guard.)"""
+    from analysis.plugins import sandbox
+    original = sandbox._STDLIB_ALLOW
+    try:
+        sandbox._STDLIB_ALLOW = frozenset(original | {'urllib'})
+        assert not _is_allowed('urllib')
+        assert not _is_allowed('urllib.request')
+    finally:
+        sandbox._STDLIB_ALLOW = original
+
+
+# ─── Trust classification ──────────────────────────────────────────────────
+
+def test_builtin_is_trusted():
+    repo_root = Path(__file__).resolve().parents[1]
+    assert is_trusted_bundle(repo_root / 'plugins' / 'builtin')
+
+
+def test_unsafe_is_trusted():
+    repo_root = Path(__file__).resolve().parents[1]
+    assert is_trusted_bundle(repo_root / 'plugins' / 'unsafe' / 'anything')
+
+
+def test_arbitrary_user_bundle_is_not_trusted():
+    repo_root = Path(__file__).resolve().parents[1]
+    assert not is_trusted_bundle(repo_root / 'plugins' / 'example_sandboxed')
+
+
+def test_outside_repo_is_not_trusted(tmp_path):
+    assert not is_trusted_bundle(tmp_path / 'random_dir')
+
+
+# ─── End-to-end loader behavior ────────────────────────────────────────────
+
+def _write_bundle(root: Path, name: str, sidebar_files: dict[str, str]):
+    """Build a bundle at ``root/name`` with the given sidebar files."""
+    bundle = root / name
+    (bundle / 'sidebar').mkdir(parents=True)
+    (bundle / 'manifest.toml').write_text(
+        f'name = "{name}"\nkey = "{name}"\nversion = "0.0"\n')
+    for fname, body in sidebar_files.items():
+        (bundle / 'sidebar' / fname).write_text(textwrap.dedent(body))
+    return bundle
+
+
+@pytest.fixture
+def sandboxed_root(tmp_path, monkeypatch):
+    """Point discovery at a temp bundle root so tests stay hermetic."""
+    monkeypatch.setenv('EA_PLUGINS_PATH', str(tmp_path))
+    return tmp_path
+
+
+def test_sandboxed_plugin_allowed_imports_succeed(sandboxed_root, capsys):
+    _write_bundle(sandboxed_root, 'good_bundle', {
+        'ok.py': '''
+            import math
+            from analysis.player import theme
+
+            def register_sidebar(add):
+                pass
+        ''',
+    })
+    bundles = discover_bundles()
+    good = next(b for b in bundles if b.key == 'good_bundle')
+    assert good.trusted is False
+    assert good.load_errors == []
+    assert len(good.sidebar_modules) == 1
+
+
+def test_sandboxed_plugin_os_import_refused(sandboxed_root, capsys):
+    _write_bundle(sandboxed_root, 'evil_bundle', {
+        'evil.py': '''
+            import os
+
+            def register_sidebar(add):
+                pass
+        ''',
+    })
+    bundles = discover_bundles()
+    evil = next(b for b in bundles if b.key == 'evil_bundle')
+    assert evil.trusted is False
+    assert len(evil.load_errors) == 1
+    role, fname, exc = evil.load_errors[0]
+    assert role == 'sidebar'
+    assert fname == 'evil.py'
+    assert isinstance(exc, SandboxViolation)
+    assert "'os'" in str(exc)
+    assert len(evil.sidebar_modules) == 0
+
+
+@pytest.mark.parametrize('forbidden', ['socket', 'urllib.request',
+                                        'subprocess', 'ctypes', 'threading',
+                                        'pickle'])
+def test_sandboxed_plugin_refuses_dangerous_imports(sandboxed_root, forbidden):
+    _write_bundle(sandboxed_root, f'bad_{forbidden.replace(".", "_")}', {
+        'bad.py': f'''
+            import {forbidden}
+
+            def register_sidebar(add):
+                pass
+        ''',
+    })
+    bundles = discover_bundles()
+    bad = next(b for b in bundles
+               if b.key == f'bad_{forbidden.replace(".", "_")}')
+    assert len(bad.load_errors) == 1
+    _role, _fname, exc = bad.load_errors[0]
+    assert isinstance(exc, SandboxViolation)
+
+
+def test_sandboxed_plugin_cannot_call_open(sandboxed_root):
+    """``open`` is stripped from the restricted builtins, so even a plugin
+    that gets past the import check can't touch the FS directly."""
+    _write_bundle(sandboxed_root, 'fs_bundle', {
+        'fs.py': '''
+            def register_sidebar(add):
+                open('/tmp/should_not_happen', 'w').close()
+        ''',
+    })
+    bundles = discover_bundles()
+    fs = next(b for b in bundles if b.key == 'fs_bundle')
+    # Module imports fine (no ``import`` statements), but calling the
+    # registered hook should fail because ``open`` is missing.
+    assert fs.load_errors == []
+    assert len(fs.sidebar_modules) == 1
+    mod = fs.sidebar_modules[0]
+    with pytest.raises(NameError):
+        mod.register_sidebar(lambda *a, **kw: None)
+
+
+def test_sandboxed_plugin_cannot_call_eval(sandboxed_root):
+    _write_bundle(sandboxed_root, 'eval_bundle', {
+        'ev.py': '''
+            def register_sidebar(add):
+                eval("1 + 1")
+        ''',
+    })
+    bundles = discover_bundles()
+    b = next(x for x in bundles if x.key == 'eval_bundle')
+    mod = b.sidebar_modules[0]
+    with pytest.raises(NameError):
+        mod.register_sidebar(lambda *a, **kw: None)
+
+
+def test_sandboxed_relative_import_within_bundle_works(sandboxed_root):
+    """Sibling helpers (``from ._helper import X``) must still resolve —
+    the sandbox vets ``import`` targets, but within-bundle relative
+    imports are pre-vetted at discovery time."""
+    _write_bundle(sandboxed_root, 'rel_bundle', {
+        '_helper.py': '''
+            CONSTANT = 42
+        ''',
+        'main.py': '''
+            from ._helper import CONSTANT
+
+            def register_sidebar(add):
+                pass
+        ''',
+    })
+    bundles = discover_bundles()
+    rel = next(b for b in bundles if b.key == 'rel_bundle')
+    assert rel.load_errors == []
+    assert len(rel.sidebar_modules) == 1
