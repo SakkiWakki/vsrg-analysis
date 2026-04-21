@@ -396,6 +396,11 @@ class PlayerTab(QWidget):
                     step *= 10
                 self._seek(step)
                 return True
+            elif t == ev.Type.MouseButtonPress and ev.button() == Qt.LeftButton:
+                self.view.setFocus(Qt.MouseFocusReason)
+                pos = ev.position() if hasattr(ev, 'position') else ev.pos()
+                if self.player.handle_mouse_down(int(pos.x()), int(pos.y())):
+                    return True
         return super().eventFilter(obj, ev)
 
     def cleanup(self):

@@ -21,6 +21,7 @@ from pathlib import Path
 
 from analysis.viz.plots import col_colors
 from analysis.player import skin as skin_module
+from analysis.player.renderer import PlayerRenderer
 
 
 # Judgment colors
@@ -164,6 +165,7 @@ class Player:
             self.miss_pressed = np.zeros(len(self.misses), dtype=bool)
 
         self.windows = osu_mania_windows(od) if game == 'osu' else etterna_windows_for(ett_judge)
+        self.judge_colors = JCLR
         self.judge_label = f'OD {od}' if game == 'osu' else str(ett_judge)
         self.game = game
         self.palette = [tuple(int(c[i:i + 2], 16) for i in (1, 3, 5))
@@ -289,6 +291,9 @@ class Player:
         self.sv_enabled = bool(self.sv_sections)
         self._build_cumulative_sv()
         self._build_ghost_sv_caches()
+        self.renderer = PlayerRenderer()
+        self.plugin_panel_open = False
+        self._hud_hitboxes = []
 
     @property
     def scroll_speed(self):
@@ -458,424 +463,20 @@ class Player:
         return self.sv_enabled
 
     def _draw(self, t_now):
-        self.screen.fill((14, 14, 16))
-        x0, lane_w = self._lane_geom()
-        judge_y = int(self.H * self.hit_line_y_frac)
+        self.renderer.draw(self, t_now)
 
-        # Lane backgrounds
-        for c in range(self.keycount):
-            rect = pygame.Rect(int(x0 + c * lane_w), 0, int(lane_w), self.H)
-            pygame.draw.rect(self.screen, (22, 22, 24), rect)
-            pygame.draw.line(self.screen, (40, 40, 44),
-                             (int(x0 + c * lane_w), 0),
-                             (int(x0 + c * lane_w), self.H))
-        pygame.draw.line(self.screen, (40, 40, 44),
-                         (int(x0 + self.keycount * lane_w), 0),
-                         (int(x0 + self.keycount * lane_w), self.H))
-
-        # Judgment line + hit window shading
-        hw_largest = self.windows[-1][1]
-        hw_y_up = judge_y - hw_largest * self.scroll_speed
-        hw_y_dn = judge_y + hw_largest * self.scroll_speed
-        for name, w in reversed(self.windows):
-            top = judge_y - w * self.scroll_speed
-            bot = judge_y + w * self.scroll_speed
-            color = JCLR[name]
-            surf = pygame.Surface((int(self.keycount * lane_w), int(bot - top)),
-                                  pygame.SRCALPHA)
-            surf.fill((color[0], color[1], color[2], 24))
-            self.screen.blit(surf, (int(x0), int(top)))
-        pygame.draw.line(self.screen, (255, 255, 255),
-                         (int(x0), judge_y),
-                         (int(x0 + self.keycount * lane_w), judge_y), 2)
-
-        # Candidate range: pick notes whose sv-distance from t_now falls in
-        # the visible screen band. Works correctly even after large seeks or
-        # under extreme SV — no note-index walk to get "stuck".
-        note_h = 14
-        screen_margin = 80
-        sps = max(1e-3, self.scroll_speed)
-        sv_hi = (judge_y + screen_margin) / sps            # top of screen
-        sv_lo = (judge_y - (self.H + screen_margin)) / sps  # bottom of screen
-        use_sv_space = bool(self.sv_enabled and self.sv_sections)
-        if use_sv_space:
-            cum_now = self._cumulative_sv_at(float(t_now))
-            target_lo = cum_now + sv_lo
-            target_hi = cum_now + sv_hi
-            lo = int(np.searchsorted(self._note_sv_cum, target_lo, side='left'))
-            hi = int(np.searchsorted(self._note_sv_cum, target_hi, side='right'))
-        else:
-            # Constant scroll: ms-to-judgment → time bounds directly.
-            target_lo = t_now + sv_lo
-            target_hi = t_now + sv_hi
-            lo = bisect.bisect_left(self.times, target_lo)
-            hi = bisect.bisect_right(self.times, target_hi)
-        candidates = list(range(lo, hi))
-        # A long-note is visible whenever its head OR its tail OR any part of
-        # the body falls in the screen band — not only when the head does.
-        # The forward candidate pass catches heads; this pass sweeps every
-        # LN whose head is outside the band and adds it if its tail is still
-        # on-screen OR the screen band is between head and tail. Without this
-        # second pass the LN flickers off the frame its head exits.
-        #
-        # We bound the sweep at 60s of chart time on either side of the
-        # candidate range — long enough to cover any reasonable LN including
-        # boss-chart sustains, short enough to stay cheap.
-        seen = set(candidates)
-        # Only LNs are relevant to the out-of-band sweep — a tap whose head
-        # is outside the screen band cannot contribute anything visible.
-        # Iterating self._ln_indices keeps this O(#LNs near window) regardless
-        # of how dense the tap stream is.
-        if self._ln_indices:
-            ln_idx = self._ln_indices
-            ln_lo = bisect.bisect_left(ln_idx, lo)
-            ln_hi = bisect.bisect_right(ln_idx, hi)
-            # Look back from the in-band range, stop when heads are older
-            # than 60s of chart time (no reasonable LN body reaches further).
-            for k in range(ln_lo - 1, -1, -1):
-                i = ln_idx[k]
-                if i in seen:
-                    continue
-                if self.times[i] < t_now - 60.0:
-                    break
-                y_head = self._time_to_y(self.times[i], t_now)
-                y_tail = self._time_to_y(self._ln_tail_times[i], t_now)
-                top_y = y_head if y_head < y_tail else y_tail
-                bot_y = y_tail if y_tail > y_head else y_head
-                if bot_y >= -screen_margin and top_y <= self.H + screen_margin:
-                    candidates.append(i); seen.add(i)
-            # Look ahead for LN heads whose tails have already scrolled into
-            # view (slow scroll / big SV jump).
-            for k in range(ln_hi, len(ln_idx)):
-                i = ln_idx[k]
-                if i in seen:
-                    continue
-                if self.times[i] > t_now + 60.0:
-                    break
-                y_head = self._time_to_y(self.times[i], t_now)
-                y_tail = self._time_to_y(self._ln_tail_times[i], t_now)
-                top_y = y_head if y_head < y_tail else y_tail
-                bot_y = y_tail if y_tail > y_head else y_head
-                if bot_y >= -screen_margin and top_y <= self.H + screen_margin:
-                    candidates.append(i); seen.add(i)
-
-        # Hoist hot attrs — attr lookups in a tight loop over hundreds of
-        # notes add up. Same deal for the precomputed lists.
-        times_ = self.times
-        offsets_ = self.offsets
-        misses_ = self.misses
-        columns_ = self._columns_list
-        noterows_ = self._noterows_list
-        ln_tails_ = self._ln_tail_times
-        rel_offsets_ = self.hold_release_offsets
-        palette_ = self.palette
-        keycount_ = self.keycount
-        time_to_y = self._time_to_y
-
-        for i in candidates:
-            note_t = times_[i]
-            c = columns_[i]
-            if c >= keycount_:
+    def handle_mouse_down(self, x, y):
+        for rect, action, payload in reversed(getattr(self, '_hud_hitboxes', [])):
+            rx, ry, rw, rh = rect
+            if not (rx <= x <= rx + rw and ry <= y <= ry + rh):
                 continue
-            off = offsets_[i]
-            miss = misses_[i]
-            y = time_to_y(note_t, t_now)
-            lx = int(x0 + c * lane_w)
-            note_color = palette_[c]
-
-            # -------- Game-agnostic note state ---------------------------
-            # All LN/press logic derives purely from (note_t, off, miss,
-            # end_t, rel_off) — no game-specific branches. That way new game
-            # adapters just need to provide these fields in their replay dict
-            # and this renderer works unchanged.
-            end_t = ln_tails_[i]
-            is_ln = not math.isnan(end_t)
-            if is_ln:
-                rel_off = rel_offsets_.get((noterows_[i], c))
-            else:
-                rel_off = None
-                end_t = None
-            # Head "consumed" time: when the player actually pressed it.
-            # If missed, the head stays visible as it falls through.
-            press_t = note_t + off  # only meaningful when not miss
-            release_t = (end_t + (rel_off or 0.0)) if is_ln else None
-
-            if miss:
-                ln_state = 'missed' if is_ln else 'missed_note'
-            elif is_ln:
-                if t_now < press_t:
-                    ln_state = 'upcoming'
-                elif t_now < release_t:
-                    ln_state = 'held'
-                else:
-                    ln_state = 'released'
-            else:
-                ln_state = 'tap'  # regular note
-
-            jname = self.note_judges[i]
-            jcolor = JCLR[jname]
-            miss_red = JCLR['miss']
-            dim_color = (note_color[0] // 2, note_color[1] // 2,
-                         note_color[2] // 2)
-            # Gray-out colors for missed notes (pset6 convention: grayed
-            # rather than tinted red — the red X overlay is what signals
-            # "this was a miss", the gray just drops visual weight).
-            miss_tap_color = (77, 77, 77)     # rgb(0.3, 0.3, 0.3)
-            miss_ln_color = (38, 38, 38)      # rgb(0.15, 0.15, 0.15)
-
-            # Display-hits mode (press_hide in code): once the player has
-            # pressed a note, hide the whole thing. For LNs, while the head
-            # is held, stick it to the judgment line with a shrinking body
-            # (pset6 LNDisplay pattern: head_y = hitpos when held). Missed
-            # notes never get hidden — they're grayed out instead so the red
-            # X + dim fill communicate the miss.
-            if is_ln:
-                y_end = self._time_to_y(end_t, t_now)
-
-                if miss:
-                    body_top, body_bot, body_color = y_end, y, miss_ln_color
-                elif ln_state == 'upcoming':
-                    body_top, body_bot, body_color = y_end, y, note_color
-                elif ln_state == 'held':
-                    if self.press_hide:
-                        # Pset6: head is stuck at hitpos (judgment line)
-                        # while held. Body shrinks between hitpos and tail.
-                        body_top, body_bot, body_color = y_end, judge_y, note_color
-                    else:
-                        body_top, body_bot, body_color = y_end, y, note_color
-                elif ln_state == 'released':
-                    if self.press_hide:
-                        # Pset6: once hit, color.a = 0 → entire LN vanishes.
-                        body_top = body_bot = None
-                        body_color = None
-                    else:
-                        # Keep showing the body+tail scrolling past so it
-                        # doesn't pop out mid-screen.
-                        body_top, body_bot, body_color = y_end, judge_y, dim_color
-                else:
-                    body_top = body_bot = None
-                    body_color = None
-
-                if body_color is not None and body_bot > body_top:
-                    self.skin_obj.draw_ln_body(self.screen, lx, body_top,
-                                               body_bot, lane_w, note_h,
-                                               body_color)
-
-                # LN tail marker — visible whenever the tail is on screen,
-                # unless press_hide hid the whole LN post-release.
-                tail_visible = not (self.press_hide and ln_state == 'released'
-                                    and not miss)
-                tail_on_screen = (-screen_margin <= y_end <= self.H +
-                                  screen_margin)
-                if tail_visible and tail_on_screen:
-                    tail_color = miss_ln_color if miss else dim_color
-                    self.skin_obj.draw_ln_tail(self.screen, lx, y_end,
-                                               lane_w, note_h, tail_color)
-                # Release-offset indicator: only relevant until the player
-                # has actually released (osu-mania tail judgment).
-                if (rel_off is not None and ln_state != 'released'
-                        and not miss and not self.press_hide):
-                    rel_y = y_end + rel_off * self.scroll_speed
-                    pygame.draw.line(self.screen, (220, 220, 220),
-                                     (int(lx + lane_w / 2), int(y_end)),
-                                     (int(lx + lane_w / 2), int(rel_y)), 1)
-                    pygame.draw.rect(self.screen, (220, 220, 220),
-                                     (lx + 8, int(rel_y) - 2,
-                                      int(lane_w - 16), 4))
-
-            # -------- Head position + visibility -------------------------
-            # Decide head draw location (stick to judgment line while an LN
-            # is held in display-hits-off mode) and whether to draw at all.
-            head_y = y
-            if is_ln and ln_state == 'held' and self.press_hide and not miss:
-                head_y = judge_y
-
-            if miss:
-                head_visible = True
-                head_color = miss_tap_color if not is_ln else miss_ln_color
-            elif self.press_hide:
-                # Taps vanish immediately on press; LN heads vanish on
-                # release (but stick to hitpos while held, handled above).
-                if is_ln:
-                    head_visible = ln_state in ('upcoming', 'held')
-                else:
-                    head_visible = ln_state == 'tap' and t_now < press_t
-                head_color = note_color
-            else:
-                head_visible = ln_state in ('upcoming', 'tap', 'held')
-                head_color = note_color
-
-            # -------- Note head ------------------------------------------
-            if head_visible:
-                self.skin_obj.draw_note_head(self.screen, lx, head_y, lane_w,
-                                             note_h, head_color)
-
-            # -------- Press marker (head hit indicator) ------------------
-            # Drawn for non-miss hits (in judgment color) AND for misses
-            # where the player actually pressed (in red). Shows the offset
-            # from the note head to the press moment so the user can see
-            # exactly when the key went down. Suppressed when the LN head
-            # is stuck to the judgment line in press-hide mode — the press
-            # moment isn't tied to the visible head there.
-            miss_has_press = bool(miss and self.miss_pressed[i])
-            show_press_mark = ((not miss or miss_has_press) and head_visible
-                               and not (is_ln and ln_state == 'held'
-                                        and self.press_hide))
-            if show_press_mark:
-                joins_ghost_hold = bool(
-                    miss_has_press and is_ln
-                    and self._miss_first_ghost_hold[i] >= 0)
-                press_y = (time_to_y(press_t, t_now) if joins_ghost_hold
-                           else y + off * self.scroll_speed)
-                line_color = miss_red if miss else jcolor
-                pygame.draw.line(self.screen, line_color,
-                                 (int(lx + lane_w / 2), int(y)),
-                                 (int(lx + lane_w / 2), int(press_y)),
-                                 2 if joins_ghost_hold else 1)
-                if not joins_ghost_hold:
-                    pygame.draw.rect(self.screen, line_color,
-                                     (lx + 8, int(press_y) - 2,
-                                      int(lane_w - 16), 4))
-
-            if miss and head_visible:
-                # Translucent red outline + X marker over the grayed head.
-                pad = 4
-                ow = int(lane_w - 8) + pad * 2
-                oh = note_h + pad * 2
-                halo = pygame.Surface((ow, oh), pygame.SRCALPHA)
-                pygame.draw.rect(halo, (255, 60, 60, 110), halo.get_rect(),
-                                 width=3)
-                self.screen.blit(halo, (lx + 4 - pad, int(y) - note_h // 2 - pad))
-                cx = lx + lane_w / 2
-                pygame.draw.line(self.screen, jcolor,
-                                 (cx - 10, y - 10), (cx + 10, y + 10), 2)
-                pygame.draw.line(self.screen, jcolor,
-                                 (cx - 10, y + 10), (cx + 10, y - 10), 2)
-
-        # Ghost holds: red hit-line for spans where the player held a key
-        # inside a missed LN. Drawn AFTER all notes so it sits on top of
-        # the grayed LN body. Release is NOT clipped to the LN tail, so
-        # overholds extend visibly past the tail. Only osu replays populate.
-        #
-        # Range check: a span is visible iff its [press_t, release_t]
-        # overlaps the on-screen time window [target_lo, target_hi].
-        # Array is sorted by press_t, so we bisect on press_t with a
-        # lookback bounded by the precomputed max hold duration — that
-        # catches long holds whose press is off-screen but release is on.
-        gh_red = JCLR['miss']
-        if self._ghost_hold_press.size:
-            if use_sv_space:
-                gh_press_key = self._ghost_hold_press_sv
-                gh_release_key = self._ghost_hold_release_sv
-                gh_max_dur = self._ghost_hold_max_sv_dur
-            else:
-                gh_press_key = self._ghost_hold_press
-                gh_release_key = self._ghost_hold_release
-                gh_max_dur = self._ghost_hold_max_dur
-            gh_hi = bisect.bisect_right(gh_press_key, target_hi)
-            gh_lo = bisect.bisect_left(gh_press_key,
-                                       target_lo - gh_max_dur)
-            for k in range(gh_lo, gh_hi):
-                pt = float(self._ghost_hold_press[k])
-                rt = float(self._ghost_hold_release[k])
-                # True overlap test. bisect_left with the max-duration
-                # lookback is conservative — it lets through spans whose
-                # release is actually < target_lo. Reject those here.
-                if float(gh_release_key[k]) < target_lo:
-                    continue
-                gc = int(self._ghost_hold_cols[k])
-                if gc >= keycount_:
-                    continue
-                y_press = time_to_y(pt, t_now)
-                y_release = time_to_y(rt, t_now)
-                glx = int(x0 + gc * lane_w)
-                cx = int(glx + lane_w / 2)
-                y_top = min(y_press, y_release)
-                y_bot = max(y_press, y_release)
-                if y_bot < 0 or y_top > self.H:
-                    continue
-                y_top = int(max(0, y_top))
-                y_bot = int(min(self.H, y_bot))
-                pygame.draw.line(self.screen, gh_red,
-                                 (cx, y_top), (cx, y_bot), 2)
-                if not self._ghost_hold_extends_miss[k]:
-                    pygame.draw.rect(self.screen, gh_red,
-                                     (glx + 8, int(y_press) - 2,
-                                      int(lane_w - 16), 4))
-                pygame.draw.rect(self.screen, gh_red,
-                                 (glx + 8, int(y_release) - 2,
-                                  int(lane_w - 16), 4))
-
-        # Ghost taps: presses that didn't land on any note. Only populated for
-        # osu replays. Drawn LAST so they sit on top of every note and any
-        # LN body/ghost hold.
-        if self._ghost_times.size:
-            ghost_key = self._ghost_sv_times if use_sv_space else self._ghost_times
-            g_lo = bisect.bisect_left(ghost_key, target_lo)
-            g_hi = bisect.bisect_right(ghost_key, target_hi)
-            for k in range(g_lo, g_hi):
-                gt = float(self._ghost_times[k])
-                gc = int(self._ghost_cols[k])
-                if gc >= keycount_:
-                    continue
-                gy = time_to_y(gt, t_now)
-                glx = int(x0 + gc * lane_w)
-                self.skin_obj.draw_ghost_tap(self.screen, glx, gy, lane_w,
-                                             note_h)
-
-        # HUD / sidebar
-        sidebar_x = self.W - 210
-        pygame.draw.rect(self.screen, (20, 20, 22),
-                         (sidebar_x, 0, 210, self.H))
-        y = 14
-        sv_line = ('SV: on' if self.sv_enabled else 'SV: off') \
-            if self.sv_sections else 'SV: n/a'
-        for line in [
-            f't = {t_now:+7.3f}s',
-            f'speed = {self.play_rate:.2f}x',
-            (f'scroll = C{int(self.cmod_bpm)} ({int(self.effective_scroll_ms)}ms)'
-             if self.scroll_mode == self.SCROLL_MODE_CMOD
-             else f'scroll = {int(self.effective_scroll_ms)} ms'),
-            f'notes = {len(self.times)}',
-            f'keycount = {self.keycount}',
-            sv_line,
-            f'{"PAUSED" if self.paused else "PLAYING"}',
-        ]:
-            surf = self.font.render(line, True, (220, 220, 220))
-            self.screen.blit(surf, (sidebar_x + 8, y))
-            y += 18
-
-        y += 12
-        title = self.big_font.render('Judgments', True, (255, 171, 145))
-        self.screen.blit(title, (sidebar_x + 8, y))
-        y += 26
-        counts = {n: 0 for n, _ in self.windows}
-        counts['miss'] = 0
-        for j in self.note_judges:
-            counts[j] = counts.get(j, 0) + 1
-        for name, w in self.windows:
-            line = f'{name:<6}  ±{w*1000:5.1f}ms  n={counts[name]}'
-            surf = self.font.render(line, True, JCLR[name])
-            self.screen.blit(surf, (sidebar_x + 8, y))
-            y += 18
-        miss_line = f'miss             n={counts["miss"]}'
-        surf = self.font.render(miss_line, True, JCLR['miss'])
-        self.screen.blit(surf, (sidebar_x + 8, y))
-        y += 30
-
-        # Help
-        help_lines = [
-            'Space: pause', 'L/R: seek', 'Sh+L/R: seek10',
-            'Up/Dn: scrollspd', '+/-: playspd',
-            'M: mute', 'R: restart', 'Q: quit',
-        ]
-        for h in help_lines:
-            surf = self.font.render(h, True, (120, 120, 130))
-            self.screen.blit(surf, (sidebar_x + 8, y))
-            y += 16
-
-        if not self.headless:
-            pygame.display.flip()
+            if action == 'toggle_plugin_panel':
+                self.plugin_panel_open = not self.plugin_panel_open
+                return True
+            if action == 'toggle_plugin':
+                self.renderer.plugins.toggle_enabled(payload)
+                return True
+        return False
 
     def tick(self, dt_s):
         """Headless: advance time and redraw. Returns raw RGB bytes + (w,h).
@@ -1003,6 +604,8 @@ class Player:
                     self.t = max(self.t_min, min(self.t_max, self.t - ev.y * 0.5))
                 elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                     x, y = ev.pos
+                    if self.handle_mouse_down(x, y):
+                        continue
                     pb_y = self.H - 18
                     if pb_y <= y <= pb_y + 8 and 10 <= x <= self.W - 220:
                         frac = (x - 10) / max(1, (self.W - 230))

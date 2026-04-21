@@ -6,6 +6,8 @@ Use it for personal use if you want lol. I might rewrite parts by hand if really
 
 Lemme know if the clanker somehow made a buffer overflow in python code lol
 
+Btw I added plugins but the plugins themselves are not sandboxed. This means you should not run arbitrary plugins from randos
+
 ---
 
 # Clanker README
@@ -17,7 +19,7 @@ A Python toolkit for offline analysis of **Etterna** and **osu!mania** replays. 
 - **Unified replay library** — auto-discovers Etterna profiles (`ReplaysV2` + `Etterna.xml`) and osu! installs (`Data/r/*.osr` + Songs dir), merging scores into one searchable list. First-run prompt lets you point it at custom install paths, and you can change them later from the Library tab's **Paths…** button.
 - **Per-note timing analysis** — mean/std offset, judgments, hand splits, per-column drift, rolling stability, chord-size timing, coupling (solo vs paired notes).
 - **Plugin visualizations** — drop a `.py` file into `visualizations/` and it shows up in the GUI automatically (see below).
-- **Embedded replay player** — pygame-rendered chart streamed into a Qt tab, with audio sync, playbar scrubbing, scroll/rate controls, swappable note skins (bar/circle), and **SV (scroll velocity)** support for osu!mania.
+- **Embedded replay player** — pygame-rendered chart streamed into a Qt tab, with audio sync, playbar scrubbing, scroll/rate controls, swappable note skins (bar/circle), draw-stage plugins, and **SV (scroll velocity)** support for osu!mania.
 - **HTML report export** — single-file self-contained summary report with all plots embedded as base64.
 - **Batch mode** — run analysis across every score in a profile and produce leaderboards / cross-chart comparisons.
 
@@ -162,6 +164,10 @@ analysis/                         (Python package)
 │   └── plugins/                  drop-in plugin registry (see below)
 ├── player/
 │   ├── player.py                 pygame replay player (headless-capable; streamed into Qt)
+│   ├── renderer.py               ordered player draw pipeline + plugin hook dispatch
+│   ├── layers/                   built-in player draw layers
+│   ├── draw_plugins/             bundled player draw plugins
+│   ├── plugin_api.py             public Stage enum for player draw plugins
 │   └── skin.py                   swappable note skins (BarSkin, CircleSkin)
 └── gui/
     ├── app.py                    PySide6 main app — library, tabs, embedded player, plot viewer
@@ -234,6 +240,36 @@ Keys (when the chart view has focus):
 | mouse wheel | seek ±0.5s (Shift for ±5s) |
 
 Bottom controls: play/pause, playbar (click anywhere to jump), scroll ±, rate ±, restart, and **SV toggle** (osu!mania only — disabled when the chart has no SV).
+
+## Player draw plugins
+
+Player draw plugins work like visualization plugins: put a `.py` file in `draw_extensions/`, `player_plugins/`, `~/.config/vsrg-analysis/player_plugins/`, or any directory listed in `ETTERNA_ANALYSIS_PLAYER_PLUGINS` (separated by `:` on Linux/macOS). Each file can expose `register(add)`.
+
+```python
+# draw_extensions/receptor_flash.py
+from analysis.player.plugin_api import Stage
+
+
+def draw(ctx, stage):
+    # ctx exposes pygame, screen, t_now, keycount, lane geometry, candidates,
+    # visible_ghost_holds, and helpers such as time_to_y()/lane_center().
+    if stage != Stage.AFTER_JUDGMENT:
+        return
+    for col in range(ctx.keycount):
+        x = int(ctx.lane_center(col))
+        y = int(ctx.judge_y)
+        ctx.pygame.draw.circle(ctx.screen, (255, 255, 255), (x, y), 5, 1)
+
+
+def register(add):
+    add('Receptor flash', draw, stages=[Stage.AFTER_JUDGMENT], priority=100)
+```
+
+Available stages are `AFTER_LANES`, `AFTER_JUDGMENT`, `AFTER_NOTES`, `AFTER_GHOSTS`, `HUD`, and `POST_FRAME`. Lower priority runs earlier within the same stage. Plugins are normal Python code, so only install plugins you trust.
+
+The replay player's right sidebar has a collapsible `Plugins n/m` section.
+Open it to enable or disable any discovered player plugin. Disabled choices
+are stored in `~/.config/vsrg-analysis/player_plugins.json`.
 
 ## Known limitations / caveats
 
