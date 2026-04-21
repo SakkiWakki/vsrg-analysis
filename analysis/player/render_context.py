@@ -1,0 +1,50 @@
+"""Per-frame drawing context shared by core layers and user plugins."""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+
+@dataclass
+class RenderContext:
+    player: object
+    screen: object
+    pygame: object
+    colors: dict
+    t_now: float
+    x0: float
+    lane_w: float
+    judge_y: int
+    note_h: int = 14
+    screen_margin: int = 80
+    target_lo: float = 0.0
+    target_hi: float = 0.0
+    use_sv_space: bool = False
+    candidates: list[int] = field(default_factory=list)
+    visible_ghost_holds: list[int] = field(default_factory=list)
+    visible_ghost_taps: list[int] = field(default_factory=list)
+    plugin_data: dict = field(default_factory=dict)
+
+    @property
+    def width(self):
+        return self.player.W
+
+    @property
+    def height(self):
+        return self.player.H
+
+    @property
+    def keycount(self):
+        return self.player.keycount
+
+    @property
+    def scroll_speed(self):
+        return self.player.scroll_speed
+
+    def time_to_y(self, t):
+        return self.player._time_to_y(float(t), self.t_now)
+
+    def lane_x(self, col):
+        return self.x0 + int(col) * self.lane_w
+
+    def lane_center(self, col):
+        return self.lane_x(col) + self.lane_w / 2
