@@ -5,7 +5,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QWidget
 
-from analysis.player.qt_renderer import QtPlayerRenderer
+from analysis.player.render.qt_renderer import QtPlayerRenderer
 
 
 class PlayerCanvas(QWidget):

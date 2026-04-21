@@ -22,13 +22,13 @@ helpers directly — this way the sidebar stays consistent with the theme
 and stays backend-agnostic for future renderers.
 
 Design tokens (colors, row heights, paddings) live in
-``analysis.player.theme``.
+``analysis.player.render.theme``.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from analysis.player import theme
+from analysis.player.render import theme
 
 
 # Monospace character width (approx) used to center short labels.
@@ -104,13 +104,13 @@ class SidebarContext:
     def text(self, text, x, baseline, color=theme.BTN_FG):
         if self.measure_only:
             return
-        from analysis.player.qt_renderer import _text
+        from analysis.player.render.qt_renderer import _text
         _text(self.painter, text, color, x, baseline)
 
     def rect(self, rect, color, outline=None, outline_w=1):
         if self.measure_only:
             return
-        from analysis.player.qt_renderer import _rect, _rect_outline
+        from analysis.player.render.qt_renderer import _rect, _rect_outline
         if color is not None:
             _rect(self.painter, color, rect)
         if outline is not None:
@@ -119,7 +119,7 @@ class SidebarContext:
     def line(self, start, end, color, width=1):
         if self.measure_only:
             return
-        from analysis.player.qt_renderer import _line
+        from analysis.player.render.qt_renderer import _line
         _line(self.painter, color, start, end, width)
 
     def add_hitbox(self, rect, action, payload=None):

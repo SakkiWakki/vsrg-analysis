@@ -108,6 +108,26 @@ def keys() -> list[str]:
     return list(_ORDER)
 
 
+def is_compatible(mode_key: str, game: str) -> bool:
+    """True if `mode_key` is safe to use under `game`. Core modes (game=None)
+    are always compatible; per-game modes must match exactly. Unknown keys
+    are incompatible so callers fall back to the game's default."""
+    m = _MODES.get(mode_key)
+    if m is None:
+        return False
+    return m.game is None or m.game == game
+
+
+def default_for_game(game: str) -> str:
+    """The preferred scroll mode for `game`, asked of its adapter. Returns
+    the core 'ms' mode if the adapter or registry can't answer."""
+    try:
+        from analysis.core import game as game_mod
+        return game_mod.get(game).default_scroll_mode()
+    except Exception:
+        return 'ms'
+
+
 # --- Core mode: ms-to-judgment (game-independent) ----------------------------
 
 

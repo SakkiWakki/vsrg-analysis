@@ -1,7 +1,7 @@
 """Built-in sidebar section: collapsible list of registered draw plugins."""
 from __future__ import annotations
 
-from analysis.player import theme
+from analysis.player.render import theme
 
 
 _CHECKBOX_INSET_X = 6    # gap between row left edge and checkbox

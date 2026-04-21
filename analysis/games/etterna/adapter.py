@@ -75,8 +75,43 @@ class EtternaAdapter(GameAdapter):
         return bpms, offset, audio
 
     def judgement_windows(self, replay, judge=None, **_):
-        from analysis.player.player import etterna_windows_for
-        return etterna_windows_for(judge or 'J4')
+        from analysis.games.etterna.judgment import windows_for
+        return windows_for(judge or 'J4')
+
+    def nudge_judge(self, current, delta):
+        """Step through J1..J9 by one per click. Etterna's judge is
+        discrete — integers only — so we take the sign of `delta` and
+        clamp to [1, 9]."""
+        cur = str(current or 'J4').upper()
+        if cur == 'JUSTICE':
+            cur = 'J9'
+        try:
+            n = int(cur.lstrip('J'))
+        except ValueError:
+            n = 4
+        step = 1 if delta > 0 else (-1 if delta < 0 else 0)
+        n = max(1, min(9, n + step))
+        return f'J{n}'
+
+    def prepare_replay_times(self, replay, bpms=None, sm_offset=0.0, **_):
+        import numpy as np
+        from analysis.games.etterna.sm_chart import row_to_time
+        from analysis.player.timing import infer_keycount
+        if bpms is not None:
+            times = np.array([row_to_time(int(r), bpms, sm_offset)
+                              for r in replay['noterows']])
+        else:
+            # 120bpm, 48 rows/beat => 96 rows/sec
+            times = replay['noterows'].astype(np.float64) / 96.0
+        hold_tails = {}
+        for h in replay.get('holds', []):
+            if len(h) == 3 and h[2] is not None:
+                if bpms is not None:
+                    hold_tails[(h[0], h[1])] = row_to_time(
+                        int(h[2]), bpms, sm_offset)
+                else:
+                    hold_tails[(h[0], h[1])] = h[2] / 96.0
+        return times, hold_tails, infer_keycount(replay)
 
     def judge_label(self, replay, judge=None, **_):
         return str(judge or 'J4')

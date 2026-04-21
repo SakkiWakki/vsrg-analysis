@@ -27,11 +27,11 @@ from analysis.plugins.sandbox import (
     'math', 'random', 'collections', 'collections.abc',
     'itertools', 'functools', 're', 'json', 'dataclasses',
     'numpy', 'numpy.linalg',
-    'analysis.player.theme', 'analysis.player.sidebar_api',
+    'analysis.player.render.theme', 'analysis.player.hud.sidebar_api',
     'analysis.plugins.host_api',
     'analysis.overlay.api',
     # Parent of an allow-listed submodule — required for
-    # ``from analysis.player import theme`` (__import__ fetches parent).
+    # ``from analysis.player.render import theme`` (__import__ fetches parent).
     'analysis.player',
 ])
 def test_allowed_modules(module):
@@ -120,7 +120,7 @@ def test_sandboxed_plugin_allowed_imports_succeed(sandboxed_root, capsys):
     _write_bundle(sandboxed_root, 'good_bundle', {
         'ok.py': '''
             import math
-            from analysis.player import theme
+            from analysis.player.render import theme
 
             def register_sidebar(add):
                 pass

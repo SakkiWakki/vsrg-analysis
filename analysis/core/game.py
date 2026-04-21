@@ -42,6 +42,31 @@ class GameAdapter:
         (OD for osu, judge for etterna)."""
         return {}
 
+    def prepare_replay_times(self, replay, **timing):
+        """Return (times_sec, hold_tails, keycount) for this replay.
+        times_sec is a float64 array parallel to replay['noterows'];
+        hold_tails maps (noterow, column) -> tail time in seconds.
+        Per-game because osu replays store absolute ms while Etterna
+        stores SM noterows that need the chart's BPM map to time out."""
+        raise NotImplementedError
+
+    def judge_kwarg_name(self) -> str:
+        """Name of the keyword the game's judge system takes in
+        `judgement_windows`/`judge_label`/`player_kwargs` ('judge' for
+        Etterna, 'od' for osu). The Player uses this to forward the
+        active value without branching per game."""
+        return 'judge'
+
+    def nudge_judge(self, current, delta):
+        """Step the current judge value by `delta`. Signed; sign is all
+        that matters for discrete judges (Etterna J1..J9), magnitude
+        matters for continuous ones (osu OD float).
+
+        Returns the new value, or `current` if the adapter doesn't
+        support switching (default). Called from the sidebar ± buttons
+        and the Player's keyboard shortcut path."""
+        return current
+
 
 _REGISTRY: dict[str, GameAdapter] = {}
 _discovered = False

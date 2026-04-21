@@ -61,8 +61,8 @@ _THIRDPARTY_ALLOW = frozenset({
 # Host API modules exposed to sandboxed plugins. Keep this list narrow;
 # expand only when the narrower surface is known to be safe.
 _HOST_API_ALLOW = frozenset({
-    'analysis.player.theme',
-    'analysis.player.sidebar_api',
+    'analysis.player.render.theme',
+    'analysis.player.hud.sidebar_api',
     'analysis.player.plugin_api',
     'analysis.player.events',
     'analysis.plugins.host_api',
@@ -130,7 +130,7 @@ def _is_allowed(module_name: str) -> bool:
                 or prefix in _HOST_API_ALLOW):
             return True
     # Parent of an allow-listed module (e.g. ``analysis.player`` when
-    # ``analysis.player.theme`` is allowed).
+    # ``analysis.player.render.theme`` is allowed).
     dotted = module_name + '.'
     for allowed in (*_STDLIB_ALLOW, *_THIRDPARTY_ALLOW, *_HOST_API_ALLOW):
         if allowed.startswith(dotted):

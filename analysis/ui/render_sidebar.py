@@ -14,7 +14,7 @@ Layout model:
 """
 from __future__ import annotations
 
-from analysis.player import theme
+from analysis.player.render import theme
 from analysis.ui.components import (Box, Button, Checkbox, Column, Heading,
                                      Row, Spacer, Text)
 

@@ -1,13 +1,41 @@
-"""Built-in sidebar section: per-judgment window + miss counts."""
+"""Built-in sidebar section: per-judgment window + miss counts, with
+a judge switcher row. The actual judge→windows mapping is owned by the
+game's adapter; this plugin is game-agnostic — it just nudges through
+whatever the adapter's `nudge_judge` accepts."""
 from __future__ import annotations
 
-from analysis.player import theme
+from analysis.player.render import theme
+
+
+_NUDGE_BTN_W = 28
+# Etterna judges are integer steps — sign is all that matters. osu OD is
+# float; ±0.1 per click mirrors the rate slider's feel.
+_OSU_OD_STEP = 0.1
 
 
 def _draw_judgments(sctx):
     p = sctx.player
     sctx.spacer()
     sctx.draw_heading('Judgments')
+
+    # Switcher row: [−] {label} [+], same layout as the rate slider.
+    step = 1.0 if p.game == 'etterna' else _OSU_OD_STEP
+    row_y = sctx.y
+    sctx.button_at((sctx.col_x, row_y, _NUDGE_BTN_W, theme.ROW_BUTTON_H),
+                   '−', 'judge_nudge', -step, center=True)
+    sctx.button_at((sctx.col_x + sctx.col_w - _NUDGE_BTN_W, row_y,
+                    _NUDGE_BTN_W, theme.ROW_BUTTON_H),
+                   '+', 'judge_nudge', step, center=True)
+    # Centered label between the nudge buttons (no hitbox).
+    readout_x = sctx.col_x + _NUDGE_BTN_W
+    readout_w = sctx.col_w - 2 * _NUDGE_BTN_W
+    label = str(p.judge_label)
+    sctx.text(label,
+              readout_x + max(0, (readout_w - len(label) * 6) // 2),
+              row_y + theme.TEXT_BASELINE_BUTTON,
+              theme.BTN_FG)
+    sctx.y += theme.ROW_TALL_H
+
     counts = {n: 0 for n, _ in p.windows}
     counts['miss'] = 0
     for j in p.note_judges:

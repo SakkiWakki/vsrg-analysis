@@ -57,7 +57,7 @@ def _escape_key(key: str) -> str:
     """Plugin keys can contain dots (rare but legal — bundle authors
     pick them). Dotted path parts are the store's separator, so rewrite
     any dots in a key to underscores. Matches ``_escape_key`` in
-    :mod:`analysis.player.sidebar_api` so all layers line up."""
+    :mod:`analysis.player.hud.sidebar_api` so all layers line up."""
     return key.replace('.', '_')
 
 

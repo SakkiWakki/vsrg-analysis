@@ -193,7 +193,7 @@ imported:
   `array`, `copy`, `numbers`, `fractions`, `decimal`, `json`,
   `__future__`.
 - **Third-party:** `numpy`.
-- **Host API:** `analysis.player.theme`, `analysis.player.sidebar_api`,
+- **Host API:** `analysis.player.render.theme`, `analysis.player.hud.sidebar_api`,
   `analysis.player.plugin_api`, `analysis.player.events`,
   `analysis.plugins.host_api` (includes `plugin_config` — see below),
   `analysis.ui` (+ `analysis.ui.components`, `analysis.ui.render_sidebar`),

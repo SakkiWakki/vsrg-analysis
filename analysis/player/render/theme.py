@@ -3,7 +3,7 @@
 Acts like a tiny Tailwind config: every color, padding, and row height used
 by the sidebar / HUD / plugin UI resolves through this module, so layout
 is consistent and tunable from one place. Callers should import token
-names normally (``from analysis.player import theme`` then ``theme.BTN_FG``)
+names normally (``from analysis.player.render import theme`` then ``theme.BTN_FG``)
 — attribute access transparently falls through to the *active* theme,
 letting bundle-provided themes override tokens at runtime.
 

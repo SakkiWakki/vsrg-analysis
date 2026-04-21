@@ -6,7 +6,8 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QLineEdit)
 
 from analysis.gui.player_canvas import PlayerCanvas
-from analysis.gui.settings import get_settings
+from analysis.gui.settings import (get_settings, load_player_settings,
+                                   save_player_setting)
 from analysis.gui.widgets import JumpSlider
 
 
@@ -21,14 +22,18 @@ class PlayerTab(QWidget):
         from analysis.core import game as game_mod
         adapter = game_mod.get(game)
         player_kwargs = adapter.player_kwargs(replay, od=od, judge=judge)
-        skin = str(get_settings().value('player/skin', 'bar'))
-        press_hide = bool(get_settings().value('player/press_hide', False, type=bool))
+        prefs = load_player_settings(game)
+        # Explicit scroll_mode from the caller (library tab) beats the saved
+        # pref — it's passed in only when the library tab already resolved it.
+        effective_mode = scroll_mode if scroll_mode is not None else prefs['scroll_mode']
         self.player = Player(replay, game=game, bpms=bpms,
                              sm_offset=sm_offset, audio_path=None,
                              window_w=900, window_h=800,
-                             scroll_ms=scroll_ms, scroll_mode=scroll_mode,
+                             scroll_ms=scroll_ms, scroll_mode=effective_mode,
                              cmod_bpm=cmod_bpm, osu_speed=osu_speed,
-                             skin=skin, press_hide=press_hide, **player_kwargs)
+                             skin=prefs['skin'],
+                             press_hide=prefs['press_hide'],
+                             **player_kwargs)
         # Replay's original playback rate (Etterna "Rate" from XML, osu!
         # "ModRate"). The chart + offsets are in chart-time, but the audio
         # file is unrated — playing at 1.0 leaves the music slower/faster
@@ -93,9 +98,8 @@ class PlayerTab(QWidget):
         self.timer.start()
 
         from analysis.player.audio import AudioEngine
-        pitch_correct = bool(get_settings().value(
-            'player/pitch_correct', True, type=bool))
-        self._audio = AudioEngine(audio_path, pitch_correct=pitch_correct)
+        self._audio = AudioEngine(audio_path,
+                                  pitch_correct=prefs['pitch_correct'])
         self._audio_ready = self._audio.ready
         if self._audio_ready:
             self._audio.prewarm_rates([0.8, 0.9, 1.1, 1.2, 1.3, 1.5])
@@ -158,13 +162,11 @@ class PlayerTab(QWidget):
         """Pull per-tab-shared toggles from QSettings. Called each tick so
         that toggling in another PlayerTab propagates here instead of the
         two tabs showing contradictory states."""
-        s = get_settings()
-        stored_ph = bool(s.value('player/press_hide', False, type=bool))
-        if stored_ph != self.player.press_hide:
-            self.player.set_press_hide(stored_ph)
-        stored_skin = str(s.value('player/skin', 'bar'))
-        if stored_skin != self.player.skin:
-            self.player.set_skin(stored_skin)
+        prefs = load_player_settings(self.player.game)
+        if prefs['press_hide'] != self.player.press_hide:
+            self.player.set_press_hide(prefs['press_hide'])
+        if prefs['skin'] != self.player.skin:
+            self.player.set_skin(prefs['skin'])
 
     def _toggle_mute(self):
         if not self._audio_ready:
@@ -178,7 +180,7 @@ class PlayerTab(QWidget):
         Re-syncs audio so rate nudges from the HUD actually retime the music,
         and persists the mode."""
         self._sync_audio()
-        get_settings().setValue('player/scroll_mode', self.player.scroll_mode)
+        save_player_setting('scroll_mode', self.player.scroll_mode)
 
     def _on_hud_action(self, action, payload):
         """Dispatcher for sidebar-HUD hitbox clicks that need Qt-side work
@@ -188,15 +190,15 @@ class PlayerTab(QWidget):
             self.player.toggle_sv()
         elif action == 'cycle_skin':
             self.player.toggle_skin()
-            get_settings().setValue('player/skin', self.player.skin)
+            save_player_setting('skin', self.player.skin)
         elif action == 'toggle_press_hide':
             self.player.toggle_press_hide()
-            get_settings().setValue('player/press_hide', self.player.press_hide)
+            save_player_setting('press_hide', self.player.press_hide)
         elif action == 'toggle_pitch':
             if self._audio_ready:
                 new = not self._audio._pitch_correct
                 self._audio.set_pitch_correct(new)
-                get_settings().setValue('player/pitch_correct', new)
+                save_player_setting('pitch_correct', new)
                 self._sync_audio()
         elif action == 'edit_scroll_value':
             self._open_scroll_edit(payload)

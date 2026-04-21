@@ -6,9 +6,9 @@ import math
 from PySide6.QtCore import QPointF, QRectF
 from PySide6.QtGui import (QBrush, QColor, QFont, QImage, QPainter, QPen)
 
-from analysis.player import culling
+from analysis.player.render import culling
 from analysis.player.plugin_api import Stage
-from analysis.player.render_context import RenderContext
+from analysis.player.render.render_context import RenderContext
 
 
 def _qcolor(color):
@@ -383,8 +383,8 @@ class QtPlayerRenderer:
             ctx.visible_ghost_taps.append(k)
 
     def _draw_hud(self, ctx, painter):
-        from analysis.player import theme
-        from analysis.player.sidebar_api import SidebarContext
+        from analysis.player.render import theme
+        from analysis.player.hud.sidebar_api import SidebarContext
         p = ctx.player
         sidebar_x = p.W - theme.SIDEBAR_WIDTH
         p.hud.clear_hitboxes()

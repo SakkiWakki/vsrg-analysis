@@ -14,7 +14,7 @@ import pytest
 
 from analysis.gui.region import (InputRouter, LanesRegion, Region,
                                   SidebarRegion)
-from analysis.player.hud_state import HudState
+from analysis.player.hud.hud_state import HudState
 
 
 class _FakeRegion:
@@ -143,7 +143,7 @@ def _fake_player(w=1200, h=700):
 
 
 def test_sidebar_region_contains_matches_theme_width():
-    from analysis.player import theme
+    from analysis.player.render import theme
     p = _fake_player(w=1600, h=800)
     r = SidebarRegion(p)
     assert r.contains(1600 - theme.SIDEBAR_WIDTH + 5, 10)
@@ -182,7 +182,7 @@ def test_sidebar_region_mouse_delegates_to_player():
 
 
 def test_lanes_region_contains_stops_at_sidebar():
-    from analysis.player import theme
+    from analysis.player.render import theme
     p = _fake_player(w=1600, h=800)
     r = LanesRegion(p, seek_fn=lambda s: None)
     sidebar_start = 1600 - theme.SIDEBAR_WIDTH

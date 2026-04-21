@@ -30,6 +30,16 @@ class OsuAdapter(GameAdapter):
         # osu! replays carry absolute ms timings; no sm-style offset needed.
         return None, 0.0
 
+    def prepare_replay_times(self, replay, **_):
+        import numpy as np
+        from analysis.player.timing import infer_keycount
+        times = replay['noterows'].astype(np.float64) / 1000.0
+        hold_tails = {}
+        for h in replay.get('holds', []):
+            if len(h) == 3 and h[2] is not None:
+                hold_tails[(h[0], h[1])] = h[2] / 1000.0
+        return times, hold_tails, infer_keycount(replay)
+
     def effective_od(self, replay, od=None):
         from analysis.viz.note_visualizer import effective_osu_od
         base = od if od is not None else float(replay.get('od', 8.0))
@@ -37,8 +47,20 @@ class OsuAdapter(GameAdapter):
         return effective_osu_od(base, mods)
 
     def judgement_windows(self, replay, od=None, **_):
-        from analysis.player.player import osu_mania_windows
-        return osu_mania_windows(self.effective_od(replay, od))
+        from analysis.games.osu.judgment import windows_for
+        return windows_for(self.effective_od(replay, od))
+
+    def judge_kwarg_name(self):
+        return 'od'
+
+    def nudge_judge(self, current, delta):
+        """osu!mania OD is continuous (float). The beatmap field caps
+        at 10 but mods push effective OD higher (HR at OD10 ≈ 14, and
+        charts can simulate stricter-than-stable windows too), so we
+        allow 0..15 in the UI. Caller passes the physical delta
+        (±0.1 from the sidebar buttons, or larger on keyboard)."""
+        cur = float(current if current is not None else 8.0)
+        return max(0.0, min(15.0, cur + float(delta)))
 
     def judge_label(self, replay, od=None, **_):
         return f'OD {self.effective_od(replay, od):g}'

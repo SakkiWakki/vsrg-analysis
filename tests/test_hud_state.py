@@ -1,7 +1,7 @@
 """Tests for the HudState container."""
 from __future__ import annotations
 
-from analysis.player.hud_state import HudState
+from analysis.player.hud.hud_state import HudState
 
 
 def test_defaults():

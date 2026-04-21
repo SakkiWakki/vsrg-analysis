@@ -1,7 +1,7 @@
 """Built-in sidebar section: scroll/rate/game controls, pinned to the bottom."""
 from __future__ import annotations
 
-from analysis.player import theme
+from analysis.player.render import theme
 
 
 _NUDGE_BTN_W = 28

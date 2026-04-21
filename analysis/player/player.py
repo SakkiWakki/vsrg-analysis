@@ -22,85 +22,30 @@ from analysis.player.plugin_loader import PluginManager
 from analysis.player import scroll as scroll_registry
 
 
-# Judgment colors
-JCLR = {
-    'marv': (255, 255, 255),
-    'perf': (255, 213, 79),
-    'great': (129, 199, 132),
-    'good': (79, 195, 247),
-    'bad': (186, 104, 200),
-    'miss': (229, 57, 53),
-}
+from analysis.player.judgment import JCLR, judge
 
-JUDGE_WINDOWS_ETT_J4 = [
-    ('marv', 0.0225),
-    ('perf', 0.045),
-    ('great', 0.090),
-    ('good', 0.135),
-    ('bad', 0.180),
-]
-
-# Scale factor relative to J4. Matches Etterna's builtin judge table.
-ETT_JUDGE_SCALES = {
-    'J1': 1.50, 'J2': 1.33, 'J3': 1.16, 'J4': 1.00,
-    'J5': 0.84, 'J6': 0.66, 'J7': 0.50, 'J8': 0.33,
-    'JUSTICE': 0.20,
-}
-
-
-def etterna_windows_for(judge='J4'):
-    scale = ETT_JUDGE_SCALES.get(str(judge).upper(), 1.0)
-    return [(n, w * scale) for (n, w) in JUDGE_WINDOWS_ETT_J4]
+# Back-compat re-exports. Old imports (analyze, tests) reach into
+# `analysis.player.player` for these; the real definitions now live on
+# each game's adapter. Delete this shim once nothing outside imports
+# them.
+def etterna_windows_for(judge_name='J4'):
+    from analysis.games.etterna.judgment import windows_for
+    return windows_for(judge_name)
 
 
 def osu_mania_windows(od):
-    return [
-        ('marv', 16.5 / 1000.0),
-        ('perf', (64 - 3 * od) / 1000.0),
-        ('great', (97 - 3 * od) / 1000.0),
-        ('good', (127 - 3 * od) / 1000.0),
-        ('bad', (151 - 3 * od) / 1000.0),
-    ]
-
-
-def judge(off_s, windows, is_miss):
-    if is_miss:
-        return 'miss'
-    a = abs(off_s)
-    for name, w in windows:
-        if a <= w:
-            return name
-    return 'miss'
+    from analysis.games.osu.judgment import windows_for
+    return windows_for(od)
 
 
 def prepare_replay_times(replay, bpms=None, sm_offset=0.0):
-    """Convert replay noterows to absolute times (seconds). For osu, noterows are already ms."""
-    keycount = replay.get('keycount') or (int(replay['columns'].max()) + 1
-                                           if len(replay['columns']) else 4)
-    if replay.get('chart_path'):  # osu
-        times = replay['noterows'].astype(np.float64) / 1000.0
-        hold_tails = {}
-        for h in replay.get('holds', []):
-            if len(h) == 3 and h[2] is not None:
-                hold_tails[(h[0], h[1])] = h[2] / 1000.0
-        return times, hold_tails, keycount
-    # Etterna: use BPM map if available
-    if bpms is not None:
-        from analysis.games.etterna.sm_chart import row_to_time
-        times = np.array([row_to_time(int(r), bpms, sm_offset)
-                          for r in replay['noterows']])
-    else:
-        # fallback: assume 120bpm, 48 rows/beat => 96 rows/second
-        times = replay['noterows'].astype(np.float64) / 96.0
-    hold_tails = {}
-    for h in replay.get('holds', []):
-        if len(h) == 3 and h[2] is not None:
-            if bpms is not None:
-                from analysis.games.etterna.sm_chart import row_to_time
-                hold_tails[(h[0], h[1])] = row_to_time(int(h[2]), bpms, sm_offset)
-            else:
-                hold_tails[(h[0], h[1])] = h[2] / 96.0
-    return times, hold_tails, keycount
+    """Back-compat shim. The canonical path is
+    `GameAdapter.prepare_replay_times`; this wrapper picks the adapter
+    from `replay['chart_path']` (osu) or falls back to Etterna."""
+    from analysis.core import game as game_mod
+    name = 'osu' if replay.get('chart_path') else 'etterna'
+    return game_mod.get(name).prepare_replay_times(
+        replay, bpms=bpms, sm_offset=sm_offset)
 
 
 class Player:
@@ -132,8 +77,11 @@ class Player:
         self.W, self.H = window_w, window_h
 
         self.replay = replay
-        self.times, self.hold_tails, self.keycount = prepare_replay_times(
-            replay, bpms=bpms, sm_offset=sm_offset)
+        from analysis.core import game as game_mod
+        self._adapter = game_mod.get(game)
+        self.times, self.hold_tails, self.keycount = (
+            self._adapter.prepare_replay_times(
+                replay, bpms=bpms, sm_offset=sm_offset))
         # Per-LN release offset (seconds, signed). osu!mania only — Etterna
         # .bin has no release timing.
         self.hold_release_offsets = {}
@@ -156,9 +104,14 @@ class Player:
         else:
             self.miss_pressed = np.zeros(len(self.misses), dtype=bool)
 
-        self.windows = osu_mania_windows(od) if game == 'osu' else etterna_windows_for(ett_judge)
+        # Adapters own the judge-system. The adapter declares which
+        # kwarg it expects ('od' for osu, 'judge' for Etterna); we stash
+        # the current value in self._active_judge so nudge_judge can
+        # round-trip it back to the adapter without branching here.
+        judge_kw = self._adapter.judge_kwarg_name()
+        self._active_judge = (od if judge_kw == 'od' else ett_judge)
+        self._apply_judge(rebuild_counts=False)
         self.judge_colors = JCLR
-        self.judge_label = f'OD {od}' if game == 'osu' else str(ett_judge)
         self.game = game
         self.palette = [tuple(int(c[i:i + 2], 16) for i in (1, 3, 5))
                         for c in col_colors(self.keycount)]
@@ -195,17 +148,15 @@ class Player:
         else:
             self._xmod_reference_bpm = 120.0
 
-        if scroll_mode is None:
-            try:
-                from analysis.core import game as game_mod
-                scroll_mode = game_mod.get(game).default_scroll_mode()
-            except Exception:
-                scroll_mode = self.SCROLL_MODE_MS
         # Back-compat: accept the old 'linear' spelling from saved settings.
         if scroll_mode == 'linear':
             scroll_mode = self.SCROLL_MODE_MS
-        if scroll_mode not in self._mode_state:
-            scroll_mode = self.SCROLL_MODE_MS
+        # Mode must be compatible with the current game. A saved 'cmod' from
+        # an Etterna session is not a valid choice when opening an osu replay,
+        # even though both modes are globally registered.
+        if not scroll_mode or not scroll_registry.is_compatible(scroll_mode,
+                                                                 game):
+            scroll_mode = scroll_registry.default_for_game(game)
         self.scroll_mode = scroll_mode
         self.play_rate = 1.0
         self.paused = True
@@ -227,75 +178,15 @@ class Player:
         # Missed notes stay visible so the red X is still informative.
         self.press_hide = bool(press_hide)
 
-        # Precomputed per-note arrays + LN lookup. The draw loop does a lot of
-        # `int(self.columns[i])` / `int(self.replay['noterows'][i])` per frame,
-        # which is surprisingly expensive (numpy scalar → Python int) on dense
-        # charts. Materializing plain Python lists once lets the inner loop
-        # stay in fast-path bytecode. `_ln_tail_times` is parallel to
-        # `self.times` and holds the tail time-in-seconds per LN head (or NaN
-        # for non-LNs), replacing the (row, col) dict lookup entirely.
-        self._noterows_list = [int(r) for r in self.replay['noterows']]
-        self._columns_list = [int(c) for c in self.columns]
-        self._ln_tail_times = np.full(len(self.times), np.nan, dtype=np.float64)
-        self._ln_indices = []
-        for i, (row_val, col_val) in enumerate(zip(self._noterows_list,
-                                                    self._columns_list)):
-            end_t = self.hold_tails.get((row_val, col_val))
-            if end_t is not None:
-                self._ln_tail_times[i] = end_t
-                self._ln_indices.append(i)
-
-        # Ghost taps: (time_sec, column) for presses that didn't land on any
-        # note. Only osu replays provide these — Etterna .bin has no raw key
-        # event stream, so the list stays empty and _draw's sweep no-ops.
-        # Stored as parallel numpy arrays so the per-frame windowing can use
-        # bisect like the regular notes do.
-        raw_ghosts = replay.get('ghost_taps') or []
-        if raw_ghosts and game == 'osu':
-            ghost_ts = np.array([t / 1000.0 for (t, _c) in raw_ghosts],
-                                dtype=np.float64)
-            ghost_cs = np.array([c for (_t, c) in raw_ghosts],
-                                dtype=np.int32)
-            # Sort by time for bisect windowing.
-            order = np.argsort(ghost_ts, kind='stable')
-            self._ghost_times = ghost_ts[order]
-            self._ghost_cols = ghost_cs[order]
-        else:
-            self._ghost_times = np.empty(0, dtype=np.float64)
-            self._ghost_cols = np.empty(0, dtype=np.int32)
-
-        # Ghost holds: (press_t_sec, release_t_sec, column) spans where the
-        # player held a key inside a missed LN. Rendered as a red hit line
-        # over the LN body, showing the actual held duration — the release
-        # time is NOT clipped to the LN tail, so overholds are visible.
-        raw_holds = replay.get('ghost_holds') or []
-        if raw_holds and game == 'osu':
-            gh_heads = np.array([lh for (lh, _c, _pt, _rt) in raw_holds],
-                                dtype=np.int64)
-            gh_press = np.array([pt / 1000.0 for (_lh, _c, pt, _rt) in raw_holds],
-                                dtype=np.float64)
-            gh_rel = np.array([rt / 1000.0 for (_lh, _c, _pt, rt) in raw_holds],
-                              dtype=np.float64)
-            gh_cols = np.array([c for (_lh, c, _pt, _rt) in raw_holds],
-                               dtype=np.int32)
-            order = np.argsort(gh_press, kind='stable')
-            self._ghost_hold_ln_heads_ms = gh_heads[order]
-            self._ghost_hold_press = gh_press[order]
-            self._ghost_hold_release = gh_rel[order]
-            self._ghost_hold_cols = gh_cols[order]
-            # Longest hold duration — used as a conservative lookback when
-            # bisecting on press_t so spans whose press is off-screen (far
-            # above the visible window) but whose release is on-screen
-            # still get picked up.
-            self._ghost_hold_max_dur = float(
-                np.max(gh_rel - gh_press)) if gh_press.size else 0.0
-        else:
-            self._ghost_hold_ln_heads_ms = np.empty(0, dtype=np.int64)
-            self._ghost_hold_press = np.empty(0, dtype=np.float64)
-            self._ghost_hold_release = np.empty(0, dtype=np.float64)
-            self._ghost_hold_cols = np.empty(0, dtype=np.int32)
-            self._ghost_hold_max_dur = 0.0
-        self._build_ghost_hold_note_links()
+        # All per-note streams (LN tails, ghost taps/holds) live on
+        # self.notes now. The renderer/culling code still reads them via
+        # the compatibility properties below so callers aren't scattered.
+        from analysis.player.notes_model import (build_notes_model,
+                                                  link_miss_ghost_holds)
+        self.notes = build_notes_model(replay, self.times,
+                                        self.hold_tails, game)
+        link_miss_ghost_holds(self.notes, self.offsets, self.misses,
+                              self.miss_pressed)
 
         # SV (scroll velocity) — list of (time_sec, sv_multiplier). When enabled,
         # note positions use the piecewise-constant integral of SV over time
@@ -315,7 +206,7 @@ class Player:
         # HUD-overlay state (sidebar scroll, panel toggles, hitboxes).
         # Separated from replay state so the player core doesn't grow
         # every time the HUD does; see analysis/player/hud_state.py.
-        from analysis.player.hud_state import HudState
+        from analysis.player.hud.hud_state import HudState
         self.hud = HudState()
         # Event bus for host/plugin notifications. Kinds documented in
         # analysis/player/events.py; the Qt tab subscribes to
@@ -333,6 +224,48 @@ class Player:
     # only knows about the registry key and a state dict per mode. Adding a
     # new mode means adding a scroll.register(...) call in a game's
     # adapter.py — no branches here.
+
+    # --- NotesModel compat properties -------------------------------------
+    # The renderer and culling layer read per-note streams by these old
+    # names. Keep them as thin read-through properties so the refactor
+    # didn't have to touch every call site. Add new code against
+    # `self.notes.*` directly.
+    # TODO: Depreciate 
+    @property
+    def _noterows_list(self): return self.notes.noterows_list
+    @property
+    def _columns_list(self): return self.notes.columns_list
+    @property
+    def _ln_tail_times(self): return self.notes.ln_tail_times
+    @property
+    def _ln_indices(self): return self.notes.ln_indices
+    @property
+    def _ghost_times(self): return self.notes.ghost_times
+    @property
+    def _ghost_cols(self): return self.notes.ghost_cols
+    @property
+    def _ghost_hold_ln_heads_ms(self): return self.notes.ghost_hold_ln_heads_ms
+    @property
+    def _ghost_hold_press(self): return self.notes.ghost_hold_press
+    @property
+    def _ghost_hold_release(self): return self.notes.ghost_hold_release
+    @property
+    def _ghost_hold_cols(self): return self.notes.ghost_hold_cols
+    @property
+    def _ghost_hold_max_dur(self): return self.notes.ghost_hold_max_dur
+    @property
+    def _ghost_sv_times(self): return self.notes.ghost_sv_times
+    @property
+    def _ghost_hold_press_sv(self): return self.notes.ghost_hold_press_sv
+    @property
+    def _ghost_hold_release_sv(self): return self.notes.ghost_hold_release_sv
+    @property
+    def _ghost_hold_max_sv_dur(self): return self.notes.ghost_hold_max_sv_dur
+    @property
+    def _miss_first_ghost_hold(self): return self.notes.miss_first_ghost_hold
+    @property
+    def _ghost_hold_extends_miss(self): return self.notes.ghost_hold_extends_miss
+
     def _mode(self, key=None):
         return scroll_registry.get(key or self.scroll_mode)
 
@@ -424,6 +357,11 @@ class Player:
             mode = self.SCROLL_MODE_MS
         if mode not in self._mode_state or mode == self.scroll_mode:
             return
+        # Per-game modes only apply when the current game matches. Rejecting
+        # here (rather than silently reinterpreting) catches plugin bugs that
+        # would otherwise leave the HUD showing e.g. CMOD while game=osu.
+        if not scroll_registry.is_compatible(mode, self.game):
+            return
         pxps = self._pxps_from_unit(self.scroll_mode, self._current_mode_value())
         prev_mode = self._mode(self.scroll_mode)
         if prev_mode and prev_mode.on_exit:
@@ -459,62 +397,32 @@ class Player:
             dtype=np.float64)
 
     def _build_ghost_sv_caches(self):
-        """Cache ghost overlay times in the same SV-space used for note culling."""
-        if self._ghost_times.size:
-            self._ghost_sv_times = np.array(
-                [self._cumulative_sv_at(float(t)) for t in self._ghost_times],
+        """Cache ghost overlay times in the same SV-space used for note
+        culling. Writes into self.notes so every per-note stream stays
+        colocated."""
+        m = self.notes
+        if m.ghost_times.size:
+            m.ghost_sv_times = np.array(
+                [self._cumulative_sv_at(float(t)) for t in m.ghost_times],
                 dtype=np.float64)
         else:
-            self._ghost_sv_times = np.empty(0, dtype=np.float64)
+            m.ghost_sv_times = np.empty(0, dtype=np.float64)
 
-        if self._ghost_hold_press.size:
-            self._ghost_hold_press_sv = np.array(
+        if m.ghost_hold_press.size:
+            m.ghost_hold_press_sv = np.array(
                 [self._cumulative_sv_at(float(t))
-                 for t in self._ghost_hold_press],
+                 for t in m.ghost_hold_press],
                 dtype=np.float64)
-            self._ghost_hold_release_sv = np.array(
+            m.ghost_hold_release_sv = np.array(
                 [self._cumulative_sv_at(float(t))
-                 for t in self._ghost_hold_release],
+                 for t in m.ghost_hold_release],
                 dtype=np.float64)
-            self._ghost_hold_max_sv_dur = float(
-                np.max(self._ghost_hold_release_sv
-                       - self._ghost_hold_press_sv))
+            m.ghost_hold_max_sv_dur = float(
+                np.max(m.ghost_hold_release_sv - m.ghost_hold_press_sv))
         else:
-            self._ghost_hold_press_sv = np.empty(0, dtype=np.float64)
-            self._ghost_hold_release_sv = np.empty(0, dtype=np.float64)
-            self._ghost_hold_max_sv_dur = 0.0
-
-    def _build_ghost_hold_note_links(self):
-        """Link a missed LN's head press to its first matching ghost-hold span."""
-        self._miss_first_ghost_hold = np.full(len(self.times), -1,
-                                              dtype=np.int32)
-        self._ghost_hold_extends_miss = np.zeros(
-            self._ghost_hold_press.size, dtype=bool)
-        if not self._ghost_hold_press.size:
-            return
-
-        by_head_col = {}
-        for k, (head_ms, col) in enumerate(zip(self._ghost_hold_ln_heads_ms,
-                                               self._ghost_hold_cols)):
-            by_head_col.setdefault((int(head_ms), int(col)), []).append(k)
-
-        # Source replay times are integer ms; allow a tiny tolerance for the
-        # seconds conversion used by offsets.
-        tol_ms = 2
-        for i, (head_ms, col) in enumerate(zip(self._noterows_list,
-                                               self._columns_list)):
-            if not (self.misses[i] and self.miss_pressed[i]):
-                continue
-            if math.isnan(self._ln_tail_times[i]):
-                continue
-            press_ms = int(head_ms + round(float(self.offsets[i]) * 1000.0))
-            for k in by_head_col.get((int(head_ms), int(col)), []):
-                gh_press_ms = int(round(float(self._ghost_hold_press[k])
-                                        * 1000.0))
-                if abs(gh_press_ms - press_ms) <= tol_ms:
-                    self._miss_first_ghost_hold[i] = k
-                    self._ghost_hold_extends_miss[k] = True
-                    break
+            m.ghost_hold_press_sv = np.empty(0, dtype=np.float64)
+            m.ghost_hold_release_sv = np.empty(0, dtype=np.float64)
+            m.ghost_hold_max_sv_dur = 0.0
 
     def _cumulative_sv_at(self, t):
         """Integral of SV(t') dt' from the first timing point to t.
@@ -585,6 +493,10 @@ class Player:
                 self.nudge_rate(payload)
                 self._notify_scroll_change()
                 return True
+            if action == 'judge_nudge':
+                self.nudge_judge(payload)
+                self._notify_scroll_change()
+                return True
             if action == 'cycle_game':
                 self.cycle_game()
                 self._notify_scroll_change()
@@ -608,18 +520,17 @@ class Player:
         return out
 
     def set_game(self, game: str) -> None:
-        """Switch the active game. Picks that game's default scroll mode
-        (Etterna → cmod, osu → osu). Core modes like ms remain available."""
+        """Switch the active game. If the current scroll mode is per-game
+        and doesn't belong to the new game (e.g. cmod while flipping to
+        osu), swap to the new game's default. Cross-game modes like ms
+        stay put — the user was deliberate about choosing them."""
         if game == self.game:
             return
         self.game = game
-        try:
-            from analysis.core import game as game_mod
-            new_mode = game_mod.get(game).default_scroll_mode()
-        except Exception:
-            new_mode = self.SCROLL_MODE_MS
-        if new_mode in self._mode_state:
-            self.set_scroll_mode(new_mode)
+        if not scroll_registry.is_compatible(self.scroll_mode, game):
+            new_mode = scroll_registry.default_for_game(game)
+            if new_mode in self._mode_state:
+                self.set_scroll_mode(new_mode)
 
     def cycle_game(self) -> None:
         """Walk through all discovered games in registration order."""
@@ -671,6 +582,28 @@ class Player:
 
     def nudge_rate(self, d):
         self.play_rate = max(0.1, min(4.0, self.play_rate + d))
+
+    def nudge_judge(self, delta):
+        """Ask the adapter for the next valid judge value, then rebuild
+        the windows list + per-note judgments that depend on it. No-op
+        if the adapter doesn't support switching."""
+        new_val = self._adapter.nudge_judge(self._active_judge, delta)
+        if new_val == self._active_judge:
+            return
+        self._active_judge = new_val
+        self._apply_judge(rebuild_counts=True)
+
+    def _apply_judge(self, *, rebuild_counts):
+        """Recompute windows + label + per-note judgments from the
+        adapter, using self._active_judge. Called once during
+        construction (rebuild_counts=False: note_judges built right
+        after) and every time nudge_judge changes the value."""
+        kw = {self._adapter.judge_kwarg_name(): self._active_judge}
+        self.windows = self._adapter.judgement_windows(self.replay, **kw)
+        self.judge_label = self._adapter.judge_label(self.replay, **kw)
+        if rebuild_counts:
+            self.note_judges = [judge(off, self.windows, mi)
+                                for off, mi in zip(self.offsets, self.misses)]
 
     def restart(self):
         self.t = self.t_min

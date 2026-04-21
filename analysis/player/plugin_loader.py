@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from analysis.player.plugin_api import Stage, normalize_stage
-from analysis.player.sidebar_api import SidebarSectionRegistry, _escape_key
+from analysis.player.hud.sidebar_api import SidebarSectionRegistry, _escape_key
 
 
 @dataclass
@@ -149,7 +149,7 @@ class PluginManager:
     @classmethod
     def discover(cls, extra_paths=None, active_theme_key=None, config=None):
         from analysis.plugins import discover_bundles
-        from analysis.player import theme as theme_mod
+        from analysis.player.render import theme as theme_mod
         mgr = cls(config=config)
         mgr.bundles = discover_bundles(extra_paths)
         for bundle in mgr.bundles:

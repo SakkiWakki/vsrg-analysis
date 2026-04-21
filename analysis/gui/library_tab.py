@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                                QProgressDialog, QToolButton)
 
 from analysis.games.etterna.replay import find_etterna_dirs
-from analysis.gui.settings import get_settings
+from analysis.gui.settings import get_settings, load_player_settings
 from analysis.gui.loaders import (Worker, resolve_etterna_chart,
                                   resolve_osu_audio)
 from analysis.gui.replay_cache import ReplayCache
@@ -449,7 +449,10 @@ class LibraryTab(QWidget):
         except ValueError:
             default_ms = 400.0
         get_settings().setValue('library/default_scroll_ms', default_ms)
-        scroll_mode = get_settings().value('player/scroll_mode', None)
+        # Scroll mode is validated against the replay's game inside
+        # load_player_settings, so a saved 'cmod' under an osu replay is
+        # transparently replaced with that game's default here.
+        scroll_mode = load_player_settings(entry['game'])['scroll_mode']
 
         title_song = (entry.get('song') or Path(entry['replay_path']).name)[:40]
         dlg = QProgressDialog(f'Loading {title_song}…', None, 0, 0, self)

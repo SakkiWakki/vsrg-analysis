@@ -20,43 +20,46 @@ from analysis.viz.plots import col_colors
 plt.style.use('dark_background')
 
 
-# J4 base windows in seconds. Higher judges (J5+) scale these down; lower
-# judges (J1-J3) scale them up. JUSTICE is the strictest preset.
-# Scales match Etterna's built-in judge table.
-ETT_J4 = [('marv', 0.02250, '#ffffff'),
-          ('perf', 0.04500, '#ffd54f'),
-          ('great', 0.09000, '#81c784'),
-          ('good', 0.13500, '#4fc3f7'),
-          ('bad', 0.18000, '#ba68c8')]
+from analysis.games.etterna.judgment import (
+    ETT_JUDGE_SCALES, windows_for as _ett_windows_for)
 
-ETT_JUDGE_SCALES = {
-    'J1': 1.50, 'J2': 1.33, 'J3': 1.16, 'J4': 1.00,
-    'J5': 0.84, 'J6': 0.66, 'J7': 0.50, 'J8': 0.33,
-    'JUSTICE': 0.20,
-}
+# Per-window color palette (viz only — the player uses JCLR from
+# analysis.player.judgment for its hit marks).
+_ETT_WCOLOR = {'marv': '#ffffff', 'perf': '#ffd54f', 'great': '#81c784',
+               'good': '#4fc3f7', 'bad': '#ba68c8'}
 MISS_CLR = '#e53935'
 
 
 def etterna_windows(judge='J4', scale=None):
     """Hit windows (name, half-window seconds, color). Pass either a judge
-    name ('J1'..'J8', 'JUSTICE') or a numeric scale."""
-    if scale is None:
-        scale = ETT_JUDGE_SCALES.get(str(judge).upper(), 1.0)
-    return [(n, w * scale, c) for (n, w, c) in ETT_J4]
+    name ('J1'..'J8', 'J9'/'JUSTICE') or a numeric scale. Delegates the
+    scale table + Bad-clamp to analysis.games.etterna.judgment so the
+    viz layer and the player can't drift apart."""
+    if scale is not None:
+        # Numeric override: apply flat scale to J4 taps without the
+        # Bad-clamp — matches the legacy behavior this argument enabled.
+        base = [('marv', 0.0225), ('perf', 0.045), ('great', 0.090),
+                ('good', 0.135), ('bad', 0.180)]
+        return [(n, w * scale, _ETT_WCOLOR[n]) for (n, w) in base]
+    return [(n, w, _ETT_WCOLOR[n]) for (n, w) in _ett_windows_for(judge)]
+
+
+_OSU_LEGACY_NAMES = {'marv': '300g', 'perf': '300', 'great': '200',
+                     'good': '100', 'bad': '50'}
+_OSU_WCOLOR = {'300g': '#ffffff', '300': '#ffd54f', '200': '#81c784',
+               '100': '#4fc3f7', '50': '#ba68c8'}
 
 
 def osu_mania_windows(od=8):
-    """Hit windows for osu!mania based on OD (ms)."""
-    hit = {
-        '300g': 16.5,
-        '300':  64 - 3 * od,
-        '200':  97 - 3 * od,
-        '100':  127 - 3 * od,
-        '50':   151 - 3 * od,
-    }
-    colors = {'300g': '#ffffff', '300': '#ffd54f',
-              '200': '#81c784', '100': '#4fc3f7', '50': '#ba68c8'}
-    return [(k, v / 1000.0, colors[k]) for k, v in hit.items()]
+    """Hit windows for osu!mania based on OD (ms). Delegates the formula
+    to analysis.games.osu.judgment; keeps the legacy '300g'/'300'/…
+    labels the plotting code already matches on."""
+    from analysis.games.osu.judgment import windows_for
+    out = []
+    for name, sec in windows_for(od):
+        legacy = _OSU_LEGACY_NAMES[name]
+        out.append((legacy, sec, _OSU_WCOLOR[legacy]))
+    return out
 
 
 # osu! mod bit values

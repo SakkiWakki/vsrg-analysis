@@ -157,43 +157,71 @@ def row_to_time(noterow, bpms, offset):
     return beat_to_time(noterow / 48.0, bpms, offset)
 
 
+# parse_notes_block notetype codes. Values match Etterna's TapNoteType enum
+# (NoteTypes.h) where practical so downstream code can reason about them
+# without a translation table. '-1' for mine is legacy from before this file
+# learned about the enum; kept for back-compat with the fingerprint path.
+NT_TAP = 1
+NT_HOLD_HEAD = 2      # '2'
+NT_ROLL_HEAD = 4      # '4' — distinct from HOLD for scoring; stored as its
+                      # own value so the fingerprint can tell them apart even
+                      # though Etterna's chartkey coalesces them to enum 2.
+NT_MINE = -1          # 'M'
+NT_LIFT = 5           # 'L'
+NT_FAKE = 6           # 'F'
+NT_AUTO_KEYSOUND = 7  # 'K'
+
+
 def parse_notes_block(notedata, keycount_hint=None):
-    """Parse SM notedata block into list of (noterow, column, notetype, end_row_if_hold)."""
+    """Parse SM notedata block into (notes, holds).
+    notes: list of (noterow, column, notetype).
+    holds: list of (start_row, column, end_row) for '2'→'3' and '4'→'3' spans.
+
+    Recognizes every note character Etterna's NoteDataUtil currently parses:
+    0 (empty), 1 (tap), 2 (hold head), 3 (tail), 4 (roll head), M (mine),
+    K (auto-keysound), L (lift), F (fake). Commented-out cases in upstream
+    (A/I/N) are skipped the same way Etterna does. Unknown chars are
+    ignored rather than asserted, matching the upstream 'be lenient with
+    broken .sm files' behavior."""
     measures = notedata.strip().split(',')
-    notes = []  # (noterow, column, notetype)
-    holds_open = {}  # (col) -> start_row
-    holds = []  # (start_row, col, end_row)
+    notes = []
+    holds_open = {}  # col -> start_row
+    holds = []
     for mi, measure in enumerate(measures):
         lines = [ln.strip() for ln in measure.strip().split('\n')
                  if ln.strip() and not ln.strip().startswith('//')]
         if not lines:
             continue
         subdiv = len(lines)
-        rows_per_line = (ROWS_PER_BEAT * 4) // subdiv
+        # Round-to-nearest, not floor: matches BeatToNoteRow's lrintf so rows
+        # line up with Etterna's for non-power-of-2 subdivisions.
+        span = ROWS_PER_BEAT * 4
         for li, line in enumerate(lines):
-            row = mi * (ROWS_PER_BEAT * 4) + li * rows_per_line
+            row = mi * span + int(span * li / subdiv + 0.5)
             for col, ch in enumerate(line):
-                if ch in '0':
+                if ch == '0':
                     continue
                 if ch == '1':
-                    notes.append((row, col, 1))
-                elif ch == '2':  # hold head
-                    notes.append((row, col, 2))
-                    holds_open[col] = row
-                elif ch == '4':  # roll head
-                    notes.append((row, col, 4))
-                    holds_open[col] = row
-                elif ch == '3':  # hold/roll tail
-                    if col in holds_open:
-                        holds.append((holds_open[col], col, row))
-                        del holds_open[col]
-                elif ch == 'M':  # mine
-                    notes.append((row, col, -1))
-                elif ch == 'L':  # lift
-                    notes.append((row, col, 5))
-                elif ch == 'F':  # fake
-                    notes.append((row, col, 6))
-                # else unknown — skip
+                    notes.append((row, col, NT_TAP))
+                elif ch == '2':
+                    notes.append((row, col, NT_HOLD_HEAD))
+                    holds_open[col] = (row, NT_HOLD_HEAD)
+                elif ch == '4':
+                    notes.append((row, col, NT_ROLL_HEAD))
+                    holds_open[col] = (row, NT_ROLL_HEAD)
+                elif ch == '3':
+                    head = holds_open.pop(col, None)
+                    if head is not None:
+                        holds.append((head[0], col, row))
+                elif ch == 'M':
+                    notes.append((row, col, NT_MINE))
+                elif ch == 'L':
+                    notes.append((row, col, NT_LIFT))
+                elif ch == 'F':
+                    notes.append((row, col, NT_FAKE))
+                elif ch == 'K':
+                    notes.append((row, col, NT_AUTO_KEYSOUND))
+                # else: unknown/commented-out (A/I/N/etc.) — skip silently
     return notes, holds
 
 
@@ -480,7 +508,7 @@ def find_chart_by_key(chartkey, songs_dir, progress=None):
 
 
 FINGERPRINT_N = 50
-FINGERPRINT_INDEX_PATH = Path.home() / '.cache' / 'etterna-analysis' / 'fingerprint_index_v4.pkl'
+FINGERPRINT_INDEX_PATH = Path.home() / '.cache' / 'etterna-analysis' / 'fingerprint_index_v5.pkl'
 
 
 def _normalize_fingerprint(rows_cols, n=None):
@@ -504,11 +532,17 @@ def _normalize_fingerprint(rows_cols, n=None):
 
 def _chart_fingerprint(notedata, n=FINGERPRINT_N):
     """Return the first `n` (noterow, column) tuples for a chart, with
-    chord columns sorted. None if the chart has fewer notes than n."""
+    chord columns sorted. None if the chart has fewer notes than n.
+
+    Only taps, hold heads, and roll heads count — fakes, keysounds,
+    lifts, and mines don't show up in replay noterow streams, so
+    including them here would break matches against real replays."""
     notes, _ = parse_notes_block(notedata)
-    if len(notes) < n:
+    rows_cols = [(nr, c) for (nr, c, t) in notes
+                 if t in (NT_TAP, NT_HOLD_HEAD, NT_ROLL_HEAD)]
+    if len(rows_cols) < n:
         return None
-    return _normalize_fingerprint([(nr, c) for (nr, c, _) in notes], n)
+    return _normalize_fingerprint(rows_cols, n)
 
 
 def _scan_one_chartfile_fp(p):

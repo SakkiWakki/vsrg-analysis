@@ -105,7 +105,7 @@ class SidebarRegion:
 
     @property
     def sidebar_x(self) -> int:
-        from analysis.player import theme
+        from analysis.player.render import theme
         return self.player.W - theme.SIDEBAR_WIDTH
 
     def contains(self, x: int, y: int) -> bool:
@@ -135,7 +135,7 @@ class LanesRegion:
         self._seek = seek_fn
 
     def contains(self, x: int, y: int) -> bool:
-        from analysis.player import theme
+        from analysis.player.render import theme
         sidebar_x = self.player.W - theme.SIDEBAR_WIDTH
         return 0 <= x < sidebar_x and 0 <= y <= self.player.H
 

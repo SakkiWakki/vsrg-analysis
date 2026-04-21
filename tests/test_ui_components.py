@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from analysis.player import theme
+from analysis.player.render import theme
 from analysis.ui.components import (Box, Button, Checkbox, Column, Component,
                                      Heading, Row, Spacer, Text,
                                      collect_actions, iter_tree, section)
