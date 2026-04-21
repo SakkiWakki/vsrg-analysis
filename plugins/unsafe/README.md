@@ -34,6 +34,7 @@ plugins/unsafe/
     sidebar/
     viz/
     replay/
+    overlay/
 ```
 
 ## Security

@@ -4,7 +4,7 @@
 // and bitmap text from a widget array kept in shared memory. It
 // does NOT know about osu!, mania, combos, accuracy, or any
 // specific game. That semantics lives entirely in the Python
-// publisher (see plugins/overlay_api.py + any plugin-specific
+// publisher (see analysis/overlay/publisher.py + any plugin-specific
 // consumer, e.g. plugins/unsafe/osu_live/shm_publisher.py).
 //
 // Why: a plugin ecosystem. Any plugin can ship its own publisher
@@ -159,7 +159,7 @@ static float measure_text(const char *s, float px) {
 }
 
 static void set_color_rgba32(uint32_t c) {
-    // Byte 0 = R, byte 3 = A (see overlay_api.py::rgba).
+    // Byte 0 = R, byte 3 = A (see analysis.overlay.api::rgba).
     glColor4f(((c >>  0) & 0xff) / 255.0f,
               ((c >>  8) & 0xff) / 255.0f,
               ((c >> 16) & 0xff) / 255.0f,

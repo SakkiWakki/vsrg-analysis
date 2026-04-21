@@ -29,6 +29,7 @@ from analysis.plugins.sandbox import (
     'numpy', 'numpy.linalg',
     'analysis.player.theme', 'analysis.player.sidebar_api',
     'analysis.plugins.host_api',
+    'analysis.overlay.api',
     # Parent of an allow-listed submodule — required for
     # ``from analysis.player import theme`` (__import__ fetches parent).
     'analysis.player',
@@ -54,6 +55,8 @@ def test_allowed_modules(module):
     'logging', 'unittest', 'argparse',
     # Third-party not on the allow-list
     'pytest', 'matplotlib', 'PySide6',
+    # Overlay host runtime touches shm/threads and is not sandbox-safe.
+    'analysis.overlay.publisher',
 ])
 def test_denied_modules(module):
     assert not _is_allowed(module)

@@ -21,12 +21,14 @@ plugins/
       my_overlay.py
     viz/                 # library-tab visualizations (register(add))
       my_plot.py
+    overlay/             # in-game overlay feeds (register_overlay(add))
+      my_hud.py
     theme/               # optional; overrides theme tokens when active
       __init__.py
 ```
 
 A directory is recognized as a bundle if it contains at least one of
-`sidebar/`, `replay/`, `viz/`, or a manifest alongside those folders.
+`sidebar/`, `replay/`, `viz/`, `overlay/`, or a manifest alongside those folders.
 Files whose names start with `_` are ignored (use them for shared helpers
 — see `builtin/viz/_common.py`).
 
@@ -83,6 +85,36 @@ Each module exposes `register(add)` and calls
 returns a matplotlib `Figure` or a `QWidget`. The category decides where
 it shows up in the Visualize menu.
 
+### `overlay/*.py`
+Each module exposes `register_overlay(add)` and calls
+`add(name, draw_fn, key=…, hz=…)`. The draw function receives an active
+overlay frame. The host owns the shared-memory publisher and commits the
+frame atomically after your function returns.
+
+```python
+from analysis.overlay.api import ANCHOR_TL, BLACK_DIM, WHITE
+
+
+def draw(frame):
+    with frame.group('panel'):
+        frame.rect('bg', 0.02, 0.02, 0.24, 0.10,
+                   color=BLACK_DIM, anchor=ANCHOR_TL)
+        frame.text('label', 'HELLO', 0.03, 0.04,
+                   px_scale=2.0, color=WHITE, anchor=ANCHOR_TL)
+
+
+def register_overlay(add):
+    add('Hello HUD', draw, key='hello_hud', hz=30)
+```
+
+Use a stable, filesystem-safe `key` because it becomes the feed name
+(`/dev/shm/vsrg_overlay_<key>`) and the persisted layout bucket.
+
+This role is designed to be sandbox-friendly: plugin code never needs to
+open `/dev/shm`, create threads, or import the publisher runtime. Use
+`analysis.overlay.api` for safe constants and helpers. Trusted host code
+can use `analysis.overlay.publisher` directly when it needs runtime control.
+
 ### `theme/`
 If your bundle ships a theme, create `theme/__init__.py` (or `theme.py`)
 with uppercase token names matching `analysis/player/theme.py`. Missing
@@ -99,29 +131,16 @@ architecture is:
   attaches to a shared-memory widget array and draws rects + bitmap
   text. It knows nothing about the plugin's semantics.
 - Plugins publish widgets from Python via
-  [`plugins.overlay_api.OverlayPublisher`](overlay_api.py). One
-  publisher = one shm segment = one feed the renderer can attach to.
+  the host-side overlay registry in `analysis.overlay.publisher`.
+  One publisher = one shm segment = one feed the renderer can attach to.
 
 Each publisher gets its own feed at `/dev/shm/vsrg_overlay_<plugin_key>`,
 so multiple plugins can run side-by-side without trampling each other.
 Launch the renderer with `--feed <path>` to point it at yours.
 
-```python
-from plugins.overlay_api import OverlayPublisher, WHITE, BLACK_DIM
-
-pub = OverlayPublisher('my_plugin', width=2560, height=1440,
-                      config_store=cfg)  # optional; persists drag layout
-pub.start()
-
-def build(pub):
-    with pub.frame() as f:
-        with f.group('panel'):              # drag as one piece
-            f.rect('bg', 0.02, 0.02, 0.30, 0.18, color=BLACK_DIM)
-            f.text('hello', 'HELLO', 0.03, 0.04,
-                   px_scale=2.5, color=WHITE)
-
-pub.run_thread(build, hz=30.0)
-```
+Most plugins should use the `overlay/*.py` role shown above. The lower
+level `OverlayPublisher` still exists for trusted host code that needs to
+start or stop feeds manually.
 
 Key properties:
 
@@ -136,12 +155,11 @@ Key properties:
   per `(width × height)` bucket across restarts.
 - **Ref publisher:** [`plugins/unsafe/osu_live/shm_publisher.py`](unsafe/osu_live/shm_publisher.py).
 
-The overlay API lives at the bundle top level (`plugins.overlay_api`,
-not under a role directory) because it's a shared runtime that
-individual plugins drive — same idea as `analysis.plugins.host_api`.
-It is **not** reachable from sandboxed bundles: publishing writes to
-`/dev/shm` and needs `os`/`mmap`/`struct`, all blocked by the sandbox.
-Use this API only from `plugins/builtin/` or `plugins/unsafe/`.
+`analysis.overlay.publisher` is **not** reachable from sandboxed bundles:
+publishing writes to `/dev/shm` and needs `os`/`mmap`/`struct`, all
+blocked by the sandbox. Sandboxed overlay plugins should use the
+`overlay/` role and import only `analysis.overlay.api`; the trusted host
+does the publishing on their behalf.
 
 ## Trust and sandboxing
 
@@ -169,7 +187,8 @@ imported:
 - **Host API:** `analysis.player.theme`, `analysis.player.sidebar_api`,
   `analysis.player.plugin_api`, `analysis.player.events`,
   `analysis.plugins.host_api` (includes `plugin_config` — see below),
-  `analysis.ui` (+ `analysis.ui.components`, `analysis.ui.render_sidebar`).
+  `analysis.ui` (+ `analysis.ui.components`, `analysis.ui.render_sidebar`),
+  `analysis.overlay.api`.
 
 Anything else — notably `os`, `sys`, `pathlib`, `subprocess`, `socket`,
 `urllib`, `requests`, `ctypes`, `threading`, `pickle`, `importlib` — is

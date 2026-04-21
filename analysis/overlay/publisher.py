@@ -1,6 +1,6 @@
 """Python client for the in-game gamescope overlay renderer.
 
-Any plugin that wants to draw HUD widgets over osu! (or any other
+Trusted host code that wants to draw HUD widgets over osu! (or any other
 game we run through gamescope) publishes via :class:`OverlayPublisher`.
 The C binary at ``analysis/games/osu/gamescope_overlay/osu_overlay``
 attaches to the shm region, reads the widget array each frame, and
@@ -9,9 +9,9 @@ renders — it knows nothing about the plugin's game semantics.
 Binary contract: ``analysis/games/osu/gamescope_overlay/overlay_shm.h``.
 All types, offsets, and sizes mirror that header exactly.
 
-Usage::
+Low-level usage::
 
-    from plugins.overlay_api import OverlayPublisher, WHITE, BLUE
+    from analysis.overlay.publisher import OverlayPublisher, WHITE, BLUE
 
     pub = OverlayPublisher('osu_mania', width=2560, height=1440)
     pub.start()
@@ -23,6 +23,20 @@ Usage::
                 f.text('combo', f'{combo}X', 0.03, 0.04,
                        px_scale=2.5, color=WHITE)
         time.sleep(1 / 30)
+
+Plugin authors normally use the higher-level ``overlay/`` bundle role
+instead. The host owns the publisher and calls a sandbox-safe draw
+function with an active frame::
+
+    from analysis.overlay.api import BLACK_DIM, WHITE
+
+    def draw(frame):
+        with frame.group('panel'):
+            frame.rect('bg', 0.02, 0.02, 0.30, 0.18, color=BLACK_DIM)
+            frame.text('hello', 'HELLO', 0.03, 0.04, color=WHITE)
+
+    def register_overlay(add):
+        add('Hello HUD', draw, key='hello_hud', hz=30)
 
 Positions are normalized ``[0, 1]``. Each widget has a stable string
 ``id``; the publisher hashes it to a 32-bit int that the renderer uses
@@ -39,9 +53,24 @@ import os
 import struct
 import threading
 import time
+from dataclasses import dataclass
 from contextlib import contextmanager
-from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
+
+from analysis.overlay.api import (
+    ANCHOR_BL,
+    ANCHOR_BR,
+    ANCHOR_C,
+    ANCHOR_TL,
+    ANCHOR_TR,
+    BLACK_DIM,
+    BLUE_ACCENT,
+    HIST_BAR,
+    WARN_AMBER,
+    WHITE,
+    rgba,
+    widget_id,
+)
 
 
 # ── Constants mirrored from overlay_shm.h ────────────────────────────
@@ -55,12 +84,6 @@ KIND_UNUSED = 0
 KIND_RECT   = 1
 KIND_TEXT   = 2
 
-ANCHOR_TL = 0
-ANCHOR_TR = 1
-ANCHOR_BL = 2
-ANCHOR_BR = 3
-ANCHOR_C  = 4
-
 # Widget struct: kind B, anchor B, _pad0 2s, widget_id I, group_id I,
 #                x f, y f, w f, h f, color I, text 48s, px_scale f
 _WIDGET_FMT = f'<B B 2s I I f f f f I {TEXT_LEN}s f'
@@ -73,40 +96,6 @@ _HEADER_STRUCT = struct.Struct('<I I I I B 3s I I I')
 _HEADER_SIZE   = _HEADER_STRUCT.size
 
 _TOTAL_SIZE = _HEADER_SIZE + MAX_WIDGETS * _WIDGET_SIZE
-
-
-# ── Color helpers ────────────────────────────────────────────────────
-
-
-def rgba(r: int, g: int, b: int, a: int = 255) -> int:
-    """Pack four 0..255 components into the layout the C side reads
-    (byte 0 = R, byte 3 = A).
-
-    We store as a little-endian uint32 so ``color & 0xff`` is R, which
-    matches how the C side decodes it via ``(c >> 0) & 0xff``."""
-    return ((r & 0xff)
-            | ((g & 0xff) << 8)
-            | ((b & 0xff) << 16)
-            | ((a & 0xff) << 24))
-
-
-WHITE       = rgba(250, 250, 250)
-BLACK_DIM   = rgba(10, 10, 15, 140)
-BLUE_ACCENT = rgba(75, 164, 255, 230)
-WARN_AMBER  = rgba(255, 180, 50)
-HIST_BAR    = rgba(75, 164, 255, 230)
-
-
-def widget_id(name: str) -> int:
-    """FNV-1a 32-bit of ``name``. Stable across restarts, used as the
-    key for persisting per-widget (or per-group) drag offsets."""
-    h = 0x811c9dc5
-    for b in name.encode('utf-8'):
-        h ^= b
-        h = (h * 0x01000193) & 0xffffffff
-    # widget_id 0 is reserved (shm uses it as "no drag"), so bump
-    # off-zero in the vanishingly unlikely case FNV hit exactly 0.
-    return h or 0x811c9dc5
 
 
 # ── Publisher ────────────────────────────────────────────────────────
@@ -189,6 +178,9 @@ class _FrameBuilder:
         # hit-testing on the C side has a meaningful bounding box.
         self._record(KIND_TEXT, id_str, x, y, 0.0, 0.0, color, s,
                      px_scale, anchor)
+
+
+OverlayFrame = _FrameBuilder
 
 
 class OverlayPublisher:
@@ -494,7 +486,7 @@ class OverlayPublisher:
                     # Publishers should not die silently; log but
                     # keep looping so a transient bug doesn't kill
                     # the overlay forever.
-                    print(f'[overlay_api] build_fn raised: {exc}')
+                    print(f'[overlay.publisher] build_fn raised: {exc}')
                 elapsed = time.monotonic() - t0
                 stop.wait(max(0.0, interval - elapsed))
 
@@ -502,3 +494,154 @@ class OverlayPublisher:
         t._stop_event = stop  # type: ignore[attr-defined]
         t.start()
         return t
+
+    def run_draw_thread(self, draw_fn, *, hz: float = 30.0,
+                        name: str = 'OverlayPublisher') -> threading.Thread:
+        """Run a higher-level overlay draw function on a daemon thread.
+
+        ``draw_fn(frame)`` receives an active :class:`OverlayFrame`; the
+        publisher owns the frame context and atomic commit. This mirrors
+        sidebar plugins more closely than :meth:`run_thread`, where the
+        caller has to open ``with pub.frame()`` manually.
+        """
+
+        def _build(pub: 'OverlayPublisher') -> None:
+            with pub.frame() as frame:
+                draw_fn(frame)
+
+        return self.run_thread(_build, hz=hz, name=name)
+
+
+@dataclass
+class OverlaySpec:
+    key: str
+    name: str
+    draw: Callable[[OverlayFrame], None]
+    hz: float = 30.0
+    width: int = 2560
+    height: int = 1440
+    module: str = ''
+    enabled: bool = True
+
+    @property
+    def feed_path(self) -> str:
+        return f'/dev/shm/vsrg_overlay_{self.key}'
+
+
+class OverlayRegistry:
+    """Registry for ``overlay/*.py`` plugin modules.
+
+    Overlay modules expose ``register_overlay(add)`` and call
+    ``add(name, draw_fn, key=..., hz=...)``. The draw function receives an
+    :class:`OverlayFrame`, not an ``OverlayPublisher``, so sandboxed plugin
+    code can emit widgets without touching files, mmap, threads, or shm.
+    """
+
+    def __init__(self, config=None):
+        from analysis.config import get_config
+        self._config = config if config is not None else get_config()
+        self._overlays: list[OverlaySpec] = []
+        self._runtime: dict[str, tuple[OverlayPublisher, threading.Thread]] = {}
+
+    def add(self, name, draw, *, key=None, hz: float = 30.0,
+            width: int = 2560, height: int = 1440, enabled: bool = True,
+            module: str = '') -> None:
+        spec_key = str(key) if key is not None else _default_overlay_key(
+            module, name)
+        self._overlays.append(OverlaySpec(
+            key=spec_key,
+            name=str(name),
+            draw=draw,
+            hz=float(hz),
+            width=int(width),
+            height=int(height),
+            module=str(module),
+            enabled=bool(enabled),
+        ))
+        self._overlays.sort(key=lambda o: (o.name, o.key))
+
+    def all_overlays(self) -> list[OverlaySpec]:
+        return list(self._overlays)
+
+    def get(self, key: str) -> OverlaySpec | None:
+        key = str(key)
+        for spec in self._overlays:
+            if spec.key == key:
+                return spec
+        return None
+
+    def start(self, key: str, *, width: int | None = None,
+              height: int | None = None, config_store=None) -> OverlayPublisher:
+        spec = self.get(key)
+        if spec is None:
+            raise KeyError(f'unknown overlay: {key}')
+        existing = self._runtime.get(spec.key)
+        if existing is not None:
+            return existing[0]
+        pub = OverlayPublisher(
+            spec.key,
+            width=spec.width if width is None else int(width),
+            height=spec.height if height is None else int(height),
+            config_store=self._config if config_store is None else config_store,
+        )
+        pub.start()
+        thread = pub.run_draw_thread(
+            spec.draw, hz=spec.hz,
+            name=f'OverlayPublisher:{spec.key}')
+        self._runtime[spec.key] = (pub, thread)
+        return pub
+
+    def stop(self, key: str) -> bool:
+        runtime = self._runtime.pop(str(key), None)
+        if runtime is None:
+            return False
+        pub, thread = runtime
+        stop = getattr(thread, '_stop_event', None)
+        if stop is not None:
+            stop.set()
+        if thread.is_alive():
+            thread.join(timeout=1.0)
+        pub.stop()
+        return True
+
+    def stop_all(self) -> None:
+        for key in list(self._runtime):
+            self.stop(key)
+
+
+def discover_overlays(extra_paths=None, config=None) -> OverlayRegistry:
+    """Discover every bundle ``overlay/`` module into a fresh registry."""
+    from analysis.plugins import discover_bundles
+    registry = OverlayRegistry(config=config)
+    for bundle in discover_bundles(extra_paths):
+        for mod in getattr(bundle, 'overlay_modules', []) or []:
+            if not hasattr(mod, 'register_overlay'):
+                continue
+            module_name = f'{bundle.key}/{getattr(mod, "__name__", "")}'
+
+            def add_overlay(name, draw, *, key=None, hz=30.0,
+                            width=2560, height=1440, enabled=True,
+                            _module=module_name):
+                registry.add(name, draw, key=key, hz=hz, width=width,
+                             height=height, enabled=enabled, module=_module)
+            try:
+                mod.register_overlay(add_overlay)
+            except Exception as exc:
+                print(f'overlay plugin register failed: {module_name}: {exc}')
+    return registry
+
+
+def all_overlays(extra_paths=None) -> list[OverlaySpec]:
+    return discover_overlays(extra_paths).all_overlays()
+
+
+def _default_overlay_key(module: str, name: str) -> str:
+    raw = (f'{module}:{name}' if module else str(name)).replace('/', ':')
+    chars = []
+    for ch in raw.lower():
+        if ch.isalnum() or ch in ('_', '-', ':'):
+            chars.append(ch)
+        else:
+            chars.append('_')
+    key = ''.join(chars).strip('_')
+    return key or f'overlay_{widget_id(raw):08x}'

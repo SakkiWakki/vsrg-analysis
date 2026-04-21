@@ -106,7 +106,7 @@ def _start_osu_with_overlay():
     from pathlib import Path
 
     from PySide6.QtWidgets import QApplication, QMessageBox
-    from plugins.unsafe.osu_live.shm_publisher import get_publisher
+    from analysis.overlay.publisher import discover_overlays
 
     parent = QApplication.activeWindow()
 
@@ -145,10 +145,12 @@ def _start_osu_with_overlay():
         cfg = get_config()
     except Exception:
         cfg = None
-    pub = get_publisher(config_store=cfg,
-                        width=int(width), height=int(height))
+    overlays = discover_overlays(config=cfg)
+    pub = overlays.start('osu_live', width=int(width), height=int(height),
+                         config_store=cfg)
     app = QApplication.instance()
     if app is not None:
+        app._osu_live_overlay_registry = overlays
         app._osu_live_shm_publisher = pub
     cmd = [
         'gamescope', '-f',

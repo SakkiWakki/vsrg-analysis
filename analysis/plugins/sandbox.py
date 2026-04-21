@@ -74,6 +74,7 @@ _HOST_API_ALLOW = frozenset({
     'analysis.ui',
     'analysis.ui.components',
     'analysis.ui.render_sidebar',
+    'analysis.overlay.api',
 })
 
 # Explicit deny-list for obviously dangerous modules. The allow-list is

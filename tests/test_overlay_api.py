@@ -1,4 +1,4 @@
-"""Memory-safety tests for :mod:`plugins.overlay_api`.
+"""Memory-safety tests for :mod:`analysis.overlay.publisher`.
 
 The publisher writes into a fixed-size shared-memory region whose
 layout is pinned by ``overlay_shm.h``. Any mismatch between the
@@ -28,11 +28,12 @@ from __future__ import annotations
 
 import os
 import struct
+import textwrap
 import uuid
 
 import pytest
 
-from plugins.overlay_api import (
+from analysis.overlay.publisher import (
     _HEADER_SIZE,
     _HEADER_STRUCT,
     _TOTAL_SIZE,
@@ -50,6 +51,7 @@ from plugins.overlay_api import (
     VERSION,
     WHITE,
     OverlayPublisher,
+    discover_overlays,
     rgba,
     widget_id,
 )
@@ -536,3 +538,50 @@ def test_many_frames_no_monotonic_overflow_crash(publisher):
     mm = publisher._mm
     seq = struct.unpack_from('<I', mm, 8)[0]
     assert seq % 2 == 0
+
+
+# ── Overlay plugin role ──────────────────────────────────────────────
+
+
+def test_sandboxed_overlay_role_registers_and_draws(tmp_path, monkeypatch):
+    monkeypatch.setenv('EA_PLUGINS_PATH', str(tmp_path))
+    bundle = tmp_path / 'overlay_demo'
+    (bundle / 'overlay').mkdir(parents=True)
+    (bundle / 'manifest.toml').write_text(
+        'name = "overlay_demo"\nkey = "overlay_demo"\n')
+    (bundle / 'overlay' / 'hud.py').write_text(textwrap.dedent('''
+        from analysis.overlay.api import BLACK_DIM, WHITE
+
+        def draw(frame):
+            with frame.group('panel'):
+                frame.rect('bg', 0.1, 0.2, 0.3, 0.4, color=BLACK_DIM)
+                frame.text('label', 'SAFE', 0.12, 0.23, color=WHITE)
+
+        def register_overlay(add):
+            add('Demo HUD', draw, key='overlay_demo_hud', hz=12)
+    '''))
+
+    registry = discover_overlays()
+    spec = registry.get('overlay_demo_hud')
+    assert spec is not None
+    assert spec.name == 'Demo HUD'
+    assert spec.hz == pytest.approx(12.0)
+
+    pub = OverlayPublisher('overlay_demo_hud', width=1920, height=1080)
+    pub.start()
+    try:
+        with pub.frame() as frame:
+            spec.draw(frame)
+        mm = pub._mm
+        assert struct.unpack_from('<I', mm, 12)[0] == 2
+        slot0 = _WIDGET_STRUCT.unpack_from(mm, _HEADER_SIZE)
+        slot1 = _WIDGET_STRUCT.unpack_from(mm, _HEADER_SIZE + _WIDGET_SIZE)
+        assert slot0[0] == KIND_RECT
+        assert slot1[0] == KIND_TEXT
+        assert slot1[10].startswith(b'SAFE')
+    finally:
+        pub.stop()
+        try:
+            os.unlink('/dev/shm/vsrg_overlay_overlay_demo_hud')
+        except FileNotFoundError:
+            pass

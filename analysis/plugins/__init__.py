@@ -7,6 +7,7 @@ A *bundle* is a directory with this layout::
       sidebar/             # sidebar sections (register_sidebar)
       replay/              # lane-space draw plugins (register, Stage-based)
       viz/                 # visualizations (register)
+      overlay/             # in-game overlay feeds (register_overlay)
       theme/               # optional; when active, overrides theme tokens
 
 Bundles are discovered at these locations (later paths override earlier):
@@ -44,11 +45,12 @@ class Bundle:
     sidebar_modules: list = field(default_factory=list)
     replay_modules: list = field(default_factory=list)
     viz_modules: list = field(default_factory=list)
+    overlay_modules: list = field(default_factory=list)
     theme_module: object | None = None
     load_errors: list = field(default_factory=list)  # [(role, filename, exc)]
 
 
-_SUBDIR_ROLES = ('sidebar', 'replay', 'viz')
+_SUBDIR_ROLES = ('sidebar', 'replay', 'viz', 'overlay')
 
 
 def _bundle_roots(extra_paths=None):
