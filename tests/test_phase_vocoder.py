@@ -19,7 +19,6 @@ import pytest
 from analysis.player.audio import (
     StreamingPhaseVocoder,
     WaveSource,
-    _find_peaks,
 )
 
 
@@ -199,64 +198,6 @@ def test_rate_one_fast_path_keeps_src_pos_in_sync():
     assert pv._src_pos == pytest.approx(pv.source.pos, abs=1.0)
 
 
-# ---- Peak detection --------------------------------------------------------
-
-
-def test_find_peaks_detects_spectral_peak():
-    """Sanity check _find_peaks on a synthetic magnitude with a clear
-    single peak."""
-    mag = np.ones(100, dtype=np.float64) * 0.001
-    mag[50] = 1.0
-    mag[49] = 0.5
-    mag[51] = 0.5
-    peaks = _find_peaks(mag)
-    assert 50 in peaks.tolist()
-
-
-# ---- Transient detection --------------------------------------------------
-
-
-def test_transient_detector_does_not_fire_on_stationary_tone():
-    """A stationary sine should NOT register transients — the flux baseline
-    tracks the (near-zero positive) flux and the absolute floor blocks
-    EMA-jitter false positives. If this regresses the audio "throbs" on
-    rate-up because the phase reset fires periodically."""
-    sig = _sine(440, 2.0, amp=0.3)
-    pv = StreamingPhaseVocoder(WaveSource(sig, SR), rate=1.15)
-    fires = 0
-    for _ in range(80):
-        if pv._ended:
-            break
-        pv._step()
-        if pv._last_transient:
-            fires += 1
-    assert fires == 0, f'transient fired {fires} times on stationary tone'
-
-
-def test_transient_detector_fires_on_onset():
-    """A silent signal that suddenly contains a burst should register as a
-    transient. We feed the PV silence for a while to let the flux baseline
-    settle, then splice in a loud burst and step once more."""
-    sr = SR
-    sig = np.zeros((sr, 1), dtype=np.float32)
-    burst_start = sr // 2
-    t = np.arange(sr - burst_start) / sr
-    sig[burst_start:, 0] = (0.6 * np.sin(2 * np.pi * 1000 * t)).astype(
-        np.float32)
-    pv = StreamingPhaseVocoder(WaveSource(sig, sr), rate=1.1)
-    # Step through the silent region first so the baseline is low.
-    pv._src_pos = 0.0
-    saw_transient = False
-    for _ in range(int(sr / pv.HOP / pv.rate) + 20):
-        if pv._ended:
-            break
-        pv._step()
-        if pv._last_transient:
-            saw_transient = True
-            break
-    assert saw_transient, 'transient detector never fired on an onset'
-
-
 # ---- End-to-end round-trip ------------------------------------------------
 
 
@@ -383,7 +324,5 @@ def test_seek_resets_phase_and_flux_state():
         pv._step()
     pv.seek(0.5)
     assert pv._first_frame is True
-    assert pv._flux_baseline == 0.0
-    assert not pv._last_transient
     assert float(np.abs(pv._out_phase[0]).max()) == 0.0
     assert float(np.abs(pv._prev_mag[0]).max()) == 0.0

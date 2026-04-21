@@ -171,8 +171,6 @@ class StreamingPhaseVocoder:
         self._src_pos = 0.0
         self._first_frame = True
         self._ended = False
-        self._flux_baseline = 0.0
-        self._last_transient = False
 
     @property
     def source_time(self) -> float:
@@ -212,8 +210,6 @@ class StreamingPhaseVocoder:
         self._prev_hop_a = float(self.HOP)
         self._first_frame = True
         self._ended = False
-        self._flux_baseline = 0.0
-        self._last_transient = False
 
     def generate(self, n_frames: int) -> tuple[np.ndarray, bool]:
         """Return (samples (n_frames, channels) float32, continue_flag).
@@ -398,30 +394,6 @@ class StreamingPhaseVocoder:
 
         return synth, tgrad_cur
 
-    def _update_transient_diagnostic(self, mags: np.ndarray) -> None:
-        """Track spectral-flux onsets for diagnostics/tests.
-
-        The phase-gradient path does not need explicit transient resets, but
-        keeping this state is useful to verify that seeks clear analysis
-        history and that stationary tones are not being mistaken for onsets.
-        """
-        if self._first_frame:
-            self._last_transient = False
-            return
-
-        pos_flux = 0.0
-        energy = 0.0
-        for c in range(self.channels):
-            cur = mags[:, c]
-            pos_flux += float(np.maximum(cur - self._prev_mag[c], 0.0).sum())
-            energy += float(cur.sum())
-
-        flux = pos_flux / max(energy, 1e-12)
-        threshold = max(0.03, 6.0 * self._flux_baseline)
-        self._last_transient = bool(energy > 1e-6 and flux > threshold)
-        if not self._last_transient:
-            self._flux_baseline = 0.98 * self._flux_baseline + 0.02 * flux
-
     def _step(self) -> None:
         """Process one analysis frame: interpolate N_FFT source samples at
         the current fractional position, FFT, run RTPGHI to propagate
@@ -433,7 +405,6 @@ class StreamingPhaseVocoder:
         frame = np.fft.ifftshift(src_frame * self._win[:, None], axes=0)
         spec = np.fft.rfft(frame, axis=0)                # (n_bins, ch) c128
         mags = np.abs(spec)
-        self._update_transient_diagnostic(mags)
         time_frame = np.empty((self.N_FFT, self.channels), dtype=np.float64)
         analysis_hop = self._prev_hop_a
 
@@ -788,21 +759,3 @@ def _monotonic() -> float:
     return time.monotonic()
 
 
-def _find_peaks(mag: np.ndarray) -> np.ndarray:
-    """Return indices of local magnitude peaks in `mag`.
-
-    A bin is a peak if its magnitude is strictly greater than its two
-    neighbors on each side (Laroche & Dolson recommend a ±2-bin window
-    for phase locking — wider windows over-lock, narrower ones leak).
-    Below a low-magnitude threshold bins are ignored so background noise
-    doesn't spawn spurious peaks."""
-    if mag.size < 5:
-        return np.empty(0, dtype=np.int64)
-    # Relative floor: bins below 1/1000 of the frame's max contribute
-    # nothing audible and shouldn't act as peaks.
-    thresh = mag.max() * 1e-3
-    k = np.arange(2, mag.size - 2)
-    is_peak = ((mag[k] > mag[k - 1]) & (mag[k] > mag[k + 1])
-               & (mag[k] > mag[k - 2]) & (mag[k] > mag[k + 2])
-               & (mag[k] > thresh))
-    return k[is_peak]
