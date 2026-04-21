@@ -79,60 +79,12 @@ class PlayerTab(QWidget):
         bar.addWidget(self.dur_lbl)
         layout.addLayout(bar)
 
-        ctl = QHBoxLayout()
-        for label, fn in [
-            ('rate −', lambda: self._nudge_rate(-0.1)),
-            ('rate +', lambda: self._nudge_rate(0.1)),
-            ('restart', self._restart),
-        ]:
-            b = QPushButton(label)
-            b.setFocusPolicy(Qt.NoFocus)
-            b.clicked.connect(lambda _checked=False, f=fn: f())
-            ctl.addWidget(b)
-
-        self.sv_btn = QPushButton()
-        self.sv_btn.setFocusPolicy(Qt.NoFocus)
-        self._refresh_sv_btn()
-        self.sv_btn.clicked.connect(lambda _checked=False: self._toggle_sv())
-        ctl.addWidget(self.sv_btn)
-
-        self.skin_btn = QPushButton()
-        self.skin_btn.setFocusPolicy(Qt.NoFocus)
-        self.skin_btn.setToolTip('Cycle note skin')
-        self.skin_btn.clicked.connect(lambda _checked=False: self._cycle_skin())
-        ctl.addWidget(self.skin_btn)
-        self._refresh_skin_btn()
-
-        self.press_btn = QPushButton()
-        self.press_btn.setFocusPolicy(Qt.NoFocus)
-        self.press_btn.setToolTip(
-            'When off, notes vanish once the player actually presses them '
-            '(LNs stick their head to the judgment line while held, then '
-            'vanish on release). Misses stay visible, dimmed.')
-        self.press_btn.clicked.connect(lambda _checked=False: self._toggle_press_hide())
-        ctl.addWidget(self.press_btn)
-        self._refresh_press_btn()
-
-        self.pitch_btn = QPushButton()
-        self.pitch_btn.setFocusPolicy(Qt.NoFocus)
-        self.pitch_btn.setToolTip(
-            'Pitch correction: when on, rate changes speed but not pitch '
-            '(like osu! DoubleTime). When off, pitch shifts with rate '
-            '(like Nightcore / Etterna stock rate-mod).')
-        self.pitch_btn.clicked.connect(lambda _checked=False: self._toggle_pitch())
-        ctl.addWidget(self.pitch_btn)
-
-        ctl.addWidget(QLabel('scroll:'))
-        self.scroll_edit = QLineEdit()
-        self.scroll_edit.setMaximumWidth(70)
-        self.scroll_edit.setPlaceholderText('ms')
-        self.scroll_edit.returnPressed.connect(self._apply_scroll_edit)
-        ctl.addWidget(self.scroll_edit)
-
-        ctl.addStretch(1)
-        self.hud = QLabel('')
-        ctl.addWidget(self.hud)
-        layout.addLayout(ctl)
+        # Toggles (SV / Skin / Display hits / Pitch-correct) and the scroll
+        # value editor all live in the sidebar HUD now — clicking the painted
+        # rects dispatches through `_on_hud_action`. A transient QLineEdit
+        # overlay (created on-demand) handles click-to-edit for the scroll
+        # readout.
+        self.scroll_edit: QLineEdit | None = None
 
         self._last_ms = None
         self.timer = QTimer(self)
@@ -145,7 +97,6 @@ class PlayerTab(QWidget):
             'player/pitch_correct', True, type=bool))
         self._audio = AudioEngine(audio_path, pitch_correct=pitch_correct)
         self._audio_ready = self._audio.ready
-        self._refresh_pitch_btn()
         if self._audio_ready:
             self._audio.prewarm_rates([0.8, 0.9, 1.1, 1.2, 1.3, 1.5])
 
@@ -157,9 +108,17 @@ class PlayerTab(QWidget):
         self.play_btn.setText('⏸')
         self._sync_audio()
         self.player.add_scroll_change_listener(self._on_scroll_change)
-        self._refresh_mode_btn()
+        self.player.add_hud_action_listener(self._on_hud_action)
 
     def _sync_audio(self):
+        # Mirror audio-engine status onto the player so the painted HUD
+        # (which has no handle to the audio engine) can render a correct
+        # Pitch-correct label and distinguish "unavailable" from "off".
+        self.player._ui_status = {
+            'audio_ready': bool(self._audio_ready),
+            'pitch_correct': bool(
+                getattr(self._audio, '_pitch_correct', True)),
+        }
         if self._audio_ready:
             self._audio.set_state(self.player.t, self.player.play_rate,
                                   not self.player.paused)
@@ -177,46 +136,6 @@ class PlayerTab(QWidget):
         self.player.nudge_rate(d)
         self._sync_audio()
 
-    def _refresh_sv_btn(self):
-        if not self.player.sv_sections or self.player.sv_suspended():
-            # The active scroll mode ignores SV (e.g. CMOD) — surface "n/a"
-            # instead of a toggle that would do nothing.
-            self.sv_btn.setText('SV: n/a')
-            self.sv_btn.setEnabled(False)
-        else:
-            self.sv_btn.setEnabled(True)
-            self.sv_btn.setText('SV: on' if self.player.sv_enabled else 'SV: off')
-
-    def _toggle_sv(self):
-        self.player.toggle_sv()
-        self._refresh_sv_btn()
-
-    def _refresh_mode_btn(self):
-        # Scroll-type button lives in the painted HUD sidebar; this just
-        # keeps the scroll-edit placeholder in sync with the current mode.
-        from analysis.player import scroll as scroll_registry
-        m = scroll_registry.get(self.player.scroll_mode)
-        placeholder = f'{m.label} value' if m else 'ms'
-        if hasattr(self, 'scroll_edit'):
-            self.scroll_edit.setPlaceholderText(placeholder)
-
-    def _refresh_skin_btn(self):
-        self.skin_btn.setText(f'Skin: {self.player.skin}')
-
-    def _cycle_skin(self):
-        self.player.toggle_skin()
-        self._refresh_skin_btn()
-        get_settings().setValue('player/skin', self.player.skin)
-
-    def _refresh_press_btn(self):
-        self.press_btn.setText(
-            f'Display hits: {"off" if self.player.press_hide else "on"}')
-
-    def _toggle_press_hide(self):
-        self.player.toggle_press_hide()
-        self._refresh_press_btn()
-        get_settings().setValue('player/press_hide', self.player.press_hide)
-
     def _sync_settings_toggles(self):
         """Pull per-tab-shared toggles from QSettings. Called each tick so
         that toggling in another PlayerTab propagates here instead of the
@@ -225,27 +144,9 @@ class PlayerTab(QWidget):
         stored_ph = bool(s.value('player/press_hide', False, type=bool))
         if stored_ph != self.player.press_hide:
             self.player.set_press_hide(stored_ph)
-            self._refresh_press_btn()
         stored_skin = str(s.value('player/skin', 'bar'))
         if stored_skin != self.player.skin:
             self.player.set_skin(stored_skin)
-            self._refresh_skin_btn()
-
-    def _refresh_pitch_btn(self):
-        if not hasattr(self, 'pitch_btn'):
-            return
-        on = self._audio_ready and getattr(self._audio, '_pitch_correct', True)
-        self.pitch_btn.setText(f'Pitch-correct: {"on" if on else "off"}')
-        self.pitch_btn.setEnabled(self._audio_ready)
-
-    def _toggle_pitch(self):
-        if not self._audio_ready:
-            return
-        new = not self._audio._pitch_correct
-        self._audio.set_pitch_correct(new)
-        get_settings().setValue('player/pitch_correct', new)
-        self._refresh_pitch_btn()
-        self._sync_audio()
 
     def _toggle_mute(self):
         if not self._audio_ready:
@@ -256,30 +157,76 @@ class PlayerTab(QWidget):
     def _on_scroll_change(self):
         """Called by the player when the painted-HUD scroll controls cycle
         the mode, nudge the speed, switch the game, or nudge play rate.
-        Keeps Qt widgets + persisted settings in sync and re-syncs audio
-        so rate nudges from the HUD actually retime the music."""
-        self._refresh_mode_btn()
-        self._refresh_sv_btn()
+        Re-syncs audio so rate nudges from the HUD actually retime the music,
+        and persists the mode."""
         self._sync_audio()
         get_settings().setValue('player/scroll_mode', self.player.scroll_mode)
 
+    def _on_hud_action(self, action, payload):
+        """Dispatcher for sidebar-HUD hitbox clicks that need Qt-side work
+        (audio sync, QSettings persistence, transient overlays). The player's
+        built-in handler already processed the logical side of `action`."""
+        if action == 'toggle_sv':
+            self.player.toggle_sv()
+        elif action == 'cycle_skin':
+            self.player.toggle_skin()
+            get_settings().setValue('player/skin', self.player.skin)
+        elif action == 'toggle_press_hide':
+            self.player.toggle_press_hide()
+            get_settings().setValue('player/press_hide', self.player.press_hide)
+        elif action == 'toggle_pitch':
+            if self._audio_ready:
+                new = not self._audio._pitch_correct
+                self._audio.set_pitch_correct(new)
+                get_settings().setValue('player/pitch_correct', new)
+                self._sync_audio()
+        elif action == 'edit_scroll_value':
+            self._open_scroll_edit(payload)
+
+    def _open_scroll_edit(self, rect):
+        """Drop a transient QLineEdit overlay on top of the scroll readout
+        so the user can type a new mode-native value. Enter applies, Escape
+        (or losing focus) cancels."""
+        from analysis.player import scroll as scroll_registry
+        if self.scroll_edit is not None:
+            self.scroll_edit.deleteLater()
+            self.scroll_edit = None
+        rx, ry, rw, rh = rect
+        # Sidebar rect lives in canvas coords — translate to tab coords.
+        origin = self.view.mapTo(self, self.view.rect().topLeft())
+        edit = QLineEdit(self)
+        mode = scroll_registry.get(self.player.scroll_mode)
+        cur = self.player._current_mode_value()
+        if mode and mode.format_value:
+            edit.setText(mode.format_value(cur).split(' ', 1)[0])
+        else:
+            edit.setText(f'{cur:.2f}')
+        edit.setGeometry(origin.x() + rx, origin.y() + ry, rw, rh)
+        edit.selectAll()
+        edit.returnPressed.connect(self._apply_scroll_edit)
+        edit.editingFinished.connect(self._close_scroll_edit)
+        edit.show()
+        edit.setFocus(Qt.MouseFocusReason)
+        self.scroll_edit = edit
+
     def _apply_scroll_edit(self):
-        raw = self.scroll_edit.text().strip()
-        if not raw:
+        if self.scroll_edit is None:
             return
+        raw = self.scroll_edit.text().strip()
         try:
             val = float(raw)
         except ValueError:
-            self.scroll_edit.clear()
+            self._close_scroll_edit()
             return
-        # Route through the player's abstraction so the raw entered value is
-        # treated as this mode's native unit (float-accepting).
         self.player._set_current_mode_value(val)
-        self.scroll_edit.clear()
+        self._close_scroll_edit()
 
-    def _restart(self):
-        self.player.restart()
-        self._sync_audio()
+    def _close_scroll_edit(self):
+        if self.scroll_edit is None:
+            return
+        w = self.scroll_edit
+        self.scroll_edit = None
+        w.deleteLater()
 
     def _t_to_slider(self, t):
         tmin, tmax = self.player.t_min, self.player.t_max
@@ -357,9 +304,6 @@ class PlayerTab(QWidget):
 
         self.time_lbl.setText(self._fmt_time(self.player.t))
         self.dur_lbl.setText(self._fmt_time(self.player.t_max))
-        self.hud.setText(
-            f'rate={self.player.play_rate:.2f}x  '
-            f'scroll={int(self.player.effective_scroll_ms)}ms')
         if not self._scrubbing:
             self._sync_audio()
 
@@ -387,7 +331,7 @@ class PlayerTab(QWidget):
                 if k == Qt.Key_M:
                     self._toggle_mute(); return True
                 if k == Qt.Key_R:
-                    self._restart(); return True
+                    self.player.restart(); self._sync_audio(); return True
                 if k in (Qt.Key_Q, Qt.Key_Escape):
                     self.window().close(); return True
             elif t == ev.Type.Wheel:

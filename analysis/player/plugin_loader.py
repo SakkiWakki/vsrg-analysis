@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from analysis.player.plugin_api import Stage, normalize_stage
+from analysis.player.sidebar_api import SidebarSectionRegistry
 
 
 @dataclass
@@ -27,6 +28,7 @@ class PluginManager:
     def __init__(self):
         self._plugins: list[DrawPlugin] = []
         self._disabled_keys = self._load_disabled_keys()
+        self.sidebar = SidebarSectionRegistry()
 
     def add(self, name, draw, stages=None, priority=100, enabled=True,
             module='', key=None):
@@ -96,16 +98,28 @@ class PluginManager:
         return mgr
 
     def _register_module(self, mod):
-        if not hasattr(mod, 'register'):
-            return
         module_name = getattr(mod, '__player_plugin_source__',
                               getattr(mod, '__name__', ''))
+        handled = False
 
-        def add(name, draw, stages=None, priority=100, enabled=True, key=None):
-            self.add(name, draw, stages=stages, priority=priority,
-                     enabled=enabled, module=module_name, key=key)
+        if hasattr(mod, 'register'):
+            def add(name, draw, stages=None, priority=100, enabled=True,
+                    key=None):
+                self.add(name, draw, stages=stages, priority=priority,
+                         enabled=enabled, module=module_name, key=key)
+            mod.register(add)
+            handled = True
 
-        mod.register(add)
+        if hasattr(mod, 'register_sidebar'):
+            def add_section(name, draw, *, priority=1000, key=None,
+                            pin_bottom=False):
+                self.sidebar.add(name, draw, priority=priority, key=key,
+                                 module=module_name, pin_bottom=pin_bottom)
+            mod.register_sidebar(add_section)
+            handled = True
+
+        if not handled:
+            return
 
     def _discover_builtin(self):
         pkg_name = 'analysis.player.draw_plugins'

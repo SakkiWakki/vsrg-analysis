@@ -318,6 +318,15 @@ class Player:
         # hitboxes — used by the surrounding Qt tab to persist settings and
         # refresh Qt widget state (SV button, scroll-edit placeholder).
         self._scroll_change_listeners = []
+        # Subscribers notified for generic HUD hitbox actions that the tab
+        # needs to react to (audio re-sync, settings persistence, pop-up
+        # overlays). Receives (action, payload).
+        self._hud_action_listeners = []
+        # Tab-owned runtime flags the painted HUD needs to render toggle
+        # labels without holding a reference to the AudioEngine.
+        # Keys: 'audio_ready' (bool), 'pitch_correct' (bool). Populated by
+        # the Qt tab each time it syncs audio.
+        self._ui_status: dict = {'audio_ready': False, 'pitch_correct': True}
 
     # --- Scroll abstraction ------------------------------------------------
     # All scroll logic is delegated to analysis.player.scroll; this Player
@@ -580,6 +589,12 @@ class Player:
                 self.cycle_game()
                 self._notify_scroll_change()
                 return True
+            # Toggles / click-to-edit rects: logical state lives elsewhere
+            # (Qt tab owns audio + QSettings), so just notify subscribers.
+            if action in ('toggle_sv', 'cycle_skin', 'toggle_press_hide',
+                          'toggle_pitch', 'edit_scroll_value'):
+                self._notify_hud_action(action, payload)
+                return True
         return False
 
     def _available_mode_keys(self) -> list[str]:
@@ -625,6 +640,16 @@ class Player:
         for cb in list(self._scroll_change_listeners):
             try:
                 cb()
+            except Exception:
+                pass
+
+    def add_hud_action_listener(self, cb):
+        self._hud_action_listeners.append(cb)
+
+    def _notify_hud_action(self, action, payload):
+        for cb in list(self._hud_action_listeners):
+            try:
+                cb(action, payload)
             except Exception:
                 pass
 

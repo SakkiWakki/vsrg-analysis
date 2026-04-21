@@ -383,177 +383,44 @@ class QtPlayerRenderer:
             ctx.visible_ghost_taps.append(k)
 
     def _draw_hud(self, ctx, painter):
+        from analysis.player import theme
+        from analysis.player.sidebar_api import SidebarContext
         p = ctx.player
-        sidebar_x = p.W - 210
+        sidebar_x = p.W - theme.SIDEBAR_WIDTH
         p._hud_hitboxes = []
-        _rect(painter, (20, 20, 22), (sidebar_x, 0, 210, p.H))
+        _rect(painter, theme.SIDEBAR_BG,
+              (sidebar_x, 0, theme.SIDEBAR_WIDTH, p.H))
         painter.setFont(self.font)
-        y = 14
-        if not p.sv_sections or p.sv_suspended():
-            sv_line = 'SV: n/a'
-        else:
-            sv_line = 'SV: on' if p.sv_enabled else 'SV: off'
-        lines = [
-            f't = {ctx.t_now:+7.3f}s',
-            f'speed = {p.play_rate:.2f}x',
-            f'notes = {len(p.times)}',
-            f'keycount = {p.keycount}',
-            sv_line,
-            f'{"PAUSED" if p.paused else "PLAYING"}',
-        ]
-        for line in lines:
-            _text(painter, line, (220, 220, 220), sidebar_x + 8, y + 13)
-            y += 18
 
-        y += 12
-        painter.setFont(self.big_font)
-        _text(painter, 'Judgments', (255, 171, 145), sidebar_x + 8, y + 18)
-        painter.setFont(self.font)
-        y += 26
-        counts = {n: 0 for n, _ in p.windows}
-        counts['miss'] = 0
-        for j in p.note_judges:
-            counts[j] = counts.get(j, 0) + 1
-        for name, w in p.windows:
-            line = f'{name:<6}  ±{w*1000:5.1f}ms  n={counts[name]}'
-            _text(painter, line, p.judge_colors[name], sidebar_x + 8, y + 13)
-            y += 18
-        _text(painter, f'miss             n={counts["miss"]}',
-              p.judge_colors['miss'], sidebar_x + 8, y + 13)
-        y += 30
+        top = self.plugins.sidebar.top_sections()
+        bottom = self.plugins.sidebar.bottom_sections()
 
-        for h in [
-            'Space: pause', 'L/R: seek', 'Sh+L/R: seek10',
-            'Up/Dn: scrollspd', '+/-: playspd',
-            'M: mute', 'R: restart', 'Q: quit',
-        ]:
-            _text(painter, h, (120, 120, 130), sidebar_x + 8, y + 13)
-            y += 16
+        top_ctx = SidebarContext(ctx, painter, self, sidebar_x,
+                                 theme.SIDEBAR_WIDTH, theme.SIDEBAR_TOP)
+        self._run_sections(top, top_ctx)
 
-        y += 12
-        y = self._draw_plugin_controls(ctx, painter, sidebar_x, y)
-        # Scroll controls: pinned near the bottom of the sidebar so they land
-        # where the empty space is, regardless of how far the plugin list
-        # extends.
-        self._draw_scroll_controls(ctx, painter, sidebar_x)
-        ctx.plugin_data['hud_y'] = y
+        if bottom:
+            measure = SidebarContext(ctx, painter, self, sidebar_x,
+                                     theme.SIDEBAR_WIDTH, 0,
+                                     measure_only=True)
+            self._run_sections(bottom, measure)
+            start_y = max(theme.SIDEBAR_TOP,
+                          p.H - measure.y - theme.SIDEBAR_BOTTOM_MARGIN)
+            real = SidebarContext(ctx, painter, self, sidebar_x,
+                                  theme.SIDEBAR_WIDTH, start_y)
+            self._run_sections(bottom, real)
+
+        ctx.plugin_data['hud_y'] = top_ctx.y
         ctx.plugin_data['sidebar_x'] = sidebar_x
 
-    def _draw_scroll_controls(self, ctx, painter, sidebar_x):
-        p = ctx.player
-        from analysis.player import scroll as scroll_registry
-        mode = scroll_registry.get(p.scroll_mode)
-        # Block: title + value + (− +) + scroll-type + rate-value + (− +) + game.
-        block_h = 156
-        y = p.H - block_h - 12
-        col_x = sidebar_x + 8
-        col_w = 190
-        half_w = (col_w - 4) // 2
-        btn_left = (col_x, 0, half_w, 20)
-        btn_right = (col_x + half_w + 4, 0, col_w - half_w - 4, 20)
-
-        _text(painter, 'Scroll', (255, 171, 145), col_x, y + 13)
-        y += 20
-        val_str = (mode.format_value(p._current_mode_value())
-                   if mode and mode.format_value
-                   else f'{p._current_mode_value():.2f}')
-        _text(painter, f'{val_str} ({int(p.effective_scroll_ms)}ms)',
-              (220, 220, 220), col_x + 2, y + 13)
-        y += 20
-        for (rx, _ry, rw, rh), label, factor in (
-            (btn_left, 'scroll −', 1 / 1.15),
-            (btn_right, 'scroll +', 1.15),
-        ):
-            rect = (rx, y, rw, rh)
-            _rect(painter, (32, 32, 36), rect)
-            _rect_outline(painter, (68, 68, 76), rect)
-            _text(painter, label, (220, 220, 220), rect[0] + 8, rect[1] + 14)
-            p._hud_hitboxes.append((rect, 'scroll_nudge', factor))
-        y += 24
-        mode_label = f'scroll type: {mode.label if mode else p.scroll_mode}'
-        rect = (col_x, y, col_w, 20)
-        _rect(painter, (32, 32, 36), rect)
-        _rect_outline(painter, (68, 68, 76), rect)
-        _text(painter, mode_label, (220, 220, 220), col_x + 8, y + 14)
-        p._hud_hitboxes.append((rect, 'cycle_scroll_mode', None))
-        y += 24
-        # Rate row: `- {rate}x +` (rate readout is the left column, "+" on right,
-        # "-" on... per spec: "- button {rate}x + button". Put − and + on the
-        # outside, rate text centered between them.
-        minus_rect = (col_x, y, 28, 20)
-        plus_rect = (col_x + col_w - 28, y, 28, 20)
-        _rect(painter, (32, 32, 36), minus_rect)
-        _rect_outline(painter, (68, 68, 76), minus_rect)
-        _text(painter, '−', (220, 220, 220), minus_rect[0] + 10,
-              minus_rect[1] + 14)
-        p._hud_hitboxes.append((minus_rect, 'rate_nudge', -0.1))
-        _rect(painter, (32, 32, 36), plus_rect)
-        _rect_outline(painter, (68, 68, 76), plus_rect)
-        _text(painter, '+', (220, 220, 220), plus_rect[0] + 10,
-              plus_rect[1] + 14)
-        p._hud_hitboxes.append((plus_rect, 'rate_nudge', 0.1))
-        rate_txt = f'{p.play_rate:.2f}x'
-        # crude center: col_w mid minus ~half of text width (6px/char).
-        tx = col_x + (col_w - len(rate_txt) * 6) // 2
-        _text(painter, rate_txt, (220, 220, 220), tx, y + 14)
-        y += 24
-        # Game cycle.
-        try:
-            from analysis.core import game as game_mod
-            games = list(game_mod.all_games().keys())
-        except Exception:
-            games = []
-        game_label = f'game: {p.game}' if p.game in games or not games else f'game: {p.game}'
-        rect = (col_x, y, col_w, 20)
-        _rect(painter, (32, 32, 36), rect)
-        _rect_outline(painter, (68, 68, 76), rect)
-        _text(painter, game_label, (220, 220, 220), col_x + 8, y + 14)
-        if len(games) > 1:
-            p._hud_hitboxes.append((rect, 'cycle_game', None))
-
-    def _draw_plugin_controls(self, ctx, painter, sidebar_x, y):
-        p = ctx.player
-        plugins = self.plugins.all_plugins()
-        enabled = self.plugins.enabled_count()
-        total = len(plugins)
-        header = (sidebar_x + 8, y, 190, 20)
-        _rect(painter, (32, 32, 36), header)
-        _rect_outline(painter, (68, 68, 76), header)
-        p._hud_hitboxes.append((header, 'toggle_plugin_panel', None))
-        marker = '[-]' if p.plugin_panel_open else '[+]'
-        _text(painter, f'{marker} Plugins {enabled}/{total}',
-              (220, 220, 220), sidebar_x + 14, y + 14)
-        y += 24
-        if not p.plugin_panel_open:
-            return y
-        if not plugins:
-            _text(painter, 'no plugins found', (120, 120, 130),
-                  sidebar_x + 18, y + 13)
-            return y + 18
-        row_h = 18
-        max_rows = max(0, (p.H - y - 8) // row_h)
-        for plugin in plugins[:max_rows]:
-            row = (sidebar_x + 10, y, 188, row_h)
-            p._hud_hitboxes.append((row, 'toggle_plugin', plugin.key))
-            box = (sidebar_x + 14, y + 3, 10, 10)
-            _rect(painter, (16, 16, 18), box)
-            _rect_outline(painter, (110, 110, 120), box)
-            if plugin.enabled:
-                _line(painter, (160, 230, 160),
-                      (box[0] + 2, box[1] + 5),
-                      (box[0] + 4, box[1] + 8), 2)
-                _line(painter, (160, 230, 160),
-                      (box[0] + 4, box[1] + 8),
-                      (box[0] + 9, box[1] + 2), 2)
-            color = (210, 210, 215) if plugin.enabled else (110, 110, 116)
-            _text(painter, _shorten(plugin.name, 22), color,
-                  sidebar_x + 30, y + 13)
-            y += row_h
-        if len(plugins) > max_rows:
-            _text(painter, f'+{len(plugins) - max_rows} more',
-                  (120, 120, 130), sidebar_x + 18, y + 13)
-            y += row_h
-        return y
+    @staticmethod
+    def _run_sections(sections, sctx):
+        for section in sections:
+            try:
+                section.draw(sctx)
+            except Exception as exc:
+                src = f' ({section.module})' if section.module else ''
+                print(f'sidebar section failed: {section.name}{src}: {exc}')
 
     @staticmethod
     def _draw_note_head(painter, skin, lx, y, lane_w, note_h, color):
@@ -597,13 +464,6 @@ def _fmt_num(x, decimals=2):
     if abs(x - round(x)) < 1e-6:
         return str(int(round(x)))
     return f'{x:.{decimals}f}'
-
-
-def _shorten(text, max_chars):
-    text = str(text)
-    if len(text) <= max_chars:
-        return text
-    return text[:max(0, max_chars - 1)] + '~'
 
 
 def _line(painter, color, start, end, width=1):
