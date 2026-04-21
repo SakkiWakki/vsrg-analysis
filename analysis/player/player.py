@@ -253,6 +253,8 @@ class Player:
         # time is NOT clipped to the LN tail, so overholds are visible.
         raw_holds = replay.get('ghost_holds') or []
         if raw_holds and game == 'osu':
+            gh_heads = np.array([lh for (lh, _c, _pt, _rt) in raw_holds],
+                                dtype=np.int64)
             gh_press = np.array([pt / 1000.0 for (_lh, _c, pt, _rt) in raw_holds],
                                 dtype=np.float64)
             gh_rel = np.array([rt / 1000.0 for (_lh, _c, _pt, rt) in raw_holds],
@@ -260,6 +262,7 @@ class Player:
             gh_cols = np.array([c for (_lh, c, _pt, _rt) in raw_holds],
                                dtype=np.int32)
             order = np.argsort(gh_press, kind='stable')
+            self._ghost_hold_ln_heads_ms = gh_heads[order]
             self._ghost_hold_press = gh_press[order]
             self._ghost_hold_release = gh_rel[order]
             self._ghost_hold_cols = gh_cols[order]
@@ -270,10 +273,12 @@ class Player:
             self._ghost_hold_max_dur = float(
                 np.max(gh_rel - gh_press)) if gh_press.size else 0.0
         else:
+            self._ghost_hold_ln_heads_ms = np.empty(0, dtype=np.int64)
             self._ghost_hold_press = np.empty(0, dtype=np.float64)
             self._ghost_hold_release = np.empty(0, dtype=np.float64)
             self._ghost_hold_cols = np.empty(0, dtype=np.int32)
             self._ghost_hold_max_dur = 0.0
+        self._build_ghost_hold_note_links()
 
         # SV (scroll velocity) — list of (time_sec, sv_multiplier). When enabled,
         # note positions use the piecewise-constant integral of SV over time
@@ -394,6 +399,38 @@ class Player:
             self._ghost_hold_press_sv = np.empty(0, dtype=np.float64)
             self._ghost_hold_release_sv = np.empty(0, dtype=np.float64)
             self._ghost_hold_max_sv_dur = 0.0
+
+    def _build_ghost_hold_note_links(self):
+        """Link a missed LN's head press to its first matching ghost-hold span."""
+        self._miss_first_ghost_hold = np.full(len(self.times), -1,
+                                              dtype=np.int32)
+        self._ghost_hold_extends_miss = np.zeros(
+            self._ghost_hold_press.size, dtype=bool)
+        if not self._ghost_hold_press.size:
+            return
+
+        by_head_col = {}
+        for k, (head_ms, col) in enumerate(zip(self._ghost_hold_ln_heads_ms,
+                                               self._ghost_hold_cols)):
+            by_head_col.setdefault((int(head_ms), int(col)), []).append(k)
+
+        # Source replay times are integer ms; allow a tiny tolerance for the
+        # seconds conversion used by offsets.
+        tol_ms = 2
+        for i, (head_ms, col) in enumerate(zip(self._noterows_list,
+                                               self._columns_list)):
+            if not (self.misses[i] and self.miss_pressed[i]):
+                continue
+            if math.isnan(self._ln_tail_times[i]):
+                continue
+            press_ms = int(head_ms + round(float(self.offsets[i]) * 1000.0))
+            for k in by_head_col.get((int(head_ms), int(col)), []):
+                gh_press_ms = int(round(float(self._ghost_hold_press[k])
+                                        * 1000.0))
+                if abs(gh_press_ms - press_ms) <= tol_ms:
+                    self._miss_first_ghost_hold[i] = k
+                    self._ghost_hold_extends_miss[k] = True
+                    break
 
     def _cumulative_sv_at(self, t):
         """Integral of SV(t') dt' from the first timing point to t.
@@ -685,14 +722,20 @@ class Player:
                                and not (is_ln and ln_state == 'held'
                                         and self.press_hide))
             if show_press_mark:
-                press_y = y + off * self.scroll_speed
+                joins_ghost_hold = bool(
+                    miss_has_press and is_ln
+                    and self._miss_first_ghost_hold[i] >= 0)
+                press_y = (time_to_y(press_t, t_now) if joins_ghost_hold
+                           else y + off * self.scroll_speed)
                 line_color = miss_red if miss else jcolor
                 pygame.draw.line(self.screen, line_color,
                                  (int(lx + lane_w / 2), int(y)),
-                                 (int(lx + lane_w / 2), int(press_y)), 1)
-                pygame.draw.rect(self.screen, line_color,
-                                 (lx + 8, int(press_y) - 2,
-                                  int(lane_w - 16), 4))
+                                 (int(lx + lane_w / 2), int(press_y)),
+                                 2 if joins_ghost_hold else 1)
+                if not joins_ghost_hold:
+                    pygame.draw.rect(self.screen, line_color,
+                                     (lx + 8, int(press_y) - 2,
+                                      int(lane_w - 16), 4))
 
             if miss and head_visible:
                 # Translucent red outline + X marker over the grayed head.
@@ -755,9 +798,10 @@ class Player:
                 y_bot = int(min(self.H, y_bot))
                 pygame.draw.line(self.screen, gh_red,
                                  (cx, y_top), (cx, y_bot), 2)
-                pygame.draw.rect(self.screen, gh_red,
-                                 (glx + 8, int(y_press) - 2,
-                                  int(lane_w - 16), 4))
+                if not self._ghost_hold_extends_miss[k]:
+                    pygame.draw.rect(self.screen, gh_red,
+                                     (glx + 8, int(y_press) - 2,
+                                      int(lane_w - 16), 4))
                 pygame.draw.rect(self.screen, gh_red,
                                  (glx + 8, int(y_release) - 2,
                                   int(lane_w - 16), 4))
