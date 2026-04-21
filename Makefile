@@ -85,8 +85,8 @@ OVERLAY_SRCS := $(OVERLAY_DIR)/osu_overlay.c \
                 $(OVERLAY_DIR)/font8x8.h \
                 $(OVERLAY_DIR)/shm_layout.h
 
-OVERLAY_CFLAGS := -O2 -Wall -Wextra $(shell pkg-config --cflags x11 gl 2>/dev/null)
-OVERLAY_LIBS   := $(shell pkg-config --libs x11 gl 2>/dev/null)
+OVERLAY_CFLAGS := -O2 -Wall -Wextra $(shell pkg-config --cflags x11 xext gl 2>/dev/null)
+OVERLAY_LIBS   := $(shell pkg-config --libs x11 xext gl 2>/dev/null)
 
 $(OVERLAY_BIN): $(OVERLAY_SRCS)
 	$(Q)echo "[overlay] gcc $(notdir $@)"

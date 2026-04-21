@@ -88,32 +88,67 @@ def register_library_actions(add):
     from plugins.unsafe.osu_live.overlay import open_overlay
     add('Live stats', _open_live_stats_window)
     add('Live overlay', open_overlay)
-    add('Start in-game overlay feed', _start_ingame_overlay_feed)
+    add('Start osu (with overlay)', _start_osu_with_overlay)
 
 
-def _start_ingame_overlay_feed():
-    """Start the /dev/shm publisher the gamescope overlay consumes.
+def _start_osu_with_overlay():
+    """Start the shm feed and launch osu! inside a gamescope session
+    with our external overlay.
 
-    The overlay binary itself is launched from a gamescope session
-    (see analysis/games/osu/gamescope_overlay/run-osu-gamescope-overlay.sh),
-    but the *feed* into its shared-memory region is produced here by
-    the Python live poller. Starting the publisher is a no-op after
-    the first call thanks to the module singleton.
+    One-click path: starts the /dev/shm publisher (so the overlay
+    has data the moment it attaches), then spawns
+    ``gamescope ... -- run-osu-gamescope-overlay.sh`` detached so
+    the GUI stays responsive. The runner script handles the
+    osu-first-then-overlay ordering that gamescope's surface
+    promotion requires.
     """
+    import os
+    import shutil
+    import subprocess
+    from pathlib import Path
+
     from PySide6.QtWidgets import QApplication, QMessageBox
     from plugins.unsafe.osu_live.shm_publisher import get_publisher
+
+    parent = QApplication.activeWindow()
+
+    if shutil.which('gamescope') is None:
+        QMessageBox.warning(
+            parent, 'Start osu (with overlay)',
+            'gamescope is not installed or not on PATH.\n\n'
+            'Install it (pacman -S gamescope) and try again.')
+        return
+    if shutil.which('osu-wine') is None:
+        QMessageBox.warning(
+            parent, 'Start osu (with overlay)',
+            'osu-wine is not installed or not on PATH.\n\n'
+            'Install osu-winello and ensure osu-wine is on PATH.')
+        return
+
+    # plugins/unsafe/osu_live/viz/live_drift.py → repo root is 4 up.
+    repo_root = Path(__file__).resolve().parents[4]
+    runner = repo_root / 'analysis/games/osu/gamescope_overlay' \
+                       / 'run-osu-gamescope-overlay.sh'
+    overlay_bin = runner.parent / 'osu_overlay'
+    if not runner.exists() or not overlay_bin.exists():
+        QMessageBox.warning(
+            parent, 'Start osu (with overlay)',
+            f'Overlay not built yet.\n\nExpected:\n  {overlay_bin}\n\n'
+            f'Run `make overlay` from the repo root first.')
+        return
+
     pub = get_publisher()
-    QMessageBox.information(
-        QApplication.activeWindow(),
-        'In-game overlay feed',
-        'Publishing live stats to /dev/shm/osu_live_overlay.\n\n'
-        'Launch osu! inside gamescope with:\n'
-        '  gamescope -f -w 2560 -h 1440 -W 2560 -H 1440 -- \\\n'
-        '      analysis/games/osu/gamescope_overlay/'
-        'run-osu-gamescope-overlay.sh')
-    # Keep a hard ref on the app so the publisher survives a
-    # re-click (get_publisher handles the singleton either way,
-    # this just makes the intent explicit).
     app = QApplication.instance()
     if app is not None:
         app._osu_live_shm_publisher = pub
+
+    width  = os.environ.get('GAMESCOPE_WIDTH',  '2560')
+    height = os.environ.get('GAMESCOPE_HEIGHT', '1440')
+    cmd = [
+        'gamescope', '-f',
+        '-w', width, '-h', height,
+        '-W', width, '-H', height,
+        '--', str(runner),
+    ]
+    # start_new_session so closing the GUI doesn't SIGHUP gamescope.
+    subprocess.Popen(cmd, start_new_session=True)

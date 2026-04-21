@@ -22,6 +22,7 @@
 #include <GL/glx.h>
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
+#include <X11/extensions/shape.h>
 
 #include <fcntl.h>
 #include <stdio.h>
@@ -304,6 +305,23 @@ int main(int argc, char **argv) {
     // it for forward-compat.
     set_cardinal_prop(dpy, win, "GAMESCOPE_EXTERNAL_OVERLAY", 1);
     set_cardinal_prop(dpy, win, "GAMESCOPE_NO_FOCUS",         1);
+
+    // Make the overlay input-transparent: empty ShapeInput region
+    // means no pointer or keyboard events ever land here. Without
+    // this, gamescope can route focus (and Alt+F4) to the overlay
+    // window, so hitting Alt+F4 in osu! closes our window — which
+    // terminates the gamescope session and kills osu! with it.
+    // With an empty input shape, gamescope sees osu! as the only
+    // viable keyboard target and Alt+F4 goes to osu!.
+    int shape_evt = 0, shape_err = 0;
+    if (XShapeQueryExtension(dpy, &shape_evt, &shape_err)) {
+        XRectangle empty = {0, 0, 0, 0};
+        XShapeCombineRectangles(dpy, win, ShapeInput, 0, 0,
+                                &empty, 0, ShapeSet, Unsorted);
+    } else {
+        fprintf(stderr, "[osu_overlay] XShape not available — overlay "
+                "may steal keyboard focus from osu!\n");
+    }
 
     GLXContext ctx = glXCreateNewContext(dpy, fb, GLX_RGBA_TYPE, NULL, True);
     if (!ctx) {
