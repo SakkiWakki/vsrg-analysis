@@ -633,20 +633,80 @@ def parse_replay(osr_path, osu_path=None, songs_dir=None, hit_window_ms=None):
                 continue
             ghost_taps.append((int(t), c))
 
+    # Ghost holds: for any LN whose head was missed or released early, the
+    # player can still mash the key inside the LN interval and "partially
+    # hold" the note. Each continuous press→release span that overlaps a
+    # missed LN interval is emitted so the renderer can draw a red hit line
+    # showing the true held duration — unclipped on the release side so you
+    # can see if they kept holding past the LN tail.
+    # One emission per span per column; deduped so a single continuous
+    # hold that straddles N consecutive missed LNs produces ONE entry, not
+    # N identical ones. ln_head is kept in the tuple for downstream
+    # debugging/analysis — the renderer ignores it.
+    ghost_holds = []
+    missed_lns_by_col = [[] for _ in range(keycount)]
+    for r in sim:
+        if r['is_hold'] and r['judgement'] == 'miss' and r['end_time'] is not None:
+            missed_lns_by_col[r['col']].append((r['time'], r['end_time']))
+    for col_lns in missed_lns_by_col:
+        col_lns.sort()
+    for c in range(keycount):
+        if not missed_lns_by_col[c]:
+            continue
+        press_start = None
+        for (t, is_press) in key_events_by_col[c]:
+            if is_press:
+                if press_start is None:
+                    press_start = int(t)
+            else:
+                if press_start is None:
+                    continue
+                span_lo, span_hi = press_start, int(t)
+                press_start = None
+                # Emit at most one entry per span — tag it with the first
+                # LN it overlaps. Multiple-LN overlaps would otherwise draw
+                # the same red bar N times.
+                for (ln_head, ln_end) in missed_lns_by_col[c]:
+                    if ln_end < span_lo or ln_head > span_hi:
+                        continue
+                    if span_hi > span_lo:
+                        ghost_holds.append((ln_head, c, span_lo, span_hi))
+                        break
+        if press_start is not None:
+            span_lo = press_start
+            for (ln_head, ln_end) in missed_lns_by_col[c]:
+                if ln_end < span_lo:
+                    continue
+                if ln_end > span_lo:
+                    ghost_holds.append((ln_head, c, span_lo, ln_end))
+                    break
+
     # Flatten sim results into the legacy parallel arrays. Hold release
     # offsets are also carried separately for the renderer.
+    # For misses, preserve the actual press offset when the player DID press
+    # (too early/late to count, but pressed); miss_pressed flags that, so
+    # the renderer knows to draw a red hit-line at the press offset instead
+    # of just the X.
     all_rows, all_offs, all_cols, all_nt, all_miss = [], [], [], [], []
+    miss_pressed = []
     hold_releases = []
     for r in sim:
         all_rows.append(r['time'])
         all_cols.append(r['col'])
         all_nt.append(0)
-        if r['head_off'] is None or r['judgement'] == 'miss':
-            all_offs.append(1.0)
+        is_miss = (r['head_off'] is None or r['judgement'] == 'miss')
+        if is_miss:
+            if r['head_off'] is not None:
+                all_offs.append(r['head_off'] / 1000.0)
+                miss_pressed.append(True)
+            else:
+                all_offs.append(1.0)
+                miss_pressed.append(False)
             all_miss.append(True)
         else:
             all_offs.append(r['head_off'] / 1000.0)
             all_miss.append(False)
+            miss_pressed.append(False)
         if r['is_hold']:
             hold_releases.append((r['time'], r['col'], r['end_time'], r['tail_off']))
 
@@ -656,6 +716,7 @@ def parse_replay(osr_path, osu_path=None, songs_dir=None, hit_window_ms=None):
     columns = np.array(all_cols, dtype=np.int32)[order]
     notetypes = np.array(all_nt, dtype=np.int32)[order]
     misses = np.array(all_miss, dtype=bool)[order]
+    miss_pressed_arr = np.array(miss_pressed, dtype=bool)[order]
 
     return {
         'noterows': noterows,
@@ -663,9 +724,11 @@ def parse_replay(osr_path, osu_path=None, songs_dir=None, hit_window_ms=None):
         'columns': columns,
         'notetypes': notetypes,
         'misses': misses,
+        'miss_pressed': miss_pressed_arr,  # parallel to misses — True = miss had an actual press
         'holds': holds_meta,
         'hold_releases': hold_releases,
         'ghost_taps': ghost_taps,   # list of (t_ms, column) — osu only
+        'ghost_holds': ghost_holds,  # list of (ln_head_t_ms, col, press_t_ms, release_t_ms) — osu only
         'keycount': keycount,
         'filepath': str(osr_path),
         'chart_path': str(osu_path),

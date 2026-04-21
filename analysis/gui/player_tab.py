@@ -227,6 +227,20 @@ class PlayerTab(QWidget):
         self._refresh_press_btn()
         get_settings().setValue('player/press_hide', self.player.press_hide)
 
+    def _sync_settings_toggles(self):
+        """Pull per-tab-shared toggles from QSettings. Called each tick so
+        that toggling in another PlayerTab propagates here instead of the
+        two tabs showing contradictory states."""
+        s = get_settings()
+        stored_ph = bool(s.value('player/press_hide', False, type=bool))
+        if stored_ph != self.player.press_hide:
+            self.player.set_press_hide(stored_ph)
+            self._refresh_press_btn()
+        stored_skin = str(s.value('player/skin', 'bar'))
+        if stored_skin != self.player.skin:
+            self.player.set_skin(stored_skin)
+            self._refresh_skin_btn()
+
     def _refresh_pitch_btn(self):
         if not hasattr(self, 'pitch_btn'):
             return
@@ -322,6 +336,12 @@ class PlayerTab(QWidget):
             self._last_ms = now
         dt = now - self._last_ms
         self._last_ms = now
+        # Keep per-tab view of globally-stored toggles in sync. Each
+        # PlayerTab has its own Player instance, but QSettings are app-wide;
+        # if the user toggles display-hits (or other player toggles) in a
+        # different tab, mirror it here so the label and rendering don't
+        # drift. Cheap: just a dict lookup + attr compare per frame.
+        self._sync_settings_toggles()
         if self._scrubbing:
             # Freeze chart clock while scrubbing; the playbar drives t directly
             # via _on_playbar_changed.

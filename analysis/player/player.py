@@ -153,6 +153,15 @@ class Player:
         self.offsets = replay['offsets']
         self.misses = replay['misses']
         self.notetypes = replay['notetypes']
+        # Parallel to self.misses — True when the miss had an actual press
+        # (head_off is the real offset, not the 1.0s sentinel). Lets the
+        # renderer draw a red hit-line at the press time so the user can
+        # see WHERE the player mispressed. Only osu populates this.
+        mp = replay.get('miss_pressed')
+        if mp is not None and len(mp) == len(self.misses):
+            self.miss_pressed = np.asarray(mp, dtype=bool)
+        else:
+            self.miss_pressed = np.zeros(len(self.misses), dtype=bool)
 
         self.windows = osu_mania_windows(od) if game == 'osu' else etterna_windows_for(ett_judge)
         self.judge_label = f'OD {od}' if game == 'osu' else str(ett_judge)
@@ -238,6 +247,34 @@ class Player:
             self._ghost_times = np.empty(0, dtype=np.float64)
             self._ghost_cols = np.empty(0, dtype=np.int32)
 
+        # Ghost holds: (press_t_sec, release_t_sec, column) spans where the
+        # player held a key inside a missed LN. Rendered as a red hit line
+        # over the LN body, showing the actual held duration — the release
+        # time is NOT clipped to the LN tail, so overholds are visible.
+        raw_holds = replay.get('ghost_holds') or []
+        if raw_holds and game == 'osu':
+            gh_press = np.array([pt / 1000.0 for (_lh, _c, pt, _rt) in raw_holds],
+                                dtype=np.float64)
+            gh_rel = np.array([rt / 1000.0 for (_lh, _c, _pt, rt) in raw_holds],
+                              dtype=np.float64)
+            gh_cols = np.array([c for (_lh, c, _pt, _rt) in raw_holds],
+                               dtype=np.int32)
+            order = np.argsort(gh_press, kind='stable')
+            self._ghost_hold_press = gh_press[order]
+            self._ghost_hold_release = gh_rel[order]
+            self._ghost_hold_cols = gh_cols[order]
+            # Longest hold duration — used as a conservative lookback when
+            # bisecting on press_t so spans whose press is off-screen (far
+            # above the visible window) but whose release is on-screen
+            # still get picked up.
+            self._ghost_hold_max_dur = float(
+                np.max(gh_rel - gh_press)) if gh_press.size else 0.0
+        else:
+            self._ghost_hold_press = np.empty(0, dtype=np.float64)
+            self._ghost_hold_release = np.empty(0, dtype=np.float64)
+            self._ghost_hold_cols = np.empty(0, dtype=np.int32)
+            self._ghost_hold_max_dur = 0.0
+
         # SV (scroll velocity) — list of (time_sec, sv_multiplier). When enabled,
         # note positions use the piecewise-constant integral of SV over time
         # (see _cumulative_sv_at). Falls back to constant scroll if empty.
@@ -246,6 +283,7 @@ class Player:
         self.sv_sections = list(sv_sections)
         self.sv_enabled = bool(self.sv_sections)
         self._build_cumulative_sv()
+        self._build_ghost_sv_caches()
 
     @property
     def scroll_speed(self):
@@ -331,6 +369,32 @@ class Player:
             [self._cumulative_sv_at(float(t)) for t in self.times],
             dtype=np.float64)
 
+    def _build_ghost_sv_caches(self):
+        """Cache ghost overlay times in the same SV-space used for note culling."""
+        if self._ghost_times.size:
+            self._ghost_sv_times = np.array(
+                [self._cumulative_sv_at(float(t)) for t in self._ghost_times],
+                dtype=np.float64)
+        else:
+            self._ghost_sv_times = np.empty(0, dtype=np.float64)
+
+        if self._ghost_hold_press.size:
+            self._ghost_hold_press_sv = np.array(
+                [self._cumulative_sv_at(float(t))
+                 for t in self._ghost_hold_press],
+                dtype=np.float64)
+            self._ghost_hold_release_sv = np.array(
+                [self._cumulative_sv_at(float(t))
+                 for t in self._ghost_hold_release],
+                dtype=np.float64)
+            self._ghost_hold_max_sv_dur = float(
+                np.max(self._ghost_hold_release_sv
+                       - self._ghost_hold_press_sv))
+        else:
+            self._ghost_hold_press_sv = np.empty(0, dtype=np.float64)
+            self._ghost_hold_release_sv = np.empty(0, dtype=np.float64)
+            self._ghost_hold_max_sv_dur = 0.0
+
     def _cumulative_sv_at(self, t):
         """Integral of SV(t') dt' from the first timing point to t.
         For t before the first section, extrapolate with the first SV value."""
@@ -396,7 +460,8 @@ class Player:
         sps = max(1e-3, self.scroll_speed)
         sv_hi = (judge_y + screen_margin) / sps            # top of screen
         sv_lo = (judge_y - (self.H + screen_margin)) / sps  # bottom of screen
-        if self.sv_enabled and self.sv_sections:
+        use_sv_space = bool(self.sv_enabled and self.sv_sections)
+        if use_sv_space:
             cum_now = self._cumulative_sv_at(float(t_now))
             target_lo = cum_now + sv_lo
             target_hi = cum_now + sv_hi
@@ -512,6 +577,7 @@ class Player:
 
             jname = self.note_judges[i]
             jcolor = JCLR[jname]
+            miss_red = JCLR['miss']
             dim_color = (note_color[0] // 2, note_color[1] // 2,
                          note_color[2] // 2)
             # Gray-out colors for missed notes (pset6 convention: grayed
@@ -608,18 +674,23 @@ class Player:
                                              note_h, head_color)
 
             # -------- Press marker (head hit indicator) ------------------
-            # Only draw when we're actually showing the press moment — i.e.
-            # the head is visible at its original scroll position, not stuck
-            # to the judgment line.
-            show_press_mark = (not miss and head_visible
+            # Drawn for non-miss hits (in judgment color) AND for misses
+            # where the player actually pressed (in red). Shows the offset
+            # from the note head to the press moment so the user can see
+            # exactly when the key went down. Suppressed when the LN head
+            # is stuck to the judgment line in press-hide mode — the press
+            # moment isn't tied to the visible head there.
+            miss_has_press = bool(miss and self.miss_pressed[i])
+            show_press_mark = ((not miss or miss_has_press) and head_visible
                                and not (is_ln and ln_state == 'held'
                                         and self.press_hide))
-            if show_press_mark and ln_state in ('tap', 'upcoming', 'held'):
+            if show_press_mark:
                 press_y = y + off * self.scroll_speed
-                pygame.draw.line(self.screen, jcolor,
+                line_color = miss_red if miss else jcolor
+                pygame.draw.line(self.screen, line_color,
                                  (int(lx + lane_w / 2), int(y)),
                                  (int(lx + lane_w / 2), int(press_y)), 1)
-                pygame.draw.rect(self.screen, jcolor,
+                pygame.draw.rect(self.screen, line_color,
                                  (lx + 8, int(press_y) - 2,
                                   int(lane_w - 16), 4))
 
@@ -638,12 +709,66 @@ class Player:
                 pygame.draw.line(self.screen, jcolor,
                                  (cx - 10, y + 10), (cx + 10, y - 10), 2)
 
+        # Ghost holds: red hit-line for spans where the player held a key
+        # inside a missed LN. Drawn AFTER all notes so it sits on top of
+        # the grayed LN body. Release is NOT clipped to the LN tail, so
+        # overholds extend visibly past the tail. Only osu replays populate.
+        #
+        # Range check: a span is visible iff its [press_t, release_t]
+        # overlaps the on-screen time window [target_lo, target_hi].
+        # Array is sorted by press_t, so we bisect on press_t with a
+        # lookback bounded by the precomputed max hold duration — that
+        # catches long holds whose press is off-screen but release is on.
+        gh_red = JCLR['miss']
+        if self._ghost_hold_press.size:
+            if use_sv_space:
+                gh_press_key = self._ghost_hold_press_sv
+                gh_release_key = self._ghost_hold_release_sv
+                gh_max_dur = self._ghost_hold_max_sv_dur
+            else:
+                gh_press_key = self._ghost_hold_press
+                gh_release_key = self._ghost_hold_release
+                gh_max_dur = self._ghost_hold_max_dur
+            gh_hi = bisect.bisect_right(gh_press_key, target_hi)
+            gh_lo = bisect.bisect_left(gh_press_key,
+                                       target_lo - gh_max_dur)
+            for k in range(gh_lo, gh_hi):
+                pt = float(self._ghost_hold_press[k])
+                rt = float(self._ghost_hold_release[k])
+                # True overlap test. bisect_left with the max-duration
+                # lookback is conservative — it lets through spans whose
+                # release is actually < target_lo. Reject those here.
+                if float(gh_release_key[k]) < target_lo:
+                    continue
+                gc = int(self._ghost_hold_cols[k])
+                if gc >= keycount_:
+                    continue
+                y_press = time_to_y(pt, t_now)
+                y_release = time_to_y(rt, t_now)
+                glx = int(x0 + gc * lane_w)
+                cx = int(glx + lane_w / 2)
+                y_top = min(y_press, y_release)
+                y_bot = max(y_press, y_release)
+                if y_bot < 0 or y_top > self.H:
+                    continue
+                y_top = int(max(0, y_top))
+                y_bot = int(min(self.H, y_bot))
+                pygame.draw.line(self.screen, gh_red,
+                                 (cx, y_top), (cx, y_bot), 2)
+                pygame.draw.rect(self.screen, gh_red,
+                                 (glx + 8, int(y_press) - 2,
+                                  int(lane_w - 16), 4))
+                pygame.draw.rect(self.screen, gh_red,
+                                 (glx + 8, int(y_release) - 2,
+                                  int(lane_w - 16), 4))
+
         # Ghost taps: presses that didn't land on any note. Only populated for
-        # osu replays (Etterna .bin has no raw key events). Scroll past the
-        # receptor just like notes do.
+        # osu replays. Drawn LAST so they sit on top of every note and any
+        # LN body/ghost hold.
         if self._ghost_times.size:
-            g_lo = bisect.bisect_left(self._ghost_times, target_lo)
-            g_hi = bisect.bisect_right(self._ghost_times, target_hi)
+            ghost_key = self._ghost_sv_times if use_sv_space else self._ghost_times
+            g_lo = bisect.bisect_left(ghost_key, target_lo)
+            g_hi = bisect.bisect_right(ghost_key, target_hi)
             for k in range(g_lo, g_hi):
                 gt = float(self._ghost_times[k])
                 gc = int(self._ghost_cols[k])
