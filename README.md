@@ -6,7 +6,7 @@ Use it for personal use if you want lol. I might rewrite parts by hand if really
 
 Lemme know if the clanker somehow made a buffer overflow in python code lol
 
-Btw I added plugins but the plugins themselves are not sandboxed. This means you should not run arbitrary plugins from randos
+Btw I added plugins but the plugins themselves are only cheaply sandboxed. This means you should not run arbitrary unsafe plugins from randos
 
 ---
 

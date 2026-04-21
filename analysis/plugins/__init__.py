@@ -40,10 +40,12 @@ class Bundle:
     name: str
     path: Path
     manifest: dict = field(default_factory=dict)
+    trusted: bool = False
     sidebar_modules: list = field(default_factory=list)
     replay_modules: list = field(default_factory=list)
     viz_modules: list = field(default_factory=list)
     theme_module: object | None = None
+    load_errors: list = field(default_factory=list)  # [(role, filename, exc)]
 
 
 _SUBDIR_ROLES = ('sidebar', 'replay', 'viz')
@@ -53,6 +55,10 @@ def _bundle_roots(extra_paths=None):
     roots = []
     repo_root = Path(__file__).resolve().parents[2]
     roots.append(repo_root / 'plugins')
+    # ``plugins/unsafe/`` is a container of trusted bundles (opt-in escape
+    # hatch for raw-Python plugins). Treated as an extra bundle root so
+    # its children are discoverable as bundles in their own right.
+    roots.append(repo_root / 'plugins' / 'unsafe')
     env = os.environ.get('EA_PLUGINS_PATH', '')
     for raw in env.split(os.pathsep):
         if raw.strip():
@@ -81,31 +87,41 @@ def _load_manifest(path: Path) -> dict:
         return {}
 
 
-def _load_module(file_path: Path, bundle_key: str, role: str):
+def _load_module(file_path: Path, bundle_key: str, role: str,
+                 sandboxed: bool = False):
     """Import a plugin module from an absolute path with a stable, unique
     fully-qualified name so sibling-relative imports (``from ._common
-    import ...``) still work within a bundle's subfolder."""
+    import ...``) still work within a bundle's subfolder.
+
+    When ``sandboxed`` is True the module is loaded with a restricted
+    ``__builtins__`` dict and its imports are vetted by the sandbox
+    finder.
+
+    Returns ``(module_or_none, error_or_none)``.
+    """
+    from analysis.plugins.sandbox import prepare_sandboxed_module
     pkg_name = f'_ea_bundle.{bundle_key}.{role}'
     _ensure_package(pkg_name, (file_path.parent,))
     mod_name = f'{pkg_name}.{file_path.stem}'
     if mod_name in sys.modules:
-        return sys.modules[mod_name]
+        return sys.modules[mod_name], None
     spec = importlib.util.spec_from_file_location(
         mod_name, file_path,
         submodule_search_locations=None,
     )
     if spec is None or spec.loader is None:
-        return None
+        return None, ImportError(f'no loader for {file_path}')
     mod = importlib.util.module_from_spec(spec)
     mod.__package__ = pkg_name
+    if sandboxed:
+        prepare_sandboxed_module(mod)
     sys.modules[mod_name] = mod
     try:
         spec.loader.exec_module(mod)
     except Exception as exc:
         sys.modules.pop(mod_name, None)
-        print(f'plugin import failed: {file_path}: {exc}')
-        return None
-    return mod
+        return None, exc
+    return mod, None
 
 
 def _ensure_package(fqname: str, search_paths):
@@ -134,7 +150,8 @@ def _iter_py_files(folder: Path):
         yield entry
 
 
-def _preload_helpers(folder: Path, bundle_key: str, role: str):
+def _preload_helpers(folder: Path, bundle_key: str, role: str,
+                     sandboxed: bool, errors: list):
     """Import underscore-prefixed ``_helper.py`` siblings first so modules
     in the same folder can do ``from ._helper import …``."""
     if not folder.is_dir():
@@ -142,20 +159,27 @@ def _preload_helpers(folder: Path, bundle_key: str, role: str):
     for entry in sorted(folder.glob('_*.py')):
         if entry.name == '__init__.py':
             continue
-        _load_module(entry, bundle_key, role)
+        _, err = _load_module(entry, bundle_key, role, sandboxed=sandboxed)
+        if err is not None:
+            errors.append((role, entry.name, err))
 
 
-def _load_theme(bundle_path: Path, bundle_key: str):
+def _load_theme(bundle_path: Path, bundle_key: str, sandboxed: bool):
     theme_dir = bundle_path / 'theme'
     if theme_dir.is_dir() and (theme_dir / '__init__.py').is_file():
-        return _load_module(theme_dir / '__init__.py', bundle_key, 'theme')
+        mod, _err = _load_module(theme_dir / '__init__.py', bundle_key,
+                                 'theme', sandboxed=sandboxed)
+        return mod
     theme_py = bundle_path / 'theme.py'
     if theme_py.is_file():
-        return _load_module(theme_py, bundle_key, 'theme')
+        mod, _err = _load_module(theme_py, bundle_key, 'theme',
+                                 sandboxed=sandboxed)
+        return mod
     return None
 
 
 def discover_bundles(extra_paths=None) -> list[Bundle]:
+    from analysis.plugins.sandbox import is_trusted_bundle
     bundles: list[Bundle] = []
     for root in _bundle_roots(extra_paths):
         if not root.is_dir():
@@ -168,18 +192,27 @@ def discover_bundles(extra_paths=None) -> list[Bundle]:
             manifest = _load_manifest(entry)
             key = str(manifest.get('key') or entry.name).lower()
             name = str(manifest.get('name') or entry.name)
+            trusted = is_trusted_bundle(entry)
+            sandboxed = not trusted
             bundle = Bundle(key=key, name=name, path=entry,
-                            manifest=manifest)
+                            manifest=manifest, trusted=trusted)
             for role in _SUBDIR_ROLES:
                 sub = entry / role
                 target = getattr(bundle, f'{role}_modules')
-                _preload_helpers(sub, key, role)
+                _preload_helpers(sub, key, role, sandboxed,
+                                 bundle.load_errors)
                 for fp in _iter_py_files(sub):
                     if fp.name.startswith('_'):
                         continue
-                    mod = _load_module(fp, key, role)
+                    mod, err = _load_module(fp, key, role,
+                                            sandboxed=sandboxed)
                     if mod is not None:
                         target.append(mod)
-            bundle.theme_module = _load_theme(entry, key)
+                    elif err is not None:
+                        bundle.load_errors.append((role, fp.name, err))
+            bundle.theme_module = _load_theme(entry, key, sandboxed)
+            for role, fname, exc in bundle.load_errors:
+                tag = 'sandboxed' if sandboxed else 'trusted'
+                print(f'plugin [{tag}] {key}/{role}/{fname} refused: {exc}')
             bundles.append(bundle)
     return bundles

@@ -78,6 +78,53 @@ with uppercase token names matching `analysis/player/theme.py`. Missing
 tokens fall through to the built-in defaults. Only one theme is active at
 a time.
 
+## Trust and sandboxing
+
+Two trust levels:
+
+| Location | Trust | Access |
+|---|---|---|
+| `plugins/builtin/` | trusted | full Python — ships with the app |
+| `plugins/unsafe/<bundle>/` | trusted | full Python — opt-in escape hatch |
+| Anywhere else (`plugins/<bundle>`, `$EA_PLUGINS_PATH`, `~/.config/…`) | sandboxed | restricted imports + stripped builtins |
+
+### Sandboxed bundles
+
+Sandboxed plugins run with a **restricted `__builtins__`** (no `open`,
+`exec`, `eval`, `compile`, `input`, `breakpoint`, `memoryview`, frame-walk
+primitives) and an **import allow-list**. Only these modules may be
+imported:
+
+- **Stdlib (pure):** `math`, `cmath`, `random`, `statistics`,
+  `dataclasses`, `typing`, `enum`, `abc`, `collections`, `itertools`,
+  `functools`, `operator`, `re`, `string`, `textwrap`, `bisect`, `heapq`,
+  `array`, `copy`, `numbers`, `fractions`, `decimal`, `json`,
+  `__future__`.
+- **Third-party:** `numpy`.
+- **Host API:** `analysis.player.theme`, `analysis.player.sidebar_api`,
+  `analysis.player.plugin_api`, `analysis.plugins.host_api`.
+
+Anything else — notably `os`, `sys`, `pathlib`, `subprocess`, `socket`,
+`urllib`, `requests`, `ctypes`, `threading`, `pickle`, `importlib` — is
+refused. A refused module raises `SandboxViolation` at import time; the
+bundle still loads, but the offending file is recorded in
+`bundle.load_errors` and flagged in the Plugins sidebar panel.
+
+**This is best-effort, not a security boundary.** NumPy in particular
+has known escape vectors (`numpy.ctypeslib`). The goal is to stop lazy
+harm and push plugin authors toward the host API — not to stop a
+determined attacker. Only install bundles from sources you trust,
+regardless of where they live in the layout above.
+
+### The `unsafe/` escape hatch
+
+If you're prototyping a plugin that needs raw Python (network calls,
+filesystem access, threads, etc.), drop it under `plugins/unsafe/` to
+skip the sandbox. The directory name is deliberate: naming it `unsafe`
+makes the trust decision visible to anyone browsing the plugin layout.
+Promote to `builtin/` once the plugin is ready, or request new host-API
+surface if you're writing something for general distribution.
+
 ## Minimal example
 
 ```

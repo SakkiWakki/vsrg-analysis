@@ -19,12 +19,18 @@ def _shorten(text, max_chars):
     return text[:max(0, max_chars - 1)] + '~'
 
 
+_COLOR_BUNDLE_TRUSTED = (180, 220, 190)
+_COLOR_BUNDLE_SANDBOXED = (200, 200, 150)
+_COLOR_BUNDLE_REFUSED = (220, 140, 140)
+
+
 def _draw_plugins_panel(sctx):
     p = sctx.player
     mgr = sctx.renderer.plugins
     plugins = mgr.all_plugins()
     enabled = mgr.enabled_count()
     total = len(plugins)
+    bundles = list(getattr(mgr, 'bundles', []))
 
     sctx.spacer()
     sctx.draw_button(
@@ -34,6 +40,26 @@ def _draw_plugins_panel(sctx):
     )
     if not p.plugin_panel_open:
         return
+
+    # Bundle header rows (trust tag) precede the plugin list so users can
+    # see at a glance which bundles loaded, which were sandboxed, and
+    # which had modules refused by the sandbox.
+    for bundle in bundles:
+        if sctx.y + _ROW_PANEL_H > p.H - _TAIL_GAP:
+            break
+        if bundle.load_errors:
+            tag = 'refused'
+            color = _COLOR_BUNDLE_REFUSED
+        elif bundle.trusted:
+            tag = 'trusted'
+            color = _COLOR_BUNDLE_TRUSTED
+        else:
+            tag = 'sandboxed'
+            color = _COLOR_BUNDLE_SANDBOXED
+        label = _shorten(f'{bundle.name} [{tag}]', _NAME_MAX_CHARS + 8)
+        sctx.text(label, sctx.col_x + 2,
+                  sctx.y + theme.TEXT_BASELINE_ROW, color)
+        sctx.y += _ROW_PANEL_H
 
     if not plugins:
         sctx.draw_text('no plugins found', color=theme.COLOR_HINT, indent=2)
