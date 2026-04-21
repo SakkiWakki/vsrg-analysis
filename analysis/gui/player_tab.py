@@ -132,6 +132,16 @@ class PlayerTab(QWidget):
                                   not self.player.paused)
 
     def _toggle(self):
+        # Unpausing after playback has finished loops back to the start.
+        # "Finished" means either the audio source signalled end-of-file OR
+        # the chart clock sits at t_max (no-audio / charts longer than the
+        # mp3 both hit this second case).
+        resuming = self.player.paused
+        audio_done = self._audio_ready and getattr(
+            self._audio, '_ended', False)
+        clock_done = self.player.t >= self.player.t_max - 1e-3
+        if resuming and (audio_done or clock_done):
+            self.player.restart()
         self.player.toggle_pause()
         self.play_btn.setText('▶' if self.player.paused else '⏸')
         self._sync_audio()
@@ -299,8 +309,10 @@ class PlayerTab(QWidget):
             # via _on_playbar_changed.
             dt = 0
         self.player.advance(dt)
-        if (not self.player.paused and self._audio_ready
-                and getattr(self._audio, '_ended', False)):
+        if not self.player.paused and (
+                (self._audio_ready
+                 and getattr(self._audio, '_ended', False))
+                or self.player.t >= self.player.t_max):
             self.player.paused = True
             self.play_btn.setText('▶')
         self.view.update()
