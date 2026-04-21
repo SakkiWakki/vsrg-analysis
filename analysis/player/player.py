@@ -219,6 +219,25 @@ class Player:
                 self._ln_tail_times[i] = end_t
                 self._ln_indices.append(i)
 
+        # Ghost taps: (time_sec, column) for presses that didn't land on any
+        # note. Only osu replays provide these — Etterna .bin has no raw key
+        # event stream, so the list stays empty and _draw's sweep no-ops.
+        # Stored as parallel numpy arrays so the per-frame windowing can use
+        # bisect like the regular notes do.
+        raw_ghosts = replay.get('ghost_taps') or []
+        if raw_ghosts and game == 'osu':
+            ghost_ts = np.array([t / 1000.0 for (t, _c) in raw_ghosts],
+                                dtype=np.float64)
+            ghost_cs = np.array([c for (_t, c) in raw_ghosts],
+                                dtype=np.int32)
+            # Sort by time for bisect windowing.
+            order = np.argsort(ghost_ts, kind='stable')
+            self._ghost_times = ghost_ts[order]
+            self._ghost_cols = ghost_cs[order]
+        else:
+            self._ghost_times = np.empty(0, dtype=np.float64)
+            self._ghost_cols = np.empty(0, dtype=np.int32)
+
         # SV (scroll velocity) — list of (time_sec, sv_multiplier). When enabled,
         # note positions use the piecewise-constant integral of SV over time
         # (see _cumulative_sv_at). Falls back to constant scroll if empty.
@@ -491,64 +510,68 @@ class Player:
             else:
                 ln_state = 'tap'  # regular note
 
-            # Press-hide mode: once the player has pressed (and, for LNs,
-            # released) the note, skip drawing entirely. Misses stay visible
-            # so the red X + body still communicate what was missed.
-            if self.press_hide and not miss:
-                if is_ln:
-                    if t_now >= release_t:
-                        continue
-                else:
-                    if t_now >= press_t:
-                        continue
-
             jname = self.note_judges[i]
             jcolor = JCLR[jname]
             dim_color = (note_color[0] // 2, note_color[1] // 2,
                          note_color[2] // 2)
-            # Dim-red tint for missed LNs (osu!mania convention).
-            miss_body_color = (110, 40, 40)
+            # Gray-out colors for missed notes (pset6 convention: grayed
+            # rather than tinted red — the red X overlay is what signals
+            # "this was a miss", the gray just drops visual weight).
+            miss_tap_color = (77, 77, 77)     # rgb(0.3, 0.3, 0.3)
+            miss_ln_color = (38, 38, 38)      # rgb(0.15, 0.15, 0.15)
 
-            # -------- LN body --------------------------------------------
-            # Drawn first so overlays (head, press bar, tail marker) sit on
-            # top. Body is clipped to the portion still "ahead" of the head
-            # progress — once the head passes the judgment line (held state),
-            # the body shrinks from judgment line up to tail, matching
-            # osu!mania / Quaver gameplay.
+            # Display-hits mode (press_hide in code): once the player has
+            # pressed a note, hide the whole thing. For LNs, while the head
+            # is held, stick it to the judgment line with a shrinking body
+            # (pset6 LNDisplay pattern: head_y = hitpos when held). Missed
+            # notes never get hidden — they're grayed out instead so the red
+            # X + dim fill communicate the miss.
             if is_ln:
                 y_end = self._time_to_y(end_t, t_now)
-                if ln_state == 'upcoming':
+
+                if miss:
+                    body_top, body_bot, body_color = y_end, y, miss_ln_color
+                elif ln_state == 'upcoming':
                     body_top, body_bot, body_color = y_end, y, note_color
                 elif ln_state == 'held':
-                    body_top, body_bot, body_color = y_end, y, note_color
+                    if self.press_hide:
+                        # Pset6: head is stuck at hitpos (judgment line)
+                        # while held. Body shrinks between hitpos and tail.
+                        body_top, body_bot, body_color = y_end, judge_y, note_color
+                    else:
+                        body_top, body_bot, body_color = y_end, y, note_color
                 elif ln_state == 'released':
-                    # Head gone, but the body+tail keep scrolling past the
-                    # judgment line so they don't pop out mid-screen. The
-                    # body spans tail → judgment line while the tail is still
-                    # on screen; once it crosses, nothing draws.
-                    body_top, body_bot, body_color = y_end, judge_y, dim_color
-                elif ln_state == 'missed':
-                    # Missed head — body continues scrolling but dim red.
-                    body_top, body_bot, body_color = y_end, y, miss_body_color
+                    if self.press_hide:
+                        # Pset6: once hit, color.a = 0 → entire LN vanishes.
+                        body_top = body_bot = None
+                        body_color = None
+                    else:
+                        # Keep showing the body+tail scrolling past so it
+                        # doesn't pop out mid-screen.
+                        body_top, body_bot, body_color = y_end, judge_y, dim_color
                 else:
                     body_top = body_bot = None
                     body_color = None
+
                 if body_color is not None and body_bot > body_top:
                     self.skin_obj.draw_ln_body(self.screen, lx, body_top,
                                                body_bot, lane_w, note_h,
                                                body_color)
 
-                # LN tail marker — drawn whenever the tail is still on screen,
-                # regardless of hold state, so the LN doesn't pop out the
-                # instant the head passes.
+                # LN tail marker — visible whenever the tail is on screen,
+                # unless press_hide hid the whole LN post-release.
+                tail_visible = not (self.press_hide and ln_state == 'released'
+                                    and not miss)
                 tail_on_screen = (-screen_margin <= y_end <= self.H +
                                   screen_margin)
-                if tail_on_screen:
+                if tail_visible and tail_on_screen:
+                    tail_color = miss_ln_color if miss else dim_color
                     self.skin_obj.draw_ln_tail(self.screen, lx, y_end,
-                                               lane_w, note_h, dim_color)
+                                               lane_w, note_h, tail_color)
                 # Release-offset indicator: only relevant until the player
                 # has actually released (osu-mania tail judgment).
-                if rel_off is not None and ln_state != 'released':
+                if (rel_off is not None and ln_state != 'released'
+                        and not miss and not self.press_hide):
                     rel_y = y_end + rel_off * self.scroll_speed
                     pygame.draw.line(self.screen, (220, 220, 220),
                                      (int(lx + lane_w / 2), int(y_end)),
@@ -557,17 +580,41 @@ class Player:
                                      (lx + 8, int(rel_y) - 2,
                                       int(lane_w - 16), 4))
 
-            head_visible = ln_state in ('upcoming', 'tap', 'missed',
-                                        'missed_note')
+            # -------- Head position + visibility -------------------------
+            # Decide head draw location (stick to judgment line while an LN
+            # is held in display-hits-off mode) and whether to draw at all.
+            head_y = y
+            if is_ln and ln_state == 'held' and self.press_hide and not miss:
+                head_y = judge_y
+
+            if miss:
+                head_visible = True
+                head_color = miss_tap_color if not is_ln else miss_ln_color
+            elif self.press_hide:
+                # Taps vanish immediately on press; LN heads vanish on
+                # release (but stick to hitpos while held, handled above).
+                if is_ln:
+                    head_visible = ln_state in ('upcoming', 'held')
+                else:
+                    head_visible = ln_state == 'tap' and t_now < press_t
+                head_color = note_color
+            else:
+                head_visible = ln_state in ('upcoming', 'tap', 'held')
+                head_color = note_color
 
             # -------- Note head ------------------------------------------
             if head_visible:
-                self.skin_obj.draw_note_head(self.screen, lx, y, lane_w,
-                                             note_h, note_color)
+                self.skin_obj.draw_note_head(self.screen, lx, head_y, lane_w,
+                                             note_h, head_color)
 
             # -------- Press marker (head hit indicator) ------------------
-            # Drawn AFTER the head so the indicator always shows on top.
-            if not miss and head_visible:
+            # Only draw when we're actually showing the press moment — i.e.
+            # the head is visible at its original scroll position, not stuck
+            # to the judgment line.
+            show_press_mark = (not miss and head_visible
+                               and not (is_ln and ln_state == 'held'
+                                        and self.press_hide))
+            if show_press_mark and ln_state in ('tap', 'upcoming', 'held'):
                 press_y = y + off * self.scroll_speed
                 pygame.draw.line(self.screen, jcolor,
                                  (int(lx + lane_w / 2), int(y)),
@@ -577,9 +624,7 @@ class Player:
                                   int(lane_w - 16), 4))
 
             if miss and head_visible:
-                # Translucent red outline + X marker. Applied to both taps
-                # and LN heads — the LN body is already tinted dim-red
-                # above, so together they read as "missed".
+                # Translucent red outline + X marker over the grayed head.
                 pad = 4
                 ow = int(lane_w - 8) + pad * 2
                 oh = note_h + pad * 2
@@ -592,6 +637,22 @@ class Player:
                                  (cx - 10, y - 10), (cx + 10, y + 10), 2)
                 pygame.draw.line(self.screen, jcolor,
                                  (cx - 10, y + 10), (cx + 10, y - 10), 2)
+
+        # Ghost taps: presses that didn't land on any note. Only populated for
+        # osu replays (Etterna .bin has no raw key events). Scroll past the
+        # receptor just like notes do.
+        if self._ghost_times.size:
+            g_lo = bisect.bisect_left(self._ghost_times, target_lo)
+            g_hi = bisect.bisect_right(self._ghost_times, target_hi)
+            for k in range(g_lo, g_hi):
+                gt = float(self._ghost_times[k])
+                gc = int(self._ghost_cols[k])
+                if gc >= keycount_:
+                    continue
+                gy = time_to_y(gt, t_now)
+                glx = int(x0 + gc * lane_w)
+                self.skin_obj.draw_ghost_tap(self.screen, glx, gy, lane_w,
+                                             note_h)
 
         # HUD / sidebar
         sidebar_x = self.W - 210

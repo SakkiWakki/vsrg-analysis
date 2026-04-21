@@ -24,6 +24,19 @@ class Skin:
     def draw_ln_tail(self, surf, lx, y, lane_w, note_h, color):
         raise NotImplementedError
 
+    def draw_ghost_tap(self, surf, lx, y, lane_w, note_h):
+        """Indicator for a press that didn't land on any note (osu only).
+
+        Transparent body, white outline, small centered dot — sized to half
+        the column width so it reads as 'a tap happened here' without
+        overpowering the actual notes. Shared across all skins since it's
+        purely a playback overlay, not a note-style choice."""
+        r = max(4, int(lane_w * 0.25))   # half the column size = radius ≈ lane_w/4
+        cx = int(lx + lane_w / 2)
+        cy = int(y)
+        pygame.draw.circle(surf, (255, 255, 255), (cx, cy), r, 1)
+        pygame.draw.circle(surf, (255, 255, 255), (cx, cy), 2)
+
 
 class BarSkin(Skin):
     """Current default: flat rectangles with a white outline."""

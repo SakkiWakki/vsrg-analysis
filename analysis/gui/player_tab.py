@@ -119,8 +119,9 @@ class PlayerTab(QWidget):
         self.press_btn = QPushButton()
         self.press_btn.setFocusPolicy(Qt.NoFocus)
         self.press_btn.setToolTip(
-            'Hide notes once the player actually pressed them (LNs hide on release). '
-            'Misses stay visible so the red X still shows.')
+            'When off, notes vanish once the player actually presses them '
+            '(LNs stick their head to the judgment line while held, then '
+            'vanish on release). Misses stay visible, dimmed.')
         self.press_btn.clicked.connect(lambda _checked=False: self._toggle_press_hide())
         ctl.addWidget(self.press_btn)
         self._refresh_press_btn()
@@ -219,7 +220,7 @@ class PlayerTab(QWidget):
 
     def _refresh_press_btn(self):
         self.press_btn.setText(
-            f'Press-hide: {"on" if self.player.press_hide else "off"}')
+            f'Display hits: {"off" if self.player.press_hide else "on"}')
 
     def _toggle_press_hide(self):
         self.player.toggle_press_hide()

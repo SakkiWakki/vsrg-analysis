@@ -586,6 +586,53 @@ def parse_replay(osr_path, osu_path=None, songs_dir=None, hit_window_ms=None):
 
     sim = simulate_mania(by_col_notes, key_events_by_col, windows)
 
+    # Ghost taps: presses that didn't get assigned to any note (pressed too
+    # early, or pressed after the last note, or just a random tap between
+    # notes). Collect the set of press times actually consumed by the
+    # simulator per column, then anything left over is a ghost.
+    #
+    # Presses that fall inside any LN's [head_time, end_time] interval on
+    # the same column are NOT ghosts — the player was clearly attempting
+    # that LN, even if they missed the head and re-pressed mid-hold. A
+    # missed LN can be re-hit partway through, so we can't restrict this
+    # to only missed LNs.
+    used_press_ts = [set() for _ in range(keycount)]
+    for r in sim:
+        c = r['col']
+        if r['press_t'] is not None:
+            used_press_ts[c].add(int(r['press_t']))
+    ln_intervals = [[] for _ in range(keycount)]
+    for r in sim:
+        if r['is_hold'] and r['end_time'] is not None:
+            ln_intervals[r['col']].append((r['time'], r['end_time']))
+    for iv in ln_intervals:
+        iv.sort()
+    import bisect as _bisect
+
+    def _inside_any_ln(t_ms, col):
+        iv = ln_intervals[col]
+        if not iv:
+            return False
+        # Rightmost LN whose head is <= t. If its end_time >= t, we're
+        # inside. Intervals don't overlap within a column, so checking the
+        # single candidate is sufficient.
+        idx = _bisect.bisect_right(iv, (t_ms, float('inf'))) - 1
+        if idx < 0:
+            return False
+        head, end = iv[idx]
+        return head <= t_ms <= end
+
+    ghost_taps = []
+    for c in range(keycount):
+        for (t, is_press) in key_events_by_col[c]:
+            if not is_press:
+                continue
+            if int(t) in used_press_ts[c]:
+                continue
+            if _inside_any_ln(int(t), c):
+                continue
+            ghost_taps.append((int(t), c))
+
     # Flatten sim results into the legacy parallel arrays. Hold release
     # offsets are also carried separately for the renderer.
     all_rows, all_offs, all_cols, all_nt, all_miss = [], [], [], [], []
@@ -618,6 +665,7 @@ def parse_replay(osr_path, osu_path=None, songs_dir=None, hit_window_ms=None):
         'misses': misses,
         'holds': holds_meta,
         'hold_releases': hold_releases,
+        'ghost_taps': ghost_taps,   # list of (t_ms, column) — osu only
         'keycount': keycount,
         'filepath': str(osr_path),
         'chart_path': str(osu_path),
