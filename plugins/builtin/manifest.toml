@@ -1,0 +1,10 @@
+# Built-in plugin bundle. This bundle ships with the app and cannot be
+# disabled; its subfolders follow the standard bundle layout:
+#   sidebar/  → right-hand HUD sections (register_sidebar)
+#   replay/   → lane-space draw plugins (register, Stage-based)
+#   viz/      → visualizations for the library tab (register, figure builders)
+#   theme/    → optional; exposes theme tokens when this bundle's theme is active
+name = "Built-in"
+key = "builtin"
+version = "1.0"
+author = "vsrg-analysis"
