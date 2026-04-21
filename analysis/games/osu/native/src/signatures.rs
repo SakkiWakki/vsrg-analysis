@@ -90,6 +90,34 @@ pub const BASE_ADDR: Signature = Signature {
 /// beatmap struct pointer stored at that slot.
 pub const BASE_TO_BEATMAP_OFFSET: i64 = -0xc;
 
+/// Entry point into the game-state enum. Walking it mirrors
+/// ``BASE_ADDR``:
+///
+/// ```text
+/// slot   = read_u32(STATUS_PTR.addr + STATUS_IND_OFFSET)
+/// status = read_u32(slot)
+/// ```
+///
+/// ``status`` is an ``osu::GameState`` enum value; compare against
+/// ``GAME_STATE_PLAY`` to detect "actually in gameplay" vs menu /
+/// results / song select / etc. The overlay uses this to hide itself
+/// whenever the user isn't actively playing.
+///
+/// Source: tosu StableMemory.scanPatterns.statusPtr.
+pub const STATUS_PTR: Signature = Signature {
+    name: "status_ptr",
+    pattern: "48 83 F8 04 73 1E",
+    offset_from_match: 0,
+};
+
+/// Immediate applied to the ``STATUS_PTR`` match before the first
+/// deref. Tosu ships this as the signature's ``offset`` field.
+pub const STATUS_IND_OFFSET: i64 = -0x4;
+
+/// Value of ``status`` when the player is in active gameplay.
+/// Matches ``GameState.play`` in tosu's enum.
+pub const GAME_STATE_PLAY: u32 = 2;
+
 // ─── Struct field offsets ─────────────────────────────────────────────────
 //
 // Offsets into the structs reached by the pointer chain above.

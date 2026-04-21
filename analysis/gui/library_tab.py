@@ -86,8 +86,12 @@ class LibraryTab(QWidget):
             b = QPushButton(label); b.clicked.connect(cb); row1.addWidget(b)
         self._plugin_actions_row = row1
         self._plugin_action_buttons: list[QPushButton] = []
-        self._rebuild_plugin_actions()
+        # Discover plugins up-front so bundle-contributed library-toolbar
+        # buttons appear on first paint.
+        from analysis.player.plugin_loader import PluginManager
+        PluginManager.discover()
         from analysis.gui.library_actions import get_registry
+        self._rebuild_plugin_actions()
         self._library_actions_unsub = get_registry().subscribe(
             self._rebuild_plugin_actions)
         v.addLayout(row1)

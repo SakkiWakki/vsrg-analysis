@@ -47,6 +47,10 @@ class LiveSnapshot:
     fields are what osu! reports about the session as a whole."""
     connected: bool
     map_title: str = ''
+    # True only when osu! reports ``GameState.play`` (active gameplay,
+    # not menu / results / song select / pause). Consumers that want to
+    # hide UI during non-play states gate on this.
+    in_gameplay: bool = False
     combo: int = 0
     max_combo: int = 0
     accuracy: float = 0.0
@@ -175,6 +179,14 @@ class OsuLiveClient:
         play = payload.get('play') or {}
         hits = play.get('hits') or {}
         hit_error_array = play.get('hitErrorArray') or []
+        # in_gameplay: native source sets play.inGameplay directly; tosu
+        # HTTP reports it at top-level state.number == 2 (GameState.play).
+        if 'inGameplay' in play:
+            in_gameplay = bool(play.get('inGameplay'))
+        else:
+            state = payload.get('state') or {}
+            state_num = state.get('number') if isinstance(state, dict) else None
+            in_gameplay = int(state_num) == 2 if state_num is not None else False
         mode = (beatmap.get('mode') or {}).get('name') or ''
         title = (beatmap.get('titleUnicode')
                  or beatmap.get('title') or '')
@@ -238,6 +250,7 @@ class OsuLiveClient:
 
         return LiveSnapshot(
             connected=True,
+            in_gameplay=in_gameplay,
             map_title=str(title),
             combo=int(play.get('combo', {}).get('current', 0) if
                       isinstance(play.get('combo'), dict)
@@ -339,6 +352,7 @@ def _native_to_payload(raw: dict) -> dict:
             # Native reader doesn't surface UR yet; leave as 0 and
             # compute from hit errors if the viz needs it.
             'unstableRate': 0.0,
+            'inGameplay': bool(raw.get('in_gameplay', False)),
         },
     }
 

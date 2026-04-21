@@ -157,6 +157,17 @@ impl ResolvedHandle {
             0
         }
     }
+    #[getter]
+    fn status_ptr(&self) -> u64 {
+        #[cfg(target_os = "linux")]
+        {
+            self.inner.status_ptr
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            0
+        }
+    }
 }
 
 /// Scan ``pid`` for every signature we need and return a handle. Raises
@@ -211,6 +222,8 @@ fn read_state<'py>(py: Python<'py>, handle: &ResolvedHandle) -> PyResult<Bound<'
         d.set_item("map_md5", s.map_md5)?;
         d.set_item("map_title", s.map_title)?;
         d.set_item("map_cs", s.map_cs)?;
+        d.set_item("game_state", s.game_state)?;
+        d.set_item("in_gameplay", s.in_gameplay)?;
         Ok(d)
     }
     #[cfg(not(target_os = "linux"))]

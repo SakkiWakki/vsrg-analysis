@@ -28,6 +28,7 @@ use crate::linux_mem;
 use crate::pattern;
 use crate::signatures::{
     self as sig, accuracy, beatmap, dotnet_list, dotnet_string, gameplay, ruleset, score, Signature,
+    GAME_STATE_PLAY,
 };
 
 /// Cached signature resolutions for one osu! process. Cheap to clone
@@ -40,6 +41,8 @@ pub struct Resolved {
     pub rulesets_ptr: u64,
     /// Absolute address of the match for ``BASE_ADDR``.
     pub base_addr: u64,
+    /// Absolute address of the match for ``STATUS_PTR``.
+    pub status_ptr: u64,
 }
 
 /// Scan the process once and return a handle with every known
@@ -48,10 +51,12 @@ pub struct Resolved {
 pub fn resolve(pid: u32) -> io::Result<Resolved> {
     let rulesets_ptr = scan_required(pid, &sig::RULESETS_PTR)?;
     let base_addr = scan_required(pid, &sig::BASE_ADDR)?;
+    let status_ptr = scan_required(pid, &sig::STATUS_PTR)?;
     Ok(Resolved {
         pid,
         rulesets_ptr,
         base_addr,
+        status_ptr,
     })
 }
 
@@ -166,10 +171,24 @@ pub struct ManiaState {
     /// Circle Size — the mania keycount for mania maps. 0 if the
     /// beatmap pointer is null.
     pub map_cs: f32,
+    /// Raw ``osu::GameState`` enum value. 2 == play (actively in
+    /// gameplay); other values indicate menu, results, song select,
+    /// etc. Exposed as-is so callers can filter however they want
+    /// (the overlay only shows on ``play``).
+    pub game_state: u32,
+    /// Convenience flag: ``game_state == GAME_STATE_PLAY``. Callers
+    /// that only need the boolean don't have to import the enum
+    /// constant.
+    pub in_gameplay: bool,
 }
 
 pub fn read_mania_state(r: &Resolved) -> io::Result<ManiaState> {
     let mut out = ManiaState::default();
+
+    // Game state is cheap (two reads) and needed on every tick so
+    // the overlay can show/hide without touching the gameplay chain.
+    out.game_state = read_game_state(r).unwrap_or(0);
+    out.in_gameplay = out.game_state == GAME_STATE_PLAY;
 
     // Beatmap data is readable independently of the gameplay chain
     // (the player can be on the song select screen with a map
@@ -200,6 +219,20 @@ pub fn read_mania_state(r: &Resolved) -> io::Result<ManiaState> {
 
     out.hit_errors_ms = read_hit_errors(r.pid, score_base)?;
     Ok(out)
+}
+
+/// Read the current ``osu::GameState`` enum value. Mirrors
+/// ``BASE_ADDR``'s double-deref pattern: the ``STATUS_PTR`` match is
+/// inside a JIT ``cmp`` instruction whose immediate at
+/// ``STATUS_IND_OFFSET`` is the static field slot; one more deref
+/// yields the u32 value.
+fn read_game_state(r: &Resolved) -> io::Result<u32> {
+    let addr = (r.status_ptr as i64 + sig::STATUS_IND_OFFSET) as u64;
+    let slot = read_u32_as_u64(r.pid, addr)?;
+    if slot == 0 {
+        return Ok(0);
+    }
+    read_u32(r.pid, slot)
 }
 
 /// Dereference ``BASE_ADDR`` to the current beatmap struct.
