@@ -74,12 +74,22 @@ class LibraryTab(QWidget):
         self.filter_edit = QLineEdit()
         self.filter_edit.textChanged.connect(self._refresh_tree)
         row1.addWidget(self.filter_edit, 1)
+        # Built-in toolbar actions first, then plugin-contributed ones.
+        # Plugin actions live in a trailing container so we can wipe and
+        # rebuild them when the registry changes without disturbing the
+        # built-ins or the search box.
         for label, cb in [('Scan library', self._load_library),
                           ('Refresh cache', lambda: self._load_library(refresh=True)),
                           ('Enrich osu titles', lambda: self._load_library(refresh=True, enrich=True)),
                           ('Plugins…', self._open_plugins_dialog),
                           ('Paths…', self._open_paths_dialog)]:
             b = QPushButton(label); b.clicked.connect(cb); row1.addWidget(b)
+        self._plugin_actions_row = row1
+        self._plugin_action_buttons: list[QPushButton] = []
+        self._rebuild_plugin_actions()
+        from analysis.gui.library_actions import get_registry
+        self._library_actions_unsub = get_registry().subscribe(
+            self._rebuild_plugin_actions)
         v.addLayout(row1)
 
         row2 = QHBoxLayout()
@@ -173,6 +183,41 @@ class LibraryTab(QWidget):
     def _open_plugins_dialog(self):
         from analysis.gui.plugins_dialog import PluginsDialog
         PluginsDialog(self).exec()
+
+    # ---------- plugin toolbar actions ----------
+    def _rebuild_plugin_actions(self):
+        """Tear down and re-add plugin-contributed toolbar buttons.
+
+        Called at build time and any time the registry changes. We
+        rebuild rather than diff because the set is small and the
+        visual order depends on registration order; a full rebuild keeps
+        the logic obvious.
+        """
+        row = getattr(self, '_plugin_actions_row', None)
+        if row is None:
+            return
+        for btn in getattr(self, '_plugin_action_buttons', []):
+            row.removeWidget(btn)
+            btn.setParent(None)
+            btn.deleteLater()
+        self._plugin_action_buttons = []
+        from analysis.gui.library_actions import get_registry
+        for action in get_registry().actions():
+            btn = QPushButton(action.label)
+            # Capture the callback in the closure; the action object may
+            # be replaced if the plugin re-registers with the same key.
+            cb = action.callback
+            btn.clicked.connect(lambda _=False, fn=cb: self._invoke_plugin_action(fn))
+            row.addWidget(btn)
+            self._plugin_action_buttons.append(btn)
+
+    def _invoke_plugin_action(self, fn):
+        try:
+            fn()
+        except Exception as exc:
+            QMessageBox.warning(
+                self, 'Plugin action failed',
+                f'A plugin-contributed toolbar action raised an error:\n{exc}')
 
     # ---------- paths dialog ----------
     def _open_paths_dialog(self):

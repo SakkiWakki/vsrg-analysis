@@ -157,6 +157,13 @@ class PluginManager:
                 mgr._register_replay(mod, bundle)
             for mod in bundle.sidebar_modules:
                 mgr._register_sidebar(mod, bundle)
+            # Library-toolbar actions can live in any of the bundle's
+            # module roles (viz is the natural home — a viz bundle may
+            # want a "go live" button — but we don't force a shape).
+            for mod in (list(bundle.replay_modules)
+                        + list(bundle.sidebar_modules)
+                        + list(getattr(bundle, 'viz_modules', []) or [])):
+                mgr._register_library_actions(mod, bundle)
         # Activate the user-chosen theme if the owning bundle was found.
         for bundle in mgr.bundles:
             if bundle.theme_module and bundle.key == active_theme_key:
@@ -202,4 +209,22 @@ class PluginManager:
             mod.register_sidebar(add_section)
         except Exception as exc:
             print(f'sidebar plugin register failed: {module_name}: {exc}')
+
+    def _register_library_actions(self, mod, bundle):
+        """Let a bundle module contribute toolbar buttons to the library
+        tab. Modules opt-in by exposing ``register_library_actions(add)``
+        at the top level; the registry is process-wide so every window's
+        library tab shows the same set."""
+        if not hasattr(mod, 'register_library_actions'):
+            return
+        from analysis.gui.library_actions import get_registry
+        module_name = f'{bundle.key}/{getattr(mod, "__name__", "")}'
+        registry = get_registry()
+
+        def add_action(label, callback, *, key=None):
+            registry.add(label, callback, key=key, module=module_name)
+        try:
+            mod.register_library_actions(add_action)
+        except Exception as exc:
+            print(f'library-action register failed: {module_name}: {exc}')
 
