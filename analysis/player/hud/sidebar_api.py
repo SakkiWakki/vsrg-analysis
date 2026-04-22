@@ -44,6 +44,12 @@ class SidebarSection:
     module: str = ''
     pin_bottom: bool = False
     enabled: bool = True
+    # Optional flyout: when set, the sidebar renders ``draw`` as a
+    # collapsed one-line header; the full ``draw_expanded`` content is
+    # painted into a flyout panel to the left of the sidebar when
+    # ``player.hud.open_flyout`` equals this section's key. One flyout
+    # may be open at a time across the whole sidebar.
+    draw_expanded: object | None = None
 
 
 class SidebarContext:
@@ -221,7 +227,7 @@ class SidebarSectionRegistry:
             'plugins', self._on_config_change)
 
     def add(self, name, draw, *, priority=1000, key=None, module='',
-            pin_bottom=False):
+            pin_bottom=False, draw_expanded=None):
         key = str(key or f'{module}:{name}')
         self._sections.append(SidebarSection(
             key=key,
@@ -231,8 +237,17 @@ class SidebarSectionRegistry:
             module=str(module),
             pin_bottom=bool(pin_bottom),
             enabled=not self._is_disabled(key),
+            draw_expanded=draw_expanded,
         ))
         self._sections.sort(key=lambda s: (s.priority, s.name))
+
+    def flyout_section(self, key):
+        """Return the section registered with this flyout key, or None."""
+        key = str(key)
+        for s in self._sections:
+            if s.enabled and s.draw_expanded is not None and s.key == key:
+                return s
+        return None
 
     def top_sections(self):
         return [s for s in self._sections

@@ -28,6 +28,19 @@ SIDEBAR_TOP = 14
 SIDEBAR_BOTTOM_MARGIN = 12
 SIDEBAR_BG = (20, 20, 22)
 
+# ─── Flyout (expanded sidebar-section panel) ───────────────────────────────
+FLYOUT_WIDTH = 220
+FLYOUT_GAP = 6              # gap between flyout and sidebar edge
+FLYOUT_BG = (26, 26, 30)
+FLYOUT_BORDER = (68, 68, 76)
+FLYOUT_INSET = 8
+
+# ─── Sidebar divider (page-break style, used above pinned sections) ────────
+DIVIDER_COLOR = (90, 90, 96)
+DIVIDER_WIDTH_FRAC = 0.45   # fraction of the sidebar column
+DIVIDER_MARGIN_Y = 6        # vertical breathing room above+below
+DIVIDER_THICKNESS = 3       # stroke width of the page-break divider
+
 # ─── Row heights ───────────────────────────────────────────────────────────
 ROW_BUTTON_H = 20
 ROW_TEXT_H = 18

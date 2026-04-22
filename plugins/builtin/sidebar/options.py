@@ -1,14 +1,23 @@
-"""Built-in sidebar section: per-replay display options (SV / Skin / hits /
-pitch-correct). Pinned to the bottom of the sidebar under Scroll."""
+"""Built-in sidebar section: per-replay display options. Rendered as a
+flyout — the sidebar shows a one-line ``Options ▸`` button that opens a
+panel to the left of the sidebar with the full control set."""
 from __future__ import annotations
 
 
-def _draw_options(sctx):
+_KEY = 'builtin:options'
+
+
+def _collapsed_header(sctx):
+    p = sctx.player
+    open_ = p.hud.open_flyout == _KEY
+    sctx.draw_button(f'Options {"▾" if open_ else "▸"}',
+                     'toggle_flyout', _KEY)
+
+
+def _draw_flyout(sctx):
     p = sctx.player
     status = getattr(p, '_ui_status',
                      {'audio_ready': False, 'pitch_correct': True})
-
-    sctx.draw_heading('Options')
 
     if not p.sv_sections or p.sv_suspended():
         sv_label = 'SV: n/a'
@@ -20,9 +29,6 @@ def _draw_options(sctx):
 
     sctx.draw_button(f'Skin: {p.skin}', 'cycle_skin')
 
-    # "Display hits: on" means hits are hidden after press (press_hide=True)
-    # — the toggle reads intuitively ("yes, suppress hits on contact")
-    # rather than mirroring the internal flag name.
     hits_label = f'Display hits: {"on" if p.press_hide else "off"}'
     sctx.draw_button(hits_label, 'toggle_press_hide')
 
@@ -37,5 +43,5 @@ def _draw_options(sctx):
 
 
 def register_sidebar(add):
-    add('Options', _draw_options, priority=900, key='builtin:options',
-        pin_bottom=True)
+    add('Options', _collapsed_header, priority=900, key=_KEY,
+        pin_bottom=True, draw_expanded=_draw_flyout)

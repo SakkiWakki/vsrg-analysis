@@ -5,8 +5,9 @@ import bisect
 import math
 from dataclasses import dataclass
 
-from PySide6.QtCore import QPointF, QRectF
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import (QBrush, QColor, QFont, QImage, QPainter, QPen)
+
 
 from analysis.player.render import culling, theme
 from analysis.player.hud.sidebar_api import SidebarContext
@@ -245,27 +246,39 @@ class QtPlayerRenderer:
         ctx.candidates = culling.select_note_candidates(ctx)
         return ctx
 
+    # Ordered draw layers. Each entry is (name, draw_fn, after_stage).
+    # Layer names drive the `layer_visibility` dict in `ctx.plugin_data`
+    # — missing/True = draw, False = skip the built-in (plugins still
+    # fire, so a plugin can replace the layer). `after_stage` is the
+    # plugin Stage fired after that layer (None for no hook).
+    @property
+    def _layers(self):
+        return (
+            ('background',    self._draw_background,   None),
+            ('lanes',         self._draw_lanes,        Stage.AFTER_LANES),
+            ('judgment',      self._draw_judgment,     Stage.AFTER_JUDGMENT),
+            ('notes',         self._draw_notes,        None),
+            ('chart_extras',  self._draw_chart_extras, Stage.AFTER_NOTES),
+            ('miss_holds',    self._draw_miss_holds,   None),
+            ('ghost_taps',    self._draw_ghost_taps,   Stage.AFTER_GHOSTS),
+            ('hud',           self._draw_hud,          Stage.HUD),
+        )
+
     def draw(self, player, painter, t_now):
-        painter.fillRect(QRectF(0, 0, player.W, player.H), _qcolor(_BG_BASE))
         ctx = self.build_context(player, painter, t_now)
-
-        self._draw_lanes(ctx, painter)
-        self.plugins.draw(Stage.AFTER_LANES, ctx)
-
-        self._draw_judgment(ctx, painter)
-        self.plugins.draw(Stage.AFTER_JUDGMENT, ctx)
-
-        self._draw_notes(ctx, painter)
-        self._draw_chart_extras(ctx, painter)
-        self.plugins.draw(Stage.AFTER_NOTES, ctx)
-
-        self._draw_miss_holds(ctx, painter)
-        self._draw_ghost_taps(ctx, painter)
-        self.plugins.draw(Stage.AFTER_GHOSTS, ctx)
-
-        self._draw_hud(ctx, painter)
-        self.plugins.draw(Stage.HUD, ctx)
+        self.plugins.draw(Stage.PRE_FRAME, ctx)
+        visibility = ctx.plugin_data.get('layer_visibility') or {}
+        for name, fn, stage in self._layers:
+            if visibility.get(name, True):
+                fn(ctx, painter)
+            if stage is not None:
+                self.plugins.draw(stage, ctx)
         self.plugins.draw(Stage.POST_FRAME, ctx)
+
+    @staticmethod
+    def _draw_background(ctx, painter):
+        p = ctx.player
+        painter.fillRect(QRectF(0, 0, p.W, p.H), _qcolor(_BG_BASE))
 
     def _draw_lanes(self, ctx, painter):
         p = ctx.player
@@ -615,6 +628,12 @@ class QtPlayerRenderer:
         p = ctx.player
         sidebar_x = p.W - theme.SIDEBAR_WIDTH
         p.hud.clear_hitboxes()
+        # If the open flyout's section has been unregistered/disabled (e.g.
+        # plugin reload), close it so a stale key doesn't paint an empty
+        # panel.
+        if p.hud.open_flyout is not None:
+            if self.plugins.sidebar.flyout_section(p.hud.open_flyout) is None:
+                p.hud.open_flyout = None
         _rect(painter, theme.SIDEBAR_BG,
               (sidebar_x, 0, theme.SIDEBAR_WIDTH, p.H))
         painter.setFont(self.font)
@@ -672,6 +691,16 @@ class QtPlayerRenderer:
         painter.restore()
 
         if bottom:
+            divider_w = int(theme.SIDEBAR_WIDTH * theme.DIVIDER_WIDTH_FRAC * 2)
+            divider_x = sidebar_x + (theme.SIDEBAR_WIDTH - divider_w) // 2
+            divider_y = bottom_start_y - theme.DIVIDER_MARGIN_Y - 8
+            pen = QPen(_qcolor(theme.DIVIDER_COLOR),
+                       int(theme.DIVIDER_THICKNESS))
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            painter.drawLine(QPointF(divider_x, divider_y),
+                             QPointF(divider_x + divider_w, divider_y))
+
             real = SidebarContext(ctx, painter, self, sidebar_x,
                                   theme.SIDEBAR_WIDTH, bottom_start_y)
             self._run_sections(bottom, real)
@@ -688,14 +717,85 @@ class QtPlayerRenderer:
             _rect(painter, (120, 120, 120),
                   (sidebar_x + 1, thumb_y, 3, thumb_h))
 
+        if p.hud.open_flyout is not None:
+            self._draw_flyout(ctx, painter, sidebar_x)
+
         ctx.plugin_data['hud_y'] = top_ctx.y
         ctx.plugin_data['sidebar_x'] = sidebar_x
 
+    def _draw_flyout(self, ctx, painter, sidebar_x):
+        p = ctx.player
+        section = self.plugins.sidebar.flyout_section(p.hud.open_flyout)
+        if section is None:
+            return
+        anchor = ctx.plugin_data.get('flyout_anchors', {}).get(
+            p.hud.open_flyout)
+
+        flyout_w = theme.FLYOUT_WIDTH
+        flyout_x = sidebar_x - flyout_w - theme.FLYOUT_GAP
+        if flyout_x < 0:
+            flyout_x = 0
+            flyout_w = max(40, sidebar_x - theme.FLYOUT_GAP)
+
+        # Measure the expanded content's height against the real width so
+        # the panel fits snugly instead of spanning the full window.
+        measure = SidebarContext(
+            ctx, painter, self, flyout_x, flyout_w,
+            theme.FLYOUT_INSET, measure_only=True,
+        )
+        try:
+            section.draw_expanded(measure)
+        except Exception as exc:
+            src = f' ({section.module})' if section.module else ''
+            print(f'flyout measure failed: {section.name}{src}: {exc}')
+            return
+        content_h = max(0, measure.y - theme.FLYOUT_INSET)
+        panel_h = content_h + 2 * theme.FLYOUT_INSET
+
+        # Align the panel's top with the header button; clamp so it
+        # doesn't run off the top or past the bottom margin.
+        anchor_top = anchor[1] if anchor else theme.SIDEBAR_TOP
+        panel_y = min(
+            max(theme.SIDEBAR_TOP, anchor_top),
+            max(theme.SIDEBAR_TOP, p.H - theme.SIDEBAR_BOTTOM_MARGIN - panel_h),
+        )
+        panel_rect = (flyout_x, panel_y, flyout_w, panel_h)
+        _rect(painter, theme.FLYOUT_BG, panel_rect)
+        _rect_outline(painter, theme.FLYOUT_BORDER, panel_rect, 1)
+
+        flyout_ctx = SidebarContext(
+            ctx, painter, self, flyout_x, flyout_w,
+            panel_y + theme.FLYOUT_INSET,
+        )
+        try:
+            section.draw_expanded(flyout_ctx)
+        except Exception as exc:
+            src = f' ({section.module})' if section.module else ''
+            print(f'flyout draw failed: {section.name}{src}: {exc}')
+
     @staticmethod
     def _run_sections(sections, sctx):
+        """Paint each section's in-place ``draw``. Flyout sections always
+        paint their collapsed header here (regardless of open state) —
+        the expanded panel is drawn separately by ``_draw_flyout`` and
+        anchored next to the header, so the header must stay visible as
+        the anchor point and re-click target. When a flyout is open,
+        record the header's rect in ``plugin_data['flyout_anchors']``
+        so ``_draw_flyout`` can position the panel against it."""
+        p = sctx.player
+        open_flyout = p.hud.open_flyout
+        anchors = sctx.render_ctx.plugin_data.setdefault(
+            'flyout_anchors', {})
         for section in sections:
             try:
+                y_before = sctx.y
                 section.draw(sctx)
+                if (section.draw_expanded is not None
+                        and section.key == open_flyout):
+                    anchors[section.key] = (
+                        sctx.sidebar_x, y_before,
+                        sctx.sidebar_w, sctx.y - y_before,
+                    )
             except Exception as exc:
                 src = f' ({section.module})' if section.module else ''
                 print(f'sidebar section failed: {section.name}{src}: {exc}')

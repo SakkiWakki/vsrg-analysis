@@ -10,6 +10,7 @@ from enum import Enum
 
 
 class Stage(str, Enum):
+    PRE_FRAME = 'pre_frame'
     AFTER_LANES = 'after_lanes'
     AFTER_JUDGMENT = 'after_judgment'
     AFTER_NOTES = 'after_notes'

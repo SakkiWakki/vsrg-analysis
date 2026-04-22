@@ -218,6 +218,121 @@ def test_adapter_without_note_drawers_uses_all_defaults():
     assert drawers == renderer._defaults
 
 
+def test_run_sections_always_draws_header_and_records_anchor_when_open():
+    """Regression: the collapsed header must draw even when its flyout
+    is open — it stays on screen as the anchor point and re-click target.
+    When open, the header's rect is recorded in
+    ``plugin_data['flyout_anchors']`` so the flyout panel can align to
+    it. Non-flyout sections draw normally and don't record anchors."""
+    from analysis.player.hud.sidebar_api import SidebarSection
+
+    seen = []
+
+    def collapsed_scroll(sctx):
+        seen.append('scroll-collapsed')
+        sctx.y += 20  # simulate the header button's row height
+
+    def collapsed_opts(sctx):
+        seen.append('opts-collapsed')
+        sctx.y += 20
+
+    def normal_section(sctx):
+        seen.append('normal')
+        sctx.y += 30
+
+    sections = [
+        SidebarSection(key='a:scroll', name='Scroll', draw=collapsed_scroll,
+                       draw_expanded=lambda s: None),
+        SidebarSection(key='a:opts', name='Opts', draw=collapsed_opts,
+                       draw_expanded=lambda s: None),
+        SidebarSection(key='a:plain', name='Plain', draw=normal_section),
+    ]
+
+    plugin_data = {}
+    render_ctx = SimpleNamespace(plugin_data=plugin_data)
+    player = SimpleNamespace(hud=SimpleNamespace(open_flyout='a:scroll'))
+    sctx = SimpleNamespace(
+        player=player, render_ctx=render_ctx,
+        sidebar_x=1000, sidebar_w=210, y=100,
+    )
+
+    QtPlayerRenderer._run_sections(sections, sctx)
+
+    # All three in-place draws fired, including the open flyout's header.
+    assert seen == ['scroll-collapsed', 'opts-collapsed', 'normal']
+    # Only the open flyout's header recorded an anchor.
+    assert set(plugin_data['flyout_anchors'].keys()) == {'a:scroll'}
+    x, y, w, h = plugin_data['flyout_anchors']['a:scroll']
+    assert (x, y, w, h) == (1000, 100, 210, 20)
+
+
+def test_toggle_flyout_action_swaps_and_closes():
+    """Regression: clicking the same flyout's header twice closes it;
+    clicking a different flyout's header while one is open swaps."""
+    from analysis.player.hud.hud_state import HudState
+
+    hud = HudState()
+    assert hud.open_flyout is None
+
+    # First click: opens scroll.
+    hud.open_flyout = (None if hud.open_flyout == 'scroll' else 'scroll')
+    assert hud.open_flyout == 'scroll'
+
+    # Click options: swap.
+    hud.open_flyout = (None if hud.open_flyout == 'options' else 'options')
+    assert hud.open_flyout == 'options'
+
+    # Click options again: close.
+    hud.open_flyout = (None if hud.open_flyout == 'options' else 'options')
+    assert hud.open_flyout is None
+
+
+def test_layer_visibility_gates_builtin_draws_but_not_plugin_stage():
+    """Regression: `ctx.plugin_data['layer_visibility']` with a layer set
+    to False must skip the built-in draw fn for that layer, but still
+    fire the plugin stage (so a plugin can replace the layer without
+    double-drawing)."""
+    drawn = []
+    stages = []
+
+    class FakePlugins:
+        def draw(self, stage, ctx):
+            stages.append(stage)
+
+    renderer = QtPlayerRenderer(plugin_manager=FakePlugins())
+    layers_called = set()
+
+    def make_recorder(name):
+        def fn(ctx, painter):
+            layers_called.add(name)
+            drawn.append(name)
+        return fn
+
+    # Monkeypatch _layers to a minimal set so we can assert precisely.
+    from analysis.player.plugin_api import Stage
+    fake_layers = (
+        ('background', make_recorder('background'), None),
+        ('lanes',      make_recorder('lanes'),      Stage.AFTER_LANES),
+        ('hud',        make_recorder('hud'),        Stage.HUD),
+    )
+    type(renderer)._layers = property(lambda self: fake_layers)
+    try:
+        ctx = SimpleNamespace(
+            plugin_data={'layer_visibility': {'lanes': False}},
+        )
+        # Stub build_context + PRE_FRAME write.
+        renderer.build_context = lambda p, pa, t: ctx
+        renderer.draw(player=None, painter=None, t_now=0.0)
+    finally:
+        del type(renderer)._layers
+
+    assert layers_called == {'background', 'hud'}  # lanes skipped
+    # But AFTER_LANES stage still fires.
+    assert Stage.AFTER_LANES in stages
+    assert Stage.PRE_FRAME in stages
+    assert Stage.POST_FRAME in stages
+
+
 def test_culling_pad_missing_attr_defaults_to_zero():
     """Defensive: old player instances without `max_draw_pad_sec` (e.g.
     external callers building their own player) still cull correctly."""

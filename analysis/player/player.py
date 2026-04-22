@@ -531,6 +531,22 @@ class Player:
                 self.cycle_game()
                 self._notify_scroll_change()
                 return True
+            if action == 'toggle_layer':
+                from analysis.config import get_config
+                cfg = get_config()
+                path = f'player.layer_visibility.{payload}'
+                cfg.set(path, not bool(cfg.get(path, True)))
+                return True
+            if action == 'toggle_layers_panel':
+                self.hud.layers_panel_open = not getattr(
+                    self.hud, 'layers_panel_open', False)
+                return True
+            if action == 'toggle_flyout':
+                # One-at-a-time: clicking the open flyout's header closes
+                # it; clicking a different header swaps.
+                self.hud.open_flyout = (
+                    None if self.hud.open_flyout == payload else payload)
+                return True
             # Toggles / click-to-edit rects: logical state lives elsewhere
             # (Qt tab owns audio + QSettings), so just notify subscribers.
             if action in ('toggle_sv', 'cycle_skin', 'toggle_press_hide',

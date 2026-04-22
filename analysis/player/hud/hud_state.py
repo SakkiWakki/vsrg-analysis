@@ -30,6 +30,12 @@ class HudState:
     # Collapsible plugins panel in the sidebar. Opened by the user via
     # the painted toggle; the renderer checks it to decide layout.
     plugin_panel_open: bool = False
+    layers_panel_open: bool = False
+
+    # Key of the currently open flyout (sidebar section with an expanded
+    # panel to the left of the sidebar), or None if no flyout is open.
+    # One-at-a-time: opening a new flyout replaces the current one.
+    open_flyout: str | None = None
 
     # Hitboxes registered during the frame's HUD draw. Rebuilt each
     # frame by the renderer (cleared at the start of ``_draw_hud``),
