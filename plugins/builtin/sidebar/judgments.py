@@ -63,4 +63,6 @@ def _draw_judgments(sctx):
 
 
 def register_sidebar(add):
-    add('Judgments', _draw_judgments, priority=200, key='builtin:judgments')
+    add('Judgments', _draw_judgments, priority=200, key='builtin:judgments',
+        draggable=True, default_free_xy=(0.02, 0.04),
+        default_size=(210, 200))

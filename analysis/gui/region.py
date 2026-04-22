@@ -94,6 +94,41 @@ class InputRouter:
             print(f'region mouse handler failed: {exc}')
             return False
 
+    def dispatch_mouse_move(self, x, y, buttons, modifiers) -> bool:
+        """Broadcast moves to every region's ``on_mouse_move`` (if any).
+
+        Unlike wheel/down, moves aren't owned by the region under the
+        cursor — during a drag the cursor can cross region boundaries
+        and each region needs to see the event (e.g. the sidebar must
+        draw the insertion line when the cursor enters it even though
+        the drag started on a free-region widget). Handlers return True
+        to signal the event was consumed; we return True if any did.
+        """
+        handled = False
+        for r in list(self.regions):
+            fn = getattr(r, 'on_mouse_move', None)
+            if fn is None:
+                continue
+            try:
+                if fn(x, y, buttons, modifiers):
+                    handled = True
+            except Exception as exc:
+                print(f'region move handler failed: {exc}')
+        return handled
+
+    def dispatch_mouse_up(self, x, y, button, modifiers) -> bool:
+        handled = False
+        for r in list(self.regions):
+            fn = getattr(r, 'on_mouse_up', None)
+            if fn is None:
+                continue
+            try:
+                if fn(x, y, button, modifiers):
+                    handled = True
+            except Exception as exc:
+                print(f'region mouse-up handler failed: {exc}')
+        return handled
+
 
 class SidebarRegion:
     """Covers the painted HUD sidebar. Wheel scrolls the sidebar; mouse
@@ -124,6 +159,12 @@ class SidebarRegion:
         # The player itself owns the hitbox-action dispatcher.
         return bool(self.player.handle_mouse_down(x, y))
 
+    def on_mouse_move(self, x, y, buttons, modifiers) -> bool:
+        return bool(self.player.handle_mouse_move(x, y))
+
+    def on_mouse_up(self, x, y, button, modifiers) -> bool:
+        return bool(self.player.handle_mouse_up(x, y))
+
 
 class LanesRegion:
     """Covers the chart-space lanes. Wheel seeks the replay; mouse
@@ -149,3 +190,9 @@ class LanesRegion:
 
     def on_mouse_down(self, x, y, button, modifiers) -> bool:
         return bool(self.player.handle_mouse_down(x, y))
+
+    def on_mouse_move(self, x, y, buttons, modifiers) -> bool:
+        return bool(self.player.handle_mouse_move(x, y))
+
+    def on_mouse_up(self, x, y, button, modifiers) -> bool:
+        return bool(self.player.handle_mouse_up(x, y))

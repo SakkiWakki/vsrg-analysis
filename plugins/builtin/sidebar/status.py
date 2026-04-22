@@ -20,4 +20,6 @@ def _draw_status(sctx):
 
 
 def register_sidebar(add):
-    add('Status', _draw_status, priority=100, key='builtin:status')
+    add('Status', _draw_status, priority=100, key='builtin:status',
+        draggable=True, default_free_xy=(0.02, 0.28),
+        default_size=(210, 130))

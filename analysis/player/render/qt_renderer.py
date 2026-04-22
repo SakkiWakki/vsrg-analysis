@@ -266,13 +266,29 @@ class QtPlayerRenderer:
 
     def draw(self, player, painter, t_now):
         ctx = self.build_context(player, painter, t_now)
+        # Hitboxes are frame-scoped — clear them up front so the free
+        # region (painted *before* the sidebar) can register its buttons
+        # + drag handles without the sidebar pass wiping them later.
+        hud = getattr(player, 'hud', None) if player is not None else None
+        if hud is not None:
+            hud.clear_hitboxes()
         self.plugins.draw(Stage.PRE_FRAME, ctx)
         visibility = ctx.plugin_data.get('layer_visibility') or {}
         for name, fn, stage in self._layers:
+            if name == 'hud':
+                # Free-region sections live above game content but below
+                # the sidebar so the drop zone still reads clearly during
+                # a drag. Drawn here (not as a regular layer) because
+                # they should never be toggled off via layer_visibility.
+                self._draw_free_sections(ctx, painter)
             if visibility.get(name, True):
                 fn(ctx, painter)
             if stage is not None:
                 self.plugins.draw(stage, ctx)
+        # Drag affordances: ghost + blue insertion line. Drawn last so
+        # they sit above both the HUD and the free-region panels.
+        if hud is not None and hud.edit_mode and hud.drag_key is not None:
+            self._draw_drag_overlay(ctx, painter)
         self.plugins.draw(Stage.POST_FRAME, ctx)
 
     @staticmethod
@@ -627,7 +643,6 @@ class QtPlayerRenderer:
     def _draw_hud(self, ctx, painter):
         p = ctx.player
         sidebar_x = p.W - theme.SIDEBAR_WIDTH
-        p.hud.clear_hitboxes()
         # If the open flyout's section has been unregistered/disabled (e.g.
         # plugin reload), close it so a stale key doesn't paint an empty
         # panel.
@@ -722,6 +737,172 @@ class QtPlayerRenderer:
 
         ctx.plugin_data['hud_y'] = top_ctx.y
         ctx.plugin_data['sidebar_x'] = sidebar_x
+        # Snapshot per-frame rects for drag-drop drop-order math; the
+        # player reads these in handle_mouse_up to decide where a
+        # dropped section should land.
+        p.hud.frame_sidepanel_rects = dict(
+            ctx.plugin_data.get('sidepanel_rects', {}))
+        p.hud.frame_free_rects = dict(
+            ctx.plugin_data.get('free_rects', {}))
+
+    def _draw_free_sections(self, ctx, painter):
+        """Render every sidebar section whose effective region is 'free'.
+
+        Each section gets its own panel at the saved ``(x, y, w, h)``,
+        with an edit-mode outline + resize handle when the user is
+        editing layout. The section's existing ``draw(sctx)`` callable
+        is reused — sections work identically in both regions because
+        they paint into whatever column the sidebar context hands out.
+        """
+        # No-op for narrowly-mocked contexts (e.g. layer-gating tests
+        # that construct a SimpleNamespace ctx with no player). The
+        # real paint path always has player + sidebar attached.
+        p = getattr(ctx, 'player', None)
+        sidebar_reg = getattr(self.plugins, 'sidebar', None)
+        if p is None or sidebar_reg is None:
+            return
+        free = sidebar_reg.free_sections()
+        if not free:
+            # Still record an empty "free rects" map so drag hit-testing
+            # can tell the region has no occupants.
+            ctx.plugin_data['free_rects'] = {}
+            return
+
+        rects: dict = {}
+        for section in free:
+            # Skip the dragged component here — it's drawn as a floating
+            # ghost at the cursor instead (see `_draw_drag_ghost`), so
+            # painting it in place would double-render.
+            if p.hud.edit_mode and p.hud.drag_key == section.key:
+                continue
+            rect = self.plugins.sidebar.section_free_rect(
+                section, p.W, p.H)
+            x, y, w, h = rect
+            # Keep the panel on-screen even if the window shrunk since
+            # the layout was saved.
+            x = max(0, min(p.W - w, x))
+            y = max(0, min(p.H - h, y))
+            rects[section.key] = (x, y, w, h)
+
+            _rect(painter, theme.FREE_BG, (x, y, w, h))
+            _rect_outline(painter, theme.FREE_BORDER, (x, y, w, h), 1)
+
+            sctx = SidebarContext(
+                ctx, painter, self, x, w,
+                y + theme.FREE_INSET)
+            try:
+                section.draw(sctx)
+            except Exception as exc:
+                src = f' ({section.module})' if section.module else ''
+                print(f'free section failed: {section.name}{src}: {exc}')
+
+            if p.hud.edit_mode:
+                self._draw_edit_outline(painter, x, y, w, h,
+                                        highlighted=False)
+                self._draw_resize_handle(painter, x + w, y + h)
+                # Whole-component drag handle hitbox (edit mode only).
+                # Using a dedicated action so the sidepanel's per-button
+                # handlers don't compete with the drag grab.
+                p.hud.add_hitbox((x, y, w, h),
+                                 'begin_drag_section', section.key)
+                # Resize handle hitbox: bottom-right corner.
+                hs = theme.RESIZE_HANDLE_SIZE
+                p.hud.add_hitbox(
+                    (x + w - hs, y + h - hs, hs, hs),
+                    'begin_resize_section', section.key)
+
+        ctx.plugin_data['free_rects'] = rects
+
+    @staticmethod
+    def _draw_edit_outline(painter, x, y, w, h, *, highlighted):
+        color = theme.COLOR_EDIT_ACCENT
+        pen = QPen(_qcolor(color), 2)
+        painter.setPen(pen)
+        painter.setBrush(QBrush(QColor(0, 0, 0, 0)))
+        painter.drawRect(QRectF(float(x), float(y), float(w), float(h)))
+
+    @staticmethod
+    def _draw_resize_handle(painter, x_br, y_br):
+        size = theme.RESIZE_HANDLE_SIZE
+        rect = (x_br - size, y_br - size, size, size)
+        _rect(painter, theme.COLOR_EDIT_ACCENT, rect)
+
+    def _draw_drag_overlay(self, ctx, painter):
+        """Paint the drag ghost at the cursor + the insertion indicator
+        in the sidepanel. Called last so it sits above everything."""
+        p = ctx.player
+        key = p.hud.drag_key
+        section = None
+        for s in self.plugins.sidebar.all_sections():
+            if s.key == key:
+                section = s
+                break
+        if section is None:
+            return
+
+        sidebar_x = p.W - theme.SIDEBAR_WIDTH
+        cur_x, cur_y = p.hud.drag_pointer
+        over_sidepanel = cur_x >= sidebar_x
+
+        # Insertion line: blue bar between sidepanel neighbors under
+        # the cursor. Only relevant when the drop target is the
+        # sidepanel.
+        if over_sidepanel:
+            self._draw_insertion_line(p, painter, sidebar_x, cur_y)
+
+        # Ghost: outlined rect at cursor, same size the section would
+        # occupy in the free region (so the user sees the drop footprint).
+        dx, dy = p.hud.drag_offset
+        _rx, _ry, w, h = self.plugins.sidebar.section_free_rect(
+            section, p.W, p.H)
+        gx = cur_x - dx
+        gy = cur_y - dy
+        # Semi-transparent fill so the cursor + underlying content
+        # show through.
+        painter.setBrush(QBrush(QColor(
+            theme.FREE_BG[0], theme.FREE_BG[1], theme.FREE_BG[2], 180)))
+        painter.setPen(QPen(_qcolor(theme.COLOR_EDIT_ACCENT), 2))
+        painter.drawRect(QRectF(float(gx), float(gy), float(w), float(h)))
+
+    def _draw_insertion_line(self, player, painter, sidebar_x, cur_y):
+        """Blue 2px bar at the nearest-neighbor boundary inside the
+        sidepanel for the current cursor Y. Uses the last frame's
+        sidepanel rects so the indicator lines up with what the user
+        sees."""
+        rects = player.hud.frame_sidepanel_rects or {}
+        # Only non-pinned sections participate in reordering; pinned-
+        # bottom ones stay fixed. Pinned status is on the section
+        # object, not on the rect, so filter by registry.
+        key_set = {
+            s.key for s in self.plugins.sidebar.all_sections()
+            if s.enabled and not s.pin_bottom
+            and self.plugins.sidebar.section_region(s.key) == 'sidepanel'
+            and s.key != player.hud.drag_key
+        }
+        band = [(k, rects[k]) for k in rects if k in key_set]
+        # Sort by Y.
+        band.sort(key=lambda kv: kv[1][1])
+        if not band:
+            return
+        # Pick the insertion y: above the first rect whose mid-Y
+        # exceeds the cursor; else below the last rect.
+        insert_y = None
+        for _, (_rx, ry, _rw, rh) in band:
+            mid = ry + rh / 2
+            if cur_y < mid:
+                insert_y = ry
+                break
+        if insert_y is None:
+            _, (_rx, ry, _rw, rh) = band[-1]
+            insert_y = ry + rh
+
+        x0 = sidebar_x + theme.SIDEBAR_INSET
+        x1 = sidebar_x + theme.SIDEBAR_WIDTH - theme.SIDEBAR_INSET
+        pen = QPen(_qcolor(theme.COLOR_EDIT_ACCENT), 3)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.drawLine(QPointF(float(x0), float(insert_y)),
+                         QPointF(float(x1), float(insert_y)))
 
     def _draw_flyout(self, ctx, painter, sidebar_x):
         p = ctx.player
@@ -781,21 +962,42 @@ class QtPlayerRenderer:
         anchored next to the header, so the header must stay visible as
         the anchor point and re-click target. When a flyout is open,
         record the header's rect in ``plugin_data['flyout_anchors']``
-        so ``_draw_flyout`` can position the panel against it."""
+        so ``_draw_flyout`` can position the panel against it.
+
+        Also records every section's sidepanel rect in
+        ``plugin_data['sidepanel_rects']`` keyed by section.key. Drag
+        hit-testing + the reorder insertion-line use these rects; in
+        edit mode, draggable sections get an outline and a
+        ``begin_drag_section`` hitbox spanning their full rect."""
         p = sctx.player
         open_flyout = p.hud.open_flyout
         anchors = sctx.render_ctx.plugin_data.setdefault(
             'flyout_anchors', {})
+        rects = sctx.render_ctx.plugin_data.setdefault(
+            'sidepanel_rects', {})
         for section in sections:
             try:
                 y_before = sctx.y
                 section.draw(sctx)
+                rect = (sctx.sidebar_x, y_before,
+                        sctx.sidebar_w, sctx.y - y_before)
+                rects[section.key] = rect
                 if (section.draw_expanded is not None
                         and section.key == open_flyout):
-                    anchors[section.key] = (
-                        sctx.sidebar_x, y_before,
-                        sctx.sidebar_w, sctx.y - y_before,
-                    )
+                    anchors[section.key] = rect
+                # Edit-mode affordances: outline + full-rect drag grab
+                # for sections the plugin marked draggable. Flyout
+                # sections skip drag-grab entirely — they're complex
+                # controls that'd be confusing to move around.
+                if (p.hud.edit_mode and section.draggable
+                        and section.draw_expanded is None
+                        and not sctx.measure_only
+                        and p.hud.drag_key != section.key):
+                    QtPlayerRenderer._draw_edit_outline(
+                        sctx.painter, rect[0], rect[1], rect[2], rect[3],
+                        highlighted=False)
+                    sctx.add_hitbox(rect, 'begin_drag_section',
+                                    section.key)
             except Exception as exc:
                 src = f' ({section.module})' if section.module else ''
                 print(f'sidebar section failed: {section.name}{src}: {exc}')

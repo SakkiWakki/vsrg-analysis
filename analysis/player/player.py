@@ -501,6 +501,20 @@ class Player:
             rx, ry, rw, rh = rect
             if not (rx <= x <= rx + rw and ry <= y <= ry + rh):
                 continue
+            # Edit-mode drag/resize grabs are consumed here regardless
+            # of the general "edit swallows clicks" rule below.
+            if action == 'begin_drag_section' and self.hud.edit_mode:
+                self._begin_drag_section(payload, x, y, rect)
+                return True
+            if action == 'begin_resize_section' and self.hud.edit_mode:
+                self._begin_resize_section(payload, x, y)
+                return True
+            # Edit mode swallows every non-edit action so drags don't
+            # accidentally fire click handlers underneath the cursor.
+            # Only the edit-mode toggle itself still works, so the
+            # header button can turn editing back off.
+            if self.hud.edit_mode and action != 'toggle_edit_mode':
+                return True
             if action == 'toggle_plugin_panel':
                 self.hud.plugin_panel_open = not self.hud.plugin_panel_open
                 return True
@@ -547,6 +561,9 @@ class Player:
                 self.hud.open_flyout = (
                     None if self.hud.open_flyout == payload else payload)
                 return True
+            if action == 'toggle_edit_mode':
+                self.toggle_edit_mode()
+                return True
             # Toggles / click-to-edit rects: logical state lives elsewhere
             # (Qt tab owns audio + QSettings), so just notify subscribers.
             if action in ('toggle_sv', 'cycle_skin', 'toggle_press_hide',
@@ -589,6 +606,178 @@ class Player:
             return
         cur = self.game if self.game in names else names[0]
         self.set_game(names[(names.index(cur) + 1) % len(names)])
+
+    def _begin_drag_section(self, key, x, y, grab_rect):
+        """Start a drag on the section with ``key``. ``grab_rect`` is
+        the section's painted rect — we remember the offset from its
+        top-left to the cursor so the ghost follows the cursor in the
+        same spot the user grabbed it."""
+        grab_x, grab_y, _gw, _gh = grab_rect
+        self.hud.drag_key = key
+        self.hud.drag_pointer = (int(x), int(y))
+        self.hud.drag_origin = (int(x), int(y))
+        self.hud.drag_offset = (int(x) - int(grab_x), int(y) - int(grab_y))
+        # Record where this drag started so the drop handler can tell
+        # "moved within sidepanel to reorder" from "moved from free to
+        # sidepanel" (and vice-versa).
+        self.hud.drag_origin_region = (
+            self.plugins.sidebar.section_region(key))
+
+    def _begin_resize_section(self, key, x, y):
+        """Start a resize on a free-region section. The current rect
+        is read off config so drag deltas translate to size changes."""
+        from analysis.player.render import theme
+        section = None
+        for s in self.plugins.sidebar.all_sections():
+            if s.key == key:
+                section = s
+                break
+        if section is None:
+            return
+        rect = self.plugins.sidebar.section_free_rect(
+            section, self.W, self.H)
+        _x, _y, w, h = rect
+        self.hud.resize_key = key
+        self.hud.resize_origin = (int(x), int(y))
+        self.hud.resize_origin_size = (int(w), int(h))
+        # Store min sizes in theme so free-region resize can clamp.
+        _ = theme.FREE_MIN_W  # touch to ensure imported on first use
+
+    def handle_mouse_move(self, x, y):
+        """While in edit mode with an active drag/resize, track the
+        cursor so the renderer can draw the ghost / update the rect.
+        Returns True if the event was consumed, i.e. the canvas should
+        schedule a repaint."""
+        if self.hud.drag_key is not None:
+            self.hud.drag_pointer = (int(x), int(y))
+            return True
+        if self.hud.resize_key is not None:
+            ox, oy = self.hud.resize_origin
+            ow, oh = self.hud.resize_origin_size
+            from analysis.player.render import theme
+            new_w = max(theme.FREE_MIN_W, ow + (int(x) - ox))
+            new_h = max(theme.FREE_MIN_H, oh + (int(y) - oy))
+            # Find current rect's (x, y) to preserve top-left — resize
+            # grows toward bottom-right only.
+            for s in self.plugins.sidebar.all_sections():
+                if s.key == self.hud.resize_key:
+                    rx, ry, _w, _h = self.plugins.sidebar.section_free_rect(
+                        s, self.W, self.H)
+                    self.plugins.sidebar.set_section_free_rect(
+                        s.key, rx, ry, new_w, new_h)
+                    break
+            return True
+        return False
+
+    def handle_mouse_up(self, x, y):
+        """End an active drag/resize, routing the drop to either the
+        sidepanel or the free region. Returns True when consumed."""
+        if self.hud.drag_key is not None:
+            self._finish_drag(int(x), int(y))
+            return True
+        if self.hud.resize_key is not None:
+            self.hud.resize_key = None
+            return True
+        return False
+
+    def _finish_drag(self, x, y):
+        key = self.hud.drag_key
+        from analysis.player.render import theme
+        # Sidepanel drop zone = anywhere at or right of the sidebar's
+        # left edge. Everything else = free region.
+        sidebar_x = self.W - theme.SIDEBAR_WIDTH
+        dropped_in_sidepanel = x >= sidebar_x
+        if dropped_in_sidepanel:
+            self.plugins.sidebar.set_section_region(key, 'sidepanel')
+            # Recompute order: find the two adjacent sidepanel sections
+            # at cursor Y and set order to midpoint. When there are no
+            # neighbors we leave the declared priority intact.
+            new_order = self._compute_drop_order(y)
+            if new_order is not None:
+                self.plugins.sidebar.set_section_order(key, new_order)
+        else:
+            self.plugins.sidebar.set_section_region(key, 'free')
+            # Translate the cursor back to the rect's top-left using
+            # the grab offset so the drop lands where the user sees
+            # the ghost.
+            dx, dy = self.hud.drag_offset
+            # Look up the section's size (from saved rect if any, else
+            # the plugin default).
+            section = None
+            for s in self.plugins.sidebar.all_sections():
+                if s.key == key:
+                    section = s
+                    break
+            if section is not None:
+                _rx, _ry, w, h = self.plugins.sidebar.section_free_rect(
+                    section, self.W, self.H)
+                new_x = max(0, min(self.W - w, x - dx))
+                new_y = max(0, min(self.H - h, y - dy))
+                self.plugins.sidebar.set_section_free_rect(
+                    key, new_x, new_y, w, h)
+        self.hud.drag_key = None
+        self.hud.drag_origin_region = None
+
+    def _compute_drop_order(self, y):
+        """Given a drop cursor Y, return the new ``order`` value for
+        the dragged section so it lands between the two sidepanel
+        neighbors nearest ``y``. Uses the midpoint between their
+        ``section_order`` values and the *previous frame's* painted
+        rects so the insertion point lines up with what the user saw.
+        Returns None when there are no other sidepanel sections."""
+        reg = self.plugins.sidebar
+        # Non-pinned sidepanel neighbors — pinned-bottom sections live
+        # in a fixed band and don't participate in reordering.
+        others = [s for s in reg.all_sections()
+                  if s.enabled
+                  and reg.section_region(s.key) == 'sidepanel'
+                  and s.key != self.hud.drag_key
+                  and not s.pin_bottom]
+        if not others:
+            return None
+        # Pair each neighbor with its last-frame Y-midpoint; fall back
+        # to section_order when the rect isn't available (first frame
+        # after enabling edit mode).
+        rects = self.hud.frame_sidepanel_rects or {}
+        pairs = []
+        for s in others:
+            r = rects.get(s.key)
+            y_mid = (r[1] + r[3] / 2) if r else None
+            pairs.append((s, y_mid, reg.section_order(s)))
+        pairs.sort(key=lambda p: p[2])
+        ordered_vals = [p[2] for p in pairs]
+        first = ordered_vals[0] - 10.0
+        last = ordered_vals[-1] + 10.0
+        # Use the pixel-accurate split when we have rects; otherwise
+        # fall back to the cursor-fraction heuristic.
+        have_rects = all(p[1] is not None for p in pairs)
+        if have_rects:
+            for i, p in enumerate(pairs):
+                if y < p[1]:
+                    if i == 0:
+                        return first
+                    return (ordered_vals[i - 1] + ordered_vals[i]) / 2.0
+            return last
+        frac = max(0.0, min(1.0, y / max(1, self.H)))
+        idx = int(round(frac * len(pairs)))
+        if idx <= 0:
+            return first
+        if idx >= len(pairs):
+            return last
+        return (ordered_vals[idx - 1] + ordered_vals[idx]) / 2.0
+
+    def toggle_edit_mode(self):
+        """Flip layout-edit mode. While on, draggable sidebar
+        components can be moved between the sidepanel and the free
+        region; normal button actions are suppressed so drags don't
+        fire clicks."""
+        self.hud.edit_mode = not self.hud.edit_mode
+        if not self.hud.edit_mode:
+            # Clear any half-finished drag/resize so we don't leave
+            # stale state when the user exits edit mode mid-gesture.
+            self.hud.drag_key = None
+            self.hud.drag_origin_region = None
+            self.hud.resize_key = None
 
     def _notify_scroll_change(self):
         self.events.emit('scroll_changed')

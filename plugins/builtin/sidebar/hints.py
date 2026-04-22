@@ -20,4 +20,6 @@ def _draw_hints(sctx):
 
 
 def register_sidebar(add):
-    add('Hints', _draw_hints, priority=300, key='builtin:hints')
+    add('Hints', _draw_hints, priority=300, key='builtin:hints',
+        draggable=True, default_free_xy=(0.02, 0.55),
+        default_size=(210, 160))

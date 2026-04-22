@@ -58,4 +58,6 @@ def _draw_layers_panel(sctx):
 
 def register_sidebar(add):
     add('Layers', _draw_layers_panel, priority=450,
-        key='builtin:layers')
+        key='builtin:layers',
+        draggable=True, default_free_xy=(0.02, 0.78),
+        default_size=(210, 180))

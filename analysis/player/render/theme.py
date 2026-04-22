@@ -71,6 +71,21 @@ COLOR_CHECKBOX_MARK = (160, 230, 160)
 COLOR_PLUGIN_ENABLED = (210, 210, 215)
 COLOR_PLUGIN_DISABLED = (110, 110, 116)
 
+# ─── Free-region (floating sidebar components) ─────────────────────────────
+FREE_BG = (22, 22, 26)
+FREE_BORDER = (68, 68, 76)
+FREE_INSET = 8
+# Accent color used for edit-mode outlines + the sidebar insertion-line
+# indicator during reorder drags.
+COLOR_EDIT_ACCENT = (70, 160, 240)
+COLOR_EDIT_ACCENT_DIM = (70, 160, 240, 70)
+# Size of the bottom-right resize handle (px).
+RESIZE_HANDLE_SIZE = 10
+# Min free-region component size so a drag-resize can't collapse a
+# component into nothing.
+FREE_MIN_W = 120
+FREE_MIN_H = 60
+
 
 _BUILTIN_THEME_NAME = 'builtin'
 _active_theme: ModuleType | None = None

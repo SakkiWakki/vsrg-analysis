@@ -202,10 +202,17 @@ class PluginManager:
         module_name = f'{bundle.key}/{getattr(mod, "__name__", "")}'
 
         def add_section(name, draw, *, priority=1000, key=None,
-                        pin_bottom=False, draw_expanded=None):
+                        pin_bottom=False, draw_expanded=None,
+                        draggable=False, default_region='sidepanel',
+                        default_free_xy=(0.5, 0.5),
+                        default_size=(210, 120)):
             self.sidebar.add(name, draw, priority=priority, key=key,
                              module=module_name, pin_bottom=pin_bottom,
-                             draw_expanded=draw_expanded)
+                             draw_expanded=draw_expanded,
+                             draggable=draggable,
+                             default_region=default_region,
+                             default_free_xy=default_free_xy,
+                             default_size=default_size)
         try:
             mod.register_sidebar(add_section)
         except Exception as exc:

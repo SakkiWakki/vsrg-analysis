@@ -357,6 +357,10 @@ class PlayerTab(QWidget):
                     self.player.restart(); self._sync_audio(); return True
                 if k in (Qt.Key_Q, Qt.Key_Escape):
                     self.window().close(); return True
+                if k == Qt.Key_Tab and (ev.modifiers() & Qt.ShiftModifier):
+                    self.player.toggle_edit_mode()
+                    self.view.update()
+                    return True
             elif t == ev.Type.Wheel:
                 pos = ev.position() if hasattr(ev, 'position') else ev.pos()
                 if self.input_router.dispatch_wheel(
@@ -369,6 +373,21 @@ class PlayerTab(QWidget):
                 if self.input_router.dispatch_mouse_down(
                         int(pos.x()), int(pos.y()),
                         ev.button(), ev.modifiers()):
+                    self.view.update()
+                    return True
+            elif t == ev.Type.MouseMove:
+                pos = ev.position() if hasattr(ev, 'position') else ev.pos()
+                if self.input_router.dispatch_mouse_move(
+                        int(pos.x()), int(pos.y()),
+                        ev.buttons(), ev.modifiers()):
+                    self.view.update()
+                    return True
+            elif t == ev.Type.MouseButtonRelease and ev.button() == Qt.LeftButton:
+                pos = ev.position() if hasattr(ev, 'position') else ev.pos()
+                if self.input_router.dispatch_mouse_up(
+                        int(pos.x()), int(pos.y()),
+                        ev.button(), ev.modifiers()):
+                    self.view.update()
                     return True
         return super().eventFilter(obj, ev)
 
