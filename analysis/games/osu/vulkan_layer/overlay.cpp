@@ -25,7 +25,7 @@
 #include "imgui/imgui.h"
 
 extern "C" {
-#include "../gamescope_overlay/overlay_shm.h"
+#include "../../../overlay/widgets/overlay_shm.h"
 }
 
 namespace vsrg {

@@ -23,6 +23,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 int  render_init(void);
 void render_shutdown(void);
 
@@ -48,5 +52,9 @@ float render_text_width(const char *s, float px_height);
 // Height of a text box at ``px_height`` — used so the resolve-box
 // layout math produces a bounding rect the hit-test can trust.
 float render_text_height(float px_height);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

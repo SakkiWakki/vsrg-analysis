@@ -7,6 +7,7 @@
 #   make venv       → virtualenv + pip install
 #   make native     → Rust osu_memory_native PyO3 extension (maturin develop)
 #   make overlay    → C gamescope external-overlay binary
+#   make gl-layer   → LD_PRELOAD OpenGL/EGL/GLX hooks for osu!stable
 #   make build      → native + overlay
 #   make test       → pytest
 #   make gui        → launch the Qt GUI (assumes build already done)
@@ -24,9 +25,17 @@ VENV_PIP   := $(VENV)/bin/pip
 VENV_MATURIN := $(VENV)/bin/maturin
 VENV_PYTEST  := $(VENV)/bin/pytest
 
-NATIVE_DIR  := analysis/games/osu/native
-OVERLAY_DIR := analysis/games/osu/gamescope_overlay
-OVERLAY_BIN := $(OVERLAY_DIR)/osu_overlay
+NATIVE_DIR    := analysis/games/osu/native
+OVERLAY_DIR   := analysis/games/osu/gamescope_overlay
+OVERLAY_BIN   := $(OVERLAY_DIR)/osu_overlay
+
+# Game-agnostic rendering + widget replay. Shared by every host
+# (the gamescope external overlay binary here, the stable GL
+# preload layer below, and anything else that wants to draw HUD
+# widgets from the /dev/shm/vsrg_overlay feed).
+RENDERER_DIR := analysis/overlay/renderer
+WIDGETS_DIR  := analysis/overlay/widgets
+INPUT_DIR    := analysis/overlay/input
 
 # Default target: one command that installs, builds, and launches.
 # This is the "I just cloned the repo, what do I type?" path.
@@ -41,6 +50,7 @@ help:
 	@echo "  make venv       - create $(VENV) and install requirements"
 	@echo "  make native     - build osu_memory_native Rust extension into the venv"
 	@echo "  make overlay    - build the gamescope in-game overlay binary"
+	@echo "  make gl-layer   - build OpenGL/EGL/GLX preload hooks"
 	@echo "  make build      - native + overlay"
 	@echo "  make test       - run pytest"
 	@echo "  make gui        - launch the Qt GUI (assumes build already done)"
@@ -84,17 +94,22 @@ native: $(NATIVE_STAMP)
 # ─── gamescope overlay ─────────────────────────────────────────────────
 
 OVERLAY_SRCS := $(OVERLAY_DIR)/osu_overlay.c \
-                $(OVERLAY_DIR)/render.c \
-                $(OVERLAY_DIR)/render.h \
-                $(OVERLAY_DIR)/nanovg.c \
-                $(OVERLAY_DIR)/nanovg.h \
-                $(OVERLAY_DIR)/nanovg_gl.h \
-                $(OVERLAY_DIR)/fontstash.h \
-                $(OVERLAY_DIR)/stb_truetype.h \
-                $(OVERLAY_DIR)/stb_image.h \
-                $(OVERLAY_DIR)/overlay_shm.h
+                $(RENDERER_DIR)/render.c \
+                $(RENDERER_DIR)/render.h \
+                $(RENDERER_DIR)/nanovg.c \
+                $(RENDERER_DIR)/nanovg.h \
+                $(RENDERER_DIR)/nanovg_gl.h \
+                $(RENDERER_DIR)/fontstash.h \
+                $(RENDERER_DIR)/stb_truetype.h \
+                $(RENDERER_DIR)/stb_image.h \
+                $(WIDGETS_DIR)/widgets.c \
+                $(WIDGETS_DIR)/widgets.h \
+                $(WIDGETS_DIR)/overlay_shm.h \
+                $(INPUT_DIR)/input.h
 
-OVERLAY_CFLAGS := -O2 -Wall -Wextra $(shell pkg-config --cflags x11 gl 2>/dev/null)
+OVERLAY_CFLAGS := -O2 -Wall -Wextra \
+                  -I$(RENDERER_DIR) -I$(WIDGETS_DIR) -I$(INPUT_DIR) \
+                  $(shell pkg-config --cflags x11 gl 2>/dev/null)
 OVERLAY_LIBS   := $(shell pkg-config --libs x11 gl 2>/dev/null) -lm
 
 # nanovg.c + the bundled stb headers throw a swarm of -Wextra warnings
@@ -109,12 +124,121 @@ $(OVERLAY_BIN): $(OVERLAY_SRCS)
 	    -Wno-misleading-indentation \
 	    -o $@ \
 	    $(OVERLAY_DIR)/osu_overlay.c \
-	    $(OVERLAY_DIR)/render.c \
-	    $(OVERLAY_DIR)/nanovg.c \
+	    $(RENDERER_DIR)/render.c \
+	    $(RENDERER_DIR)/nanovg.c \
+	    $(WIDGETS_DIR)/widgets.c \
 	    $(OVERLAY_LIBS)
 
 .PHONY: overlay
 overlay: $(OVERLAY_BIN)
+
+# ─── OpenGL/EGL/GLX preload hook (osu!stable) ─────────────────────────
+#
+# osu!stable under Wine may present through OpenGL/EGL instead of
+# Vulkan/DXVK. These shared objects are injected with LD_PRELOAD and log
+# the first buffer-present call they intercept. Build both 64-bit and
+# 32-bit variants because old stable/Wine setups can use either Unix
+# process bitness.
+
+GL_LAYER_DIR := analysis/games/osu/gl_layer
+GL_LAYER_SO  := $(GL_LAYER_DIR)/lib/libvsrg_gl_overlay.so
+GL_LAYER_SO64_ALT := $(GL_LAYER_DIR)/lib64/libvsrg_gl_overlay.so
+GL_LAYER_SO32 := $(GL_LAYER_DIR)/lib32/libvsrg_gl_overlay.so
+
+GL_LAYER_SRCS  := $(GL_LAYER_DIR)/gl_layer.cpp
+
+# 64-bit build pulls in the same NanoVG-backed shim the gamescope
+# overlay uses (from analysis/overlay/renderer + widgets). 32-bit
+# stays logging-only until we have multilib fontstash/GL headers;
+# stable under modern Wine runs 64-bit so the renderer only needs
+# to live in the 64-bit .so.
+GL_LAYER_RENDER_SRCS_C := $(RENDERER_DIR)/render.c \
+                          $(RENDERER_DIR)/nanovg.c \
+                          $(WIDGETS_DIR)/widgets.c \
+                          $(INPUT_DIR)/input.c \
+                          $(INPUT_DIR)/input_x11_poll.c \
+                          $(INPUT_DIR)/input_x11_xi2.c \
+                          $(GL_LAYER_DIR)/shm_consumer.c
+
+GL_LAYER_CXXFLAGS := -std=c++20 -O2 -fPIC -fvisibility=hidden \
+                     -Wall -Wextra -Wno-unused-parameter \
+                     -I$(RENDERER_DIR) -I$(WIDGETS_DIR) -I$(INPUT_DIR) \
+                     $(shell pkg-config --cflags x11 egl gl 2>/dev/null)
+GL_LAYER_CFLAGS_C := -std=c11 -O2 -fPIC -fvisibility=hidden \
+                     -Wno-unused-function -Wno-unused-parameter \
+                     -Wno-sign-compare -Wno-unused-but-set-variable \
+                     -Wno-misleading-indentation \
+                     -I$(RENDERER_DIR) -I$(WIDGETS_DIR) -I$(INPUT_DIR) \
+                     $(shell pkg-config --cflags x11 gl 2>/dev/null)
+GL_LAYER_LDFLAGS  := -shared -fvisibility=hidden
+GL_LAYER_LIBS     := -ldl -lm $(shell pkg-config --libs x11 xi egl gl 2>/dev/null)
+
+GL_LAYER_BUILD_DIR := $(GL_LAYER_DIR)/.build
+GL_LAYER_C_OBJS := $(patsubst %.c,$(GL_LAYER_BUILD_DIR)/%.o, \
+                       $(notdir $(GL_LAYER_RENDER_SRCS_C)))
+GL_LAYER_CPP_OBJS := $(patsubst %.cpp,$(GL_LAYER_BUILD_DIR)/%.o, \
+                         $(notdir $(GL_LAYER_SRCS)))
+
+# Per-file compile rules. g++'s ``-x c`` is single-shot (it applies
+# only to the next input file), so the previous single-invocation
+# ``g++ -x c a.c b.c`` pattern silently compiled b.c as C++ and
+# mangled render_text_width's reference from widgets.c into a C++
+# symbol that didn't match render.c's unmangled definition. Building
+# each TU separately with the right compiler avoids that.
+
+# C files: renderer + widgets + shm consumer.
+$(GL_LAYER_BUILD_DIR)/%.o: $(RENDERER_DIR)/%.c \
+                           $(RENDERER_DIR)/render.h \
+                           $(WIDGETS_DIR)/widgets.h
+	$(Q)mkdir -p $(@D)
+	$(Q)gcc $(GL_LAYER_CFLAGS_C) -DVSRG_GL_LAYER_HAS_RENDERER -c -o $@ $<
+
+$(GL_LAYER_BUILD_DIR)/%.o: $(WIDGETS_DIR)/%.c \
+                           $(RENDERER_DIR)/render.h \
+                           $(WIDGETS_DIR)/widgets.h \
+                           $(INPUT_DIR)/input.h
+	$(Q)mkdir -p $(@D)
+	$(Q)gcc $(GL_LAYER_CFLAGS_C) -DVSRG_GL_LAYER_HAS_RENDERER -c -o $@ $<
+
+$(GL_LAYER_BUILD_DIR)/%.o: $(INPUT_DIR)/%.c \
+                           $(INPUT_DIR)/input.h \
+                           $(INPUT_DIR)/input_backend.h
+	$(Q)mkdir -p $(@D)
+	$(Q)gcc $(GL_LAYER_CFLAGS_C) -DVSRG_GL_LAYER_HAS_RENDERER -c -o $@ $<
+
+$(GL_LAYER_BUILD_DIR)/%.o: $(GL_LAYER_DIR)/%.c \
+                           $(GL_LAYER_DIR)/shm_consumer.h
+	$(Q)mkdir -p $(@D)
+	$(Q)gcc $(GL_LAYER_CFLAGS_C) -DVSRG_GL_LAYER_HAS_RENDERER -c -o $@ $<
+
+# C++ file: gl_layer.cpp.
+$(GL_LAYER_BUILD_DIR)/%.o: $(GL_LAYER_DIR)/%.cpp \
+                           $(RENDERER_DIR)/render.h \
+                           $(WIDGETS_DIR)/widgets.h \
+                           $(INPUT_DIR)/input.h \
+                           $(GL_LAYER_DIR)/shm_consumer.h
+	$(Q)mkdir -p $(@D)
+	$(Q)g++ $(GL_LAYER_CXXFLAGS) -DVSRG_GL_LAYER_HAS_RENDERER -c -o $@ $<
+
+$(GL_LAYER_SO): $(GL_LAYER_C_OBJS) $(GL_LAYER_CPP_OBJS)
+	$(Q)echo "[gl-layer] g++ $(notdir $@) (with NanoVG renderer)"
+	$(Q)mkdir -p $(@D)
+	$(Q)g++ $(GL_LAYER_CXXFLAGS) $(GL_LAYER_LDFLAGS) \
+	    -o $@ $(GL_LAYER_C_OBJS) $(GL_LAYER_CPP_OBJS) $(GL_LAYER_LIBS)
+
+$(GL_LAYER_SO64_ALT): $(GL_LAYER_SO)
+	$(Q)echo "[gl-layer] cp $(notdir $@)"
+	$(Q)mkdir -p $(@D)
+	$(Q)cp $< $@
+
+$(GL_LAYER_SO32): $(GL_LAYER_SRCS)
+	$(Q)echo "[gl-layer] g++ -m32 $(notdir $@) (logging only)"
+	$(Q)mkdir -p $(@D)
+	$(Q)g++ -m32 $(GL_LAYER_CXXFLAGS) $(GL_LAYER_LDFLAGS) \
+	    -o $@ $(GL_LAYER_SRCS) $(GL_LAYER_LIBS)
+
+.PHONY: gl-layer
+gl-layer: $(GL_LAYER_SO) $(GL_LAYER_SO64_ALT) $(GL_LAYER_SO32)
 
 # ─── vulkan layer (in-process HUD) ─────────────────────────────────────
 #
@@ -209,7 +333,9 @@ gui: venv
 .PHONY: clean
 clean:
 	$(Q)echo "[clean] overlay binary + maturin stamp + target/"
-	$(Q)rm -f $(OVERLAY_BIN) $(NATIVE_STAMP)
+	$(Q)rm -f $(OVERLAY_BIN) $(GL_LAYER_SO) $(GL_LAYER_SO64_ALT) \
+	    $(GL_LAYER_SO32) $(GL_LAYER_DIR)/libvsrg_gl_overlay.so \
+	    $(GL_LAYER_DIR)/libvsrg_gl_overlay32.so $(NATIVE_STAMP)
 	$(Q)rm -rf $(NATIVE_DIR)/target
 	$(Q)find . -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 

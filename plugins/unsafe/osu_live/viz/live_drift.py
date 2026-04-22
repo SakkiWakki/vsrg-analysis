@@ -102,18 +102,58 @@ def _vulkan_layer_installed() -> bool:
     return manifest.is_file()
 
 
+def _gl_layer_paths():
+    """Built LD_PRELOAD hooks for osu!stable's OpenGL/EGL/GLX path."""
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[4]
+    gl_dir = repo_root / 'analysis/games/osu/gl_layer'
+    return [
+        gl_dir / 'lib/libvsrg_gl_overlay.so',
+        gl_dir / 'lib64/libvsrg_gl_overlay.so',
+        gl_dir / 'lib32/libvsrg_gl_overlay.so',
+    ]
+
+
+def _gl_layer_preload_path() -> str:
+    """LD_PRELOAD path to the 64-bit renderer-enabled shim.
+
+    We used to use glibc's bitness-dispatching ``$LIB`` token (which
+    expands to ``lib``/``lib32``/``lib64`` based on the runtime
+    process), but under osu-winello's yawl runtime (pressure-vessel
+    sandbox) the token expands inside the container's re-mapped
+    filesystem where our ``lib/`` subdirectory does not survive the
+    bind-mount. Pressure-vessel logs the failure as::
+
+        ERROR: ld.so: object '/tmp/pressure-vessel-libs-XXXXX/${LIB}/
+            libvsrg_gl_overlay.so' from LD_PRELOAD cannot be preloaded
+
+    osu!stable on modern Wine is 64-bit, so we pin to the explicit
+    64-bit .so and skip the dispatch entirely.
+    """
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[4]
+    return str(repo_root / 'analysis/games/osu/gl_layer/lib64/libvsrg_gl_overlay.so')
+
+
+def _gl_layer_built() -> bool:
+    return any(p.is_file() for p in _gl_layer_paths())
+
+
 def _start_osu_with_overlay():
     """Start the shm feed and launch osu! with an in-game HUD.
 
-    Two paths, picked at runtime:
+    Paths, picked at runtime:
 
-    * **Vulkan layer (preferred).** If our implicit layer manifest is
-      installed, launch raw ``osu-wine`` with ``VSRG_OVERLAY_LAYER=1``.
-      The layer attaches to DXVK in-process — no compositor, no
-      input interception, no mouse-accel surprise.
+    * **GL preload hook (stable default).** osu!stable under Wine uses
+      OpenGL/EGL in current osu-winello logs, so launch raw
+      ``osu-wine`` with our ``LD_PRELOAD`` hook when built.
+    * **Vulkan layer (lazer/DXVK).** Kept available for lazer-style
+      Vulkan paths, but only selected here with
+      ``VSRG_FORCE_VULKAN_LAYER=1`` so stable does not silently take a
+      layer that cannot see its presents.
     * **Gamescope external overlay (fallback).** If the layer is
       missing (or the user has explicitly disabled it via
-      ``VSRG_OVERLAY_LAYER_DISABLE=1``), fall through to the original
+      ``VSRG_GL_OVERLAY_DISABLE=1``), fall through to the original
       gamescope-wrapped path.
 
     The shm publisher is the same in both cases — the layer and the
@@ -137,9 +177,15 @@ def _start_osu_with_overlay():
             'Install osu-winello and ensure osu-wine is on PATH.')
         return
 
-    use_layer = (
+    use_gl_layer = (
+        _gl_layer_built()
+        and os.environ.get('VSRG_GL_OVERLAY_DISABLE') != '1'
+        and os.environ.get('VSRG_FORCE_VULKAN_LAYER') != '1'
+    )
+    use_vulkan_layer = (
         _vulkan_layer_installed()
         and os.environ.get('VSRG_OVERLAY_LAYER_DISABLE') != '1'
+        and os.environ.get('VSRG_FORCE_VULKAN_LAYER') == '1'
     )
 
     # Same in both paths: the publisher fills /dev/shm/vsrg_overlay.
@@ -161,14 +207,45 @@ def _start_osu_with_overlay():
     _p = _diag.path()
     if _p is not None:
         print(f'[osu_live] diagnostic log: {_p}', flush=True)
+        path_label = (
+            'gl-layer' if use_gl_layer else
+            'vulkan-layer' if use_vulkan_layer else
+            'gamescope'
+        )
         _diag.log('osu_live',
-                  f'=== overlay session start (path={"layer" if use_layer else "gamescope"}) ===')
+                  f'=== overlay session start (path={path_label}) ===')
     app = QApplication.instance()
     if app is not None:
         app._osu_live_overlay_registry = overlays
         app._osu_live_shm_publisher = pub
 
-    if use_layer:
+    if use_gl_layer:
+        # Inject into Wine's Unix process and catch EGL/GLX swap paths.
+        # Keep any existing preload entries after ours so we get first
+        # chance at the public swap/proc-address symbols.
+        env = dict(os.environ, VSRG_GL_OVERLAY='1')
+        # Point the renderer at a bundled font. The host's
+        # /usr/share/fonts tree isn't bind-mounted into the
+        # pressure-vessel sandbox yawl-winello uses, but $HOME is —
+        # so a path under the repo root resolves inside the game's
+        # process too.
+        repo_root = Path(__file__).resolve().parents[4]
+        env['VSRG_OVERLAY_FONT'] = str(
+            repo_root / 'analysis/overlay/assets/DejaVuSansMono.ttf')
+        # Forward a debug flag from our own environment so we can
+        # flip it on with ``VSRG_INPUT_DEBUG=1 <launch command>``
+        # without touching the launcher. Harmless when unset.
+        if os.environ.get('VSRG_INPUT_DEBUG'):
+            env['VSRG_INPUT_DEBUG'] = os.environ['VSRG_INPUT_DEBUG']
+        old_preload = env.get('LD_PRELOAD', '').strip()
+        preload = _gl_layer_preload_path()
+        env['LD_PRELOAD'] = (
+            f'{preload} {old_preload}' if old_preload else preload
+        )
+        subprocess.Popen(['osu-wine'], env=env, start_new_session=True)
+        return
+
+    if use_vulkan_layer:
         # Hand the env var to the loader; DXVK will load our layer
         # below it inside osu!'s own process. start_new_session so
         # closing the GUI doesn't take osu down with it.
@@ -180,9 +257,9 @@ def _start_osu_with_overlay():
     if shutil.which('gamescope') is None:
         QMessageBox.warning(
             parent, 'Start osu (with overlay)',
-            'Neither the Vulkan overlay layer nor gamescope is '
+            'Neither the GL overlay hook nor gamescope is '
             'available.\n\n'
-            'Install the layer (`make vulkan-layer-install`) or '
+            'Build the hook (`make gl-layer`) or install '
             'gamescope (`pacman -S gamescope`).')
         return
 

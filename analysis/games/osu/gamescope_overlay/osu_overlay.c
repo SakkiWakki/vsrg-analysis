@@ -1,33 +1,29 @@
-// Generic gamescope external-overlay renderer.
+// Generic gamescope external-overlay host.
 //
-// This binary is intentionally dumb: it knows how to draw rects
-// and bitmap text from a widget array kept in shared memory. It
-// does NOT know about osu!, mania, combos, accuracy, or any
-// specific game. That semantics lives entirely in the Python
-// publisher (see analysis/overlay/publisher.py + any plugin-specific
-// consumer, e.g. plugins/unsafe/osu_live/shm_publisher.py).
+// This binary is intentionally dumb: it stands up a transparent
+// RGBA8888 GLX window, reads a widget array from shared memory, and
+// replays the widgets through the game-agnostic renderer in
+// analysis/overlay/renderer + widgets/. It does NOT know about osu!,
+// mania, combos, accuracy, or any specific game. That semantics
+// lives entirely in the Python publisher (see
+// analysis/overlay/publisher.py + any plugin-specific consumer,
+// e.g. plugins/unsafe/osu_live/shm_publisher.py).
 //
-// Why: a plugin ecosystem. Any plugin can ship its own publisher
-// and get a HUD in-game without touching C or rebuilding.
+// Why the osu!-shaped path: this is the first host we shipped. The
+// same drawing code is also called from the GL preload layer
+// (analysis/games/osu/gl_layer) and can trivially host etterna or
+// any other VSRG the publisher supports.
 //
-// Shm contract: analysis/games/osu/gamescope_overlay/overlay_shm.h
-// Launch: osu_overlay --feed /dev/shm/vsrg_overlay
-//                     --width W --height H
-// (One shm per session — every Python publisher writes into the same
-// segment. The C reader doesn't care which plugin owns each widget.)
+// Shm contract:  analysis/overlay/widgets/overlay_shm.h
+// Launch:        osu_overlay --feed /dev/shm/vsrg_overlay
+//                            --width W --height H
 //
 // Controls:
-//   Shift+Tab  toggle edit mode. In edit mode, widgets get a dashed
-//              outline, the screen dims, and the user can drag a
-//              widget with the left mouse button. On release we
-//              write the new (x, y) back into the shm slot; the
-//              publisher picks it up on its next frame and persists
-//              via the app's ConfigStore.
-//
-// Rendering: immediate-mode GL, fixed-function pipeline, no shaders
-// or VBOs. The 8x8 bitmap font is drawn as GL_QUADS per lit pixel.
-// Vsync is pinned to the compositor via GLX_EXT_swap_control so we
-// don't beat gamescope's cadence.
+//   Shift+Tab  toggle edit mode. Widgets get outlined, the screen
+//              dims, and the user can drag a widget with the left
+//              mouse button. On release we write the new (x, y)
+//              back into shm; the publisher picks it up on its
+//              next frame and persists via ConfigStore.
 
 #define _GNU_SOURCE
 #include <GL/gl.h>
@@ -45,19 +41,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "overlay_shm.h"
-#include "render.h"
-
-// Map a widget's px_scale (bitmap-era: 1.0 == 8 px tall) to a pixel
-// height. The bitmap font drew each glyph as solid 8×8 blocks with
-// no padding, so px_scale=s was s*8 px of visible ink. We preserve
-// that convention as a single scalar so the publisher's layout code
-// keeps working and the knob is easy to retune if we change fonts.
-//
-// This lives here (not in render.c) because it's a widget-layout
-// contract between the Python publisher and the overlay, not a
-// font-rendering concern.
-#define VSRG_TEXT_HEIGHT_PER_PX_SCALE  8.0f
+#include "../../../overlay/widgets/overlay_shm.h"
+#include "../../../overlay/widgets/widgets.h"
+#include "../../../overlay/renderer/render.h"
 
 // ─── Globals (small, C-program scale) ───────────────────────────────────
 
@@ -69,8 +55,6 @@ static const char     *g_feed_path;    // where we're attached
 static void shm_attach(void) {
     int fd = open(g_feed_path, O_CREAT | O_RDWR, 0600);
     if (fd < 0) return;
-    // Ensure at least sizeof(VsrgOverlayShm) — we're happy to grow
-    // (or create) the file so the publisher's mmap succeeds too.
     struct stat st;
     if (fstat(fd, &st) < 0) { close(fd); return; }
     if (st.st_size < (off_t)sizeof(VsrgOverlayShm)) {
@@ -86,7 +70,6 @@ static void shm_attach(void) {
 }
 
 // Seqlock read of the full shm into `out`. Returns 1 on success.
-// Re-reads up to 16 times if the writer is mid-update (odd seq).
 static int shm_read(VsrgOverlayShm *out) {
     if (!g_shm) return 0;
     for (int tries = 0; tries < 16; tries++) {
@@ -110,160 +93,6 @@ static void set_cardinal_prop(Display *dpy, Window w,
     Atom a = XInternAtom(dpy, name, False);
     XChangeProperty(dpy, w, a, XA_CARDINAL, 32, PropModeReplace,
                     (unsigned char *)&value, 1);
-}
-
-// ─── Text measurement in widget units ───────────────────────────────────
-
-// The publisher addresses text by `px_scale` (bitmap-era). Convert to
-// the shim's pixel-height API here; everywhere below just calls these.
-static float px_height_for_scale(float px_scale) {
-    return px_scale * VSRG_TEXT_HEIGHT_PER_PX_SCALE;
-}
-
-static float measure_text(const char *s, float px_scale) {
-    return render_text_width(s, px_height_for_scale(px_scale));
-}
-
-static float text_height(float px_scale) {
-    return render_text_height(px_height_for_scale(px_scale));
-}
-
-// ─── Widget layout (normalized → pixels) ────────────────────────────────
-
-// Resolve a widget's normalized (x, y) + anchor into a pixel
-// top-left corner. Size is resolved to an on-screen bounding box
-// (for rect: w*canvas_w, h*canvas_h; for text: measured string).
-typedef struct {
-    float px, py;          // top-left in pixels
-    float pw, ph;          // size in pixels (for hit-testing)
-} ResolvedBox;
-
-static ResolvedBox resolve_box(const VsrgOverlayWidget *w,
-                               int canvas_w, int canvas_h) {
-    float pw, ph;
-    if (w->kind == VSRG_OVERLAY_KIND_TEXT) {
-        pw = measure_text(w->text, w->px_scale);
-        ph = text_height(w->px_scale);
-    } else {
-        pw = w->w * canvas_w;
-        ph = w->h * canvas_h;
-    }
-    float px = w->x * canvas_w;
-    float py = w->y * canvas_h;
-    switch (w->anchor) {
-        case VSRG_OVERLAY_ANCHOR_TR: px = canvas_w - px - pw; break;
-        case VSRG_OVERLAY_ANCHOR_BL: py = canvas_h - py - ph; break;
-        case VSRG_OVERLAY_ANCHOR_BR: px = canvas_w - px - pw;
-                                     py = canvas_h - py - ph; break;
-        case VSRG_OVERLAY_ANCHOR_C:  px += canvas_w * 0.5f - pw * 0.5f;
-                                     py += canvas_h * 0.5f - ph * 0.5f; break;
-        default: break;  // TL: already correct.
-    }
-    ResolvedBox rb = { px, py, pw, ph };
-    return rb;
-}
-
-// Inverse of resolve_box for the (x, y) field: given the desired
-// on-screen pixel top-left ``(target_px, target_py)``, what
-// *normalized, pre-anchor* (x, y) should we write back so the next
-// resolve yields that pixel position? Used during drag.
-static void reverse_anchor(const VsrgOverlayWidget *w,
-                           int canvas_w, int canvas_h,
-                           float pw, float ph,
-                           float target_px, float target_py,
-                           float *out_nx, float *out_ny) {
-    float ux = target_px, uy = target_py;
-    switch (w->anchor) {
-        case VSRG_OVERLAY_ANCHOR_TR: ux = canvas_w - target_px - pw; break;
-        case VSRG_OVERLAY_ANCHOR_BL: uy = canvas_h - target_py - ph; break;
-        case VSRG_OVERLAY_ANCHOR_BR: ux = canvas_w - target_px - pw;
-                                     uy = canvas_h - target_py - ph; break;
-        case VSRG_OVERLAY_ANCHOR_C:  ux = target_px - (canvas_w * 0.5f - pw * 0.5f);
-                                     uy = target_py - (canvas_h * 0.5f - ph * 0.5f); break;
-        default: break;
-    }
-    *out_nx = ux / (float)canvas_w;
-    *out_ny = uy / (float)canvas_h;
-}
-
-// ─── Rendering ──────────────────────────────────────────────────────────
-
-// Translucent colours used by edit-mode decorations. Packed in the
-// publisher's RGBA32 byte order (byte 0=R, 3=A) so they flow through
-// render_rect unchanged.
-#define RGBA_PACK(r, g, b, a) \
-    ((uint32_t)((r) | ((g) << 8) | ((b) << 16) | ((a) << 24)))
-#define EDIT_DIM            RGBA_PACK(0,   0,   0,   115)
-#define EDIT_HELP_BG        RGBA_PACK(0,   0,   0,   204)
-#define EDIT_HELP_TEXT      RGBA_PACK(255, 255, 255, 255)
-#define EDIT_OUTLINE_HOVER  RGBA_PACK(255, 217, 51,  255)
-#define EDIT_OUTLINE_IDLE   RGBA_PACK(255, 255, 255, 166)
-
-static void draw_widgets(const VsrgOverlayShm *s, int width, int height) {
-    uint32_t n = s->n_widgets;
-    if (n > VSRG_OVERLAY_MAX_WIDGETS) n = VSRG_OVERLAY_MAX_WIDGETS;
-    for (uint32_t i = 0; i < n; i++) {
-        const VsrgOverlayWidget *w = &s->widgets[i];
-        if (w->kind == VSRG_OVERLAY_KIND_UNUSED) continue;
-        ResolvedBox rb = resolve_box(w, width, height);
-        if (w->kind == VSRG_OVERLAY_KIND_RECT) {
-            render_rect(rb.px, rb.py, rb.pw, rb.ph, w->color);
-        } else if (w->kind == VSRG_OVERLAY_KIND_TEXT) {
-            render_text(w->text, rb.px, rb.py,
-                        px_height_for_scale(w->px_scale), w->color);
-        }
-    }
-}
-
-// Edit-mode overlay: dim the whole canvas, then outline every
-// widget. If ``hover_idx`` >= 0, brighten that outline.
-static void draw_edit_decorations(const VsrgOverlayShm *s,
-                                  int width, int height,
-                                  int hover_idx) {
-    // Full-screen dim quad so the player notices they're in edit mode
-    // and the widgets stand out against the game.
-    render_rect(0, 0, (float)width, (float)height, EDIT_DIM);
-
-    uint32_t n = s->n_widgets;
-    if (n > VSRG_OVERLAY_MAX_WIDGETS) n = VSRG_OVERLAY_MAX_WIDGETS;
-    for (uint32_t i = 0; i < n; i++) {
-        const VsrgOverlayWidget *w = &s->widgets[i];
-        if (w->kind == VSRG_OVERLAY_KIND_UNUSED) continue;
-        ResolvedBox rb = resolve_box(w, width, height);
-        uint32_t col = ((int)i == hover_idx)
-                       ? EDIT_OUTLINE_HOVER : EDIT_OUTLINE_IDLE;
-        float stroke = ((int)i == hover_idx) ? 2.5f : 1.0f;
-        // Pad the outline a couple pixels so text widgets don't have
-        // the outline clipped against the glyph pixels.
-        render_rect_outline(rb.px - 2.0f, rb.py - 2.0f,
-                            rb.pw + 4.0f, rb.ph + 4.0f,
-                            col, stroke);
-    }
-
-    // Help strip at top of screen.
-    render_rect(0, 0, (float)width, 28.0f, EDIT_HELP_BG);
-    render_text("EDIT MODE  DRAG WIDGETS  SHIFT+TAB TO EXIT",
-                12.0f, 6.0f, px_height_for_scale(1.8f), EDIT_HELP_TEXT);
-}
-
-// Pick the topmost (last-rendered) widget under a pixel.
-static int hit_test(const VsrgOverlayShm *s, int width, int height,
-                    int mx, int my) {
-    int n = (int)s->n_widgets;
-    if (n > VSRG_OVERLAY_MAX_WIDGETS) n = VSRG_OVERLAY_MAX_WIDGETS;
-    for (int i = n - 1; i >= 0; i--) {
-        const VsrgOverlayWidget *w = &s->widgets[i];
-        if (w->kind == VSRG_OVERLAY_KIND_UNUSED) continue;
-        ResolvedBox rb = resolve_box(w, width, height);
-        // Small margin so thin text is easier to grab.
-        float x0 = rb.px - 2, y0 = rb.py - 2;
-        float x1 = rb.px + rb.pw + 2, y1 = rb.py + rb.ph + 2;
-        if ((float)mx >= x0 && (float)mx <= x1
-            && (float)my >= y0 && (float)my <= y1) {
-            return i;
-        }
-    }
-    return -1;
 }
 
 // ─── Entry point ────────────────────────────────────────────────────────
@@ -330,9 +159,6 @@ int main(int argc, char **argv) {
     swa.colormap = cmap;
     swa.border_pixel = 0;
     swa.background_pixel = 0;
-    // Always select key/pointer events — we need them in edit mode,
-    // and selecting them in normal mode is harmless (we only grab
-    // the pointer when edit mode turns on).
     swa.event_mask = StructureNotifyMask | KeyPressMask
                    | ButtonPressMask | ButtonReleaseMask
                    | PointerMotionMask;
@@ -346,10 +172,6 @@ int main(int argc, char **argv) {
     set_cardinal_prop(dpy, win, "GAMESCOPE_EXTERNAL_OVERLAY", 1);
     set_cardinal_prop(dpy, win, "GAMESCOPE_NO_FOCUS",         1);
 
-    // Passive global grab on Shift+Tab so we receive the key chord
-    // regardless of focus. GrabModeAsync for both keyboard and
-    // pointer so other apps keep running normally; we only get the
-    // chord routed to us.
     KeyCode tab_kc = XKeysymToKeycode(dpy, XK_Tab);
     if (tab_kc != 0) {
         XGrabKey(dpy, tab_kc, ShiftMask, root, True,
@@ -364,15 +186,11 @@ int main(int argc, char **argv) {
     XMapWindow(dpy, win);
     glXMakeCurrent(dpy, win, ctx);
 
-    // Stand up the drawing shim now that we have a GL context. On
-    // failure we bail: there's no fallback renderer anymore, so an
-    // init failure means we can't draw anything usefully.
     if (!render_init()) {
         fprintf(stderr, "[overlay] render_init failed; aborting\n");
         return 1;
     }
 
-    // Vsync.
     typedef void (*PFNGLXSWAPINTERVALEXTPROC)(Display *, GLXDrawable, int);
     const char *glx_exts = glXQueryExtensionsString(dpy, screen);
     if (glx_exts && strstr(glx_exts, "GLX_EXT_swap_control")) {
@@ -396,8 +214,8 @@ int main(int argc, char **argv) {
 
     // ── Drag state ────────────────────────────────────────────
     int edit_mode      = 0;
-    int drag_idx       = -1;    // widget slot being dragged, -1 = none
-    int drag_grab_mx   = 0;     // pointer x at mouse-down (in px)
+    int drag_idx       = -1;
+    int drag_grab_mx   = 0;
     int drag_grab_my   = 0;
     int hover_idx      = -1;
     int mouse_x        = 0;
@@ -408,7 +226,6 @@ int main(int argc, char **argv) {
     unsigned long frame = 0;
 
     for (;;) {
-        // ── X events ────────────────────────────────────────
         while (XPending(dpy)) {
             XEvent ev;
             XNextEvent(dpy, &ev);
@@ -420,9 +237,6 @@ int main(int argc, char **argv) {
                 if (ks == XK_Tab && (ev.xkey.state & ShiftMask)) {
                     edit_mode = !edit_mode;
                     if (g_shm) {
-                        // Expose the flag so Python can gate
-                        // stateful publisher logic on it (e.g.
-                        // keep positions stable while editing).
                         __atomic_store_n(&g_shm->edit_mode,
                                          (uint8_t)edit_mode,
                                          __ATOMIC_RELEASE);
@@ -448,14 +262,12 @@ int main(int argc, char **argv) {
                 if (ev.xbutton.button == Button1 && g_shm) {
                     VsrgOverlayShm snap;
                     if (shm_read(&snap)) {
-                        int idx = hit_test(&snap, width, height,
-                                           mouse_x, mouse_y);
+                        int idx = vsrg_hit_test(&snap, width, height,
+                                                mouse_x, mouse_y);
                         if (idx >= 0) {
                             drag_idx     = idx;
                             drag_grab_mx = mouse_x;
                             drag_grab_my = mouse_y;
-                            // Tell the publisher: hands off the
-                            // dragged widget's (x, y) until release.
                             __atomic_store_n(&g_shm->drag_active, 1u,
                                              __ATOMIC_RELEASE);
                             __atomic_store_n(&g_shm->dragged_widget_id,
@@ -468,11 +280,6 @@ int main(int argc, char **argv) {
                 if (ev.xbutton.button == Button1 && drag_idx >= 0) {
                     drag_idx = -1;
                     if (g_shm) {
-                        // Release hand-off: publisher now owns the
-                        // position again and should capture the
-                        // final delta. dragged_seq bumps exactly
-                        // once per drag so the publisher persists
-                        // the result at the end, not every frame.
                         __atomic_store_n(&g_shm->drag_active, 0u,
                                          __ATOMIC_RELEASE);
                         __atomic_add_fetch(&g_shm->dragged_seq, 1,
@@ -491,12 +298,6 @@ int main(int argc, char **argv) {
         int have = shm_read(&snap);
 
         // ── Live drag: move the dragged widget's group in shm ───
-        // Group semantics: if the widget under the cursor has
-        // group_id != 0, every widget sharing that group_id moves
-        // by the same *pixel* delta — the user perceives the
-        // composite HUD as one piece. group_id == 0 means drag
-        // only this widget (singleton group keyed by widget_id on
-        // the Python side).
         if (edit_mode && drag_idx >= 0 && have && g_shm
                 && (uint32_t)drag_idx < snap.n_widgets) {
             VsrgOverlayWidget w_cur = snap.widgets[drag_idx];
@@ -514,12 +315,12 @@ int main(int argc, char **argv) {
                               : (wi.group_id == group_id);
                 if (!move_this) continue;
 
-                ResolvedBox rb_i = resolve_box(&wi, width, height);
+                VsrgResolvedBox rb_i = vsrg_resolve_box(&wi, width, height);
                 float new_resolved_x = rb_i.px + dx_px;
                 float new_resolved_y = rb_i.py + dy_px;
                 float nx, ny;
-                reverse_anchor(&wi, width, height, rb_i.pw, rb_i.ph,
-                               new_resolved_x, new_resolved_y, &nx, &ny);
+                vsrg_reverse_anchor(&wi, width, height, rb_i.pw, rb_i.ph,
+                                    new_resolved_x, new_resolved_y, &nx, &ny);
                 if (nx < 0.0f) nx = 0.0f;
                 if (nx > 1.0f) nx = 1.0f;
                 if (ny < 0.0f) ny = 0.0f;
@@ -529,28 +330,18 @@ int main(int argc, char **argv) {
                 wi_shm->y = ny;
             }
 
-            // Advance grab point so next frame's delta is
-            // incremental relative to where the cursor is now.
             drag_grab_mx = mouse_x;
             drag_grab_my = mouse_y;
-            // Don't bump dragged_seq here — the publisher is told
-            // to ignore us mid-drag via drag_active. We bump once
-            // on ButtonRelease so persistence happens exactly once
-            // per drag (not 60× per second).
             shm_read(&snap);
         }
 
         // ── Hover highlight in edit mode ────────────────────
         hover_idx = -1;
         if (edit_mode && have) {
-            hover_idx = hit_test(&snap, width, height, mouse_x, mouse_y);
+            hover_idx = vsrg_hit_test(&snap, width, height, mouse_x, mouse_y);
         }
 
         // ── Hash to skip no-op frames ───────────────────────
-        // Hash the visible widgets + edit mode + hover so we
-        // only redraw + swap when the display actually changes.
-        // Skipping both the render and the swap is what fixes
-        // gamescope's "same buffer committed twice" spam.
         uint64_t hash = 0xcbf29ce484222325ull;
         #define FNV_MIX(b) do { hash ^= (uint8_t)(b); \
                                 hash *= 0x100000001b3ull; } while (0)
@@ -570,9 +361,6 @@ int main(int argc, char **argv) {
                 FNV_MIX(w->kind);
                 FNV_MIX(w->anchor);
                 FNV_BYTES(&w->widget_id, sizeof(w->widget_id));
-                // Quantize floats so 1ulp jitter doesn't flip the
-                // hash. Positions → 1/10 px, sizes → 1/10 px,
-                // px_scale → 1/10 px.
                 int qx = (int)lroundf(w->x * 10000.0f);
                 int qy = (int)lroundf(w->y * 10000.0f);
                 int qw = (int)lroundf(w->w * 10000.0f);
@@ -596,18 +384,15 @@ int main(int argc, char **argv) {
         }
 
         // ── Draw ────────────────────────────────────────────
-        // The shim manages projection / blend state inside
-        // begin/end; we only own the clear and the swap so
-        // gamescope composes against a transparent background.
         glViewport(0, 0, width, height);
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
         glClear(GL_COLOR_BUFFER_BIT);
 
         render_begin_frame(width, height);
         if (have) {
-            draw_widgets(&snap, width, height);
+            vsrg_draw_widgets(&snap, width, height);
             if (edit_mode) {
-                draw_edit_decorations(&snap, width, height, hover_idx);
+                vsrg_draw_edit_decorations(&snap, width, height, hover_idx);
             }
         }
         render_end_frame();

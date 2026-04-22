@@ -6,7 +6,7 @@ The C binary at ``analysis/games/osu/gamescope_overlay/osu_overlay``
 attaches to the shm region, reads the widget array each frame, and
 renders — it knows nothing about the plugin's game semantics.
 
-Binary contract: ``analysis/games/osu/gamescope_overlay/overlay_shm.h``.
+Binary contract: ``analysis/overlay/widgets/overlay_shm.h``.
 All types, offsets, and sizes mirror that header exactly.
 
 Low-level usage::
