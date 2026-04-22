@@ -6,7 +6,7 @@ import bisect
 import hashlib
 from pathlib import Path
 
-from analysis import cache_dir
+from analysis.core.cache import Cache
 
 # Note: This is the worst implementation for anything I've ever seen. Why does Etterna do this???
 
@@ -351,9 +351,7 @@ def chart_hash(stepstype, notedata):
     return hashlib.md5((stepstype + notedata).encode()).hexdigest()[:16]
 
 
-# v4: indexes both stored and generated .ssc chartkeys, so stale #CHARTKEY
-# tags don't make otherwise-correct replay/XML keys miss chart lookup.
-CHARTKEY_INDEX_PATH = cache_dir() / 'chartkey_index_v4.pkl'
+_CHARTKEY_INDEX_CACHE = Cache('chartkey_index.pkl')
 
 
 def _scan_one_chartfile(p):
@@ -433,27 +431,6 @@ def _build_chartkey_index(songs_dir, progress=None):
     return index
 
 
-def _load_chartkey_index():
-    import pickle
-    if not CHARTKEY_INDEX_PATH.exists():
-        return None
-    try:
-        with open(CHARTKEY_INDEX_PATH, 'rb') as f:
-            return pickle.load(f)
-    except Exception:
-        return None
-
-
-def _save_chartkey_index(data):
-    import pickle
-    CHARTKEY_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with open(CHARTKEY_INDEX_PATH, 'wb') as f:
-            pickle.dump(data, f)
-    except OSError:
-        pass
-
-
 def get_chartkey_index(songs_dir, refresh=False, progress=None):
     """Return {chartkey: (ssc_file, chart_index)} for all charts under
     songs_dir. Cached on disk; refreshes when Songs dir mtime changes."""
@@ -462,18 +439,16 @@ def get_chartkey_index(songs_dir, refresh=False, progress=None):
         songs_mtime = os.stat(songs_dir).st_mtime
     except OSError:
         songs_mtime = 0.0
-    cached = _load_chartkey_index() if not refresh else None
-    if cached and cached.get('songs_dir') == songs_dir and \
-            abs(cached.get('mtime', 0) - songs_mtime) < 1.0:
-        return cached['index']
+    fp = (songs_dir, songs_mtime)
+    if not refresh:
+        if _CHARTKEY_INDEX_CACHE.fingerprint() == fp:
+            cached = _CHARTKEY_INDEX_CACHE.load()
+            if cached is not None:
+                return cached
     if progress:
         progress('scanning Songs for chartkeys…')
     index = _build_chartkey_index(songs_dir, progress=progress)
-    _save_chartkey_index({
-        'songs_dir': songs_dir,
-        'mtime': songs_mtime,
-        'index': index,
-    })
+    _CHARTKEY_INDEX_CACHE.save(index, fingerprint=fp)
     return index
 
 
@@ -503,7 +478,7 @@ def find_chart_by_key(chartkey, songs_dir, progress=None):
 
 
 FINGERPRINT_N = 50
-FINGERPRINT_INDEX_PATH = cache_dir() / 'fingerprint_index_v6.pkl'
+_FINGERPRINT_INDEX_CACHE = Cache('fingerprint_index.pkl')
 
 
 def _normalize_fingerprint(rows_cols, n=None):
@@ -599,27 +574,6 @@ def _build_fingerprint_index(songs_dir, progress=None):
     return index
 
 
-def _load_fingerprint_index():
-    import pickle
-    if not FINGERPRINT_INDEX_PATH.exists():
-        return None
-    try:
-        with open(FINGERPRINT_INDEX_PATH, 'rb') as f:
-            return pickle.load(f)
-    except Exception:
-        return None
-
-
-def _save_fingerprint_index(data):
-    import pickle
-    FINGERPRINT_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with open(FINGERPRINT_INDEX_PATH, 'wb') as f:
-            pickle.dump(data, f)
-    except OSError:
-        pass
-
-
 def get_fingerprint_index(songs_dir, refresh=False, progress=None):
     """Return {fingerprint: (path, chart_idx)}. Cached on disk, invalidated
     when Songs dir mtime changes."""
@@ -628,18 +582,16 @@ def get_fingerprint_index(songs_dir, refresh=False, progress=None):
         songs_mtime = os.stat(songs_dir).st_mtime
     except OSError:
         songs_mtime = 0.0
-    cached = _load_fingerprint_index() if not refresh else None
-    if cached and cached.get('songs_dir') == songs_dir and \
-            abs(cached.get('mtime', 0) - songs_mtime) < 1.0:
-        return cached['index']
+    fp = (songs_dir, songs_mtime)
+    if not refresh:
+        if _FINGERPRINT_INDEX_CACHE.fingerprint() == fp:
+            cached = _FINGERPRINT_INDEX_CACHE.load()
+            if cached is not None:
+                return cached
     if progress:
         progress('scanning Songs for fingerprints…')
     index = _build_fingerprint_index(songs_dir, progress=progress)
-    _save_fingerprint_index({
-        'songs_dir': songs_dir,
-        'mtime': songs_mtime,
-        'index': index,
-    })
+    _FINGERPRINT_INDEX_CACHE.save(index, fingerprint=fp)
     return index
 
 

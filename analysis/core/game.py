@@ -74,6 +74,33 @@ class GameAdapter:
         `analysis.core.search.build_library()`."""
         return []
 
+    # --- library cache lifecycle -----------------------------------------
+    # Three entry points, all optional. Default impls fall back to
+    # `scan_library` so an adapter that only implements the old hook still
+    # works — it just won't benefit from incremental updates or separate
+    # caching.
+    def load_cached(self) -> list | None:
+        """Return this game's cached entries, or None if no valid cache
+        exists. Cheap: should not do a full rescan."""
+        return None
+
+    def save_cached(self, entries: list) -> None:
+        """Persist this game's entries to the adapter's cache. Called
+        when a consumer (e.g. the GUI) mutates entries in place and
+        wants the change to survive across runs."""
+        pass
+
+    def incremental_update(self, progress=None) -> list:
+        """Fast path: return the complete entry list for this game after
+        picking up any new replays since the last rebuild. If there's no
+        cache yet, behaves like `rebuild`."""
+        return self.rebuild(progress=progress)
+
+    def rebuild(self, progress=None) -> list:
+        """Slow path: wipe this game's caches, rescan everything, write a
+        fresh cache, and return the entry list."""
+        return self.scan_library(progress=progress) or []
+
     # --- standalone-launch resolver (CLI / player __main__) ---------------
     def can_handle_path(self, path) -> bool:
         """True if `path` looks like a replay this adapter can parse — used

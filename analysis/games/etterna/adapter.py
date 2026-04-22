@@ -3,8 +3,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from analysis.core.cache import Cache
 from analysis.core.game import GameAdapter
 from analysis.player import scroll
+
+
+_LIBRARY_CACHE = Cache('etterna_library.pkl')
 
 
 class EtternaAdapter(GameAdapter):
@@ -343,44 +347,118 @@ class EtternaAdapter(GameAdapter):
     }
 
     def scan_library(self, progress=None):
-        from analysis.games.etterna.replay import (parse_etterna_xml,
-                                                   find_etterna_dirs)
+        from analysis.games.etterna.replay import find_etterna_dirs
         dirs = find_etterna_dirs()
         xml = dirs.get('xml_path')
         replays = dirs.get('replays_dir')
         if not xml or not replays:
             return []
+        return self._entries_from_xml(xml, Path(replays))
+
+    def _score_to_entry(self, s, rdir: Path):
+        rp = rdir / s['scorekey']
+        if not rp.exists():
+            return None
+        return {
+            'game': 'etterna',
+            'replay_path': str(rp),
+            'scorekey': s['scorekey'],
+            'song': s.get('song', ''),
+            'pack': s.get('pack', ''),
+            'steps': s.get('steps', ''),
+            'rate': s.get('rate', 1.0),
+            'wife': s.get('ssrnormpercent', 0),
+            'grade': s.get('grade', ''),
+            'datetime': s.get('datetime', ''),
+            'mtime': rp.stat().st_mtime,
+            'ssrs': s.get('ssrs', {}),
+            'maxcombo': s.get('maxcombo', 0),
+            'chart_key': s.get('chartkey', ''),
+            'keycount': self._STEPSTYPE_KEYCOUNT.get(
+                s.get('stepstype', 'dance-single'), 4),
+            'judgescale': float(s.get('judgescale', 1.0)),
+            # Etterna.xml's TapNoteScores block — includes HitMine /
+            # AvoidMine alongside the tap counts. The replay .bin
+            # doesn't record which mines were hit, so this is the only
+            # way to surface mine-hit info in the player.
+            'judgments': dict(s.get('judgments') or {}),
+        }
+
+    def _entries_from_xml(self, xml_path, rdir: Path, want_keys=None):
+        """Parse Etterna.xml and return entries. If `want_keys` is set,
+        skip any `<Score>` whose scorekey isn't in the set — lets the
+        incremental path reparse the XML (there's only one) but do the
+        per-entry work only for new scores."""
+        from analysis.games.etterna.replay import parse_etterna_xml
         out = []
-        rdir = Path(replays)
-        for s in parse_etterna_xml(xml):
-            rp = rdir / s['scorekey']
-            if not rp.exists():
+        for s in parse_etterna_xml(xml_path):
+            if want_keys is not None and s['scorekey'] not in want_keys:
                 continue
-            out.append({
-                'game': 'etterna',
-                'replay_path': str(rp),
-                'scorekey': s['scorekey'],
-                'song': s.get('song', ''),
-                'pack': s.get('pack', ''),
-                'steps': s.get('steps', ''),
-                'rate': s.get('rate', 1.0),
-                'wife': s.get('ssrnormpercent', 0),
-                'grade': s.get('grade', ''),
-                'datetime': s.get('datetime', ''),
-                'mtime': rp.stat().st_mtime,
-                'ssrs': s.get('ssrs', {}),
-                'maxcombo': s.get('maxcombo', 0),
-                'chart_key': s.get('chartkey', ''),
-                'keycount': self._STEPSTYPE_KEYCOUNT.get(
-                    s.get('stepstype', 'dance-single'), 4),
-                'judgescale': float(s.get('judgescale', 1.0)),
-                # Etterna.xml's TapNoteScores block — includes HitMine /
-                # AvoidMine alongside the tap counts. The replay .bin
-                # doesn't record which mines were hit, so this is the only
-                # way to surface mine-hit info in the player.
-                'judgments': dict(s.get('judgments') or {}),
-            })
+            entry = self._score_to_entry(s, rdir)
+            if entry is not None:
+                out.append(entry)
         return out
+
+    # --- library cache lifecycle -----------------------------------------
+    def load_cached(self):
+        return _LIBRARY_CACHE.load()
+
+    def save_cached(self, entries):
+        _LIBRARY_CACHE.save([e for e in entries if e.get('game') == 'etterna'])
+
+    def rebuild(self, progress=None):
+        from analysis.games.etterna.replay import find_etterna_dirs
+        _LIBRARY_CACHE.clear()
+        dirs = find_etterna_dirs()
+        xml = dirs.get('xml_path')
+        replays = dirs.get('replays_dir')
+        if not xml or not replays:
+            return []
+        if progress:
+            progress('etterna: rebuilding from Etterna.xml…')
+        entries = self._entries_from_xml(xml, Path(replays))
+        # Don't poison the cache with an empty result: if the XML was
+        # unparseable (e.g. lxml missing and malformed bytes), saving
+        # []  would make every future `incremental_update` a no-op even
+        # after the user fixes the underlying problem. Leaving the
+        # cache absent forces the next call back into `rebuild`.
+        if entries:
+            _LIBRARY_CACHE.save(entries)
+        return entries
+
+    def incremental_update(self, progress=None):
+        from analysis.games.etterna.replay import find_etterna_dirs
+        cached = _LIBRARY_CACHE.load()
+        if cached is None:
+            return self.rebuild(progress=progress)
+        dirs = find_etterna_dirs()
+        xml = dirs.get('xml_path')
+        replays = dirs.get('replays_dir')
+        if not xml or not replays:
+            return cached
+
+        # Cheap diff: parse the XML just to collect ScoreKeys, then only
+        # materialize entries for keys we haven't seen. A ScoreKey is
+        # immutable per replay (Etterna mints a new one for every play),
+        # so set-difference is exact.
+        known_keys = {e.get('scorekey') for e in cached if e.get('scorekey')}
+        from analysis.games.etterna.replay import parse_etterna_xml
+        rdir = Path(replays)
+        new_entries = []
+        for s in parse_etterna_xml(xml):
+            if s['scorekey'] in known_keys:
+                continue
+            entry = self._score_to_entry(s, rdir)
+            if entry is not None:
+                new_entries.append(entry)
+
+        if not new_entries:
+            return cached
+        if progress:
+            progress(f'etterna: {len(new_entries)} new score(s)')
+        merged = cached + new_entries
+        _LIBRARY_CACHE.save(merged)
+        return merged
 
     # --- standalone-launch resolver --------------------------------------
     def can_handle_path(self, path):

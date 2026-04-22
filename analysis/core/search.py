@@ -1,115 +1,58 @@
 """Unified replay library search. Iterates over every registered
-`GameAdapter` and merges their `scan_library()` results into one filterable
-list. Adding a new game = register its adapter; no edits here."""
-import os
-import time
-import pickle
-from pathlib import Path
+`GameAdapter` and merges its per-game cache into one filterable list.
+Adapters own their own cache files (see `GameAdapter.load_cached` /
+`incremental_update` / `rebuild`); this module is the glue that joins
+them and respects the user's ``library.enabled_games`` config."""
 from datetime import datetime
 
-from analysis import cache_dir
+from analysis.config.store import get_config
 from analysis.core import game as game_mod
 
 
-CACHE_PATH = cache_dir() / 'library.pkl'
+def enabled_games() -> set[str]:
+    """Games the user wants visible. Missing config = all registered
+    games enabled. Unknown names in the config are ignored so removing
+    a game doesn't hard-error the library."""
+    stored = get_config().get('library.enabled_games')
+    if stored is None:
+        return set(game_mod.all_games().keys())
+    registered = set(game_mod.all_games().keys())
+    return {name for name in stored if name in registered}
 
 
-def _ensure_cache_dir():
-    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+def set_game_enabled(name: str, enabled: bool) -> None:
+    current = enabled_games()
+    if enabled:
+        current.add(name)
+    else:
+        current.discard(name)
+    # Persist as a sorted list for readability in config.json.
+    get_config().set('library.enabled_games', sorted(current))
 
 
-def _hash_one(p):
-    import hashlib
-    try:
-        with open(p, 'rb') as f:
-            return str(p), hashlib.md5(f.read()).hexdigest()
-    except OSError:
-        return str(p), None
+def build_library(refresh=False, progress=None):
+    """Return the full library as a flat list of entry dicts.
 
-
-def enrich_osu_with_charts(entries, songs_dir=None, progress=None):
-    """Resolve song titles for osu entries by hashing .osu files in parallel."""
-    from analysis.games.osu.replay import find_osu_dirs, parse_osu_file
-    from concurrent.futures import ThreadPoolExecutor
-    if songs_dir is None:
-        songs_dir = find_osu_dirs().get('songs_dir')
-    if not songs_dir:
-        return entries
-    # Group by hash: multiple replays can share a beatmap_hash (same chart
-    # played N times). The previous `{hash: entry}` dict dropped all but one,
-    # leaving duplicates unenriched forever.
-    hashes = {}
-    for e in entries:
-        if e['game'] == 'osu' and e.get('beatmap_hash'):
-            hashes.setdefault(e['beatmap_hash'], []).append(e)
-    if not hashes:
-        return entries
-
-    paths = list(Path(songs_dir).rglob('*.osu'))
-    if progress:
-        progress(f'hashing {len(paths)} .osu files…')
-    max_workers = min(32, (os.cpu_count() or 4) * 4)
-    matched_entries = 0
-    matched_hashes = 0
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for i, (path_str, h) in enumerate(ex.map(_hash_one, paths, chunksize=32)):
-            if h is None:
-                continue
-            if h in hashes:
-                try:
-                    chart = parse_osu_file(path_str)
-                    song = f"{chart.get('artist','?')} - {chart.get('title','?')}"
-                    version = chart.get('version', '')
-                    creator = chart.get('creator', '')
-                    keycount = chart.get('keycount')
-                    for e in hashes[h]:
-                        e['song'] = song
-                        e['steps'] = version
-                        e['pack'] = creator or e.get('pack', '')
-                        e['keycount'] = keycount
-                        e['chart_path'] = path_str
-                        matched_entries += 1
-                    matched_hashes += 1
-                except Exception:
-                    pass
-            if progress and i % 500 == 0:
-                progress(f'hashed {i}/{len(paths)} — '
-                         f'{matched_hashes}/{len(hashes)} charts matched')
-    if progress:
-        progress(f'enrichment done: {matched_hashes}/{len(hashes)} charts '
-                 f'({matched_entries} replays)')
-    return entries
-
-
-def build_library(use_cache=True, max_age_s=24 * 3600, refresh=False,
-                  enrich_osu=False, progress=None):
-    """Build the unified library by asking each game adapter to scan its own
-    replays. Set enrich_osu=True to resolve osu!mania song titles (slow:
-    hashes every .osu file). `progress` is an optional callable(str)."""
-    _ensure_cache_dir()
-    if use_cache and CACHE_PATH.exists() and not refresh:
-        age = time.time() - CACHE_PATH.stat().st_mtime
-        if age < max_age_s:
-            try:
-                with open(CACHE_PATH, 'rb') as f:
-                    return pickle.load(f)
-            except Exception:
-                pass
+    Each adapter owns its own cache. By default we ask each adapter for
+    an incremental update (fast — picks up new replays, reuses cache).
+    Pass `refresh=True` to force a full rebuild of every enabled game;
+    callers that want to rebuild only one game should call
+    `adapter.rebuild()` directly.
+    """
+    enabled = enabled_games()
     entries = []
     for name, adapter in game_mod.all_games().items():
+        if name not in enabled:
+            continue
         if progress:
-            progress(f'scanning {name}…')
-        got = adapter.scan_library(progress=progress) or []
+            progress(f'{name}: checking for new replays…')
+        if refresh:
+            got = adapter.rebuild(progress=progress) or []
+        else:
+            got = adapter.incremental_update(progress=progress) or []
         entries.extend(got)
         if progress:
             progress(f'{name}: {len(got)} entries — total {len(entries)}')
-    if enrich_osu:
-        entries = enrich_osu_with_charts(entries, progress=progress)
-    try:
-        with open(CACHE_PATH, 'wb') as f:
-            pickle.dump(entries, f)
-    except OSError:
-        pass
     return entries
 
 
@@ -203,10 +146,9 @@ if __name__ == '__main__':
     p.add_argument('--min-wife', type=float)
     p.add_argument('--limit', type=int, default=30)
     p.add_argument('--refresh', action='store_true')
-    p.add_argument('--no-enrich', action='store_true')
     a = p.parse_args()
 
-    lib = build_library(refresh=a.refresh, enrich_osu=not a.no_enrich)
+    lib = build_library(refresh=a.refresh)
     from collections import Counter
     counts = Counter(e['game'] for e in lib)
     parts = ', '.join(f'{n} {g}' for g, n in counts.most_common())

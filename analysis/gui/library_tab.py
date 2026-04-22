@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                                QMessageBox, QFileDialog, QHeaderView, QMenu,
                                QProgressDialog, QToolButton)
 
+from analysis.core import game as game_mod
 from analysis.core import gui_adapter as gui_mod
 from analysis.gui.settings import get_settings, load_player_settings
 from analysis.gui.loaders import Worker
@@ -75,9 +76,10 @@ class LibraryTab(QWidget):
         # Built-in toolbar actions first. Plugin-contributed actions live
         # behind one menu button so discovery does not keep appending
         # extra top-level toolbar controls.
-        for label, cb in [('Scan library', self._load_library),
-                          ('Refresh cache', lambda: self._load_library(refresh=True)),
-                          ('Enrich osu titles', lambda: self._load_library(refresh=True, enrich=True)),
+        b = QPushButton('Check for new replays')
+        b.clicked.connect(self._load_library)
+        row1.addWidget(b)
+        for label, cb in [('Games…', self._open_game_settings_dialog),
                           ('Plugins…', self._open_plugins_dialog),
                           ('Paths…', self._open_paths_dialog)]:
             b = QPushButton(label); b.clicked.connect(cb); row1.addWidget(b)
@@ -232,35 +234,57 @@ class LibraryTab(QWidget):
             self._load_library(refresh=True)
 
     # ---------- library scan ----------
-    def _load_library(self, refresh=False, enrich=False):
+    def _load_library(self, refresh=False):
+        """Incremental library load. `refresh=True` forces a rebuild of
+        every enabled game; per-game rebuilds go through `_rebuild_game`
+        on the Refresh-games dropdown."""
         # Guard against re-entry: QThread aborts the process if a running
         # thread's Python wrapper is garbage-collected. Before we overwrite
         # `self._scan_worker`, make sure the old one has finished.
         if self._scan_worker is not None and self._scan_worker.isRunning():
             self.status_lbl.setText('already scanning — please wait')
             return
-        from analysis.core.search import build_library, enrich_osu_with_charts
+        from analysis.core.search import build_library
         self.status_lbl.setText('scanning…')
 
         def job(progress):
-            lib = build_library(refresh=refresh, enrich_osu=enrich, progress=progress)
-            if not enrich and any(gui_mod.get(e['game']).needs_enrichment(e)
-                                  for e in lib):
-                progress('auto-enriching osu charts…')
-                enrich_osu_with_charts(lib, progress=progress)
-                import pickle
-                from analysis.core.search import CACHE_PATH
-                try:
-                    with open(CACHE_PATH, 'wb') as fh:
-                        pickle.dump(lib, fh)
-                except OSError:
-                    pass
-            return lib
+            return build_library(refresh=refresh, progress=progress)
 
         self._scan_worker = Worker(job)
         self._scan_worker.progress.connect(self.status_lbl.setText)
         self._scan_worker.done.connect(self._on_library_loaded)
         self._scan_worker.failed.connect(lambda e: QMessageBox.critical(self, 'scan failed', e))
+        self._scan_worker.start()
+
+    def _open_game_settings_dialog(self):
+        from analysis.gui.game_settings_dialog import GameSettingsDialog
+        dlg = GameSettingsDialog(self, on_rebuild=self._rebuild_game)
+        dlg.exec()
+        # The dialog may have toggled `library.enabled_games` — reload
+        # so entries from newly-disabled games drop out (and newly-enabled
+        # games are pulled in from their caches).
+        self._load_library()
+
+    def _rebuild_game(self, name):
+        if self._scan_worker is not None and self._scan_worker.isRunning():
+            self.status_lbl.setText('already scanning — please wait')
+            return
+        self.status_lbl.setText(f'rebuilding {name}…')
+
+        def job(progress):
+            from analysis.core.search import build_library
+            adapter = game_mod.get(name)
+            adapter.rebuild(progress=progress)
+            # Reload the full library from every adapter's cache so the
+            # tree shows the fresh entries plus whatever the other games
+            # have cached.
+            return build_library(progress=progress)
+
+        self._scan_worker = Worker(job)
+        self._scan_worker.progress.connect(self.status_lbl.setText)
+        self._scan_worker.done.connect(self._on_library_loaded)
+        self._scan_worker.failed.connect(
+            lambda e: QMessageBox.critical(self, 'rebuild failed', e))
         self._scan_worker.start()
 
     def _on_library_loaded(self, lib):
@@ -415,13 +439,14 @@ class LibraryTab(QWidget):
             self._refresh_tree()
 
     def _persist_library(self):
-        try:
-            import pickle
-            from analysis.core.search import CACHE_PATH
-            with open(CACHE_PATH, 'wb') as fh:
-                pickle.dump(self.library, fh)
-        except OSError:
-            pass
+        # Library is split across per-adapter caches. Ask every registered
+        # adapter to persist its own subset; each adapter filters
+        # `self.library` for the game it owns.
+        for adapter in game_mod.all_games().values():
+            try:
+                adapter.save_cached(self.library)
+            except Exception:
+                pass
 
     # ---------- open player / viz / html ----------
     def _open_player_for(self, entry, rep=None):

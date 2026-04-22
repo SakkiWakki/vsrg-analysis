@@ -37,6 +37,21 @@ def _qapp():
 
 
 @pytest.fixture(autouse=True)
+def _isolated_config_store(tmp_path, monkeypatch):
+    """Point the unified config store at an isolated tmp config file
+    per test. ConfigStore resolves its path via ``Path.home()`` by
+    default; without this redirect, any test that touches
+    ``get_config()`` writes into the real user's ``~/.config`` and
+    leaks across processes."""
+    from analysis.config import store
+    cfg_path = tmp_path / 'config.json'
+    monkeypatch.setattr(store, '_default_path', lambda: cfg_path)
+    store._singleton = None
+    yield
+    store._singleton = None
+
+
+@pytest.fixture(autouse=True)
 def _isolated_qsettings(tmp_path, monkeypatch, _qapp):
     from PySide6.QtCore import QSettings
     # QSettings honors XDG_CONFIG_HOME on Linux under the native format, so

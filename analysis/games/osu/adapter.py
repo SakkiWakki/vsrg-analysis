@@ -3,8 +3,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from analysis.core.cache import Cache
 from analysis.core.game import GameAdapter
 from analysis.player import scroll
+
+
+_LIBRARY_CACHE = Cache('osu_library.pkl')
+# Maps .osu path -> (mtime, size, md5, parsed_meta). Reused across both
+# rebuild and incremental-update paths so hashing the Songs folder is a
+# one-time cost, not a per-refresh cost.
+_CHART_INDEX_CACHE = Cache('osu_chart_index.pkl')
 
 
 class OsuAdapter(GameAdapter):
@@ -73,24 +81,56 @@ class OsuAdapter(GameAdapter):
 
     # --- library scan -----------------------------------------------------
     def scan_library(self, progress=None):
-        import os
-        from concurrent.futures import ThreadPoolExecutor
-        from analysis.games.osu.replay import find_osu_dirs
-        dirs = find_osu_dirs()
-        paths = []
-        for rdir in dirs.get('replays_dirs') or []:
-            paths.extend(Path(rdir).glob('*.osr'))
-        if not paths:
-            return []
-        out = []
-        max_workers = min(32, (os.cpu_count() or 4) * 4)
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            for i, res in enumerate(ex.map(_parse_one_osr, paths, chunksize=8)):
-                if res is not None:
-                    out.append(res)
-                if progress and i % 200 == 0:
-                    progress(f'osu: {i}/{len(paths)} replays…')
-        return out
+        """Parse every .osr on disk into a placeholder entry (no song
+        title — enrichment fills those). Kept for parity with the old
+        adapter contract; `rebuild` and `incremental_update` are the
+        library pipeline's real entry points."""
+        paths = _osr_paths()
+        return _parse_osr_batch(paths, progress=progress)
+
+    # --- library cache lifecycle -----------------------------------------
+    def load_cached(self):
+        return _LIBRARY_CACHE.load()
+
+    def save_cached(self, entries):
+        _LIBRARY_CACHE.save([e for e in entries if e.get('game') == 'osu'])
+
+    def rebuild(self, progress=None):
+        _LIBRARY_CACHE.clear()
+        _CHART_INDEX_CACHE.clear()
+        paths = _osr_paths()
+        entries = _parse_osr_batch(paths, progress=progress)
+        _enrich_entries(entries, progress=progress)
+        # Same rationale as EtternaAdapter.rebuild: an empty result
+        # typically means the replays dir isn't configured, not that
+        # the user has zero replays. Leaving the cache absent means the
+        # next click actually retries instead of reading [] forever.
+        if entries:
+            _LIBRARY_CACHE.save(entries)
+        return entries
+
+    def incremental_update(self, progress=None):
+        cached = _LIBRARY_CACHE.load()
+        if cached is None:
+            return self.rebuild(progress=progress)
+
+        known = {e['replay_path']: e for e in cached}
+        all_paths = _osr_paths()
+        new_paths = [p for p in all_paths if str(p) not in known]
+        if not new_paths:
+            return cached
+
+        if progress:
+            progress(f'osu: {len(new_paths)} new replay(s)…')
+        new_entries = _parse_osr_batch(new_paths, progress=progress)
+        if new_entries:
+            # Warm chart index makes this near-instant on the common path
+            # (user played a chart that was already in the Songs folder).
+            _enrich_entries(new_entries, progress=progress)
+
+        merged = cached + new_entries
+        _LIBRARY_CACHE.save(merged)
+        return merged
 
     # --- standalone-launch resolver --------------------------------------
     def can_handle_path(self, path):
@@ -124,6 +164,147 @@ class OsuAdapter(GameAdapter):
     def viz_windows(self, replay, judge=None, od=None):
         from analysis.viz.note_visualizer import osu_mania_windows
         return osu_mania_windows(od=od if od is not None else 8), 'time (ms)', None
+
+
+def _osr_paths():
+    from analysis.games.osu.replay import find_osu_dirs
+    dirs = find_osu_dirs()
+    paths = []
+    for rdir in dirs.get('replays_dirs') or []:
+        paths.extend(Path(rdir).glob('*.osr'))
+    return paths
+
+
+def _parse_osr_batch(paths, progress=None):
+    import os
+    from concurrent.futures import ThreadPoolExecutor
+    if not paths:
+        return []
+    out = []
+    max_workers = min(32, (os.cpu_count() or 4) * 4)
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for i, res in enumerate(ex.map(_parse_one_osr, paths, chunksize=8)):
+            if res is not None:
+                out.append(res)
+            if progress and i % 200 == 0:
+                progress(f'osu: parsed {i}/{len(paths)} replays…')
+    return out
+
+
+def _hash_chart(path):
+    import hashlib
+    try:
+        with open(path, 'rb') as f:
+            return hashlib.md5(f.read()).hexdigest()
+    except OSError:
+        return None
+
+
+def _hash_chart_from_path_str(path_str):
+    """Module-level so ThreadPoolExecutor can pickle the callable."""
+    return path_str, _hash_chart(path_str)
+
+
+def _chart_meta(path):
+    from analysis.games.osu.replay import parse_osu_file
+    try:
+        chart = parse_osu_file(path)
+    except Exception:
+        return None
+    return {
+        'song': f"{chart.get('artist', '?')} - {chart.get('title', '?')}",
+        'steps': chart.get('version', ''),
+        'creator': chart.get('creator', ''),
+        'keycount': chart.get('keycount'),
+    }
+
+
+def _build_chart_index(songs_dir, progress=None):
+    """Return a dict {path_str: (mtime, size, md5, meta)}. Reuses a
+    persistent cache, rehashing only files whose mtime/size changed."""
+    import os
+    from concurrent.futures import ThreadPoolExecutor
+    cached = _CHART_INDEX_CACHE.load() or {}
+    paths = list(Path(songs_dir).rglob('*.osu'))
+
+    stale = []
+    fresh = {}
+    for p in paths:
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        key = str(p)
+        prev = cached.get(key)
+        if prev and prev[0] == st.st_mtime and prev[1] == st.st_size:
+            fresh[key] = prev
+        else:
+            stale.append((key, st.st_mtime, st.st_size))
+
+    if progress:
+        if stale:
+            progress(f'hashing {len(stale)} new/changed .osu files '
+                     f'({len(fresh)} reused)…')
+        else:
+            progress(f'reusing {len(fresh)} cached chart hashes')
+
+    if stale:
+        max_workers = min(32, (os.cpu_count() or 4) * 4)
+        path_strs = [s[0] for s in stale]
+        stats = {s[0]: (s[1], s[2]) for s in stale}
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            for i, (path_str, md5) in enumerate(
+                    ex.map(_hash_chart_from_path_str, path_strs, chunksize=32)):
+                if md5 is None:
+                    continue
+                meta = _chart_meta(path_str)
+                mtime, size = stats[path_str]
+                fresh[path_str] = (mtime, size, md5, meta)
+                if progress and i % 500 == 0:
+                    progress(f'hashed {i}/{len(stale)} new .osu files')
+
+    _CHART_INDEX_CACHE.save(fresh)
+    return fresh
+
+
+def _enrich_entries(entries, progress=None):
+    """Fill song/steps/pack/keycount/chart_path in-place on osu entries,
+    using a persistent chart-hash index keyed on (path, mtime, size)."""
+    from analysis.games.osu.replay import find_osu_dirs
+    targets = {}
+    for e in entries:
+        if e.get('game') == 'osu' and e.get('beatmap_hash'):
+            targets.setdefault(e['beatmap_hash'], []).append(e)
+    if not targets:
+        return
+    songs_dir = find_osu_dirs().get('songs_dir')
+    if not songs_dir:
+        return
+
+    index = _build_chart_index(songs_dir, progress=progress)
+    hash_to_entry = {}
+    for path_str, (_m, _s, md5, meta) in index.items():
+        if md5 and md5 in targets and meta is not None:
+            hash_to_entry[md5] = (path_str, meta)
+
+    matched_hashes = 0
+    matched_entries = 0
+    for md5, group in targets.items():
+        hit = hash_to_entry.get(md5)
+        if not hit:
+            continue
+        path_str, meta = hit
+        matched_hashes += 1
+        for e in group:
+            e['song'] = meta['song']
+            e['steps'] = meta['steps']
+            e['pack'] = meta['creator'] or e.get('pack', '')
+            e['keycount'] = meta['keycount']
+            e['chart_path'] = path_str
+            matched_entries += 1
+    if progress:
+        progress(f'osu enrichment: {matched_hashes}/{len(targets)} charts '
+                 f'({matched_entries} replays)')
 
 
 def _parse_one_osr(p):
