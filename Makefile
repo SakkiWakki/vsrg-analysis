@@ -116,6 +116,64 @@ $(OVERLAY_BIN): $(OVERLAY_SRCS)
 .PHONY: overlay
 overlay: $(OVERLAY_BIN)
 
+# ─── vulkan layer (in-process HUD) ─────────────────────────────────────
+#
+# Preferred overlay path: a Vulkan layer loaded by DXVK inside osu!'s
+# own process. Zero compositor, zero input latency. Falls back to the
+# gamescope overlay above if the layer isn't installed or fails to
+# load (see the launcher in plugins/unsafe/osu_live/viz/live_drift.py).
+
+LAYER_DIR  := analysis/games/osu/vulkan_layer
+LAYER_SO   := $(LAYER_DIR)/libVkLayer_vsrg_overlay.so
+LAYER_JSON := $(LAYER_DIR)/VkLayer_vsrg_overlay.json
+
+# Install location: XDG_DATA_HOME per-user. Loader discovers layers
+# here before system paths, which is exactly what we want during dev.
+XDG_DATA_HOME_OR_DEFAULT := $(if $(XDG_DATA_HOME),$(XDG_DATA_HOME),$(HOME)/.local/share)
+LAYER_INSTALL_DIR        := $(XDG_DATA_HOME_OR_DEFAULT)/vulkan/implicit_layer.d
+
+LAYER_SRCS := $(LAYER_DIR)/layer.cpp \
+              $(LAYER_DIR)/overlay.cpp \
+              $(LAYER_DIR)/input.cpp \
+              $(LAYER_DIR)/imgui/imgui.cpp \
+              $(LAYER_DIR)/imgui/imgui_draw.cpp \
+              $(LAYER_DIR)/imgui/imgui_tables.cpp \
+              $(LAYER_DIR)/imgui/imgui_widgets.cpp
+
+LAYER_CXXFLAGS := -std=c++20 -O2 -fPIC -fvisibility=hidden \
+                  -Wall -Wextra -Wno-unused-parameter \
+                  -I$(LAYER_DIR) -I$(LAYER_DIR)/imgui \
+                  $(shell pkg-config --cflags vulkan x11 2>/dev/null)
+LAYER_LDFLAGS  := -shared -fvisibility=hidden
+LAYER_LIBS     := $(shell pkg-config --libs vulkan x11 2>/dev/null)
+
+$(LAYER_SO): $(LAYER_SRCS) $(LAYER_DIR)/vkroots.h $(LAYER_DIR)/overlay.h
+	$(Q)echo "[layer] g++ $(notdir $@)"
+	$(Q)g++ $(LAYER_CXXFLAGS) $(LAYER_LDFLAGS) \
+	    -o $@ $(LAYER_SRCS) $(LAYER_LIBS)
+
+# Manifest generated from template with the absolute .so path so the
+# loader doesn't depend on LD_LIBRARY_PATH.
+$(LAYER_JSON): $(LAYER_DIR)/VkLayer_vsrg_overlay.json.in $(LAYER_SO)
+	$(Q)echo "[layer] generating $(notdir $@)"
+	$(Q)sed 's|@LIBRARY_PATH@|$(abspath $(LAYER_SO))|' \
+	    $(LAYER_DIR)/VkLayer_vsrg_overlay.json.in > $@
+
+.PHONY: vulkan-layer
+vulkan-layer: $(LAYER_SO) $(LAYER_JSON)
+
+.PHONY: vulkan-layer-install
+vulkan-layer-install: vulkan-layer
+	$(Q)echo "[layer] install → $(LAYER_INSTALL_DIR)"
+	$(Q)mkdir -p $(LAYER_INSTALL_DIR)
+	$(Q)cp $(LAYER_JSON) $(LAYER_INSTALL_DIR)/VkLayer_vsrg_overlay.json
+	$(Q)echo "[layer] installed. Enable with: VSRG_OVERLAY_LAYER=1"
+
+.PHONY: vulkan-layer-uninstall
+vulkan-layer-uninstall:
+	$(Q)echo "[layer] uninstall from $(LAYER_INSTALL_DIR)"
+	$(Q)rm -f $(LAYER_INSTALL_DIR)/VkLayer_vsrg_overlay.json
+
 # ─── aggregate ─────────────────────────────────────────────────────────
 
 .PHONY: build
