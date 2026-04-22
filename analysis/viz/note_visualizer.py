@@ -14,7 +14,6 @@ from matplotlib.patches import Rectangle
 from matplotlib.collections import PatchCollection
 from matplotlib.widgets import Slider
 
-from analysis.games.etterna.replay import parse_replay as parse_etterna
 from analysis.viz.plots import col_colors
 
 plt.style.use('dark_background')
@@ -273,14 +272,11 @@ def render_chart_full(replay, save_path='chart.png', rows_per_panel=None,
         print("empty replay")
         return
 
-    if game == 'osu':
-        windows = osu_mania_windows(od=od)
-        unit_label = 'time (ms)'
-        rpm = None
-    else:
-        windows = etterna_windows('J4')
-        unit_label = 'noterow'
-        rpm = rows_per_ms if rows_per_ms is not None else 0.37
+    from analysis.core import game as game_mod
+    windows, unit_label, rpm = game_mod.get(game).viz_windows(
+        replay, od=od)
+    if rows_per_ms is not None:
+        rpm = rows_per_ms
 
     if rows_per_panel is None:
         rows_per_panel = 8000 if game == 'osu' else 2400
@@ -323,16 +319,11 @@ def render_chart_full(replay, save_path='chart.png', rows_per_panel=None,
 
 def interactive(replay, game='etterna', od=8, window_units=None, rows_per_ms=None):
     """Interactive scrollable view."""
-    if game == 'osu':
-        windows = osu_mania_windows(od=od)
-        unit_label = 'time (ms)'
-        rpm = None
-        win = window_units or 8000
-    else:
-        windows = etterna_windows('J4')
-        unit_label = 'noterow'
-        rpm = rows_per_ms if rows_per_ms is not None else 0.37
-        win = window_units or 2400
+    from analysis.core import game as game_mod
+    windows, unit_label, rpm = game_mod.get(game).viz_windows(replay, od=od)
+    if rows_per_ms is not None:
+        rpm = rows_per_ms
+    win = window_units or (8000 if game == 'osu' else 2400)
 
     fig = plt.figure(figsize=(10, 11))
     gs = fig.add_gridspec(1, 4, width_ratios=[3, 0.05, 1, 0.05], wspace=0.1)
@@ -380,17 +371,15 @@ if __name__ == '__main__':
     if '--rows-per-ms' in args:
         rpm = float(args[args.index('--rows-per-ms') + 1])
 
-    if '--osu' in args or path.endswith('.osr'):
-        from analysis.games.osu.replay import parse_replay as parse_osu, find_osu_dirs
-        osu_path = args[args.index('--osu') + 1] if '--osu' in args else None
-        songs = find_osu_dirs().get('songs_dir')
-        rep = parse_osu(path, osu_path=osu_path, songs_dir=songs)
-        game = 'osu'
-        title = f"{rep['chart_meta'].get('artist','?')} - {rep['chart_meta'].get('title','?')} [{rep['chart_meta'].get('version','')}]  {rep['keycount']}K OD{od}"
+    from analysis.core.game import resolve_standalone_replay, get as get_adapter
+    game, rep, _bpms, _off, _audio, _extra = resolve_standalone_replay(
+        path, args=args)
+    if game == 'osu':
+        cm = rep.get('chart_meta', {})
+        title = (f"{cm.get('artist','?')} - {cm.get('title','?')} "
+                 f"[{cm.get('version','')}]  {rep['keycount']}K OD{od}")
     else:
-        rep = parse_etterna(path)
-        game = 'etterna'
-        title = f"Etterna replay: {path.split('/')[-1][:20]}... ({rep.get('keycount') or 'autoK'})"
+        title = f"{game} replay: {path.split('/')[-1][:20]}... ({rep.get('keycount') or 'autoK'})"
 
     if '--interactive' in args:
         interactive(rep, game=game, od=od, rows_per_ms=rpm)
@@ -400,14 +389,9 @@ if __name__ == '__main__':
                           title=title)
     else:
         win = 8000 if game == 'osu' else 2400
-        if game == 'osu':
-            windows = osu_mania_windows(od=od)
-            unit_label = 'time (ms)'
-            rpm_use = None
-        else:
-            windows = etterna_windows('J4')
-            unit_label = 'noterow'
-            rpm_use = rpm if rpm is not None else 0.37
+        windows, unit_label, rpm_default = get_adapter(game).viz_windows(
+            rep, od=od)
+        rpm_use = rpm if rpm is not None else rpm_default
 
         fig = plt.figure(figsize=(10, 11))
         gs = fig.add_gridspec(1, 3, width_ratios=[3, 0.08, 1])

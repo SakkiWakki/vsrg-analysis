@@ -114,11 +114,6 @@ whatever's out of date.
 python -m analysis.gui.app                           # direct
 make                                                 # Linux: build + launch
 
-# CLI dispatcher (analysis without the GUI)
-./analyze --help
-./analyze replay /path/to/replay.osr                 # stats + plots for one replay
-./analyze batch                                      # leaderboard across a profile
-
 # Replay player standalone (Qt)
 python -m analysis.player.player /path/to/replay.osr                 # osu!mania
 python -m analysis.player.player /path/to/replay.bin --sm chart.sm   # Etterna

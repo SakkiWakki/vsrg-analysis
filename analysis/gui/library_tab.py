@@ -464,6 +464,7 @@ class LibraryTab(QWidget):
             dlg.deleteLater()
 
         def on_done(payload):
+            from analysis.core import game as game_mod
             r, bpms, sm_off, audio = payload
             self._maybe_backfill_entry(entry, r)
             # Etterna stores the score's music rate in Etterna.xml; osu! stores
@@ -472,15 +473,11 @@ class LibraryTab(QWidget):
             # the replay was actually played at — otherwise the audio plays at
             # 1.0x against a chart that was originally at e.g. 1.15x.
             rate = float(entry.get('rate') or 1.0)
-            if entry['game'] == 'osu':
-                tab = PlayerTab(r, game='osu', audio_path=audio,
-                                scroll_ms=default_ms, scroll_mode=scroll_mode,
-                                play_rate=rate)
-            else:
-                tab = PlayerTab(r, game='etterna', bpms=bpms, sm_offset=sm_off,
-                                audio_path=audio, scroll_ms=default_ms,
-                                scroll_mode=scroll_mode, play_rate=rate,
-                                xml_judgments=entry.get('judgments'))
+            extra = game_mod.get(entry['game']).player_tab_kwargs(
+                r, entry, (bpms, sm_off, audio))
+            tab = PlayerTab(r, game=entry['game'], audio_path=audio,
+                            scroll_ms=default_ms, scroll_mode=scroll_mode,
+                            play_rate=rate, **extra)
             title = (entry.get('song') or 'play')[:40]
             self._add_tab(tab, f'▶ {title}')
             if worker in self._viz_workers:

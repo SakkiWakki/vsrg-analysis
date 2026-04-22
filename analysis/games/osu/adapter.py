@@ -71,6 +71,102 @@ class OsuAdapter(GameAdapter):
     def player_kwargs(self, replay, od=None, **_):
         return {'od': self.effective_od(replay, od)}
 
+    # --- library scan -----------------------------------------------------
+    def scan_library(self, progress=None):
+        import os
+        from concurrent.futures import ThreadPoolExecutor
+        from analysis.games.osu.replay import find_osu_dirs
+        dirs = find_osu_dirs()
+        paths = []
+        for rdir in dirs.get('replays_dirs') or []:
+            paths.extend(Path(rdir).glob('*.osr'))
+        if not paths:
+            return []
+        out = []
+        max_workers = min(32, (os.cpu_count() or 4) * 4)
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            for i, res in enumerate(ex.map(_parse_one_osr, paths, chunksize=8)):
+                if res is not None:
+                    out.append(res)
+                if progress and i % 200 == 0:
+                    progress(f'osu: {i}/{len(paths)} replays…')
+        return out
+
+    # --- standalone-launch resolver --------------------------------------
+    def can_handle_path(self, path):
+        return str(path).lower().endswith('.osr')
+
+    def resolve_standalone(self, path, args=None):
+        from analysis.games.osu.replay import (parse_replay, find_osu_dirs,
+                                               parse_osu_file)
+        args = args or []
+        osu_path = args[args.index('--osu') + 1] if '--osu' in args else None
+        songs = find_osu_dirs().get('songs_dir')
+        rep = parse_replay(path, osu_path=osu_path, songs_dir=songs)
+        audio = args[args.index('--audio') + 1] if '--audio' in args else None
+        if audio is None and rep.get('chart_path'):
+            try:
+                chart = parse_osu_file(rep['chart_path'])
+            except Exception:
+                chart = {}
+            if chart.get('audio'):
+                cand = Path(rep['chart_path']).parent / chart['audio']
+                if cand.exists():
+                    audio = str(cand)
+        return rep, None, 0.0, audio, {}
+
+    # --- PlayerTab kwargs -------------------------------------------------
+    def player_tab_kwargs(self, replay, entry, chart_ctx):
+        # osu carries OD + mods on the replay itself; nothing extra needed.
+        return {}
+
+    # --- note visualizer --------------------------------------------------
+    def viz_windows(self, replay, judge=None, od=None):
+        from analysis.viz.note_visualizer import osu_mania_windows
+        return osu_mania_windows(od=od if od is not None else 8), 'time (ms)', None
+
+
+def _parse_one_osr(p):
+    """Module-level helper so ThreadPoolExecutor can pickle the callable."""
+    import osrparse
+    from analysis.games.osu.replay import rate_for_mods
+    try:
+        r = osrparse.Replay.from_path(str(p))
+        mode = getattr(r, 'mode', None)
+        mode_int = mode.value if hasattr(mode, 'value') else int(mode or 0)
+        if mode_int != 3:
+            return None
+        mods = int(r.mods.value) if hasattr(r.mods, 'value') else int(r.mods or 0)
+        rate = rate_for_mods(mods)
+        total = (getattr(r, 'count_300', 0) + getattr(r, 'count_100', 0) +
+                 getattr(r, 'count_50', 0) + getattr(r, 'count_miss', 0) +
+                 getattr(r, 'count_geki', 0) + getattr(r, 'count_katu', 0))
+        acc = 0.0
+        if total:
+            acc = (getattr(r, 'count_geki', 0) * 300 +
+                   getattr(r, 'count_300', 0) * 300 +
+                   getattr(r, 'count_katu', 0) * 200 +
+                   getattr(r, 'count_100', 0) * 100 +
+                   getattr(r, 'count_50', 0) * 50) / (total * 300) * 100
+        return {
+            'game': 'osu',
+            'replay_path': str(p),
+            'beatmap_hash': r.beatmap_hash,
+            'song': f'[{r.beatmap_hash[:8]}]',
+            'pack': r.username,
+            'steps': '',
+            'rate': rate,
+            'mods': mods,
+            'wife': acc / 100.0,
+            'grade': '',
+            'datetime': str(r.timestamp),
+            'mtime': p.stat().st_mtime,
+            'ssrs': {},
+            'maxcombo': r.max_combo,
+        }
+    except Exception:
+        return None
+
 
 # --- osu!mania scroll mode --------------------------------------------------
 # From SpeedMania.cs:126 — DistanceAt: px/ms = Speed * 21 / 600 = Speed * 0.035

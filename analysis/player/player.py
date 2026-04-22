@@ -663,39 +663,9 @@ if __name__ == '__main__':
         sys.exit(1)
     path = args[0]
     od = float(args[args.index('--od') + 1]) if '--od' in args else 8
-    audio = args[args.index('--audio') + 1] if '--audio' in args else None
 
-    if path.endswith('.osr') or '--osu' in args:
-        from analysis.games.osu.replay import parse_replay as parse_osu, find_osu_dirs
-        osu_path = args[args.index('--osu') + 1] if '--osu' in args else None
-        songs = find_osu_dirs().get('songs_dir')
-        rep = parse_osu(path, osu_path=osu_path, songs_dir=songs)
-        if audio is None and rep.get('chart_path'):
-            af = Path(rep['chart_path']).parent / rep['chart_meta'].get('version', '')
-            # try to resolve audio in same folder as .osu
-            osu_dir = Path(rep['chart_path']).parent
-            from analysis.games.osu.replay import parse_osu_file
-            chart = parse_osu_file(rep['chart_path'])
-            if chart.get('audio'):
-                cand = osu_dir / chart['audio']
-                if cand.exists():
-                    audio = str(cand)
-        launch_from_replay(rep, game='osu', od=od, audio_path=audio)
-    else:
-        from analysis.games.etterna.replay import parse_replay as parse_ett, find_etterna_dirs
-        rep = parse_ett(path)
-        bpms = None
-        sm_off = 0.0
-        if '--bpm' in args:
-            bpms = [(0.0, float(args[args.index('--bpm') + 1]))]
-        if '--sm' in args:
-            from analysis.games.etterna.sm_chart import parse_sm, parse_ssc
-            smp = args[args.index('--sm') + 1]
-            data = parse_ssc(smp) if smp.endswith('.ssc') else parse_sm(smp)
-            bpms = data['bpms']
-            sm_off = data['offset']
-            if audio is None:
-                from analysis.games.etterna.adapter import EtternaAdapter
-                audio = EtternaAdapter._resolve_music_asset(smp, data['music'])
-        launch_from_replay(rep, game='etterna', bpms=bpms, sm_offset=sm_off,
-                           audio_path=audio)
+    from analysis.core.game import resolve_standalone_replay
+    game, rep, bpms, sm_off, audio, _extra = resolve_standalone_replay(
+        path, args=args)
+    launch_from_replay(rep, game=game, od=od, bpms=bpms, sm_offset=sm_off,
+                       audio_path=audio)

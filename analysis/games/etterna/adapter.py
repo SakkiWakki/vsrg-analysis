@@ -336,6 +336,93 @@ class EtternaAdapter(GameAdapter):
     def player_kwargs(self, replay, judge=None, **_):
         return {'ett_judge': judge or 'J4'}
 
+    # --- library scan -----------------------------------------------------
+    _STEPSTYPE_KEYCOUNT = {
+        'dance-single': 4, 'dance-solo': 6, 'dance-double': 8,
+        'pump-single': 5, 'pump-double': 10, 'kb7-single': 7,
+    }
+
+    def scan_library(self, progress=None):
+        from analysis.games.etterna.replay import (parse_etterna_xml,
+                                                   find_etterna_dirs)
+        dirs = find_etterna_dirs()
+        xml = dirs.get('xml_path')
+        replays = dirs.get('replays_dir')
+        if not xml or not replays:
+            return []
+        out = []
+        rdir = Path(replays)
+        for s in parse_etterna_xml(xml):
+            rp = rdir / s['scorekey']
+            if not rp.exists():
+                continue
+            out.append({
+                'game': 'etterna',
+                'replay_path': str(rp),
+                'scorekey': s['scorekey'],
+                'song': s.get('song', ''),
+                'pack': s.get('pack', ''),
+                'steps': s.get('steps', ''),
+                'rate': s.get('rate', 1.0),
+                'wife': s.get('ssrnormpercent', 0),
+                'grade': s.get('grade', ''),
+                'datetime': s.get('datetime', ''),
+                'mtime': rp.stat().st_mtime,
+                'ssrs': s.get('ssrs', {}),
+                'maxcombo': s.get('maxcombo', 0),
+                'chart_key': s.get('chartkey', ''),
+                'keycount': self._STEPSTYPE_KEYCOUNT.get(
+                    s.get('stepstype', 'dance-single'), 4),
+                'judgescale': float(s.get('judgescale', 1.0)),
+                # Etterna.xml's TapNoteScores block — includes HitMine /
+                # AvoidMine alongside the tap counts. The replay .bin
+                # doesn't record which mines were hit, so this is the only
+                # way to surface mine-hit info in the player.
+                'judgments': dict(s.get('judgments') or {}),
+            })
+        return out
+
+    # --- standalone-launch resolver --------------------------------------
+    def can_handle_path(self, path):
+        # Etterna claims anything that isn't clearly another game's replay.
+        # osu's can_handle_path matches first on .osr; this is the fallback.
+        return not str(path).lower().endswith('.osr')
+
+    def resolve_standalone(self, path, args=None):
+        from analysis.games.etterna.replay import parse_replay
+        args = args or []
+        rep = parse_replay(path)
+        bpms = None
+        sm_off = 0.0
+        audio = None
+        if '--bpm' in args:
+            bpms = [(0.0, float(args[args.index('--bpm') + 1]))]
+        if '--sm' in args:
+            from analysis.games.etterna.sm_chart import parse_sm, parse_ssc
+            smp = args[args.index('--sm') + 1]
+            data = parse_ssc(smp) if smp.endswith('.ssc') else parse_sm(smp)
+            bpms = data['bpms']
+            sm_off = data['offset']
+            audio = EtternaAdapter._resolve_music_asset(smp, data['music'])
+        if '--audio' in args:
+            audio = args[args.index('--audio') + 1]
+        return rep, bpms, sm_off, audio, {}
+
+    # --- PlayerTab kwargs -------------------------------------------------
+    def player_tab_kwargs(self, replay, entry, chart_ctx):
+        bpms, sm_off, _audio = chart_ctx
+        return {
+            'bpms': bpms,
+            'sm_offset': sm_off,
+            'xml_judgments': entry.get('judgments'),
+        }
+
+    # --- note visualizer --------------------------------------------------
+    def viz_windows(self, replay, judge=None, od=None):
+        from analysis.viz.note_visualizer import etterna_windows
+        j = judge or 'J4'
+        return etterna_windows(j), 'noterow', 0.37
+
 
 # --- Etterna scroll modes ----------------------------------------------------
 # Values expressed in the 480-tall Til Death / fallback theme space; scaled to

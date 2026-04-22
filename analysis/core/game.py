@@ -67,6 +67,52 @@ class GameAdapter:
         and the Player's keyboard shortcut path."""
         return current
 
+    # --- library scan -----------------------------------------------------
+    def scan_library(self, progress=None) -> list:
+        """Return a list of entry dicts for every playable replay on disk.
+        Must include at minimum `game`, `replay_path`, `mtime`. Called by
+        `analysis.core.search.build_library()`."""
+        return []
+
+    # --- standalone-launch resolver (CLI / player __main__) ---------------
+    def can_handle_path(self, path) -> bool:
+        """True if `path` looks like a replay this adapter can parse — used
+        by the player's standalone entry point to pick an adapter."""
+        return False
+
+    def resolve_standalone(self, path, args=None):
+        """Parse a replay + resolve audio + return (replay, bpms, sm_offset,
+        audio, extra_kwargs) for the standalone player entry point. `args`
+        is the raw argv after the replay path so adapters can pick up
+        optional flags (e.g. --sm, --osu, --bpm)."""
+        raise NotImplementedError
+
+    # --- PlayerTab construction -------------------------------------------
+    def player_tab_kwargs(self, replay, entry, chart_ctx) -> dict:
+        """Extra keyword arguments for `PlayerTab.__init__` beyond the shared
+        set (game, audio_path, scroll_ms, scroll_mode, play_rate).
+        `chart_ctx` is the (bpms, sm_offset, audio) tuple the GUI adapter's
+        `resolve_chart_context` returned."""
+        return {}
+
+    # --- note visualizer windows ------------------------------------------
+    def viz_windows(self, replay, judge=None, od=None):
+        """Return (windows, unit_label, rows_per_ms) for the note visualizer.
+        Used by render_chart_full / interactive in analysis/viz/note_visualizer.
+        `windows` is the list-of-tuples shape that viz expects (name, w_s, color)."""
+        raise NotImplementedError
+
+
+def resolve_standalone_replay(path, args=None):
+    """Pick the adapter that claims `path`, run its standalone resolver.
+    Returns (game_name, replay, bpms, sm_offset, audio, extra_kwargs)."""
+    for name, adapter in all_games().items():
+        if adapter.can_handle_path(path):
+            rep, bpms, off, audio, extra = adapter.resolve_standalone(
+                path, args=args)
+            return name, rep, bpms, off, audio, extra
+    raise ValueError(f'no adapter claims replay path: {path!r}')
+
 
 _REGISTRY: dict[str, GameAdapter] = {}
 _discovered = False
