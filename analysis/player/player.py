@@ -189,11 +189,11 @@ class Player:
         # self.notes now. The renderer/culling code still reads them via
         # the compatibility properties below so callers aren't scattered.
         from analysis.player.notes_model import (build_notes_model,
-                                                  link_miss_ghost_holds)
+                                                  link_miss_holds)
         self.notes = build_notes_model(replay, self.times,
                                         self.hold_tails, game)
-        link_miss_ghost_holds(self.notes, self.offsets, self.misses,
-                              self.miss_pressed)
+        link_miss_holds(self.notes, self.offsets, self.misses,
+                        self.miss_pressed)
 
         # SV (scroll velocity) — list of (time_sec, sv_multiplier). When enabled,
         # note positions use the piecewise-constant integral of SV over time
@@ -251,27 +251,25 @@ class Player:
     @property
     def _ghost_cols(self): return self.notes.ghost_cols
     @property
-    def _ghost_hold_ln_heads_ms(self): return self.notes.ghost_hold_ln_heads_ms
+    def _miss_hold_ln_heads_ms(self): return self.notes.miss_hold_ln_heads_ms
     @property
-    def _ghost_hold_press(self): return self.notes.ghost_hold_press
+    def _miss_hold_press(self): return self.notes.miss_hold_press
     @property
-    def _ghost_hold_release(self): return self.notes.ghost_hold_release
+    def _miss_hold_release(self): return self.notes.miss_hold_release
     @property
-    def _ghost_hold_cols(self): return self.notes.ghost_hold_cols
+    def _miss_hold_cols(self): return self.notes.miss_hold_cols
     @property
-    def _ghost_hold_max_dur(self): return self.notes.ghost_hold_max_dur
+    def _miss_hold_max_dur(self): return self.notes.miss_hold_max_dur
     @property
     def _ghost_sv_times(self): return self.notes.ghost_sv_times
     @property
-    def _ghost_hold_press_sv(self): return self.notes.ghost_hold_press_sv
+    def _miss_hold_press_sv(self): return self.notes.miss_hold_press_sv
     @property
-    def _ghost_hold_release_sv(self): return self.notes.ghost_hold_release_sv
+    def _miss_hold_release_sv(self): return self.notes.miss_hold_release_sv
     @property
-    def _ghost_hold_max_sv_dur(self): return self.notes.ghost_hold_max_sv_dur
+    def _miss_hold_max_sv_dur(self): return self.notes.miss_hold_max_sv_dur
     @property
-    def _miss_first_ghost_hold(self): return self.notes.miss_first_ghost_hold
-    @property
-    def _ghost_hold_extends_miss(self): return self.notes.ghost_hold_extends_miss
+    def _miss_first_hold(self): return self.notes.miss_first_hold
     @property
     def _miss_head_suppressed(self): return self.notes.miss_head_suppressed
     @property
@@ -431,21 +429,21 @@ class Player:
         else:
             m.ghost_sv_times = np.empty(0, dtype=np.float64)
 
-        if m.ghost_hold_press.size:
-            m.ghost_hold_press_sv = np.array(
+        if m.miss_hold_press.size:
+            m.miss_hold_press_sv = np.array(
                 [self._cumulative_sv_at(float(t))
-                 for t in m.ghost_hold_press],
+                 for t in m.miss_hold_press],
                 dtype=np.float64)
-            m.ghost_hold_release_sv = np.array(
+            m.miss_hold_release_sv = np.array(
                 [self._cumulative_sv_at(float(t))
-                 for t in m.ghost_hold_release],
+                 for t in m.miss_hold_release],
                 dtype=np.float64)
-            m.ghost_hold_max_sv_dur = float(
-                np.max(m.ghost_hold_release_sv - m.ghost_hold_press_sv))
+            m.miss_hold_max_sv_dur = float(
+                np.max(m.miss_hold_release_sv - m.miss_hold_press_sv))
         else:
-            m.ghost_hold_press_sv = np.empty(0, dtype=np.float64)
-            m.ghost_hold_release_sv = np.empty(0, dtype=np.float64)
-            m.ghost_hold_max_sv_dur = 0.0
+            m.miss_hold_press_sv = np.empty(0, dtype=np.float64)
+            m.miss_hold_release_sv = np.empty(0, dtype=np.float64)
+            m.miss_hold_max_sv_dur = 0.0
 
     def _cumulative_sv_at(self, t):
         """Integral of SV(t') dt' from the first timing point to t.

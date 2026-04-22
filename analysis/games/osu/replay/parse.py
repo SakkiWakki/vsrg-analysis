@@ -117,11 +117,12 @@ def _first_overlapping_missed_ln(missed, span_lo, span_hi):
     return None
 
 
-def _ghost_holds(sim, key_events_by_col, keycount):
-    """For each missed LN, emit `(ln_head, col, press_lo, press_hi)` for
-    the first press span that overlaps it. Rendered as a red hit-line
-    showing how long the player actually held; deduped so a single span
-    that straddles N consecutive missed LNs produces one entry, not N."""
+def _miss_holds(sim, key_events_by_col, keycount):
+    """For each missed LN, emit `(ln_head, col, press_t, release_t)` for
+    the first press span that overlaps it. Rendered as a red stroke
+    showing how long the player actually held the key for a miss;
+    deduped so a single span that straddles N consecutive missed LNs
+    produces one entry, not N."""
     missed_by_col = [[] for _ in range(keycount)]
     for r in sim:
         if (r['is_hold'] and r['judgement'] == 'miss'
@@ -223,7 +224,7 @@ def parse_replay(osr_path, osu_path=None, songs_dir=None, hit_window_ms=None):
         **arrays,
         'holds': holds_meta,
         'ghost_taps': _ghost_taps(sim, key_events_by_col, keycount),
-        'ghost_holds': _ghost_holds(sim, key_events_by_col, keycount),
+        'miss_holds': _miss_holds(sim, key_events_by_col, keycount),
         'keycount': keycount,
         'filepath': str(osr_path),
         'chart_path': str(osu_path),

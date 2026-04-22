@@ -21,7 +21,7 @@ class RenderContext:
     target_hi: float = 0.0
     use_sv_space: bool = False
     candidates: list[int] = field(default_factory=list)
-    visible_ghost_holds: list[int] = field(default_factory=list)
+    visible_miss_holds: list[int] = field(default_factory=list)
     visible_ghost_taps: list[int] = field(default_factory=list)
     plugin_data: dict = field(default_factory=dict)
 

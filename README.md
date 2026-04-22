@@ -307,7 +307,7 @@ from analysis.player.plugin_api import Stage
 
 def draw(ctx, stage):
     # ctx exposes ctx.painter for native Qt drawing, plus t_now, keycount,
-    # lane geometry, candidates, visible_ghost_holds, and helpers such as
+    # lane geometry, candidates, visible_miss_holds, and helpers such as
     # time_to_y()/lane_center().
     if stage != Stage.AFTER_JUDGMENT:
         return

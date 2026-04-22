@@ -10,7 +10,7 @@ imports every `<game>/adapter.py`, and registers the exposed adapter.
 2. Add `replay.py` (or whatever you need) implementing a parser that returns
    the usual dict with `noterows`, `columns`, `offsets`, `misses`,
    `notetypes`, `holds`, and optionally `keycount`, `chart_path`, `od`,
-   `sv_sections`, `ghost_taps`, `ghost_holds`, etc.
+   `sv_sections`, `ghost_taps`, `miss_holds`, etc.
 3. Add `adapter.py` exposing an `ADAPTER` instance of a `GameAdapter`
    subclass (see `analysis/core/game.py`):
 

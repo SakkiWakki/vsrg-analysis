@@ -1,14 +1,49 @@
 """Native Qt renderer for the embedded replay player."""
 from __future__ import annotations
 
+import bisect
 import math
+from dataclasses import dataclass
 
 from PySide6.QtCore import QPointF, QRectF
 from PySide6.QtGui import (QBrush, QColor, QFont, QImage, QPainter, QPen)
 
-from analysis.player.render import culling
+from analysis.player.render import culling, theme
+from analysis.player.hud.sidebar_api import SidebarContext
 from analysis.player.plugin_api import Stage
 from analysis.player.render.render_context import RenderContext
+
+
+# Roll bodies/tails use a fixed green per Etterna convention; keep it
+# local to the renderer since nothing else branches on roll colors.
+_ROLL_BODY = (90, 210, 90)
+_ROLL_TAIL = (60, 160, 60)
+_MISS_TAP_BODY = (77, 77, 77)
+_MISS_LN_BODY = (38, 38, 38)
+_RELEASE_GUIDE = (220, 220, 220)
+_MISS_X_OUTLINE = (255, 60, 60, 110)
+
+
+@dataclass
+class _NoteView:
+    """Per-note values used across the draw helpers. Built once per
+    `_draw_notes` iteration so the sub-draws don't recompute them."""
+    i: int
+    col: int
+    y: int           # y of the note head in screen pixels
+    y_end: int       # y of the LN tail (== y when not an LN)
+    lx: int          # left edge of the lane
+    off: float       # hit offset in seconds (signed)
+    press_t: float   # head + off, seconds
+    release_t: float | None  # LN end + release offset, seconds
+    rel_off: float | None
+    end_t: float | None
+    is_ln: bool
+    is_roll: bool
+    miss: bool
+    ln_state: str    # 'upcoming' | 'tap' | 'held' | 'released' | 'missed' | 'missed_note'
+    note_color: tuple
+    jcolor: tuple    # judgement color for this note
 
 
 def _qcolor(color):
@@ -159,7 +194,7 @@ class QtPlayerRenderer:
         self._draw_chart_extras(ctx, painter)
         self.plugins.draw(Stage.AFTER_NOTES, ctx)
 
-        self._draw_ghost_holds(ctx, painter)
+        self._draw_miss_holds(ctx, painter)
         self._draw_ghost_taps(ctx, painter)
         self.plugins.draw(Stage.AFTER_GHOSTS, ctx)
 
@@ -190,163 +225,201 @@ class QtPlayerRenderer:
               (ctx.x0 + p.keycount * ctx.lane_w, ctx.judge_y), 2)
 
     def _draw_notes(self, ctx, painter):
-        p = ctx.player
         for i in ctx.candidates:
-            note_t = p.times[i]
-            c = p._columns_list[i]
-            if c >= p.keycount:
+            n = self._build_note_view(ctx, i)
+            if n is None:
                 continue
-            off = p.offsets[i]
-            miss = p.misses[i]
-            if miss and i < len(p._miss_head_suppressed):
-                if p._miss_head_suppressed[i]:
-                    continue
-            y = ctx.time_to_y(note_t)
-            lx = int(ctx.x0 + c * ctx.lane_w)
-            note_color = p.palette[c]
-
-            end_t = p._ln_tail_times[i]
-            is_ln = not math.isnan(end_t)
-            if is_ln:
-                rel_off = p.hold_release_offsets.get((p._noterows_list[i], c))
-            else:
-                rel_off = None
-                end_t = None
-            press_t = note_t + off
-            release_t = (end_t + (rel_off or 0.0)) if is_ln else None
-
-            if miss:
-                ln_state = 'missed' if is_ln else 'missed_note'
-            elif is_ln:
-                if ctx.t_now < press_t:
-                    ln_state = 'upcoming'
-                elif ctx.t_now < release_t:
-                    ln_state = 'held'
-                else:
-                    ln_state = 'released'
-            else:
-                ln_state = 'tap'
-
-            jcolor = p.judge_colors[p.note_judges[i]]
-            miss_red = p.judge_colors['miss']
-            dim_color = tuple(v // 2 for v in note_color)
-            miss_tap_color = (77, 77, 77)
-            miss_ln_color = (38, 38, 38)
-
-            # Rolls ('4'→'3') share the replay/noterow stream with holds
-            # but Etterna's noteskins color them green. Only the body
-            # and tail swap — the head still uses the lane palette so
-            # the player can tell what column it's in.
-            is_roll = (is_ln and p._roll_head_keys
-                       and (p._noterows_list[i], c) in p._roll_head_keys)
-            roll_body_color = (90, 210, 90)
-            roll_tail_color = (60, 160, 60)
-
-            if is_ln:
-                y_end = ctx.time_to_y(end_t)
-                held_body = roll_body_color if is_roll else note_color
-                released_body = roll_tail_color if is_roll else dim_color
-                if miss:
-                    body_top, body_bot, body_color = y_end, y, miss_ln_color
-                elif ln_state == 'upcoming':
-                    body_top, body_bot, body_color = y_end, y, held_body
-                elif ln_state == 'held':
-                    if p.press_hide:
-                        body_top, body_bot, body_color = y_end, ctx.judge_y, held_body
-                    else:
-                        body_top, body_bot, body_color = y_end, y, held_body
-                elif ln_state == 'released':
-                    if p.press_hide:
-                        body_top = body_bot = None
-                        body_color = None
-                    else:
-                        body_top, body_bot, body_color = y_end, ctx.judge_y, released_body
-                else:
-                    body_top = body_bot = None
-                    body_color = None
-
-                if body_color is not None and body_bot > body_top:
-                    self._draw_ln_body(painter, p.skin, lx, body_top,
-                                       body_bot, ctx.lane_w, body_color)
-
-                tail_visible = not (p.press_hide and ln_state == 'released'
-                                    and not miss)
-                tail_on_screen = (-ctx.screen_margin <= y_end
-                                  <= p.H + ctx.screen_margin)
-                if tail_visible and tail_on_screen:
-                    if miss:
-                        tail_color = miss_ln_color
-                    elif is_roll:
-                        tail_color = roll_tail_color
-                    else:
-                        tail_color = dim_color
-                    self._draw_ln_tail(painter, p.skin, lx, y_end,
-                                       ctx.lane_w, ctx.note_h, tail_color)
-
-                if (rel_off is not None and ln_state != 'released'
-                        and not miss and not p.press_hide):
-                    rel_y = y_end + rel_off * p.scroll_speed
-                    cx = lx + ctx.lane_w / 2
-                    _line(painter, (220, 220, 220), (cx, y_end), (cx, rel_y))
-                    _rect(painter, (220, 220, 220),
-                          (lx + 8, rel_y - 2, ctx.lane_w - 16, 4))
-
-            head_y = y
-            if is_ln and ln_state == 'held' and p.press_hide and not miss:
-                head_y = ctx.judge_y
-
-            if miss:
-                head_visible = True
-                head_color = miss_tap_color if not is_ln else miss_ln_color
-            elif p.press_hide:
-                if is_ln:
-                    head_visible = ln_state in ('upcoming', 'held')
-                else:
-                    head_visible = ln_state == 'tap' and ctx.t_now < press_t
-                head_color = note_color
-            else:
-                head_visible = ln_state in ('upcoming', 'tap', 'held')
-                head_color = note_color
-
+            if n.is_ln:
+                self._draw_ln_parts(ctx, painter, n)
+            head_visible = self._draw_note_head_if_visible(ctx, painter, n)
             if head_visible:
-                self._draw_note_head(painter, p.skin, lx, head_y, ctx.lane_w,
-                                     ctx.note_h, head_color)
+                self._draw_press_mark(ctx, painter, n)
+                if n.miss:
+                    self._draw_miss_x(painter, ctx, n)
 
-            miss_has_press = bool(miss and p.miss_pressed[i])
-            show_press_mark = ((not miss or miss_has_press) and head_visible
-                               and not (is_ln and ln_state == 'held'
-                                        and p.press_hide))
-            if show_press_mark:
-                joins_ghost_hold = bool(
-                    miss_has_press and is_ln and p._miss_first_ghost_hold[i] >= 0)
-                press_y = (ctx.time_to_y(press_t) if joins_ghost_hold
-                           else y + off * p.scroll_speed)
-                line_color = miss_red if miss else jcolor
-                cx = lx + ctx.lane_w / 2
-                _line(painter, line_color, (cx, y), (cx, press_y),
-                      2 if joins_ghost_hold else 1)
-                if not joins_ghost_hold:
-                    _rect(painter, line_color,
-                          (lx + 8, press_y - 2, ctx.lane_w - 16, 4))
+    def _build_note_view(self, ctx, i):
+        """Gather the per-note values the draw helpers need. Returns
+        `None` for notes that should be skipped entirely (off-lane,
+        or a miss whose head is subsumed by an earlier miss's hold)."""
+        p = ctx.player
+        col = p._columns_list[i]
+        if col >= p.keycount:
+            return None
+        if p.misses[i] and i < len(p._miss_head_suppressed) \
+                and p._miss_head_suppressed[i]:
+            return None
 
-            if miss and head_visible:
-                pad = 4
-                _rect_outline(painter, (255, 60, 60, 110),
-                              (lx + 4 - pad, y - ctx.note_h // 2 - pad,
-                               ctx.lane_w - 8 + pad * 2,
-                               ctx.note_h + pad * 2), 3)
-                cx = lx + ctx.lane_w / 2
-                _line(painter, jcolor, (cx - 10, y - 10),
-                      (cx + 10, y + 10), 2)
-                _line(painter, jcolor, (cx - 10, y + 10),
-                      (cx + 10, y - 10), 2)
+        note_t = p.times[i]
+        end_t = p._ln_tail_times[i]
+        is_ln = not math.isnan(end_t)
+        off = p.offsets[i]
+        press_t = note_t + off
+        if is_ln:
+            rel_off = p.hold_release_offsets.get((p._noterows_list[i], col))
+            release_t = end_t + (rel_off or 0.0)
+            y_end = ctx.time_to_y(end_t)
+        else:
+            rel_off = None
+            release_t = None
+            end_t = None
+            y_end = 0  # unused when not an LN
+
+        return _NoteView(
+            i=i, col=col,
+            y=ctx.time_to_y(note_t),
+            y_end=y_end,
+            lx=int(ctx.x0 + col * ctx.lane_w),
+            off=off,
+            press_t=press_t,
+            release_t=release_t,
+            rel_off=rel_off,
+            end_t=end_t,
+            is_ln=is_ln,
+            is_roll=bool(is_ln and p._roll_head_keys
+                         and (p._noterows_list[i], col) in p._roll_head_keys),
+            miss=bool(p.misses[i]),
+            ln_state=self._ln_state(ctx, press_t, release_t, is_ln, p.misses[i]),
+            note_color=p.palette[col],
+            jcolor=p.judge_colors[p.note_judges[i]],
+        )
+
+    @staticmethod
+    def _ln_state(ctx, press_t, release_t, is_ln, miss):
+        if miss:
+            return 'missed' if is_ln else 'missed_note'
+        if not is_ln:
+            return 'tap'
+        if ctx.t_now < press_t:
+            return 'upcoming'
+        if ctx.t_now < release_t:
+            return 'held'
+        return 'released'
+
+    def _draw_ln_parts(self, ctx, painter, n):
+        """Body fill, tail sprite, and the release-guide line."""
+        self._draw_ln_body_fill(ctx, painter, n)
+        self._draw_ln_tail_sprite(ctx, painter, n)
+        self._draw_ln_release_guide(ctx, painter, n)
+
+    def _draw_ln_body_fill(self, ctx, painter, n):
+        body = self._ln_body_span(ctx, n)
+        if body is None:
+            return
+        top, bot, color = body
+        if bot <= top:
+            return
+        self._draw_ln_body(painter, ctx.player.skin, n.lx, top, bot,
+                           ctx.lane_w, color)
+
+    def _draw_ln_tail_sprite(self, ctx, painter, n):
+        hidden_by_press_hide = (ctx.player.press_hide
+                                and n.ln_state == 'released' and not n.miss)
+        on_screen = -ctx.screen_margin <= n.y_end <= ctx.player.H + ctx.screen_margin
+        if hidden_by_press_hide or not on_screen:
+            return
+        self._draw_ln_tail(painter, ctx.player.skin, n.lx, n.y_end,
+                           ctx.lane_w, ctx.note_h, self._ln_tail_color(n))
+
+    def _draw_ln_release_guide(self, ctx, painter, n):
+        """White tick + line from tail to where the player released the
+        key. Only meaningful for successfully-held LNs in visible mode."""
+        p = ctx.player
+        has_release_offset = n.rel_off is not None
+        eligible_state = n.ln_state != 'released' and not n.miss
+        if not (has_release_offset and eligible_state and not p.press_hide):
+            return
+        rel_y = n.y_end + n.rel_off * p.scroll_speed
+        self._draw_lane_line(painter, _RELEASE_GUIDE, n.lx, ctx.lane_w,
+                             n.y_end, rel_y)
+        self._draw_tick(painter, _RELEASE_GUIDE, n.lx, rel_y, ctx.lane_w)
+
+    def _ln_body_span(self, ctx, n):
+        """Return `(top_y, bot_y, color)` for the LN body fill, or None
+        when no body should draw (e.g. released + press_hide)."""
+        p = ctx.player
+        held_color = _ROLL_BODY if n.is_roll else n.note_color
+        released_color = _ROLL_TAIL if n.is_roll else tuple(v // 2 for v in n.note_color)
+
+        if n.miss:
+            return n.y_end, n.y, _MISS_LN_BODY
+        if n.ln_state == 'upcoming':
+            return n.y_end, n.y, held_color
+        if n.ln_state == 'held':
+            bot = ctx.judge_y if p.press_hide else n.y
+            return n.y_end, bot, held_color
+        if n.ln_state == 'released' and not p.press_hide:
+            return n.y_end, ctx.judge_y, released_color
+        return None
+
+    @staticmethod
+    def _ln_tail_color(n):
+        if n.miss:
+            return _MISS_LN_BODY
+        if n.is_roll:
+            return _ROLL_TAIL
+        return tuple(v // 2 for v in n.note_color)
+
+    def _draw_note_head_if_visible(self, ctx, painter, n):
+        """Draw the note head sprite when appropriate; return whether it
+        was drawn (the press-mark and miss-X both key off this)."""
+        p = ctx.player
+        head_visible, head_color, head_y = self._head_style(ctx, n)
+        if head_visible:
+            self._draw_note_head(painter, p.skin, n.lx, head_y, ctx.lane_w,
+                                 ctx.note_h, head_color)
+        return head_visible
+
+    @staticmethod
+    def _head_style(ctx, n):
+        """`(visible, color, y)` — the head is hidden during held LNs in
+        press_hide mode (the held-body already covers the judge line)."""
+        p = ctx.player
+        if n.miss:
+            color = _MISS_LN_BODY if n.is_ln else _MISS_TAP_BODY
+            return True, color, n.y
+        if p.press_hide:
+            if n.is_ln:
+                visible = n.ln_state in ('upcoming', 'held')
+                y = ctx.judge_y if n.ln_state == 'held' else n.y
+            else:
+                visible = n.ln_state == 'tap' and ctx.t_now < n.press_t
+                y = n.y
+            return visible, n.note_color, y
+        return n.ln_state in ('upcoming', 'tap', 'held'), n.note_color, n.y
+
+    def _draw_press_mark(self, ctx, painter, n):
+        """Thin vertical line + tick showing where the player hit relative
+        to the note head. Skipped for missed LNs entirely for readability"""
+        p = ctx.player
+        if n.miss and n.is_ln and not p.miss_pressed[n.i]:
+            return
+        if n.is_ln and n.ln_state == 'held' and p.press_hide:
+            return
+
+        press_y = n.y + n.off * p.scroll_speed
+        color = p.judge_colors['miss'] if n.miss else n.jcolor
+        self._draw_lane_line(painter, color, n.lx, ctx.lane_w, n.y, press_y)
+        self._draw_tick(painter, color, n.lx, press_y, ctx.lane_w)
+
+    @staticmethod
+    def _draw_miss_x(painter, ctx, n):
+        """Red outline box + X through the note head."""
+        pad = 4
+        _rect_outline(painter, _MISS_X_OUTLINE,
+                      (n.lx + 4 - pad, n.y - ctx.note_h // 2 - pad,
+                       ctx.lane_w - 8 + pad * 2,
+                       ctx.note_h + pad * 2), 3)
+        cx = n.lx + ctx.lane_w / 2
+        _line(painter, n.jcolor, (cx - 10, n.y - 10),
+              (cx + 10, n.y + 10), 2)
+        _line(painter, n.jcolor, (cx - 10, n.y + 10),
+              (cx + 10, n.y - 10), 2)
 
     def _draw_chart_extras(self, ctx, painter):
         """Mines, lifts, fakes — chart-only notes that never hit the
         replay stream. Each sweep is a pair of bisects into the
         time-sorted arrays; we keep them in separate calls so adding
         a new type doesn't touch the hot tap/LN loop above."""
-        import bisect
         p = ctx.player
 
         mines_t = p._mine_times
@@ -386,51 +459,69 @@ class QtPlayerRenderer:
                                 ctx.lane_w, ctx.note_h,
                                 p.palette[col])
 
-    def _draw_ghost_holds(self, ctx, painter):
-        import bisect
-
+    def _draw_miss_holds(self, ctx, painter):
         p = ctx.player
-        ctx.visible_ghost_holds = []
-        if not p._ghost_hold_press.size:
+        ctx.visible_miss_holds = []
+        if not p._miss_hold_press.size:
             return
+
+        red = p.judge_colors['miss']
+        for k in self._visible_miss_hold_indices(ctx):
+            col = int(p._miss_hold_cols[k])
+            if col >= p.keycount:
+                continue
+            y_press = ctx.time_to_y(float(p._miss_hold_press[k]))
+            y_release = ctx.time_to_y(float(p._miss_hold_release[k]))
+            clipped = self._clip_to_screen(y_press, y_release, p.H)
+            if clipped is None:
+                continue
+            lane_x = int(ctx.x0 + col * ctx.lane_w)
+            top, bot = clipped
+            self._draw_lane_line(painter, red, lane_x, ctx.lane_w, top, bot,
+                                 width=2)
+            self._draw_tick(painter, red, lane_x, y_press, ctx.lane_w)
+            self._draw_tick(painter, red, lane_x, y_release, ctx.lane_w)
+            ctx.visible_miss_holds.append(k)
+
+    @staticmethod
+    def _visible_miss_hold_indices(ctx):
+        """Indices of miss-holds whose press→release span could touch the
+        screen, in the correct key space for the current scroll mode."""
+        p = ctx.player
         if ctx.use_sv_space:
-            gh_press_key = p._ghost_hold_press_sv
-            gh_release_key = p._ghost_hold_release_sv
-            gh_max_dur = p._ghost_hold_max_sv_dur
+            press_key, release_key = p._miss_hold_press_sv, p._miss_hold_release_sv
+            max_dur = p._miss_hold_max_sv_dur
         else:
-            gh_press_key = p._ghost_hold_press
-            gh_release_key = p._ghost_hold_release
-            gh_max_dur = p._ghost_hold_max_dur
-        gh_hi = bisect.bisect_right(gh_press_key, ctx.target_hi)
-        gh_lo = bisect.bisect_left(gh_press_key, ctx.target_lo - gh_max_dur)
-        gh_red = p.judge_colors['miss']
-        for k in range(gh_lo, gh_hi):
-            if float(gh_release_key[k]) < ctx.target_lo:
-                continue
-            gc = int(p._ghost_hold_cols[k])
-            if gc >= p.keycount:
-                continue
-            y_press = ctx.time_to_y(float(p._ghost_hold_press[k]))
-            y_release = ctx.time_to_y(float(p._ghost_hold_release[k]))
-            glx = int(ctx.x0 + gc * ctx.lane_w)
-            cx = glx + ctx.lane_w / 2
-            y_top = min(y_press, y_release)
-            y_bot = max(y_press, y_release)
-            if y_bot < 0 or y_top > p.H:
-                continue
-            y_top = max(0, y_top)
-            y_bot = min(p.H, y_bot)
-            _line(painter, gh_red, (cx, y_top), (cx, y_bot), 2)
-            if not p._ghost_hold_extends_miss[k]:
-                _rect(painter, gh_red,
-                      (glx + 8, y_press - 2, ctx.lane_w - 16, 4))
-            _rect(painter, gh_red,
-                  (glx + 8, y_release - 2, ctx.lane_w - 16, 4))
-            ctx.visible_ghost_holds.append(k)
+            press_key, release_key = p._miss_hold_press, p._miss_hold_release
+            max_dur = p._miss_hold_max_dur
+        lo = bisect.bisect_left(press_key, ctx.target_lo - max_dur)
+        hi = bisect.bisect_right(press_key, ctx.target_hi)
+        return [k for k in range(lo, hi)
+                if float(release_key[k]) >= ctx.target_lo]
+
+    @staticmethod
+    def _clip_to_screen(y_a, y_b, screen_h):
+        """Order `(y_a, y_b)` top-to-bottom and clip to `[0, screen_h]`.
+        Returns `None` when the span is fully off-screen."""
+        top, bot = min(y_a, y_b), max(y_a, y_b)
+        if bot < 0 or top > screen_h:
+            return None
+        return max(0, top), min(screen_h, bot)
+
+    @staticmethod
+    def _draw_tick(painter, color, lane_x, y, lane_w):
+        """Short horizontal bar centered in the lane at `y`. Used to mark
+        a discrete timing event (press, release, guide point)."""
+        _rect(painter, color, (lane_x + 8, y - 2, lane_w - 16, 4))
+
+    @staticmethod
+    def _draw_lane_line(painter, color, lane_x, lane_w, y0, y1, width=1):
+        """Vertical line down the lane's centerline from `y0` to `y1`.
+        Used to connect two timing events (head→press, press→release)."""
+        cx = lane_x + lane_w / 2
+        _line(painter, color, (cx, y0), (cx, y1), width)
 
     def _draw_ghost_taps(self, ctx, painter):
-        import bisect
-
         p = ctx.player
         ctx.visible_ghost_taps = []
         if not p._ghost_times.size:
@@ -448,8 +539,6 @@ class QtPlayerRenderer:
             ctx.visible_ghost_taps.append(k)
 
     def _draw_hud(self, ctx, painter):
-        from analysis.player.render import theme
-        from analysis.player.hud.sidebar_api import SidebarContext
         p = ctx.player
         sidebar_x = p.W - theme.SIDEBAR_WIDTH
         p.hud.clear_hitboxes()
