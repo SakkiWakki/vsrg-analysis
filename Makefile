@@ -74,6 +74,8 @@ NATIVE_STAMP := $(NATIVE_DIR)/.maturin-stamp
 $(NATIVE_STAMP): $(NATIVE_SRCS) | venv
 	$(Q)echo "[native] maturin develop --release"
 	$(Q)cd $(NATIVE_DIR) && ../../../../$(VENV_MATURIN) develop --release
+	$(Q)$(VENV_PY) -c "import osu_memory_native" \
+	    || { echo "[native] post-build import failed — venv mismatch?"; exit 1; }
 	$(Q)touch $@
 
 .PHONY: native
@@ -82,15 +84,26 @@ native: $(NATIVE_STAMP)
 # ─── gamescope overlay ─────────────────────────────────────────────────
 
 OVERLAY_SRCS := $(OVERLAY_DIR)/osu_overlay.c \
+                $(OVERLAY_DIR)/font_ttf.c \
+                $(OVERLAY_DIR)/font_ttf.h \
                 $(OVERLAY_DIR)/font8x8.h \
+                $(OVERLAY_DIR)/stb_truetype.h \
                 $(OVERLAY_DIR)/overlay_shm.h
 
 OVERLAY_CFLAGS := -O2 -Wall -Wextra $(shell pkg-config --cflags x11 gl 2>/dev/null)
 OVERLAY_LIBS   := $(shell pkg-config --libs x11 gl 2>/dev/null) -lm
 
+# stb_truetype.h intentionally has a sea of unused-function warnings
+# when compiled standalone; silence them only for font_ttf.c so the
+# rest of the overlay keeps -Wextra strict.
 $(OVERLAY_BIN): $(OVERLAY_SRCS)
 	$(Q)echo "[overlay] gcc $(notdir $@)"
-	$(Q)gcc $(OVERLAY_CFLAGS) -o $@ $(OVERLAY_DIR)/osu_overlay.c $(OVERLAY_LIBS)
+	$(Q)gcc $(OVERLAY_CFLAGS) \
+	    -Wno-unused-function -Wno-sign-compare -Wno-unused-but-set-variable \
+	    -o $@ \
+	    $(OVERLAY_DIR)/osu_overlay.c \
+	    $(OVERLAY_DIR)/font_ttf.c \
+	    $(OVERLAY_LIBS)
 
 .PHONY: overlay
 overlay: $(OVERLAY_BIN)

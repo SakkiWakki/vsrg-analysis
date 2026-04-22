@@ -46,7 +46,25 @@
 #include <unistd.h>
 
 #include "font8x8.h"
+#include "font_ttf.h"
 #include "overlay_shm.h"
+
+// Map a widget's px_scale (bitmap-era: 1.0 == 8 px tall) to a TTF
+// pixel height.
+//
+// Calibration: the bitmap font draws each glyph as solid 8×8 blocks
+// with no padding, so a `px_scale=s` glyph is exactly 8*s pixels of
+// visible ink. DejaVu Sans Mono's cap-height is ~0.7 of its em, so
+// to get the same visible ink height we need px_height ≈ 8*s / 0.7
+// ≈ 11.4*s. 11.0 rounds nicely and matches the header/body/small
+// triplet the HUD uses (px_scale 2.5/2.0/1.6 → 27/22/18 px TTF, which
+// reads cleanly at 1440p inside the bitmap-era panel bounds).
+//
+// If backgrounds still look tight or loose, the proper fix is for
+// HUD modules to size backgrounds via measure_text()/text_height()
+// rather than fixed normalized constants; tuning this knob is only
+// a global scalar.
+#define VSRG_TTF_HEIGHT_PER_PX_SCALE  11.0f
 
 // ─── Globals (small, C-program scale) ───────────────────────────────────
 
@@ -137,7 +155,7 @@ static void draw_glyph(char c, float x, float y, float px) {
     }
 }
 
-static void draw_text(const char *s, float x, float y, float px) {
+static void draw_text_bitmap(const char *s, float x, float y, float px) {
     glBegin(GL_QUADS);
     float cx = x;
     for (; *s; s++) {
@@ -148,16 +166,42 @@ static void draw_text(const char *s, float x, float y, float px) {
     glEnd();
 }
 
-// Width in pixels the renderer will use for a text string at scale
-// ``px``. Matches draw_text's per-glyph advance so drag hit-testing
-// can compute the same bounding box.
-static float measure_text(const char *s, float px) {
+static float measure_text_bitmap(const char *s, float px) {
     float w = 0.0f;
     for (; *s; s++) {
         if (*s == ' ') w += 4.0f * px;
         else           w += 9.0f * px;
     }
     return w;
+}
+
+// Font-agnostic wrappers. Use TTF when the atlas is available; fall
+// back to the 8x8 bitmap so the overlay still draws if DejaVu isn't
+// installed or the atlas bake fails. Kept in one place so the
+// measure/draw pair stay in sync — a mismatched pair would leave the
+// hit-test boxes wrong in edit mode.
+static void draw_text(const char *s, float x, float y, float px) {
+    if (font_ttf_ready()) {
+        font_ttf_draw(s, x, y, px * VSRG_TTF_HEIGHT_PER_PX_SCALE);
+    } else {
+        draw_text_bitmap(s, x, y, px);
+    }
+}
+
+static float measure_text(const char *s, float px) {
+    if (font_ttf_ready()) {
+        return font_ttf_measure(s, px * VSRG_TTF_HEIGHT_PER_PX_SCALE);
+    }
+    return measure_text_bitmap(s, px);
+}
+
+// Height of a text widget's bounding box at scale ``px``. resolve_box
+// used to hardcode 8*px for the bitmap font; with TTF we want the
+// requested design height so hit-testing lines up with what the user
+// sees.
+static float text_height(float px) {
+    if (font_ttf_ready()) return px * VSRG_TTF_HEIGHT_PER_PX_SCALE;
+    return 8.0f * px;
 }
 
 static void set_color_rgba32(uint32_t c) {
@@ -183,7 +227,7 @@ static ResolvedBox resolve_box(const VsrgOverlayWidget *w,
     float pw, ph;
     if (w->kind == VSRG_OVERLAY_KIND_TEXT) {
         pw = measure_text(w->text, w->px_scale);
-        ph = 8.0f * w->px_scale;
+        ph = text_height(w->px_scale);
     } else {
         pw = w->w * canvas_w;
         ph = w->h * canvas_h;
@@ -399,6 +443,11 @@ int main(int argc, char **argv) {
     if (!ctx) { fprintf(stderr, "[overlay] glXCreateNewContext failed\n"); return 1; }
     XMapWindow(dpy, win);
     glXMakeCurrent(dpy, win, ctx);
+
+    // Bake the TTF atlas now that we have a GL context. Failure is
+    // non-fatal — font_ttf_ready() stays 0 and the draw/measure
+    // wrappers fall back to the 8x8 bitmap font.
+    font_ttf_init();
 
     // Vsync.
     typedef void (*PFNGLXSWAPINTERVALEXTPROC)(Display *, GLXDrawable, int);
