@@ -45,26 +45,19 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "font8x8.h"
-#include "font_ttf.h"
 #include "overlay_shm.h"
+#include "render.h"
 
-// Map a widget's px_scale (bitmap-era: 1.0 == 8 px tall) to a TTF
-// pixel height.
+// Map a widget's px_scale (bitmap-era: 1.0 == 8 px tall) to a pixel
+// height. The bitmap font drew each glyph as solid 8×8 blocks with
+// no padding, so px_scale=s was s*8 px of visible ink. We preserve
+// that convention as a single scalar so the publisher's layout code
+// keeps working and the knob is easy to retune if we change fonts.
 //
-// Calibration: the bitmap font draws each glyph as solid 8×8 blocks
-// with no padding, so a `px_scale=s` glyph is exactly 8*s pixels of
-// visible ink. DejaVu Sans Mono's cap-height is ~0.7 of its em, so
-// to get the same visible ink height we need px_height ≈ 8*s / 0.7
-// ≈ 11.4*s. 11.0 rounds nicely and matches the header/body/small
-// triplet the HUD uses (px_scale 2.5/2.0/1.6 → 27/22/18 px TTF, which
-// reads cleanly at 1440p inside the bitmap-era panel bounds).
-//
-// If backgrounds still look tight or loose, the proper fix is for
-// HUD modules to size backgrounds via measure_text()/text_height()
-// rather than fixed normalized constants; tuning this knob is only
-// a global scalar.
-#define VSRG_TTF_HEIGHT_PER_PX_SCALE  11.0f
+// This lives here (not in render.c) because it's a widget-layout
+// contract between the Python publisher and the overlay, not a
+// font-rendering concern.
+#define VSRG_TEXT_HEIGHT_PER_PX_SCALE  8.0f
 
 // ─── Globals (small, C-program scale) ───────────────────────────────────
 
@@ -119,97 +112,20 @@ static void set_cardinal_prop(Display *dpy, Window w,
                     (unsigned char *)&value, 1);
 }
 
-// ─── Drawing primitives ─────────────────────────────────────────────────
+// ─── Text measurement in widget units ───────────────────────────────────
 
-static void rect_verts(float x, float y, float w, float h) {
-    glVertex2f(x,     y);
-    glVertex2f(x + w, y);
-    glVertex2f(x + w, y + h);
-    glVertex2f(x,     y + h);
+// The publisher addresses text by `px_scale` (bitmap-era). Convert to
+// the shim's pixel-height API here; everywhere below just calls these.
+static float px_height_for_scale(float px_scale) {
+    return px_scale * VSRG_TEXT_HEIGHT_PER_PX_SCALE;
 }
 
-static void draw_filled_rect(float x, float y, float w, float h) {
-    glBegin(GL_QUADS);
-    rect_verts(x, y, w, h);
-    glEnd();
+static float measure_text(const char *s, float px_scale) {
+    return render_text_width(s, px_height_for_scale(px_scale));
 }
 
-static void draw_outline_rect(float x, float y, float w, float h) {
-    glBegin(GL_LINE_LOOP);
-    glVertex2f(x,     y);
-    glVertex2f(x + w, y);
-    glVertex2f(x + w, y + h);
-    glVertex2f(x,     y + h);
-    glEnd();
-}
-
-static void draw_glyph(char c, float x, float y, float px) {
-    const Glyph8x8 *g = font_glyph(c);
-    for (int row = 0; row < 8; row++) {
-        uint8_t bits = (*g)[row];
-        for (int col = 0; col < 8; col++) {
-            if (bits & (0x80 >> col)) {
-                rect_verts(x + col * px, y + row * px, px, px);
-            }
-        }
-    }
-}
-
-static void draw_text_bitmap(const char *s, float x, float y, float px) {
-    glBegin(GL_QUADS);
-    float cx = x;
-    for (; *s; s++) {
-        if (*s == ' ') { cx += 4.0f * px; continue; }
-        draw_glyph(*s, cx, y, px);
-        cx += 9.0f * px;
-    }
-    glEnd();
-}
-
-static float measure_text_bitmap(const char *s, float px) {
-    float w = 0.0f;
-    for (; *s; s++) {
-        if (*s == ' ') w += 4.0f * px;
-        else           w += 9.0f * px;
-    }
-    return w;
-}
-
-// Font-agnostic wrappers. Use TTF when the atlas is available; fall
-// back to the 8x8 bitmap so the overlay still draws if DejaVu isn't
-// installed or the atlas bake fails. Kept in one place so the
-// measure/draw pair stay in sync — a mismatched pair would leave the
-// hit-test boxes wrong in edit mode.
-static void draw_text(const char *s, float x, float y, float px) {
-    if (font_ttf_ready()) {
-        font_ttf_draw(s, x, y, px * VSRG_TTF_HEIGHT_PER_PX_SCALE);
-    } else {
-        draw_text_bitmap(s, x, y, px);
-    }
-}
-
-static float measure_text(const char *s, float px) {
-    if (font_ttf_ready()) {
-        return font_ttf_measure(s, px * VSRG_TTF_HEIGHT_PER_PX_SCALE);
-    }
-    return measure_text_bitmap(s, px);
-}
-
-// Height of a text widget's bounding box at scale ``px``. resolve_box
-// used to hardcode 8*px for the bitmap font; with TTF we want the
-// requested design height so hit-testing lines up with what the user
-// sees.
-static float text_height(float px) {
-    if (font_ttf_ready()) return px * VSRG_TTF_HEIGHT_PER_PX_SCALE;
-    return 8.0f * px;
-}
-
-static void set_color_rgba32(uint32_t c) {
-    // Byte 0 = R, byte 3 = A (see analysis.overlay.api::rgba).
-    glColor4f(((c >>  0) & 0xff) / 255.0f,
-              ((c >>  8) & 0xff) / 255.0f,
-              ((c >> 16) & 0xff) / 255.0f,
-              ((c >> 24) & 0xff) / 255.0f);
+static float text_height(float px_scale) {
+    return render_text_height(px_height_for_scale(px_scale));
 }
 
 // ─── Widget layout (normalized → pixels) ────────────────────────────────
@@ -272,31 +188,41 @@ static void reverse_anchor(const VsrgOverlayWidget *w,
 
 // ─── Rendering ──────────────────────────────────────────────────────────
 
-static void render_widgets(const VsrgOverlayShm *s, int width, int height) {
+// Translucent colours used by edit-mode decorations. Packed in the
+// publisher's RGBA32 byte order (byte 0=R, 3=A) so they flow through
+// render_rect unchanged.
+#define RGBA_PACK(r, g, b, a) \
+    ((uint32_t)((r) | ((g) << 8) | ((b) << 16) | ((a) << 24)))
+#define EDIT_DIM            RGBA_PACK(0,   0,   0,   115)
+#define EDIT_HELP_BG        RGBA_PACK(0,   0,   0,   204)
+#define EDIT_HELP_TEXT      RGBA_PACK(255, 255, 255, 255)
+#define EDIT_OUTLINE_HOVER  RGBA_PACK(255, 217, 51,  255)
+#define EDIT_OUTLINE_IDLE   RGBA_PACK(255, 255, 255, 166)
+
+static void draw_widgets(const VsrgOverlayShm *s, int width, int height) {
     uint32_t n = s->n_widgets;
     if (n > VSRG_OVERLAY_MAX_WIDGETS) n = VSRG_OVERLAY_MAX_WIDGETS;
     for (uint32_t i = 0; i < n; i++) {
         const VsrgOverlayWidget *w = &s->widgets[i];
         if (w->kind == VSRG_OVERLAY_KIND_UNUSED) continue;
         ResolvedBox rb = resolve_box(w, width, height);
-        set_color_rgba32(w->color);
         if (w->kind == VSRG_OVERLAY_KIND_RECT) {
-            draw_filled_rect(rb.px, rb.py, rb.pw, rb.ph);
+            render_rect(rb.px, rb.py, rb.pw, rb.ph, w->color);
         } else if (w->kind == VSRG_OVERLAY_KIND_TEXT) {
-            draw_text(w->text, rb.px, rb.py, w->px_scale);
+            render_text(w->text, rb.px, rb.py,
+                        px_height_for_scale(w->px_scale), w->color);
         }
     }
 }
 
 // Edit-mode overlay: dim the whole canvas, then outline every
 // widget. If ``hover_idx`` >= 0, brighten that outline.
-static void render_edit_decorations(const VsrgOverlayShm *s,
-                                    int width, int height,
-                                    int hover_idx) {
-    // Full-screen dim quad so the player notices they're in edit
-    // mode and the widgets stand out.
-    glColor4f(0.0f, 0.0f, 0.0f, 0.45f);
-    draw_filled_rect(0, 0, (float)width, (float)height);
+static void draw_edit_decorations(const VsrgOverlayShm *s,
+                                  int width, int height,
+                                  int hover_idx) {
+    // Full-screen dim quad so the player notices they're in edit mode
+    // and the widgets stand out against the game.
+    render_rect(0, 0, (float)width, (float)height, EDIT_DIM);
 
     uint32_t n = s->n_widgets;
     if (n > VSRG_OVERLAY_MAX_WIDGETS) n = VSRG_OVERLAY_MAX_WIDGETS;
@@ -304,26 +230,20 @@ static void render_edit_decorations(const VsrgOverlayShm *s,
         const VsrgOverlayWidget *w = &s->widgets[i];
         if (w->kind == VSRG_OVERLAY_KIND_UNUSED) continue;
         ResolvedBox rb = resolve_box(w, width, height);
-        if ((int)i == hover_idx) {
-            glColor4f(1.0f, 0.85f, 0.2f, 1.0f);
-            glLineWidth(2.5f);
-        } else {
-            glColor4f(1.0f, 1.0f, 1.0f, 0.65f);
-            glLineWidth(1.0f);
-        }
-        // Pad the outline a couple pixels so text widgets don't
-        // have the outline clipped against the glyph pixels.
-        draw_outline_rect(rb.px - 2.0f, rb.py - 2.0f,
-                          rb.pw + 4.0f, rb.ph + 4.0f);
+        uint32_t col = ((int)i == hover_idx)
+                       ? EDIT_OUTLINE_HOVER : EDIT_OUTLINE_IDLE;
+        float stroke = ((int)i == hover_idx) ? 2.5f : 1.0f;
+        // Pad the outline a couple pixels so text widgets don't have
+        // the outline clipped against the glyph pixels.
+        render_rect_outline(rb.px - 2.0f, rb.py - 2.0f,
+                            rb.pw + 4.0f, rb.ph + 4.0f,
+                            col, stroke);
     }
-    glLineWidth(1.0f);
 
     // Help strip at top of screen.
-    glColor4f(0.0f, 0.0f, 0.0f, 0.8f);
-    draw_filled_rect(0, 0, (float)width, 28.0f);
-    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
-    draw_text("EDIT MODE  DRAG WIDGETS  SHIFT+TAB TO EXIT",
-              12.0f, 6.0f, 1.8f);
+    render_rect(0, 0, (float)width, 28.0f, EDIT_HELP_BG);
+    render_text("EDIT MODE  DRAG WIDGETS  SHIFT+TAB TO EXIT",
+                12.0f, 6.0f, px_height_for_scale(1.8f), EDIT_HELP_TEXT);
 }
 
 // Pick the topmost (last-rendered) widget under a pixel.
@@ -444,10 +364,13 @@ int main(int argc, char **argv) {
     XMapWindow(dpy, win);
     glXMakeCurrent(dpy, win, ctx);
 
-    // Bake the TTF atlas now that we have a GL context. Failure is
-    // non-fatal — font_ttf_ready() stays 0 and the draw/measure
-    // wrappers fall back to the 8x8 bitmap font.
-    font_ttf_init();
+    // Stand up the drawing shim now that we have a GL context. On
+    // failure we bail: there's no fallback renderer anymore, so an
+    // init failure means we can't draw anything usefully.
+    if (!render_init()) {
+        fprintf(stderr, "[overlay] render_init failed; aborting\n");
+        return 1;
+    }
 
     // Vsync.
     typedef void (*PFNGLXSWAPINTERVALEXTPROC)(Display *, GLXDrawable, int);
@@ -673,25 +596,21 @@ int main(int argc, char **argv) {
         }
 
         // ── Draw ────────────────────────────────────────────
+        // The shim manages projection / blend state inside
+        // begin/end; we only own the clear and the swap so
+        // gamescope composes against a transparent background.
         glViewport(0, 0, width, height);
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
         glClear(GL_COLOR_BUFFER_BIT);
 
-        glMatrixMode(GL_PROJECTION);
-        glLoadIdentity();
-        glOrtho(0, width, height, 0, -1, 1);
-        glMatrixMode(GL_MODELVIEW);
-        glLoadIdentity();
-
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
+        render_begin_frame(width, height);
         if (have) {
-            render_widgets(&snap, width, height);
+            draw_widgets(&snap, width, height);
             if (edit_mode) {
-                render_edit_decorations(&snap, width, height, hover_idx);
+                draw_edit_decorations(&snap, width, height, hover_idx);
             }
         }
+        render_end_frame();
 
         glXSwapBuffers(dpy, win);
         last_hash  = hash;

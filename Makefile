@@ -84,25 +84,33 @@ native: $(NATIVE_STAMP)
 # ─── gamescope overlay ─────────────────────────────────────────────────
 
 OVERLAY_SRCS := $(OVERLAY_DIR)/osu_overlay.c \
-                $(OVERLAY_DIR)/font_ttf.c \
-                $(OVERLAY_DIR)/font_ttf.h \
-                $(OVERLAY_DIR)/font8x8.h \
+                $(OVERLAY_DIR)/render.c \
+                $(OVERLAY_DIR)/render.h \
+                $(OVERLAY_DIR)/nanovg.c \
+                $(OVERLAY_DIR)/nanovg.h \
+                $(OVERLAY_DIR)/nanovg_gl.h \
+                $(OVERLAY_DIR)/fontstash.h \
                 $(OVERLAY_DIR)/stb_truetype.h \
+                $(OVERLAY_DIR)/stb_image.h \
                 $(OVERLAY_DIR)/overlay_shm.h
 
 OVERLAY_CFLAGS := -O2 -Wall -Wextra $(shell pkg-config --cflags x11 gl 2>/dev/null)
 OVERLAY_LIBS   := $(shell pkg-config --libs x11 gl 2>/dev/null) -lm
 
-# stb_truetype.h intentionally has a sea of unused-function warnings
-# when compiled standalone; silence them only for font_ttf.c so the
-# rest of the overlay keeps -Wextra strict.
+# nanovg.c + the bundled stb headers throw a swarm of -Wextra warnings
+# (unused functions/parameters, sign comparisons) that we don't want
+# to patch upstream. Suppress them only for the overlay binary; nothing
+# else in the repo uses these flags.
 $(OVERLAY_BIN): $(OVERLAY_SRCS)
 	$(Q)echo "[overlay] gcc $(notdir $@)"
 	$(Q)gcc $(OVERLAY_CFLAGS) \
-	    -Wno-unused-function -Wno-sign-compare -Wno-unused-but-set-variable \
+	    -Wno-unused-function -Wno-unused-parameter \
+	    -Wno-sign-compare -Wno-unused-but-set-variable \
+	    -Wno-misleading-indentation \
 	    -o $@ \
 	    $(OVERLAY_DIR)/osu_overlay.c \
-	    $(OVERLAY_DIR)/font_ttf.c \
+	    $(OVERLAY_DIR)/render.c \
+	    $(OVERLAY_DIR)/nanovg.c \
 	    $(OVERLAY_LIBS)
 
 .PHONY: overlay
