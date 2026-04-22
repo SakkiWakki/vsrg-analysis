@@ -122,6 +122,17 @@ class GameAdapter:
         `resolve_chart_context` returned."""
         return {}
 
+    # --- per-note-type drawer overrides -----------------------------------
+    def note_drawers(self) -> dict:
+        """Optional per-note-type drawer overrides. Return a dict whose
+        keys match the renderer's registry (see
+        `analysis/player/render/qt_renderer.py::QtPlayerRenderer._default_drawers`)
+        and whose values are callables matching that key's signature.
+        Anything not in the dict falls through to the renderer default.
+        Use this to reskin a specific note type per game (e.g. Etterna
+        mines vs osu hit-circles) without touching shared layout logic."""
+        return {}
+
     # --- note visualizer windows ------------------------------------------
     def viz_windows(self, replay, judge=None, od=None):
         """Return (windows, unit_label, rows_per_ms) for the note visualizer.

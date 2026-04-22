@@ -22,14 +22,15 @@ def _make_note(*, miss, is_ln, miss_pressed_i=True, off=0.0, ln_state='tap'):
     )
 
 
-def _make_press_ctx(miss_pressed=(True,)):
+def _make_press_ctx(renderer, miss_pressed=(True,)):
     player = SimpleNamespace(
         miss_pressed=np.array(miss_pressed, dtype=bool),
         press_hide=False,
         scroll_speed=1000.0,
         judge_colors={'miss': (255, 0, 0)},
     )
-    return SimpleNamespace(player=player, lane_w=80)
+    return SimpleNamespace(player=player, lane_w=80,
+                            drawers=renderer._defaults)
 
 
 def _patch_draw_recorders(renderer):
@@ -55,7 +56,7 @@ def test_missed_ln_skips_press_mark_when_pressed():
     renderer = QtPlayerRenderer(plugin_manager=SimpleNamespace())
     lines, ticks = _patch_draw_recorders(renderer)
 
-    ctx = _make_press_ctx(miss_pressed=(True,))
+    ctx = _make_press_ctx(renderer, miss_pressed=(True,))
     note = _make_note(miss=True, is_ln=True, off=-0.150, ln_state='missed')
 
     renderer._draw_press_mark(ctx, painter=None, n=note)
@@ -70,7 +71,7 @@ def test_missed_ln_skips_press_mark_when_not_pressed():
     renderer = QtPlayerRenderer(plugin_manager=SimpleNamespace())
     lines, ticks = _patch_draw_recorders(renderer)
 
-    ctx = _make_press_ctx(miss_pressed=(False,))
+    ctx = _make_press_ctx(renderer, miss_pressed=(False,))
     note = _make_note(miss=True, is_ln=True, off=1.0, ln_state='missed')
 
     renderer._draw_press_mark(ctx, painter=None, n=note)
@@ -84,7 +85,7 @@ def test_hit_tap_draws_press_mark():
     renderer = QtPlayerRenderer(plugin_manager=SimpleNamespace())
     lines, ticks = _patch_draw_recorders(renderer)
 
-    ctx = _make_press_ctx()
+    ctx = _make_press_ctx(renderer)
     note = _make_note(miss=False, is_ln=False, off=0.020, ln_state='tap')
 
     renderer._draw_press_mark(ctx, painter=None, n=note)
@@ -94,11 +95,12 @@ def test_hit_tap_draws_press_mark():
 
 
 def test_missed_tap_still_draws_press_mark():
-    """Missed non-LN draws a red press-mark — the rule only excludes LNs."""
+    """Missed non-LN draws a red press-mark — the rule only excludes LNs
+    and never-pressed misses."""
     renderer = QtPlayerRenderer(plugin_manager=SimpleNamespace())
     lines, ticks = _patch_draw_recorders(renderer)
 
-    ctx = _make_press_ctx(miss_pressed=(True,))
+    ctx = _make_press_ctx(renderer, miss_pressed=(True,))
     note = _make_note(miss=True, is_ln=False, off=0.080, ln_state='missed_note')
 
     renderer._draw_press_mark(ctx, painter=None, n=note)
@@ -106,6 +108,24 @@ def test_missed_tap_still_draws_press_mark():
     assert len(lines) == 1
     assert len(ticks) == 1
     assert lines[0][0] == (255, 0, 0)  # miss color
+
+
+def test_missed_tap_without_press_skips_press_mark():
+    """Regression: osu replays write a 1.0s sentinel offset for misses
+    the player never pressed. Drawing a press-mark for those produces a
+    full-second line that crosses unrelated notes on the same column,
+    visually connecting unrelated misses (TWO-TORIAL col=3, ~10.4s)."""
+    renderer = QtPlayerRenderer(plugin_manager=SimpleNamespace())
+    lines, ticks = _patch_draw_recorders(renderer)
+
+    ctx = _make_press_ctx(renderer, miss_pressed=(False,))
+    note = _make_note(miss=True, is_ln=False, off=1.0,
+                      ln_state='missed_note')
+
+    renderer._draw_press_mark(ctx, painter=None, n=note)
+
+    assert lines == []
+    assert ticks == []
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +185,37 @@ def test_culling_pad_zero_matches_legacy_window():
     ctx = _cull_ctx(player, target_lo=1.2, target_hi=2.8)
 
     assert culling.select_note_candidates(ctx) == [2]
+
+
+def test_adapter_drawer_override_takes_precedence():
+    """Regression: `GameAdapter.note_drawers()` entries must replace the
+    renderer's defaults for matching keys. A game can reskin any single
+    note-type without reimplementing the pipeline."""
+    renderer = QtPlayerRenderer(plugin_manager=SimpleNamespace())
+
+    calls = []
+
+    def custom_press_mark(painter, lx, lane_w, y_head, y_press, color):
+        calls.append(('press_mark', lx, y_head, y_press, color))
+
+    adapter = SimpleNamespace(note_drawers=lambda: {'press_mark': custom_press_mark})
+    player = SimpleNamespace(_adapter=adapter)
+
+    drawers = renderer._resolve_drawers(player)
+    assert drawers['press_mark'] is custom_press_mark
+    # Non-overridden keys still fall back to defaults.
+    assert drawers['tap_head'] is renderer._defaults['tap_head']
+
+
+def test_adapter_without_note_drawers_uses_all_defaults():
+    """Adapters that don't implement `note_drawers` still work — the
+    renderer falls back to every default without error."""
+    renderer = QtPlayerRenderer(plugin_manager=SimpleNamespace())
+    adapter = SimpleNamespace(note_drawers=lambda: {})
+    player = SimpleNamespace(_adapter=adapter)
+
+    drawers = renderer._resolve_drawers(player)
+    assert drawers == renderer._defaults
 
 
 def test_culling_pad_missing_attr_defaults_to_zero():

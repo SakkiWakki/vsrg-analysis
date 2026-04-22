@@ -176,6 +176,56 @@ class QtPlayerRenderer:
         self.big_font = QFont('monospace', 14)
         self.big_font.setBold(True)
         self.compat = QtPygameCompat()
+        self._defaults = self._default_drawers()
+        # Cache adapter-resolved drawer maps, keyed by adapter id so
+        # switching replays (and thus adapters) picks up the right set
+        # without rebuilding on every frame.
+        self._drawer_cache: dict = {}
+
+    # -----------------------------------------------------------------
+    # Drawer registry. Each key here is a per-note-type draw op that a
+    # game adapter may override via `GameAdapter.note_drawers()`.
+    #
+    # Signatures (every drawer takes `painter` first):
+    #   tap_head(painter, skin, lx, y, lane_w, note_h, color)
+    #   ln_body(painter, skin, lx, y_top, y_bot, lane_w, color)
+    #   ln_tail(painter, skin, lx, y, lane_w, note_h, color)
+    #   ln_release_guide(painter, lx, lane_w, y_tail, y_release)
+    #   mine(painter, lx, y, lane_w)
+    #   lift(painter, skin, lx, y, lane_w, note_h, color)
+    #   fake(painter, skin, lx, y, lane_w, note_h, color)
+    #   ghost_tap(painter, lx, y, lane_w, note_h)
+    #   press_mark(painter, lx, lane_w, y_head, y_press, color)
+    #   miss_x(painter, lx, y, lane_w, note_h, jcolor)
+    #   miss_hold_stroke(painter, lx, lane_w, y_top, y_bot,
+    #                    y_press, y_release, color)
+    # -----------------------------------------------------------------
+    def _default_drawers(self) -> dict:
+        return {
+            'tap_head': self._draw_note_head,
+            'ln_body': self._draw_ln_body,
+            'ln_tail': self._draw_ln_tail,
+            'ln_release_guide': self._default_ln_release_guide,
+            'mine': self._draw_mine,
+            'lift': self._draw_lift,
+            'fake': self._draw_fake,
+            'ghost_tap': self._draw_ghost_tap,
+            'press_mark': self._default_press_mark,
+            'miss_x': self._default_miss_x,
+            'miss_hold_stroke': self._default_miss_hold_stroke,
+        }
+
+    def _resolve_drawers(self, player) -> dict:
+        adapter = getattr(player, '_adapter', None)
+        cache_key = id(adapter)
+        cached = self._drawer_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        drawers = dict(self._defaults)
+        if adapter is not None:
+            drawers.update(adapter.note_drawers() or {})
+        self._drawer_cache[cache_key] = drawers
+        return drawers
 
     def build_context(self, player, painter, t_now):
         x0, lane_w = player._lane_geom()
@@ -190,6 +240,7 @@ class QtPlayerRenderer:
             judge_y=int(player.H * player.hit_line_y_frac),
             painter=painter,
         )
+        ctx.drawers = self._resolve_drawers(player)
         culling.prepare_time_window(ctx)
         ctx.candidates = culling.select_note_candidates(ctx)
         return ctx
@@ -248,7 +299,7 @@ class QtPlayerRenderer:
             if head_visible:
                 self._draw_press_mark(ctx, painter, n)
                 if n.miss:
-                    self._draw_miss_x(painter, ctx, n)
+                    self._draw_miss_x(ctx, painter, n)
 
     def _build_note_view(self, ctx, i):
         """Gather the per-note values the draw helpers need. Returns
@@ -321,8 +372,8 @@ class QtPlayerRenderer:
         top, bot, color = body
         if bot <= top:
             return
-        self._draw_ln_body(painter, ctx.player.skin, n.lx, top, bot,
-                           ctx.lane_w, color)
+        ctx.drawers['ln_body'](painter, ctx.player.skin, n.lx, top, bot,
+                               ctx.lane_w, color)
 
     def _draw_ln_tail_sprite(self, ctx, painter, n):
         hidden_by_press_hide = (ctx.player.press_hide
@@ -330,8 +381,8 @@ class QtPlayerRenderer:
         on_screen = -ctx.screen_margin <= n.y_end <= ctx.player.H + ctx.screen_margin
         if hidden_by_press_hide or not on_screen:
             return
-        self._draw_ln_tail(painter, ctx.player.skin, n.lx, n.y_end,
-                           ctx.lane_w, ctx.note_h, self._ln_tail_color(n))
+        ctx.drawers['ln_tail'](painter, ctx.player.skin, n.lx, n.y_end,
+                               ctx.lane_w, ctx.note_h, self._ln_tail_color(n))
 
     def _draw_ln_release_guide(self, ctx, painter, n):
         """White tick + line from tail to where the player released the
@@ -342,9 +393,13 @@ class QtPlayerRenderer:
         if not (has_release_offset and eligible_state and not p.press_hide):
             return
         rel_y = n.y_end + n.rel_off * p.scroll_speed
-        self._draw_lane_line(painter, _RELEASE_GUIDE, n.lx, ctx.lane_w,
-                             n.y_end, rel_y)
-        self._draw_tick(painter, _RELEASE_GUIDE, n.lx, rel_y, ctx.lane_w)
+        ctx.drawers['ln_release_guide'](painter, n.lx, ctx.lane_w,
+                                         n.y_end, rel_y)
+
+    def _default_ln_release_guide(self, painter, lx, lane_w, y_tail, y_release):
+        self._draw_lane_line(painter, _RELEASE_GUIDE, lx, lane_w,
+                             y_tail, y_release)
+        self._draw_tick(painter, _RELEASE_GUIDE, lx, y_release, lane_w)
 
     def _ln_body_span(self, ctx, n):
         """Return `(top_y, bot_y, color)` for the LN body fill, or None
@@ -378,8 +433,8 @@ class QtPlayerRenderer:
         p = ctx.player
         head_visible, head_color, head_y = self._head_style(ctx, n)
         if head_visible:
-            self._draw_note_head(painter, p.skin, n.lx, head_y, ctx.lane_w,
-                                 ctx.note_h, head_color)
+            ctx.drawers['tap_head'](painter, p.skin, n.lx, head_y, ctx.lane_w,
+                                     ctx.note_h, head_color)
         return head_visible
 
     @staticmethod
@@ -402,47 +457,59 @@ class QtPlayerRenderer:
 
     def _draw_press_mark(self, ctx, painter, n):
         """Thin vertical line + tick showing where the player hit relative
-        to the note head. Skipped for missed LNs entirely for readability"""
+        to the note head. Skipped for missed LNs entirely for readability,
+        and for any miss where the player never actually pressed — the
+        parser writes a 1.0s sentinel offset for those, which would
+        otherwise draw a full-second line that crosses unrelated notes."""
         p = ctx.player
         if n.miss and n.is_ln:
+            return
+        if n.miss and not p.miss_pressed[n.i]:
             return
         if n.is_ln and n.ln_state == 'held' and p.press_hide:
             return
 
         press_y = n.y + n.off * p.scroll_speed
         color = p.judge_colors['miss'] if n.miss else n.jcolor
-        self._draw_lane_line(painter, color, n.lx, ctx.lane_w, n.y, press_y)
-        self._draw_tick(painter, color, n.lx, press_y, ctx.lane_w)
+        ctx.drawers['press_mark'](painter, n.lx, ctx.lane_w, n.y, press_y,
+                                   color)
+
+    def _default_press_mark(self, painter, lx, lane_w, y_head, y_press, color):
+        self._draw_lane_line(painter, color, lx, lane_w, y_head, y_press)
+        self._draw_tick(painter, color, lx, y_press, lane_w)
+
+    def _draw_miss_x(self, ctx, painter, n):
+        """Red outline box + X through the note head."""
+        ctx.drawers['miss_x'](painter, n.lx, n.y, ctx.lane_w, ctx.note_h,
+                               n.jcolor)
 
     @staticmethod
-    def _draw_miss_x(painter, ctx, n):
-        """Red outline box + X through the note head."""
+    def _default_miss_x(painter, lx, y, lane_w, note_h, jcolor):
         pad = 4
-        hx, hy, hw, hh = _head_rect(n.lx, n.y, ctx.lane_w, ctx.note_h)
+        hx, hy, hw, hh = _head_rect(lx, y, lane_w, note_h)
         _rect_outline(painter, _MISS_X_OUTLINE,
                       (hx - pad, hy - pad, hw + pad * 2, hh + pad * 2), 3)
-        cx = n.lx + ctx.lane_w / 2
-        _line(painter, n.jcolor, (cx - 10, n.y - 10),
-              (cx + 10, n.y + 10), 2)
-        _line(painter, n.jcolor, (cx - 10, n.y + 10),
-              (cx + 10, n.y - 10), 2)
+        cx = lx + lane_w / 2
+        _line(painter, jcolor, (cx - 10, y - 10), (cx + 10, y + 10), 2)
+        _line(painter, jcolor, (cx - 10, y + 10), (cx + 10, y - 10), 2)
 
     def _draw_chart_extras(self, ctx, painter):
         """Mines, lifts, fakes — chart-only notes that never hit the
         replay stream. Each sweep is a pair of bisects into the
         time-sorted arrays."""
         p = ctx.player
+        d = ctx.drawers
 
         def draw_mine(col, y):
-            self._draw_mine(painter, ctx.lane_x(col), y, ctx.lane_w)
+            d['mine'](painter, ctx.lane_x(col), y, ctx.lane_w)
 
         def draw_lift(col, y):
-            self._draw_lift(painter, p.skin, ctx.lane_x(col), y,
-                            ctx.lane_w, ctx.note_h, p.palette[col])
+            d['lift'](painter, p.skin, ctx.lane_x(col), y,
+                      ctx.lane_w, ctx.note_h, p.palette[col])
 
         def draw_fake(col, y):
-            self._draw_fake(painter, p.skin, ctx.lane_x(col), y,
-                            ctx.lane_w, ctx.note_h, p.palette[col])
+            d['fake'](painter, p.skin, ctx.lane_x(col), y,
+                      ctx.lane_w, ctx.note_h, p.palette[col])
 
         self._sweep_chart_notes(ctx, p._mine_times, p._mine_cols, draw_mine)
         self._sweep_chart_notes(ctx, p._lift_times, p._lift_cols, draw_lift)
@@ -468,6 +535,7 @@ class QtPlayerRenderer:
             return
 
         red = p.judge_colors['miss']
+        draw = ctx.drawers['miss_hold_stroke']
         for k in self._visible_miss_hold_indices(ctx):
             col = int(p._miss_hold_cols[k])
             if col >= p.keycount:
@@ -477,13 +545,16 @@ class QtPlayerRenderer:
             clipped = self._clip_to_screen(y_press, y_release, p.H)
             if clipped is None:
                 continue
-            lane_x = int(ctx.lane_x(col))
             top, bot = clipped
-            self._draw_lane_line(painter, red, lane_x, ctx.lane_w, top, bot,
-                                 width=2)
-            self._draw_tick(painter, red, lane_x, y_press, ctx.lane_w)
-            self._draw_tick(painter, red, lane_x, y_release, ctx.lane_w)
+            draw(painter, int(ctx.lane_x(col)), ctx.lane_w, top, bot,
+                 y_press, y_release, red)
             ctx.visible_miss_holds.append(k)
+
+    def _default_miss_hold_stroke(self, painter, lx, lane_w, y_top, y_bot,
+                                   y_press, y_release, color):
+        self._draw_lane_line(painter, color, lx, lane_w, y_top, y_bot, width=2)
+        self._draw_tick(painter, color, lx, y_press, lane_w)
+        self._draw_tick(painter, color, lx, y_release, lane_w)
 
     @staticmethod
     def _visible_miss_hold_indices(ctx):
@@ -536,8 +607,8 @@ class QtPlayerRenderer:
             if gc >= p.keycount:
                 continue
             gy = ctx.time_to_y(float(p._ghost_times[k]))
-            self._draw_ghost_tap(painter, ctx.lane_x(gc), gy,
-                                 ctx.lane_w, ctx.note_h)
+            ctx.drawers['ghost_tap'](painter, ctx.lane_x(gc), gy,
+                                      ctx.lane_w, ctx.note_h)
             ctx.visible_ghost_taps.append(k)
 
     def _draw_hud(self, ctx, painter):
