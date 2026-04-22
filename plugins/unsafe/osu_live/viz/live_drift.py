@@ -146,14 +146,16 @@ def _start_osu_with_overlay():
     except Exception:
         cfg = None
     overlays = discover_overlays(config=cfg)
-    try:
-        pub = overlays.start('osu_live', width=int(width), height=int(height),
-                             config_store=cfg)
-    except RuntimeError as exc:
-        QMessageBox.warning(
-            parent, 'Start osu (with overlay)',
-            f'{exc}\n\nEnable the overlay in the Plugins dialog and try again.')
-        return
+    pub = overlays.start(width=int(width), height=int(height),
+                         config_store=cfg)
+    # Print the diagnostic log path to stdout once so the user knows
+    # where to tail. Gamescope's own spam will bury anything else, but
+    # this single line lets them find the file.
+    from analysis import diag as _diag
+    _p = _diag.path()
+    if _p is not None:
+        print(f'[osu_live] diagnostic log: {_p}', flush=True)
+        _diag.log('osu_live', '=== overlay session start ===')
     app = QApplication.instance()
     if app is not None:
         app._osu_live_overlay_registry = overlays

@@ -11,8 +11,10 @@
 // and get a HUD in-game without touching C or rebuilding.
 //
 // Shm contract: analysis/games/osu/gamescope_overlay/overlay_shm.h
-// Launch: osu_overlay --feed /dev/shm/vsrg_overlay_<plugin_key>
+// Launch: osu_overlay --feed /dev/shm/vsrg_overlay
 //                     --width W --height H
+// (One shm per session — every Python publisher writes into the same
+// segment. The C reader doesn't care which plugin owns each widget.)
 //
 // Controls:
 //   Shift+Tab  toggle edit mode. In edit mode, widgets get a dashed
@@ -315,9 +317,7 @@ int main(int argc, char **argv) {
         }
     }
     if (!feed) {
-        // Back-compat with the old osu_live path so existing
-        // runner scripts keep working during the transition.
-        feed = "/dev/shm/vsrg_overlay_osu_live";
+        feed = "/dev/shm/vsrg_overlay";
     }
     g_feed_path = feed;
 

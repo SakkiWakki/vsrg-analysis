@@ -1,9 +1,23 @@
-"""Built-in sidebar section: per-judgment window + miss counts, with
-a judge switcher row. The actual judge→windows mapping is owned by the
-game's adapter; this plugin is game-agnostic — it just nudges through
-whatever the adapter's `nudge_judge` accepts."""
+"""Built-in judgments component.
+
+Shows per-window hit counts for the current judge, with nudge buttons
+to shift the judge on games that support it.
+
+Ported to the unified component API: one ``draw(ctx)`` renders on the
+sidebar (where ``judge_nudge`` clicks do route back to the player) and
+on any future overlay that exposes ``judgment_counts`` in its game
+state. On the gamescope overlay today the buttons render as chrome
+only since clicks don't route back — that's fine, the live readout is
+the useful part there.
+"""
 from __future__ import annotations
 
+from analysis.components import (
+    ComponentManifest,
+    DataNotAvailable,
+    SURFACE_OVERLAY,
+    SURFACE_SIDEBAR,
+)
 from analysis.player.render import theme
 
 
@@ -13,56 +27,78 @@ _NUDGE_BTN_W = 28
 _OSU_OD_STEP = 0.1
 
 
-def _draw_judgments(sctx):
-    p = sctx.player
-    sctx.spacer()
-    sctx.draw_heading('Judgments')
+def _draw(ctx):
+    ctx.spacer()
+    ctx.draw_heading('Judgments')
 
-    # Switcher row: [−] {label} [+], same layout as the rate slider.
-    step = 1.0 if p.game == 'etterna' else _OSU_OD_STEP
-    row_y = sctx.y
-    sctx.button_at((sctx.col_x, row_y, _NUDGE_BTN_W, theme.ROW_BUTTON_H),
-                   '−', 'judge_nudge', -step, center=True)
-    sctx.button_at((sctx.col_x + sctx.col_w - _NUDGE_BTN_W, row_y,
-                    _NUDGE_BTN_W, theme.ROW_BUTTON_H),
-                   '+', 'judge_nudge', step, center=True)
-    # Centered label between the nudge buttons (no hitbox).
-    readout_x = sctx.col_x + _NUDGE_BTN_W
-    readout_w = sctx.col_w - 2 * _NUDGE_BTN_W
-    label = str(p.judge_label)
-    sctx.text(label,
-              readout_x + max(0, (readout_w - len(label) * 6) // 2),
-              row_y + theme.TEXT_BASELINE_BUTTON,
-              theme.BTN_FG)
-    sctx.y += theme.ROW_TALL_H
+    # Switcher row. The data needed for the label (judge_label) is
+    # replay-side only — overlay data source raises DataNotAvailable.
+    # Skip the row cleanly on surfaces without it.
+    try:
+        judge_label = ctx.data.judge_label()
+        game = ctx.data.game()
+        step = 1.0 if game == 'etterna' else _OSU_OD_STEP
+        slots = ctx.split_row(n=3)
+        left, mid, right = slots
+        ctx.button_at((left[0], ctx.y, _NUDGE_BTN_W, theme.ROW_BUTTON_H),
+                      '−', 'judge_nudge', -step, center=True)
+        ctx.button_at((right[0] + right[1] - _NUDGE_BTN_W, ctx.y,
+                       _NUDGE_BTN_W, theme.ROW_BUTTON_H),
+                      '+', 'judge_nudge', step, center=True)
+        readout_x = _NUDGE_BTN_W
+        readout_w = ctx.w - 2 * _NUDGE_BTN_W
+        ctx.text(judge_label,
+                 readout_x + max(0, (readout_w - len(judge_label) * 6) // 2),
+                 ctx.y + theme.TEXT_BASELINE_BUTTON,
+                 color=theme.BTN_FG)
+        ctx.y += theme.ROW_TALL_H
+    except DataNotAvailable:
+        # Overlay side: no judge concept, skip the switcher.
+        pass
 
-    counts = {n: 0 for n, _ in p.windows}
-    counts['miss'] = 0
-    for j in p.note_judges:
-        counts[j] = counts.get(j, 0) + 1
-    for name, w in p.windows:
-        line = f'{name:<6}  ±{w*1000:5.1f}ms  n={counts[name]}'
-        sctx.draw_text(line, color=p.judge_colors[name])
-    sctx.draw_text(f'miss             n={counts["miss"]}',
-                   color=p.judge_colors['miss'])
+    counts = ctx.data.judgment_counts()
+    try:
+        colors = ctx.data.judgment_colors()
+    except DataNotAvailable:
+        # Overlay side: fall back to a single color for all windows.
+        colors = {}
 
-    # Mines: hit count is XML-only (.bin replay doesn't record which
-    # mines were triggered), total is chart-derived. We fold both into
-    # the same list so the player sees mines alongside the regular
-    # judgments instead of a separate section. "n=hit/total" mirrors
-    # the in-game results screen ("Mines 012/1337").
-    xml_j = getattr(p, 'xml_judgments', None) or {}
-    hit = xml_j.get('HitMine')
-    total_mines = len(p.replay.get('chart_mines') or [])
-    if hit is not None or total_mines:
-        if total_mines:
-            line = f'mines hit        n={int(hit or 0)}/{total_mines}'
+    try:
+        windows = ctx.data.judgment_windows()
+    except DataNotAvailable:
+        # Overlay-only path: just show counts in the order the source
+        # iterates.
+        windows = [(name, 0.0) for name in counts if name != 'miss']
+
+    default_color = theme.BTN_FG
+    for name, width_s in windows:
+        count = counts.get(name, 0)
+        if width_s:
+            line = f'{name:<6}  ±{width_s*1000:5.1f}ms  n={count}'
         else:
-            line = f'mines hit        n={int(hit or 0)}'
-        sctx.draw_text(line, color=p.judge_colors.get('miss', (220, 60, 60)))
+            line = f'{name:<10}  n={count}'
+        ctx.draw_text(line, color=colors.get(name, default_color))
+
+    miss_count = counts.get('miss', 0)
+    ctx.draw_text(f'miss             n={miss_count}',
+                  color=colors.get('miss', (220, 60, 60)))
 
 
-def register_sidebar(add):
-    add('Judgments', _draw_judgments, priority=200, key='builtin:judgments',
-        draggable=True, default_free_xy=(0.02, 0.04),
-        default_size=(210, 200))
+MANIFEST = ComponentManifest(
+    key='builtin:judgments',
+    name='Judgments',
+    supported_surfaces={SURFACE_SIDEBAR, SURFACE_OVERLAY},
+    requires_data={'judgment_counts'},
+    optional_data={'judgment_windows', 'judgment_colors', 'judge_label',
+                   'game'},
+    sidebar_priority=200,
+    sidebar_draggable=True,
+    sidebar_default_free_xy=(0.02, 0.04),
+    sidebar_default_size=(210, 200),
+    overlay_default_xy=(0.02, 0.04),
+    overlay_default_size=(0.18, 0.22),
+)
+
+
+def register_components(add):
+    add(MANIFEST, _draw)

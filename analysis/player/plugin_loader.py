@@ -35,9 +35,15 @@ class PluginManager:
 
     def __init__(self, config=None):
         from analysis.config import get_config
+        from analysis.components.registry import ComponentRegistry
         self._config = config if config is not None else get_config()
         self._plugins: list[DrawPlugin] = []
         self.sidebar = SidebarSectionRegistry(config=self._config)
+        # Unified component registry — the source of truth for plugins
+        # that opted into the new cross-surface API. Ported sidebar
+        # sections feed in here too; ``discover`` bridges them back
+        # into ``self.sidebar`` so the existing renderer picks them up.
+        self.components = ComponentRegistry()
         self.bundles = []
         self._config_sub = self._config.subscribe(
             'plugins', self._on_config_change)
@@ -150,6 +156,10 @@ class PluginManager:
     def discover(cls, extra_paths=None, active_theme_key=None, config=None):
         from analysis.plugins import discover_bundles
         from analysis.player.render import theme as theme_mod
+        from analysis.components.registry import (
+            bridge_into_sidebar_registry,
+            discover_from_bundles,
+        )
         mgr = cls(config=config)
         mgr.bundles = discover_bundles(extra_paths)
         for bundle in mgr.bundles:
@@ -164,6 +174,12 @@ class PluginManager:
                         + list(bundle.sidebar_modules)
                         + list(getattr(bundle, 'viz_modules', []) or [])):
                 mgr._register_library_actions(mod, bundle)
+        # Unified components: discover + bridge to sidebar. Overlay
+        # bridging happens at overlay-registry discovery time (see
+        # analysis/overlay/publisher.py::discover_overlays), since
+        # the overlay registry has its own lifecycle.
+        mgr.components = discover_from_bundles(mgr.bundles)
+        bridge_into_sidebar_registry(mgr.components, mgr.sidebar)
         # Activate the user-chosen theme if the owning bundle was found.
         for bundle in mgr.bundles:
             if bundle.theme_module and bundle.key == active_theme_key:

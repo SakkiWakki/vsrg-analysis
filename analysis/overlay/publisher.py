@@ -77,7 +77,7 @@ from analysis.overlay.api import (
 
 MAGIC        = 0x56524F56
 VERSION      = 2
-MAX_WIDGETS  = 32
+MAX_WIDGETS  = 128
 TEXT_LEN     = 48
 
 KIND_UNUSED = 0
@@ -194,11 +194,15 @@ class OverlayPublisher:
     def __init__(self, plugin_key: str, *, width: int = 2560,
                  height: int = 1440,
                  config_store=None,
-                 config_prefix: str | None = None):
+                 config_prefix: str | None = None,
+                 shm_path: str | None = None):
         self.plugin_key   = plugin_key
         self.width        = int(width)
         self.height       = int(height)
-        self._shm_path    = f'/dev/shm/vsrg_overlay_{plugin_key}'
+        # Single global shm by default — every plugin in the live
+        # session draws into the same segment. Tests may pass a
+        # per-test path to keep parallel runs from racing on it.
+        self._shm_path    = shm_path or '/dev/shm/vsrg_overlay'
         self._fd: int | None = None
         self._mm: mmap.mmap | None = None
         self._seq         = 0
@@ -516,12 +520,23 @@ class OverlayPublisher:
         return self.run_thread(_build, hz=hz, name=name)
 
 
+# Session-wide overlay refresh rate. Hardcoded — every spec drew at
+# its own ``hz`` when each lived in its own publisher; now they share
+# one draw thread, so the slowest plugin doesn't slow down the rest
+# and the fastest doesn't oversample everyone else.
+SESSION_HZ = 30.0
+
+# Stable key for the single session publisher. Used as the config
+# bucket prefix for persisted layouts.
+SESSION_KEY = 'vsrg'
+
+
 @dataclass
 class OverlaySpec:
     key: str
     name: str
     draw: Callable[[OverlayFrame], None]
-    hz: float = 30.0
+    hz: float = SESSION_HZ  # kept on the spec for back-compat; ignored at draw
     width: int = 2560
     height: int = 1440
     module: str = ''
@@ -529,29 +544,40 @@ class OverlaySpec:
 
     @property
     def feed_path(self) -> str:
-        return f'/dev/shm/vsrg_overlay_{self.key}'
+        return '/dev/shm/vsrg_overlay'
 
 
 class OverlayRegistry:
-    """Registry for ``overlay/*.py`` plugin modules.
+    """Registry for ``overlay/*.py`` plugin modules and unified components.
 
     Overlay modules expose ``register_overlay(add)`` and call
-    ``add(name, draw_fn, key=..., hz=...)``. The draw function receives an
-    :class:`OverlayFrame`, not an ``OverlayPublisher``, so sandboxed plugin
-    code can emit widgets without touching files, mmap, threads, or shm.
+    ``add(name, draw_fn, key=..., hz=...)``. Unified components are
+    bridged in via :func:`analysis.components.registry.bridge_into_overlay_registry`.
+
+    All enabled specs share one :class:`OverlayPublisher` and one render
+    thread. Each tick: open one frame, call every enabled spec's
+    ``draw(frame)`` in registration order, commit. A spec that raises is
+    caught and latched-off so a buggy plugin can't blank the overlay.
     """
 
     def __init__(self, config=None):
         from analysis.config import get_config
         self._config = config if config is not None else get_config()
         self._overlays: list[OverlaySpec] = []
-        self._runtime: dict[str, tuple[OverlayPublisher, threading.Thread]] = {}
-        self._last_start: dict[str, tuple[int | None, int | None, object]] = {}
-        self._restart_on_enable: set[str] = set()
+        self._runtime: tuple[OverlayPublisher, threading.Thread] | None = None
+        self._last_start: tuple[int | None, int | None, object] | None = None
+        # Specs whose draw raised this session — kept off until restart
+        # or until the user re-enables them through the dialog (mirrors
+        # PluginManager._runtime_disabled).
+        self._runtime_disabled: set[str] = set()
+        # Diagnostic: print the spec list once on the first session tick
+        # so logs reveal whether the bridge actually registered the
+        # unified-component spec the user is hunting for.
+        self._logged_first_tick = False
         self._config_sub = self._config.subscribe(
             'plugins', self._on_config_change)
 
-    def add(self, name, draw, *, key=None, hz: float = 30.0,
+    def add(self, name, draw, *, key=None, hz: float = SESSION_HZ,
             width: int = 2560, height: int = 1440, enabled: bool = True,
             module: str = '') -> None:
         spec_key = str(key) if key is not None else _default_overlay_key(
@@ -578,35 +604,71 @@ class OverlayRegistry:
                 return spec
         return None
 
-    def start(self, key: str, *, width: int | None = None,
-              height: int | None = None, config_store=None) -> OverlayPublisher:
-        spec = self.get(key)
-        if spec is None:
-            raise KeyError(f'unknown overlay: {key}')
-        if not spec.enabled:
-            raise RuntimeError(f'overlay is disabled: {key}')
-        existing = self._runtime.get(spec.key)
-        if existing is not None:
-            return existing[0]
-        self._last_start[spec.key] = (width, height, config_store)
+    def start(self, key: str | None = None, *, width: int | None = None,
+              height: int | None = None,
+              config_store=None) -> OverlayPublisher:
+        """Start the session publisher.
+
+        ``key`` is accepted for back-compat but ignored — there is one
+        publisher per session, not per plugin. Repeat calls return the
+        same publisher.
+        """
+        if self._runtime is not None:
+            return self._runtime[0]
+        # Pick the canvas size from the first spec that declared one,
+        # or the explicit override. All plugins share the same canvas
+        # because they share the same shm.
+        canvas_w = int(width) if width is not None else (
+            self._overlays[0].width if self._overlays else 2560)
+        canvas_h = int(height) if height is not None else (
+            self._overlays[0].height if self._overlays else 1440)
+        self._last_start = (width, height, config_store)
         pub = OverlayPublisher(
-            spec.key,
-            width=spec.width if width is None else int(width),
-            height=spec.height if height is None else int(height),
+            SESSION_KEY,
+            width=canvas_w,
+            height=canvas_h,
             config_store=self._config if config_store is None else config_store,
         )
         pub.start()
         thread = pub.run_draw_thread(
-            spec.draw, hz=spec.hz,
-            name=f'OverlayPublisher:{spec.key}')
-        self._runtime[spec.key] = (pub, thread)
+            self._draw_session, hz=SESSION_HZ,
+            name=f'OverlayPublisher:{SESSION_KEY}')
+        self._runtime = (pub, thread)
         return pub
 
-    def stop(self, key: str) -> bool:
-        runtime = self._runtime.pop(str(key), None)
-        if runtime is None:
+    def _draw_session(self, frame: OverlayFrame) -> None:
+        """Render one frame across every enabled spec.
+
+        Each spec's draw runs inside its own try/except so a single
+        misbehaving plugin can't take the whole overlay down. A spec
+        that raises is latched off for the rest of the session — same
+        policy as :class:`PluginManager` for replay plugins.
+        """
+        from analysis import diag
+        if not self._logged_first_tick:
+            self._logged_first_tick = True
+            diag.log('overlay.registry',
+                     f'first session tick — specs: '
+                     f'{[(s.key, s.enabled) for s in self._overlays]}')
+        for spec in list(self._overlays):
+            if not spec.enabled or spec.key in self._runtime_disabled:
+                continue
+            try:
+                spec.draw(frame)
+            except Exception as exc:
+                import traceback
+                self._runtime_disabled.add(spec.key)
+                src = f' ({spec.module})' if spec.module else ''
+                diag.log('overlay.registry',
+                         f'plugin disabled: {spec.name}{src}: {exc}\n'
+                         + traceback.format_exc())
+
+    def stop(self, key: str | None = None) -> bool:
+        """Stop the session publisher. ``key`` ignored (back-compat)."""
+        if self._runtime is None:
             return False
-        pub, thread = runtime
+        pub, thread = self._runtime
+        self._runtime = None
         stop = getattr(thread, '_stop_event', None)
         if stop is not None:
             stop.set()
@@ -616,28 +678,31 @@ class OverlayRegistry:
         return True
 
     def stop_all(self) -> None:
-        for key in list(self._runtime):
-            self.stop(key)
+        self.stop()
 
     def set_enabled(self, key: str, enabled: bool) -> bool:
         key = str(key)
         if not any(o.key == key for o in self._overlays):
             return False
+        if enabled and key in self._runtime_disabled:
+            # User explicitly re-enabled — give it another shot.
+            self._runtime_disabled.discard(key)
         self._config.set(
             f'plugins.{_escape_config_key(key)}.overlay_disabled',
             not bool(enabled))
         for spec in self._overlays:
             if spec.key == key:
                 spec.enabled = bool(enabled)
-        if not enabled:
-            self.stop(key)
+        # Note: we do NOT stop the session when one spec is disabled —
+        # other plugins keep drawing. The disabled spec is just skipped
+        # in _draw_session next tick.
         return True
 
     def close(self) -> None:
         if self._config_sub is not None:
             self._config.unsubscribe(self._config_sub)
             self._config_sub = None
-        self.stop_all()
+        self.stop()
 
     def _is_disabled(self, key: str) -> bool:
         return bool(self._config.get(
@@ -652,24 +717,26 @@ class OverlayRegistry:
             if _escape_config_key(spec.key) != escaped:
                 continue
             spec.enabled = not disabled
-            if disabled:
-                if spec.key in self._runtime:
-                    self._restart_on_enable.add(spec.key)
-                self.stop(spec.key)
-            elif spec.key in self._restart_on_enable:
-                self._restart_on_enable.discard(spec.key)
-                width, height, config_store = self._last_start.get(
-                    spec.key, (None, None, None))
-                self.start(spec.key, width=width, height=height,
-                           config_store=config_store)
+            if not disabled:
+                # Re-enabling clears the runtime-fail latch; the next
+                # tick will try the spec again.
+                self._runtime_disabled.discard(spec.key)
             break
 
 
 def discover_overlays(extra_paths=None, config=None) -> OverlayRegistry:
-    """Discover every bundle ``overlay/`` module into a fresh registry."""
+    """Discover every bundle ``overlay/`` module into a fresh registry.
+
+    In addition to the legacy ``register_overlay(add)`` entry point,
+    this also bridges in any unified components (see
+    ``analysis/components``) whose manifest lists ``overlay`` as a
+    supported surface and whose ``requires_data`` is satisfied by
+    :class:`~analysis.components.overlay_backend.OverlayGameStateDataSource`.
+    """
     from analysis.plugins import discover_bundles
     registry = OverlayRegistry(config=config)
-    for bundle in discover_bundles(extra_paths):
+    bundles = list(discover_bundles(extra_paths))
+    for bundle in bundles:
         for mod in getattr(bundle, 'overlay_modules', []) or []:
             if not hasattr(mod, 'register_overlay'):
                 continue
@@ -684,6 +751,16 @@ def discover_overlays(extra_paths=None, config=None) -> OverlayRegistry:
                 mod.register_overlay(add_overlay)
             except Exception as exc:
                 print(f'overlay plugin register failed: {module_name}: {exc}')
+    # Bridge unified components targeting the overlay surface.
+    try:
+        from analysis.components.registry import (
+            bridge_into_overlay_registry,
+            discover_from_bundles,
+        )
+        components = discover_from_bundles(bundles)
+        bridge_into_overlay_registry(components, registry)
+    except Exception as exc:
+        print(f'component→overlay bridge failed: {exc}')
     return registry
 
 

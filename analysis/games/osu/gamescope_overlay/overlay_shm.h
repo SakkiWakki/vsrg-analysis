@@ -1,10 +1,11 @@
 // Generic widget-slot shared-memory contract between any Python
 // publisher and the gamescope overlay binary.
 //
-// Path convention: /dev/shm/vsrg_overlay_<plugin_key>
-// The overlay is launched with --feed <path>; the path determines
-// which plugin's widget array it renders. One overlay binary, N
-// plugins — each with its own shm segment.
+// Path convention: /dev/shm/vsrg_overlay
+// One shm segment per session, shared by every Python publisher
+// (legacy register_overlay plugins + unified components). The C
+// overlay reads this single segment; new plugins just add widgets
+// to the next frame instead of standing up their own shm + binary.
 //
 // Layout:
 //   - Fixed-size header (magic/version/seq + edit-mode state).
@@ -29,7 +30,10 @@
 #define VSRG_OVERLAY_MAGIC        0x56524F56u   // 'VROV'
 // v2: added group_id so widgets in the same group drag together.
 #define VSRG_OVERLAY_VERSION      2
-#define VSRG_OVERLAY_MAX_WIDGETS  32
+// Bumped from 32 → 128 when the overlay collapsed to one shared
+// segment. Multiple plugins now share each frame, so the cap is the
+// session-wide widget budget, not a per-plugin one.
+#define VSRG_OVERLAY_MAX_WIDGETS  128
 #define VSRG_OVERLAY_TEXT_LEN     48
 
 // Widget.kind

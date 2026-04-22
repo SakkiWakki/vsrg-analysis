@@ -107,8 +107,10 @@ def register_overlay(add):
     add('Hello HUD', draw, key='hello_hud', hz=30)
 ```
 
-Use a stable, filesystem-safe `key` because it becomes the feed name
-(`/dev/shm/vsrg_overlay_<key>`) and the persisted layout bucket.
+Use a stable, filesystem-safe `key` — it identifies the spec in the
+plugins dialog and namespaces the persisted layout bucket. (Every spec
+shares the single session feed at `/dev/shm/vsrg_overlay`; the key is
+not part of the path.)
 
 For live game data, adapters should translate game-specific state into
 `analysis.overlay.api.OverlayGameState`. That model carries common fields
@@ -139,13 +141,16 @@ architecture is:
 - A single C renderer (`analysis/games/osu/gamescope_overlay/osu_overlay`)
   attaches to a shared-memory widget array and draws rects + bitmap
   text. It knows nothing about the plugin's semantics.
-- Plugins publish widgets from Python via
-  the host-side overlay registry in `analysis.overlay.publisher`.
-  One publisher = one shm segment = one feed the renderer can attach to.
+- Plugins publish widgets from Python via the host-side overlay
+  registry in `analysis.overlay.publisher`. One session = one shm
+  segment (`/dev/shm/vsrg_overlay`) = one publisher. Every overlay
+  spec — both legacy `register_overlay` plugins and unified
+  components — shares that segment by drawing into the same frame
+  each tick.
 
-Each publisher gets its own feed at `/dev/shm/vsrg_overlay_<plugin_key>`,
-so multiple plugins can run side-by-side without trampling each other.
-Launch the renderer with `--feed <path>` to point it at yours.
+The renderer is launched once with `--feed /dev/shm/vsrg_overlay`.
+Adding a new overlay plugin doesn't require a second renderer or shm
+segment — your widgets just appear in the next merged frame.
 
 Most plugins should use the `overlay/*.py` role shown above. The lower
 level `OverlayPublisher` still exists for trusted host code that needs to

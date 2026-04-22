@@ -32,7 +32,7 @@ osu_pid=$!
 sleep 4
 
 "$here/osu_overlay" --width "$width" --height "$height" \
-    --feed /dev/shm/vsrg_overlay_osu_live \
+    --feed /dev/shm/vsrg_overlay \
     > /tmp/osu_overlay.log 2>&1 &
 overlay_pid=$!
 
