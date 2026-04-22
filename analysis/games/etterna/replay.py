@@ -10,6 +10,39 @@ from pathlib import Path
 MISS_SENTINEL = 1.000000
 
 
+def _sanitize_nonascii(raw: bytes) -> bytes:
+    """Rewrite *invalid-UTF-8* bytes as `&#NN;` numeric entities while
+    leaving valid UTF-8 sequences untouched. Etterna.xml is declared
+    UTF-8 and is mostly valid UTF-8 (Japanese/Greek song names work
+    fine), but occasionally contains a stray latin-1 byte (e.g.
+    `Punkt\xfcre` — `ü` as 0xFC) that breaks the parser. Escaping every
+    high byte would corrupt the legit multi-byte characters, so we
+    round-trip through `utf-8` with `backslashreplace` to isolate just
+    the bad bytes and rewrite those as entities."""
+    try:
+        raw.decode('utf-8')
+        return raw  # fully valid UTF-8; no rewriting needed
+    except UnicodeDecodeError:
+        pass
+    text = raw.decode('utf-8', errors='backslashreplace')
+    # `backslashreplace` emits `\xNN` for each invalid byte. Swap those
+    # for `&#NN;` so the XML parser accepts them verbatim.
+    pattern = re.compile(r'\\x([0-9a-fA-F]{2})')
+    fixed = pattern.sub(lambda m: f'&#{int(m.group(1), 16)};', text)
+    return fixed.encode('utf-8')
+
+
+def _strip_xml_decl(raw: bytes) -> bytes:
+    """Drop a leading ``<?xml ... ?>`` declaration. Useful when the
+    declaration lies about the encoding; without it, the parser treats
+    the bytes as ASCII/UTF-8 and our entity rewrite takes over."""
+    if raw.startswith(b'<?xml'):
+        end = raw.find(b'?>')
+        if end != -1:
+            return raw[end + 2:].lstrip()
+    return raw
+
+
 def parse_replay(filepath):
     """Parse an Etterna .bin replay file. Handles V1 and V2 interchangeably.
 
@@ -117,16 +150,25 @@ def parse_etterna_xml(filepath):
         tree = ET.parse(filepath)
         root = tree.getroot()
     except ET.ParseError:
-        # Some Etterna.xml files have malformed entries. Strip bad bytes and retry.
+        # Some Etterna.xml files have malformed entries. Strip control
+        # bytes and rewrite stray non-ASCII bytes (e.g. `Punkt\xfcre` —
+        # latin-1 `ü` in a file declared UTF-8) as numeric entities so
+        # the stdlib parser accepts them. Also retries with the XML
+        # declaration stripped in case the encoding claim itself is
+        # wrong.
         with open(filepath, 'rb') as f:
             raw = f.read()
         import re as _re
-        # drop control chars except \t, \n, \r
         raw = _re.sub(rb'[\x00-\x08\x0b\x0c\x0e-\x1f]', b'', raw)
-        try:
-            root = ET.fromstring(raw)
-        except ET.ParseError:
-            # last resort: lxml with recover=True
+        root = None
+        for attempt in (raw, _sanitize_nonascii(raw),
+                        _strip_xml_decl(_sanitize_nonascii(raw))):
+            try:
+                root = ET.fromstring(attempt)
+                break
+            except ET.ParseError:
+                continue
+        if root is None:
             try:
                 from lxml import etree as LET
                 parser = LET.XMLParser(recover=True, huge_tree=True)
@@ -246,21 +288,25 @@ def _resolve_etterna_save(save):
     if not save.exists():
         return None
     replays = save / 'ReplaysV2'
-    xml = None
+    xmls: list[Path] = []
     profiles = save / 'LocalProfiles'
     if profiles.exists():
         for sub in sorted(profiles.iterdir()):
             candidate = sub / 'Etterna.xml'
             if candidate.exists():
-                xml = candidate
-                break
+                xmls.append(candidate)
     direct = save / 'Etterna.xml'
-    if xml is None and direct.exists():
-        xml = direct
+    if not xmls and direct.exists():
+        xmls.append(direct)
+    # `xml_path` stays as the first profile's XML for backward compat
+    # with single-profile callers (batch.py, tests). Multi-profile
+    # consumers (the adapter) iterate `xml_paths` to cover every
+    # profile under LocalProfiles.
     return {
         'save_dir': str(save),
         'replays_dir': str(replays) if replays.exists() else None,
-        'xml_path': str(xml) if xml else None,
+        'xml_path': str(xmls[0]) if xmls else None,
+        'xml_paths': [str(p) for p in xmls],
         'extra_songs_dirs': _parse_additional_song_folders(save),
     }
 
@@ -298,7 +344,7 @@ def find_etterna_dirs():
         if resolved is not None:
             return resolved
     return {'save_dir': None, 'replays_dir': None, 'xml_path': None,
-            'extra_songs_dirs': []}
+            'xml_paths': [], 'extra_songs_dirs': []}
 
 
 def summary(replay):

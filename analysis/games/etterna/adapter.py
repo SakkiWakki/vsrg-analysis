@@ -345,20 +345,68 @@ class EtternaAdapter(GameAdapter):
         'dance-single': 4, 'dance-solo': 6, 'dance-double': 8,
         'pump-single': 5, 'pump-double': 10, 'kb7-single': 7,
     }
-
+    # Why not just do this in the first place wtf
     def scan_library(self, progress=None):
         from analysis.games.etterna.replay import find_etterna_dirs
         dirs = find_etterna_dirs()
-        xml = dirs.get('xml_path')
+        xmls = self._xml_paths(dirs)
         replays = dirs.get('replays_dir')
-        if not xml or not replays:
+        if not xmls or not replays:
             return []
-        return self._entries_from_xml(xml, Path(replays))
+        return self._entries_from_xmls(xmls, Path(replays),
+                                        ck2st=self._load_chartkey_stepstype(dirs))
 
-    def _score_to_entry(self, s, rdir: Path):
+    @staticmethod
+    def _xml_paths(dirs):
+        """Return the list of per-profile Etterna.xml paths. Falls back
+        to the singular `xml_path` (old consumers that didn't populate
+        `xml_paths`) so external callers building their own dirs dict
+        keep working."""
+        paths = list(dirs.get('xml_paths') or [])
+        if not paths and dirs.get('xml_path'):
+            paths = [dirs['xml_path']]
+        return paths
+
+    @staticmethod
+    def _load_chartkey_stepstype(dirs) -> dict:
+        """Build a ``{chartkey: stepstype}`` map from Etterna's
+        ``Cache/cache.db`` so scores for non-4K keymodes (kb7, dance-solo,
+        pump, etc.) get the right keycount. Etterna.xml's ``<Chart>`` has
+        no StepsType attribute, so without this lookup every score ends
+        up labeled dance-single by default. Returns ``{}`` if the cache
+        is missing or unreadable — callers fall back to dance-single for
+        each unresolved chartkey, matching the old behavior."""
+        save = dirs.get('save_dir')
+        if not save:
+            return {}
+        # Cache lives next to Save/ under the install root (one level up).
+        cache_db = Path(save).parent / 'Cache' / 'cache.db'
+        if not cache_db.is_file():
+            return {}
+        import sqlite3
+        try:
+            con = sqlite3.connect(f'file:{cache_db}?mode=ro', uri=True)
+            try:
+                cur = con.execute('SELECT CHARTKEY, STEPSTYPE FROM steps')
+                return {ck: st for ck, st in cur if ck and st}
+            finally:
+                con.close()
+        except sqlite3.DatabaseError as exc:
+            print(f'etterna cache.db unreadable: {exc}')
+            return {}
+
+    def _score_to_entry(self, s, rdir: Path, ck2st=None):
         rp = rdir / s['scorekey']
         if not rp.exists():
             return None
+        # Etterna.xml doesn't carry StepsType on <Chart>; resolve it from
+        # Cache/cache.db when available so non-4K keymodes (kb7,
+        # dance-solo, pump, etc.) get the right keycount. Falls back to
+        # the XML's value (or the dance-single default) when the cache
+        # doesn't know the chart.
+        stepstype = s.get('stepstype', 'dance-single')
+        if ck2st:
+            stepstype = ck2st.get(s.get('chartkey', ''), stepstype)
         return {
             'game': 'etterna',
             'replay_path': str(rp),
@@ -374,8 +422,8 @@ class EtternaAdapter(GameAdapter):
             'ssrs': s.get('ssrs', {}),
             'maxcombo': s.get('maxcombo', 0),
             'chart_key': s.get('chartkey', ''),
-            'keycount': self._STEPSTYPE_KEYCOUNT.get(
-                s.get('stepstype', 'dance-single'), 4),
+            'stepstype': stepstype,
+            'keycount': self._STEPSTYPE_KEYCOUNT.get(stepstype, 4),
             'judgescale': float(s.get('judgescale', 1.0)),
             # Etterna.xml's TapNoteScores block — includes HitMine /
             # AvoidMine alongside the tap counts. The replay .bin
@@ -384,18 +432,39 @@ class EtternaAdapter(GameAdapter):
             'judgments': dict(s.get('judgments') or {}),
         }
 
-    def _entries_from_xml(self, xml_path, rdir: Path, want_keys=None):
-        """Parse Etterna.xml and return entries. If `want_keys` is set,
-        skip any `<Score>` whose scorekey isn't in the set — lets the
-        incremental path reparse the XML (there's only one) but do the
-        per-entry work only for new scores."""
+    def _entries_from_xml(self, xml_path, rdir: Path, want_keys=None,
+                          ck2st=None):
+        """Parse a single Etterna.xml and return entries. `want_keys` is
+        used by the incremental path to skip already-cached scorekeys;
+        `ck2st` is the chartkey→stepstype map from Cache/cache.db so
+        non-4K keymodes get the right keycount."""
         from analysis.games.etterna.replay import parse_etterna_xml
         out = []
         for s in parse_etterna_xml(xml_path):
             if want_keys is not None and s['scorekey'] not in want_keys:
                 continue
-            entry = self._score_to_entry(s, rdir)
+            entry = self._score_to_entry(s, rdir, ck2st=ck2st)
             if entry is not None:
+                out.append(entry)
+        return out
+
+    def _entries_from_xmls(self, xml_paths, rdir: Path, want_keys=None,
+                           ck2st=None):
+        """Merge entries from every profile's Etterna.xml. Deduped by
+        scorekey — the replay .bin is shared across profiles via the
+        ReplaysV2 folder, so if two profiles reference the same score
+        we keep the first occurrence (profiles are iterated in sorted
+        order, so 00000000 wins)."""
+        out = []
+        seen: set[str] = set()
+        for xml in xml_paths:
+            for entry in self._entries_from_xml(xml, rdir, want_keys,
+                                                ck2st=ck2st):
+                sk = entry.get('scorekey')
+                if sk and sk in seen:
+                    continue
+                if sk:
+                    seen.add(sk)
                 out.append(entry)
         return out
 
@@ -410,13 +479,15 @@ class EtternaAdapter(GameAdapter):
         from analysis.games.etterna.replay import find_etterna_dirs
         _LIBRARY_CACHE.clear()
         dirs = find_etterna_dirs()
-        xml = dirs.get('xml_path')
+        xmls = self._xml_paths(dirs)
         replays = dirs.get('replays_dir')
-        if not xml or not replays:
+        if not xmls or not replays:
             return []
         if progress:
-            progress('etterna: rebuilding from Etterna.xml…')
-        entries = self._entries_from_xml(xml, Path(replays))
+            progress(f'etterna: rebuilding from {len(xmls)} profile(s)…')
+        entries = self._entries_from_xmls(
+            xmls, Path(replays),
+            ck2st=self._load_chartkey_stepstype(dirs))
         # Don't poison the cache with an empty result: if the XML was
         # unparseable (e.g. lxml missing and malformed bytes), saving
         # []  would make every future `incremental_update` a no-op even
@@ -432,25 +503,30 @@ class EtternaAdapter(GameAdapter):
         if cached is None:
             return self.rebuild(progress=progress)
         dirs = find_etterna_dirs()
-        xml = dirs.get('xml_path')
+        xmls = self._xml_paths(dirs)
         replays = dirs.get('replays_dir')
-        if not xml or not replays:
+        if not xmls or not replays:
             return cached
 
-        # Cheap diff: parse the XML just to collect ScoreKeys, then only
-        # materialize entries for keys we haven't seen. A ScoreKey is
-        # immutable per replay (Etterna mints a new one for every play),
-        # so set-difference is exact.
+        # Cheap diff: parse every profile's XML just to collect ScoreKeys,
+        # then only materialize entries for keys we haven't seen. A
+        # ScoreKey is immutable per replay (Etterna mints a new one for
+        # every play), so set-difference is exact across profiles too.
         known_keys = {e.get('scorekey') for e in cached if e.get('scorekey')}
         from analysis.games.etterna.replay import parse_etterna_xml
         rdir = Path(replays)
+        ck2st = self._load_chartkey_stepstype(dirs)
         new_entries = []
-        for s in parse_etterna_xml(xml):
-            if s['scorekey'] in known_keys:
-                continue
-            entry = self._score_to_entry(s, rdir)
-            if entry is not None:
-                new_entries.append(entry)
+        seen_new: set[str] = set()
+        for xml in xmls:
+            for s in parse_etterna_xml(xml):
+                sk = s['scorekey']
+                if sk in known_keys or sk in seen_new:
+                    continue
+                entry = self._score_to_entry(s, rdir, ck2st=ck2st)
+                if entry is not None:
+                    new_entries.append(entry)
+                    seen_new.add(sk)
 
         if not new_entries:
             return cached
