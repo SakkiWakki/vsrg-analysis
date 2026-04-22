@@ -22,6 +22,21 @@ _MISS_TAP_BODY = (77, 77, 77)
 _MISS_LN_BODY = (38, 38, 38)
 _RELEASE_GUIDE = (220, 220, 220)
 _MISS_X_OUTLINE = (255, 60, 60, 110)
+_BG_BASE = (14, 14, 16)
+_LANE_BG = (22, 22, 24)
+_LANE_LINE = (40, 40, 44)
+
+
+def _head_rect(lx, y, lane_w, note_h):
+    return (lx + 4, y - note_h // 2, lane_w - 8, note_h)
+
+
+def _circle_head_radius(lane_w):
+    return max(6, int((lane_w - 4) * 0.46))
+
+
+def _dim(color, factor=2):
+    return tuple(v // factor for v in color)
 
 
 @dataclass
@@ -180,8 +195,7 @@ class QtPlayerRenderer:
         return ctx
 
     def draw(self, player, painter, t_now):
-        painter.fillRect(QRectF(0, 0, player.W, player.H),
-                         QColor(14, 14, 16))
+        painter.fillRect(QRectF(0, 0, player.W, player.H), _qcolor(_BG_BASE))
         ctx = self.build_context(player, painter, t_now)
 
         self._draw_lanes(ctx, painter)
@@ -206,11 +220,10 @@ class QtPlayerRenderer:
         p = ctx.player
         for c in range(p.keycount):
             x = ctx.x0 + c * ctx.lane_w
-            painter.fillRect(QRectF(x, 0, ctx.lane_w, p.H),
-                             QColor(22, 22, 24))
-            _line(painter, (40, 40, 44), (x, 0), (x, p.H))
+            painter.fillRect(QRectF(x, 0, ctx.lane_w, p.H), _qcolor(_LANE_BG))
+            _line(painter, _LANE_LINE, (x, 0), (x, p.H))
         x = ctx.x0 + p.keycount * ctx.lane_w
-        _line(painter, (40, 40, 44), (x, 0), (x, p.H))
+        _line(painter, _LANE_LINE, (x, 0), (x, p.H))
 
     def _draw_judgment(self, ctx, painter):
         p = ctx.player
@@ -268,7 +281,7 @@ class QtPlayerRenderer:
             i=i, col=col,
             y=ctx.time_to_y(note_t),
             y_end=y_end,
-            lx=int(ctx.x0 + col * ctx.lane_w),
+            lx=int(ctx.lane_x(col)),
             off=off,
             press_t=press_t,
             release_t=release_t,
@@ -338,7 +351,7 @@ class QtPlayerRenderer:
         when no body should draw (e.g. released + press_hide)."""
         p = ctx.player
         held_color = _ROLL_BODY if n.is_roll else n.note_color
-        released_color = _ROLL_TAIL if n.is_roll else tuple(v // 2 for v in n.note_color)
+        released_color = _ROLL_TAIL if n.is_roll else _dim(n.note_color)
 
         if n.miss:
             return n.y_end, n.y, _MISS_LN_BODY
@@ -357,7 +370,7 @@ class QtPlayerRenderer:
             return _MISS_LN_BODY
         if n.is_roll:
             return _ROLL_TAIL
-        return tuple(v // 2 for v in n.note_color)
+        return _dim(n.note_color)
 
     def _draw_note_head_if_visible(self, ctx, painter, n):
         """Draw the note head sprite when appropriate; return whether it
@@ -391,7 +404,7 @@ class QtPlayerRenderer:
         """Thin vertical line + tick showing where the player hit relative
         to the note head. Skipped for missed LNs entirely for readability"""
         p = ctx.player
-        if n.miss and n.is_ln and not p.miss_pressed[n.i]:
+        if n.miss and n.is_ln:
             return
         if n.is_ln and n.ln_state == 'held' and p.press_hide:
             return
@@ -405,10 +418,9 @@ class QtPlayerRenderer:
     def _draw_miss_x(painter, ctx, n):
         """Red outline box + X through the note head."""
         pad = 4
+        hx, hy, hw, hh = _head_rect(n.lx, n.y, ctx.lane_w, ctx.note_h)
         _rect_outline(painter, _MISS_X_OUTLINE,
-                      (n.lx + 4 - pad, n.y - ctx.note_h // 2 - pad,
-                       ctx.lane_w - 8 + pad * 2,
-                       ctx.note_h + pad * 2), 3)
+                      (hx - pad, hy - pad, hw + pad * 2, hh + pad * 2), 3)
         cx = n.lx + ctx.lane_w / 2
         _line(painter, n.jcolor, (cx - 10, n.y - 10),
               (cx + 10, n.y + 10), 2)
@@ -418,46 +430,36 @@ class QtPlayerRenderer:
     def _draw_chart_extras(self, ctx, painter):
         """Mines, lifts, fakes — chart-only notes that never hit the
         replay stream. Each sweep is a pair of bisects into the
-        time-sorted arrays; we keep them in separate calls so adding
-        a new type doesn't touch the hot tap/LN loop above."""
+        time-sorted arrays."""
         p = ctx.player
 
-        mines_t = p._mine_times
-        if mines_t.size:
-            lo = bisect.bisect_left(mines_t, ctx.target_lo)
-            hi = bisect.bisect_right(mines_t, ctx.target_hi)
-            for k in range(lo, hi):
-                col = int(p._mine_cols[k])
-                if col >= p.keycount:
-                    continue
-                y = ctx.time_to_y(float(mines_t[k]))
-                self._draw_mine(painter, ctx.lane_x(col), y, ctx.lane_w)
+        def draw_mine(col, y):
+            self._draw_mine(painter, ctx.lane_x(col), y, ctx.lane_w)
 
-        lifts_t = p._lift_times
-        if lifts_t.size:
-            lo = bisect.bisect_left(lifts_t, ctx.target_lo)
-            hi = bisect.bisect_right(lifts_t, ctx.target_hi)
-            for k in range(lo, hi):
-                col = int(p._lift_cols[k])
-                if col >= p.keycount:
-                    continue
-                y = ctx.time_to_y(float(lifts_t[k]))
-                self._draw_lift(painter, p.skin, ctx.lane_x(col), y,
-                                ctx.lane_w, ctx.note_h,
-                                p.palette[col])
+        def draw_lift(col, y):
+            self._draw_lift(painter, p.skin, ctx.lane_x(col), y,
+                            ctx.lane_w, ctx.note_h, p.palette[col])
 
-        fakes_t = p._fake_times
-        if fakes_t.size:
-            lo = bisect.bisect_left(fakes_t, ctx.target_lo)
-            hi = bisect.bisect_right(fakes_t, ctx.target_hi)
-            for k in range(lo, hi):
-                col = int(p._fake_cols[k])
-                if col >= p.keycount:
-                    continue
-                y = ctx.time_to_y(float(fakes_t[k]))
-                self._draw_fake(painter, p.skin, ctx.lane_x(col), y,
-                                ctx.lane_w, ctx.note_h,
-                                p.palette[col])
+        def draw_fake(col, y):
+            self._draw_fake(painter, p.skin, ctx.lane_x(col), y,
+                            ctx.lane_w, ctx.note_h, p.palette[col])
+
+        self._sweep_chart_notes(ctx, p._mine_times, p._mine_cols, draw_mine)
+        self._sweep_chart_notes(ctx, p._lift_times, p._lift_cols, draw_lift)
+        self._sweep_chart_notes(ctx, p._fake_times, p._fake_cols, draw_fake)
+
+    @staticmethod
+    def _sweep_chart_notes(ctx, times, cols, draw_fn):
+        if not times.size:
+            return
+        p = ctx.player
+        lo = bisect.bisect_left(times, ctx.target_lo)
+        hi = bisect.bisect_right(times, ctx.target_hi)
+        for k in range(lo, hi):
+            col = int(cols[k])
+            if col >= p.keycount:
+                continue
+            draw_fn(col, ctx.time_to_y(float(times[k])))
 
     def _draw_miss_holds(self, ctx, painter):
         p = ctx.player
@@ -475,7 +477,7 @@ class QtPlayerRenderer:
             clipped = self._clip_to_screen(y_press, y_release, p.H)
             if clipped is None:
                 continue
-            lane_x = int(ctx.x0 + col * ctx.lane_w)
+            lane_x = int(ctx.lane_x(col))
             top, bot = clipped
             self._draw_lane_line(painter, red, lane_x, ctx.lane_w, top, bot,
                                  width=2)
@@ -630,12 +632,12 @@ class QtPlayerRenderer:
     @staticmethod
     def _draw_note_head(painter, skin, lx, y, lane_w, note_h, color):
         if skin == 'circle':
-            r = max(6, int((lane_w - 4) * 0.46))
+            r = _circle_head_radius(lane_w)
             cx = lx + lane_w / 2
             _ellipse(painter, color, cx, y, r, r)
             _ellipse_outline(painter, (255, 255, 255), cx, y, r, r)
         else:
-            rect = (lx + 4, y - note_h // 2, lane_w - 8, note_h)
+            rect = _head_rect(lx, y, lane_w, note_h)
             _rect(painter, color, rect)
             _rect_outline(painter, (255, 255, 255), rect)
 
@@ -677,13 +679,13 @@ class QtPlayerRenderer:
         rect outline so the player can tell them from filled taps at
         a glance. Keeps the lane color for column identity."""
         if skin == 'circle':
-            r = max(6, int((lane_w - 4) * 0.46))
+            r = _circle_head_radius(lane_w)
             cx = lx + lane_w / 2
             _ellipse_outline(painter, color, cx, y, r, r, 2)
             _ellipse_outline(painter, (255, 255, 255), cx, y,
                              max(2, r // 3), max(2, r // 3))
         else:
-            rect = (lx + 4, y - note_h // 2, lane_w - 8, note_h)
+            rect = _head_rect(lx, y, lane_w, note_h)
             _rect_outline(painter, color, rect, 2)
             _rect_outline(painter, (255, 255, 255),
                           (lx + 8, y - note_h // 4,
@@ -694,14 +696,14 @@ class QtPlayerRenderer:
         """Fakes never judge; Etterna renders them at 25% opacity. We
         match that by dimming the lane color to ~1/4 and drawing a
         regular tap shape so the player still sees the gimmick."""
-        dim = tuple(v // 4 for v in color)
+        dim = _dim(color, factor=4)
         if skin == 'circle':
-            r = max(6, int((lane_w - 4) * 0.46))
+            r = _circle_head_radius(lane_w)
             cx = lx + lane_w / 2
             _ellipse(painter, dim, cx, y, r, r)
             _ellipse_outline(painter, (90, 90, 90), cx, y, r, r)
         else:
-            rect = (lx + 4, y - note_h // 2, lane_w - 8, note_h)
+            rect = _head_rect(lx, y, lane_w, note_h)
             _rect(painter, dim, rect)
             _rect_outline(painter, (90, 90, 90), rect)
 

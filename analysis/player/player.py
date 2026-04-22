@@ -195,6 +195,15 @@ class Player:
         link_miss_holds(self.notes, self.offsets, self.misses,
                         self.miss_pressed)
 
+        # Culling pad: how far beyond a note's head/tail its drawn strokes
+        # (press mark, release guide) can reach. Without this, a note
+        # scrolls off the window while the tail of its line is still
+        # on-screen, and the line pops out.
+        off_abs = float(np.max(np.abs(self.offsets))) if self.offsets.size else 0.0
+        rel_abs = max((abs(v) for v in self.hold_release_offsets.values()),
+                      default=0.0)
+        self.max_draw_pad_sec = max(off_abs, rel_abs)
+
         # SV (scroll velocity) — list of (time_sec, sv_multiplier). When enabled,
         # note positions use the piecewise-constant integral of SV over time
         # (see _cumulative_sv_at). Falls back to constant scroll if empty.

@@ -23,12 +23,17 @@ def prepare_time_window(ctx):
 
 def select_note_candidates(ctx):
     p = ctx.player
+    # Pad the window by the largest press/release offset so notes whose
+    # head has scrolled off but whose hit-line extension is still on
+    # screen stay in the candidate set.
+    pad = getattr(p, 'max_draw_pad_sec', 0.0)
+    lo_t, hi_t = ctx.target_lo - pad, ctx.target_hi + pad
     if ctx.use_sv_space:
-        lo = int(np.searchsorted(p._note_sv_cum, ctx.target_lo, side='left'))
-        hi = int(np.searchsorted(p._note_sv_cum, ctx.target_hi, side='right'))
+        lo = int(np.searchsorted(p._note_sv_cum, lo_t, side='left'))
+        hi = int(np.searchsorted(p._note_sv_cum, hi_t, side='right'))
     else:
-        lo = bisect.bisect_left(p.times, ctx.target_lo)
-        hi = bisect.bisect_right(p.times, ctx.target_hi)
+        lo = bisect.bisect_left(p.times, lo_t)
+        hi = bisect.bisect_right(p.times, hi_t)
     candidates = list(range(lo, hi))
     seen = set(candidates)
 
