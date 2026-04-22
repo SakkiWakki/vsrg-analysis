@@ -198,6 +198,9 @@ class QtPlayerRenderer:
                 continue
             off = p.offsets[i]
             miss = p.misses[i]
+            if miss and i < len(p._miss_head_suppressed):
+                if p._miss_head_suppressed[i]:
+                    continue
             y = ctx.time_to_y(note_t)
             lx = int(ctx.x0 + c * ctx.lane_w)
             note_color = p.palette[c]

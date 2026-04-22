@@ -51,6 +51,8 @@ class NotesModel:
         default_factory=lambda: np.empty(0, dtype=np.int32))
     ghost_hold_extends_miss: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=bool))
+    miss_head_suppressed: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=bool))
 
     # SV-space caches — populated by the SV builder, kept here so every
     # "per-note stream" lives in one place.
@@ -154,6 +156,7 @@ def link_miss_ghost_holds(m: NotesModel, offsets, misses, miss_pressed):
     miss offset. Idempotent; call after judging."""
     m.miss_first_ghost_hold = np.full(len(offsets), -1, dtype=np.int32)
     m.ghost_hold_extends_miss = np.zeros(m.ghost_hold_press.size, dtype=bool)
+    m.miss_head_suppressed = np.zeros(len(offsets), dtype=bool)
     if not m.ghost_hold_press.size:
         return
 
@@ -162,16 +165,30 @@ def link_miss_ghost_holds(m: NotesModel, offsets, misses, miss_pressed):
                                             m.ghost_hold_cols)):
         by_head_col.setdefault((int(head_ms), int(col)), []).append(k)
 
+    linked_ln_keys = set()
+    used_ghost_holds = set()
     tol_ms = 2
     for i, (head_ms, col) in enumerate(zip(m.noterows_list, m.columns_list)):
         if not (misses[i] and miss_pressed[i]):
             continue
         if math.isnan(m.ln_tail_times[i]):
             continue
+        ln_key = (int(head_ms), int(col))
         press_ms = int(head_ms + round(float(offsets[i]) * 1000.0))
-        for k in by_head_col.get((int(head_ms), int(col)), []):
+        matched = None
+        for k in by_head_col.get(ln_key, []):
+            if k in used_ghost_holds:
+                continue
             gh_press_ms = int(round(float(m.ghost_hold_press[k]) * 1000.0))
             if abs(gh_press_ms - press_ms) <= tol_ms:
-                m.miss_first_ghost_hold[i] = k
-                m.ghost_hold_extends_miss[k] = True
+                matched = k
                 break
+        if matched is None:
+            continue
+        used_ghost_holds.add(matched)
+        if ln_key in linked_ln_keys:
+            m.miss_head_suppressed[i] = True
+            continue
+        linked_ln_keys.add(ln_key)
+        m.miss_first_ghost_hold[i] = matched
+        m.ghost_hold_extends_miss[matched] = True

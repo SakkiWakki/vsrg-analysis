@@ -273,6 +273,8 @@ class Player:
     @property
     def _ghost_hold_extends_miss(self): return self.notes.ghost_hold_extends_miss
     @property
+    def _miss_head_suppressed(self): return self.notes.miss_head_suppressed
+    @property
     def _mine_times(self): return self.notes.mine_times
     @property
     def _mine_cols(self): return self.notes.mine_cols
