@@ -67,8 +67,11 @@ if exist "native\*.whl" (
 
 REM Stage the overlay DLL + injector under the path the plugin looks
 REM for (matches what make.bat overlay produces, so runtime is identical).
+REM Defining OVERLAY_DEST outside the `if (...)` block because cmd.exe
+REM parses the whole block at once — a `set X=Y` inside only takes effect
+REM after the block exits, so `%X%` references within would expand empty.
+set "OVERLAY_DEST=build\win\analysis\games\osu\gl_layer\win\Release"
 if exist "overlay\vsrg_gl_overlay.dll" (
-    set "OVERLAY_DEST=build\win\analysis\games\osu\gl_layer\win\Release"
     mkdir "%OVERLAY_DEST%" 2>nul
     copy /y "overlay\vsrg_gl_overlay.dll" "%OVERLAY_DEST%\" >nul || goto :fail
     copy /y "overlay\inject.exe"          "%OVERLAY_DEST%\" >nul || goto :fail
