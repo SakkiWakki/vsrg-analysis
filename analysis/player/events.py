@@ -6,10 +6,10 @@ one handler don't stop the others. Unsubscribe via the returned handle.
 
 Kinds are plain strings. Canonical ones used by the host today:
 
-  * ``scroll_changed`` — no payload. Fired when the scroll mode, scroll
+  * ``scroll_changed``: no payload. Fired when the scroll mode, scroll
     value, rate, or active game change via HUD controls. Subscribers
     typically re-sync audio and persist settings.
-  * ``hud_action`` — payload ``(action, data)``. Fired for HUD toggles
+  * ``hud_action``: payload ``(action, data)``. Fired for HUD toggles
     whose logical state lives outside the player (audio pitch-correct,
     QSettings-backed toggles, transient overlays).
 
@@ -24,7 +24,7 @@ from dataclasses import dataclass
 @dataclass
 class Subscription:
     """Opaque handle returned by ``EventBus.on``. Pass back to
-    ``EventBus.off`` to unsubscribe. Equality-compared by identity —
+    ``EventBus.off`` to unsubscribe. Equality-compared by identity;
     don't rely on its internals."""
     kind: str
     fn: object
@@ -50,15 +50,16 @@ class EventBus:
             return False
 
     def emit(self, kind: str, payload=None) -> None:
-        # Snapshot the bucket before iterating — handlers are allowed to
+        # Snapshot the bucket before iterating: handlers are allowed to
         # subscribe or unsubscribe during dispatch.
         for sub in list(self._subs.get(str(kind), ())):
             try:
-                if payload is None:
-                    sub.fn()
-                elif isinstance(payload, tuple):
-                    sub.fn(*payload)
-                else:
-                    sub.fn(payload)
+                match payload:
+                    case None:
+                        sub.fn()
+                    case tuple():
+                        sub.fn(*payload)
+                    case _:
+                        sub.fn(payload)
             except Exception as exc:
                 print(f'event handler for {kind!r} failed: {exc}')

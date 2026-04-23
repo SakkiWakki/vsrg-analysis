@@ -231,8 +231,12 @@ def test_finish_drag_routes_by_cursor_x():
         plugins=SimpleNamespace(sidebar=reg),
         hud=hud, W=W, H=800,
     )
-    # _finish_drag calls self._compute_drop_order on sidepanel drops.
+    # _finish_drag delegates to _compute_drop_order / _drop_in_sidepanel /
+    # _drop_in_free_region on the Player; bind them to the shim so the
+    # unbound-method call flow works.
     shim._compute_drop_order = lambda y: Player._compute_drop_order(shim, y)
+    shim._drop_in_sidepanel = lambda k, y: Player._drop_in_sidepanel(shim, k, y)
+    shim._drop_in_free_region = lambda k, x, y: Player._drop_in_free_region(shim, k, x, y)
 
     # Drop at x in sidebar column — stays in sidepanel.
     sidebar_x = W - theme.SIDEBAR_WIDTH

@@ -303,7 +303,6 @@ class EtternaAdapter(GameAdapter):
     def prepare_replay_times(self, replay, bpms=None, sm_offset=0.0, **_):
         import numpy as np
         from analysis.games.etterna.sm_chart import row_to_time
-        from analysis.player.timing import infer_keycount
 
         def _r2t(row):
             if bpms is not None:
@@ -339,7 +338,7 @@ class EtternaAdapter(GameAdapter):
             replay[t_key] = ts[order]
             replay[c_key] = cs[order]
 
-        return times, hold_tails, infer_keycount(replay)
+        return times, hold_tails, int(replay['keycount'])
 
     def judge_label(self, replay, judge=None, **_):
         return str(judge or 'J4')

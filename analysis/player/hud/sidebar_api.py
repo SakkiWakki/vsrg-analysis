@@ -290,6 +290,15 @@ class SidebarSectionRegistry:
     def all_sections(self):
         return list(self._sections)
 
+    def find_section(self, key: str):
+        """Look up a section by key, or None if no section with that key
+        is registered. Callers don't have to reimplement linear search
+        over `all_sections`."""
+        for s in self._sections:
+            if s.key == key:
+                return s
+        return None
+
     # ── Per-section layout (region, order, free-region rect) ────────
 
     def _layout_path(self, key: str, field: str) -> str:
@@ -309,10 +318,8 @@ class SidebarSectionRegistry:
         return 'free' if declared == 'free' else 'sidepanel'
 
     def section_region(self, key: str) -> str:
-        for s in self._sections:
-            if s.key == key:
-                return self._effective_region(s)
-        return 'sidepanel'
+        section = self.find_section(key)
+        return self._effective_region(section) if section else 'sidepanel'
 
     def section_order(self, section: 'SidebarSection') -> float:
         """User-facing drop order. Falls back to the plugin's declared

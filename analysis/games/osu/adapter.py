@@ -40,13 +40,12 @@ class OsuAdapter(GameAdapter):
 
     def prepare_replay_times(self, replay, **_):
         import numpy as np
-        from analysis.player.timing import infer_keycount
         times = replay['noterows'].astype(np.float64) / 1000.0
         hold_tails = {}
         for h in replay.get('holds', []):
             if len(h) == 3 and h[2] is not None:
                 hold_tails[(h[0], h[1])] = h[2] / 1000.0
-        return times, hold_tails, infer_keycount(replay)
+        return times, hold_tails, int(replay['keycount'])
 
     def effective_od(self, replay, od=None):
         from analysis.viz.note_visualizer import effective_osu_od
@@ -350,20 +349,23 @@ def _parse_one_osr(p):
 
 
 # --- osu!mania scroll mode --------------------------------------------------
-# From SpeedMania.cs:126 — DistanceAt: px/ms = Speed * 21 / 600 = Speed * 0.035
-# in osu's 480-tall logical playfield. We scale by H / REFERENCE_FIELD_H in
-# the Player so the visual fraction-of-screen-per-second matches osu stable.
-_OSU_SPEED_PX_PER_MS = 0.035
+# Ported from osu-framework's SpeedMania.DistanceAt (px/ms = Speed * 21/600).
+_OSU_PX_PER_MS_PER_SPEED = 21.0 / 600.0
+_MS_PER_S = 1000.0
+
+
+def _osu_pxps_at_reference_field(value):
+    return value * _OSU_PX_PER_MS_PER_SPEED * _MS_PER_S
 
 
 def _osu_to_pxps(value, opts, p):
     field_scale = p.H / p.REFERENCE_FIELD_H
-    return float(value) * _OSU_SPEED_PX_PER_MS * 1000.0 * field_scale
+    return _osu_pxps_at_reference_field(float(value)) * field_scale
 
 
 def _osu_from_pxps(pxps, opts, p):
     field_scale = p.H / p.REFERENCE_FIELD_H
-    return pxps / (_OSU_SPEED_PX_PER_MS * 1000.0 * field_scale)
+    return pxps / (_osu_pxps_at_reference_field(1.0) * field_scale)
 
 
 scroll.register(scroll.ScrollMode(

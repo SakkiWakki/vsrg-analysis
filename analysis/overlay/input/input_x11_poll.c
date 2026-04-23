@@ -35,11 +35,7 @@ static KeyCode  g_kc_shift_l   = 0;
 static KeyCode  g_kc_shift_r   = 0;
 static KeyCode  g_kc_tab       = 0;
 
-// Non-fatal X11 error handler. Xlib's default handler calls exit() on
-// BadWindow and friends; that would kill the game on any hiccup.
-// We swallow errors silently — a failed poll simply produces
-// ``valid == 0`` for that frame, which the edge-detection layer
-// handles by dropping history.
+// Override Xlib's default handler, which calls exit() on BadWindow etc.
 static int x11_poll_error_handler(Display *dpy, XErrorEvent *ev) {
     (void)dpy;
     (void)ev;
@@ -51,7 +47,7 @@ static int x11_poll_init(void) {
     g_dpy = XOpenDisplay(NULL);
     if (!g_dpy) {
         fprintf(stderr, "[input/x11_poll] XOpenDisplay(NULL) failed "
-                        "— DISPLAY not set or unreachable\n");
+                        "- DISPLAY not set or unreachable\n");
         return 0;
     }
     // Install once per process. This is a global handler — if Wine

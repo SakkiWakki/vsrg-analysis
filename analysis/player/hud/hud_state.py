@@ -1,7 +1,7 @@
 """Per-frame HUD state, separated from replay state.
 
 ``Player`` used to own the HUD's scroll offset, plugin-panel toggle, and
-hitbox list alongside replay state like ``t`` / ``scroll_speed`` — which
+hitbox list alongside replay state like ``t`` / ``scroll_speed``, which
 conflated two very different lifecycles. Replay state is the source of
 truth for what's being analyzed; HUD state is ephemeral overlay state
 that only matters while the painted sidebar is on screen.
@@ -55,7 +55,7 @@ class HudState:
     #   drag_offset:  (dx, dy) from the dragged rect's top-left to
     #                 the pointer at mouse-down (so the ghost follows
     #                 the cursor in the same spot it was grabbed)
-    #   drag_origin_region: 'sidepanel' or 'free' — where the drag
+    #   drag_origin_region: 'sidepanel' or 'free'; where the drag
     #                 started, for the release-time routing rules
     drag_key: str | None = None
     drag_pointer: tuple = (0, 0)

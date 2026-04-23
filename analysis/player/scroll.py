@@ -1,11 +1,11 @@
 """Scroll-mode registry.
 
 Each game contributes zero or more `ScrollMode` entries describing how a
-game-native scalar (Etterna CMOD BPM, osu!mania Scroll Speed, Quaver SV…)
+game-native scalar (Etterna CMOD BPM, osu!mania Scroll Speed, Quaver SV...)
 maps to effective px/sec. A small core ms-to-judgment mode is registered
 here and is always present.
 
-Modes are *globally* accessible — a player loaded from an Etterna replay
+Modes are *globally* accessible: a player loaded from an Etterna replay
 can switch to `osu` mode if the user has that game folder installed.
 
 Adding a mode (see analysis/games/README.md for game setup):
@@ -27,6 +27,8 @@ import math
 from dataclasses import dataclass, field
 from typing import Callable, Any
 
+from analysis.core import game as game_mod
+
 
 # --- Mode descriptor ---------------------------------------------------------
 
@@ -46,8 +48,8 @@ class ScrollMode:
     # value in this dict is the default; the per-player state dict copies it.
     options: dict[str, Any] = field(default_factory=dict)
     # Optional lifecycle callbacks triggered by Player.set_scroll_mode:
-    #   on_enter(player, mode_state) — called after the mode becomes active
-    #   on_exit(player,  mode_state) — called before switching away
+    #   on_enter(player, mode_state): called after the mode becomes active
+    #   on_exit(player,  mode_state): called before switching away
     on_enter: Callable[[Any, dict], None] | None = None
     on_exit: Callable[[Any, dict], None] | None = None
 
@@ -67,17 +69,13 @@ def ms_nudge(value: float, factor: float, opts: dict) -> float:
 
 
 def integer_step_nudge(value: float, factor: float, opts: dict) -> float:
-    """Snap toward integer units, then step by ±1. A fractional value (from
-    a cross-mode translation like C1115 → osu 35.05) first floors/ceils to
-    reach an integer boundary; thereafter stepping is by whole units, matching
-    osu!mania's in-game F3/F4 binding."""
-    if factor >= 1:
-        if value == math.floor(value):
-            return math.floor(value) + 1
-        return math.ceil(value)
-    if value == math.ceil(value):
-        return math.ceil(value) - 1
-    return math.floor(value)
+    """Snap toward integer units, then step by +/-1. A fractional value
+    (from a cross-mode translation like C1115 -> osu 35.05) first
+    floors/ceils to reach an integer boundary; thereafter stepping is by
+    whole units, matching osu!mania's in-game F3/F4 binding."""
+    d = 1 if factor >= 1 else -1
+    snapped = math.ceil(value) if d > 0 else math.floor(value)
+    return snapped + d * (value == snapped)
 
 
 # --- Registry ----------------------------------------------------------------
@@ -122,7 +120,6 @@ def default_for_game(game: str) -> str:
     """The preferred scroll mode for `game`, asked of its adapter. Returns
     the core 'ms' mode if the adapter or registry can't answer."""
     try:
-        from analysis.core import game as game_mod
         return game_mod.get(game).default_scroll_mode()
     except Exception:
         return 'ms'
@@ -138,13 +135,6 @@ def _ms_to_pxps(value, opts, p):
 
 def _ms_from_pxps(pxps, opts, p):
     return (p.H * p.hit_line_y_frac) / max(1e-6, pxps) * 1000.0
-
-
-def _fmt_near_int(v: float) -> str:
-    """Decimal if fractional, else integer — keeps the HUD readable for both
-    integer osu values and float CMOD→osu cross-translations."""
-    iv = int(round(v))
-    return str(iv) if abs(v - iv) < 1e-4 else f'{v:.2f}'
 
 
 register(ScrollMode(
@@ -174,5 +164,4 @@ def ensure_loaded() -> None:
     if _discovered:
         return
     _discovered = True
-    from analysis.core import game as game_mod
     game_mod.discover_games()

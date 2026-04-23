@@ -20,6 +20,9 @@ from pathlib import Path
 from analysis.viz.plots import col_colors
 from analysis.player.plugin_loader import PluginManager
 from analysis.player import scroll as scroll_registry
+from analysis.player.render import theme
+from analysis.core import game as game_mod
+from analysis.config import get_config
 
 
 from analysis.player.judgment import JCLR, judge
@@ -42,10 +45,19 @@ def prepare_replay_times(replay, bpms=None, sm_offset=0.0):
     """Back-compat shim. The canonical path is
     `GameAdapter.prepare_replay_times`; this wrapper picks the adapter
     from `replay['chart_path']` (osu) or falls back to Etterna."""
-    from analysis.core import game as game_mod
     name = 'osu' if replay.get('chart_path') else 'etterna'
     return game_mod.get(name).prepare_replay_times(
         replay, bpms=bpms, sm_offset=sm_offset)
+
+
+def _rect_contains(rect, x, y):
+    rx, ry, rw, rh = rect
+    return rx <= x <= rx + rw and ry <= y <= ry + rh
+
+
+# Synthetic slot size around the end of the sidepanel section order,
+# used when a drop lands before-all or after-all existing sections.
+_ORDER_GAP = 10.0
 
 
 class Player:
@@ -84,7 +96,6 @@ class Player:
         self.xml_judgments = dict(xml_judgments or {})
 
         self.replay = replay
-        from analysis.core import game as game_mod
         self._adapter = game_mod.get(game)
         self.times, self.hold_tails, self.keycount = (
             self._adapter.prepare_replay_times(
@@ -117,7 +128,7 @@ class Player:
         # round-trip it back to the adapter without branching here.
         judge_kw = self._adapter.judge_kwarg_name()
         self._active_judge = (od if judge_kw == 'od' else ett_judge)
-        self._apply_judge(rebuild_counts=False)
+        self._apply_judge()
         self.judge_colors = JCLR
         self.game = game
         self.palette = [tuple(int(c[i:i + 2], 16) for i in (1, 3, 5))
@@ -170,11 +181,6 @@ class Player:
         self.t = 0.0                 # current playback time (s)
         self._last_tick = None
         self.audio_path = audio_path
-
-        # Precompute judgment colors
-        self.note_judges = []
-        for off, mi in zip(self.offsets, self.misses):
-            self.note_judges.append(judge(off, self.windows, mi))
 
         self.t_max = float(self.times[-1]) + 5.0 if len(self.times) else 10.0
         self.t_min = -2.0
@@ -341,9 +347,21 @@ class Player:
     @property
     def scroll_speed(self):
         """Effective px/sec for converting *chart-time* deltas to on-screen
-        distance. Dividing by play_rate matches Etterna CMOD (ArrowEffects.cpp
-        fBPS = BPM/60/musicRate): at higher rate, the same chart-second
-        covers fewer pixels."""
+        distance.
+
+        Rate is normalized here, not in the per-mode to_pxps functions. A mode
+        defines its value as visual (wall-clock) scroll speed at rate=1, and
+        that visual must stay invariant across play_rate. Dividing by play_rate
+        shrinks the chart-time pxps so wall-clock pxps is rate-independent:
+        the same pixels flow past in the same wall-clock second regardless of
+        rate.
+
+        When writing a new game's scroll mode, return pxps at rate=1 and do
+        not divide by rate yourself; the Player applies it for every mode.
+
+        Examples: "osu 30" and "Quaver 15" describe a fixed on-screen look
+        that holds at any rate. Etterna CMOD normalizes the same way
+        (ArrowEffects.cpp fBPS = BPM/60/musicRate)."""
         pxps = self._pxps_from_unit(self.scroll_mode, self._current_mode_value())
         return pxps / max(0.01, self.play_rate)
 
@@ -380,7 +398,7 @@ class Player:
 
     def set_scroll_mode(self, mode):
         """Switch scroll modes while preserving visual px/sec. Lifecycle
-        callbacks on the registered mode handle side effects — e.g. CMOD's
+        callbacks on the registered mode handle side effects - e.g. CMOD's
         on_enter suspends SV and stashes the prior state in the mode's
         `_mode_state` entry; on_exit restores it."""
         if mode == 'linear':
@@ -392,12 +410,16 @@ class Player:
         # would otherwise leave the HUD showing e.g. CMOD while game=osu.
         if not scroll_registry.is_compatible(mode, self.game):
             return
+
         pxps = self._pxps_from_unit(self.scroll_mode, self._current_mode_value())
+
         prev_mode = self._mode(self.scroll_mode)
         if prev_mode and prev_mode.on_exit:
             prev_mode.on_exit(self, self._mode_state[self.scroll_mode])
+
         self.scroll_mode = mode
         self._set_current_mode_value(self._unit_from_pxps(mode, pxps))
+
         new_mode = self._mode(mode)
         if new_mode and new_mode.on_enter:
             new_mode.on_enter(self, self._mode_state[mode])
@@ -426,32 +448,29 @@ class Player:
             [self._cumulative_sv_at(float(t)) for t in self.times],
             dtype=np.float64)
 
+    def _times_to_sv(self, times):
+        """Project an array of note times into the cumulative-SV space
+        used for note culling. Returns an empty float64 array when
+        `times` is empty."""
+        if not times.size:
+            return np.empty(0, dtype=np.float64)
+        return np.array(
+            [self._cumulative_sv_at(float(t)) for t in times],
+            dtype=np.float64)
+
     def _build_ghost_sv_caches(self):
         """Cache ghost overlay times in the same SV-space used for note
         culling. Writes into self.notes so every per-note stream stays
         colocated."""
         m = self.notes
-        if m.ghost_times.size:
-            m.ghost_sv_times = np.array(
-                [self._cumulative_sv_at(float(t)) for t in m.ghost_times],
-                dtype=np.float64)
-        else:
-            m.ghost_sv_times = np.empty(0, dtype=np.float64)
+        m.ghost_sv_times = self._times_to_sv(m.ghost_times)
 
+        m.miss_hold_press_sv = self._times_to_sv(m.miss_hold_press)
+        m.miss_hold_release_sv = self._times_to_sv(m.miss_hold_release)
         if m.miss_hold_press.size:
-            m.miss_hold_press_sv = np.array(
-                [self._cumulative_sv_at(float(t))
-                 for t in m.miss_hold_press],
-                dtype=np.float64)
-            m.miss_hold_release_sv = np.array(
-                [self._cumulative_sv_at(float(t))
-                 for t in m.miss_hold_release],
-                dtype=np.float64)
             m.miss_hold_max_sv_dur = float(
                 np.max(m.miss_hold_release_sv - m.miss_hold_press_sv))
         else:
-            m.miss_hold_press_sv = np.empty(0, dtype=np.float64)
-            m.miss_hold_release_sv = np.empty(0, dtype=np.float64)
             m.miss_hold_max_sv_dur = 0.0
 
     def _cumulative_sv_at(self, t):
@@ -498,79 +517,74 @@ class Player:
 
     def handle_mouse_down(self, x, y):
         for rect, action, payload in reversed(self.hud.hitboxes):
-            rx, ry, rw, rh = rect
-            if not (rx <= x <= rx + rw and ry <= y <= ry + rh):
+            if not _rect_contains(rect, x, y):
                 continue
-            # Edit-mode drag/resize grabs are consumed here regardless
-            # of the general "edit swallows clicks" rule below.
-            if action == 'begin_drag_section' and self.hud.edit_mode:
+
+            edit_mode = self.hud.edit_mode
+            is_drag_grab = edit_mode and action == 'begin_drag_section'
+            is_resize_grab = edit_mode and action == 'begin_resize_section'
+            is_dispatchable = not edit_mode or action == 'toggle_edit_mode'
+
+            if is_drag_grab:
                 self._begin_drag_section(payload, x, y, rect)
-                return True
-            if action == 'begin_resize_section' and self.hud.edit_mode:
+            elif is_resize_grab:
                 self._begin_resize_section(payload, x, y)
-                return True
-            # Edit mode swallows every non-edit action so drags don't
+            elif is_dispatchable:
+                self._dispatch_hud_action(action, payload)
+            # else: edit mode swallows non-edit actions so drags don't
             # accidentally fire click handlers underneath the cursor.
-            # Only the edit-mode toggle itself still works, so the
-            # header button can turn editing back off.
-            if self.hud.edit_mode and action != 'toggle_edit_mode':
-                return True
-            if action == 'toggle_plugin_panel':
+            return True
+        return False
+
+    def _dispatch_hud_action(self, action, payload):
+        """Run the side effect for a HUD action. Assumes the rect-hit and
+        edit-mode gates in handle_mouse_down have already passed."""
+        match action:
+            case 'toggle_plugin_panel':
                 self.hud.plugin_panel_open = not self.hud.plugin_panel_open
-                return True
-            if action == 'toggle_plugin':
+            case 'toggle_plugin':
                 self.plugins.toggle_enabled(payload)
-                return True
-            if action == 'scroll_nudge':
+            case 'scroll_nudge':
                 self.nudge_scroll(payload)
                 self._notify_scroll_change()
-                return True
-            if action == 'cycle_scroll_mode':
-                keys = self._available_mode_keys()
-                if not keys:
-                    return True
-                cur = self.scroll_mode if self.scroll_mode in keys else keys[0]
-                self.set_scroll_mode(keys[(keys.index(cur) + 1) % len(keys)])
-                self._notify_scroll_change()
-                return True
-            if action == 'rate_nudge':
+            case 'cycle_scroll_mode':
+                self._cycle_scroll_mode()
+            case 'rate_nudge':
                 self.nudge_rate(payload)
                 self._notify_scroll_change()
-                return True
-            if action == 'judge_nudge':
+            case 'judge_nudge':
                 self.nudge_judge(payload)
                 self._notify_scroll_change()
-                return True
-            if action == 'cycle_game':
+            case 'cycle_game':
                 self.cycle_game()
                 self._notify_scroll_change()
-                return True
-            if action == 'toggle_layer':
-                from analysis.config import get_config
+            case 'toggle_layer':
                 cfg = get_config()
                 path = f'player.layer_visibility.{payload}'
                 cfg.set(path, not bool(cfg.get(path, True)))
-                return True
-            if action == 'toggle_layers_panel':
+            case 'toggle_layers_panel':
                 self.hud.layers_panel_open = not getattr(
                     self.hud, 'layers_panel_open', False)
-                return True
-            if action == 'toggle_flyout':
-                # One-at-a-time: clicking the open flyout's header closes
-                # it; clicking a different header swaps.
+            case 'toggle_flyout':
+                # Clicking the open flyout's header closes it; clicking
+                # a different header swaps which flyout is open.
                 self.hud.open_flyout = (
                     None if self.hud.open_flyout == payload else payload)
-                return True
-            if action == 'toggle_edit_mode':
+            case 'toggle_edit_mode':
                 self.toggle_edit_mode()
-                return True
-            # Toggles / click-to-edit rects: logical state lives elsewhere
-            # (Qt tab owns audio + QSettings), so just notify subscribers.
-            if action in ('toggle_sv', 'cycle_skin', 'toggle_press_hide',
-                          'toggle_pitch', 'edit_scroll_value'):
+            case ('toggle_sv' | 'cycle_skin' | 'toggle_press_hide'
+                  | 'toggle_pitch' | 'edit_scroll_value'):
+                # Logical state lives elsewhere (Qt tab owns audio +
+                # QSettings); this just notifies subscribers to re-read.
                 self._notify_hud_action(action, payload)
-                return True
-        return False
+
+    def _cycle_scroll_mode(self):
+        keys = self._available_mode_keys()
+        if not keys:
+            return
+        cur = self.scroll_mode if self.scroll_mode in keys else keys[0]
+        self.set_scroll_mode(keys[(keys.index(cur) + 1) % len(keys)])
+        self._notify_scroll_change()
 
     def _available_mode_keys(self) -> list[str]:
         """Modes visible in the scroll-type cycle for the current game.
@@ -598,7 +612,6 @@ class Player:
     def cycle_game(self) -> None:
         """Walk through all discovered games in registration order."""
         try:
-            from analysis.core import game as game_mod
             names = list(game_mod.all_games().keys())
         except Exception:
             return
@@ -626,97 +639,94 @@ class Player:
     def _begin_resize_section(self, key, x, y):
         """Start a resize on a free-region section. The current rect
         is read off config so drag deltas translate to size changes."""
-        from analysis.player.render import theme
-        section = None
-        for s in self.plugins.sidebar.all_sections():
-            if s.key == key:
-                section = s
-                break
+        section = self.plugins.sidebar.find_section(key)
         if section is None:
             return
-        rect = self.plugins.sidebar.section_free_rect(
+        _, _, w, h = self.plugins.sidebar.section_free_rect(
             section, self.W, self.H)
-        _x, _y, w, h = rect
         self.hud.resize_key = key
         self.hud.resize_origin = (int(x), int(y))
         self.hud.resize_origin_size = (int(w), int(h))
-        # Store min sizes in theme so free-region resize can clamp.
-        _ = theme.FREE_MIN_W  # touch to ensure imported on first use
 
     def handle_mouse_move(self, x, y):
         """While in edit mode with an active drag/resize, track the
         cursor so the renderer can draw the ghost / update the rect.
         Returns True if the event was consumed, i.e. the canvas should
         schedule a repaint."""
-        if self.hud.drag_key is not None:
+        dragging = self.hud.drag_key is not None
+        resizing = self.hud.resize_key is not None
+
+        if dragging:
             self.hud.drag_pointer = (int(x), int(y))
-            return True
-        if self.hud.resize_key is not None:
-            ox, oy = self.hud.resize_origin
-            ow, oh = self.hud.resize_origin_size
-            from analysis.player.render import theme
-            new_w = max(theme.FREE_MIN_W, ow + (int(x) - ox))
-            new_h = max(theme.FREE_MIN_H, oh + (int(y) - oy))
-            # Find current rect's (x, y) to preserve top-left — resize
-            # grows toward bottom-right only.
-            for s in self.plugins.sidebar.all_sections():
-                if s.key == self.hud.resize_key:
-                    rx, ry, _w, _h = self.plugins.sidebar.section_free_rect(
-                        s, self.W, self.H)
-                    self.plugins.sidebar.set_section_free_rect(
-                        s.key, rx, ry, new_w, new_h)
-                    break
-            return True
-        return False
+        elif resizing:
+            self._apply_resize(int(x), int(y))
+        return dragging or resizing
+
+    def _apply_resize(self, x, y):
+        """Resize the in-flight section so its bottom-right follows the
+        cursor; top-left is preserved so resize only grows outward."""
+        ox, oy = self.hud.resize_origin
+        ow, oh = self.hud.resize_origin_size
+        new_w = max(theme.FREE_MIN_W, ow + (x - ox))
+        new_h = max(theme.FREE_MIN_H, oh + (y - oy))
+        section = self.plugins.sidebar.find_section(self.hud.resize_key)
+        if section is None:
+            return
+        rx, ry, _, _ = self.plugins.sidebar.section_free_rect(
+            section, self.W, self.H)
+        self.plugins.sidebar.set_section_free_rect(
+            section.key, rx, ry, new_w, new_h)
 
     def handle_mouse_up(self, x, y):
         """End an active drag/resize, routing the drop to either the
         sidepanel or the free region. Returns True when consumed."""
-        if self.hud.drag_key is not None:
+        dragging = self.hud.drag_key is not None
+        resizing = self.hud.resize_key is not None
+
+        if dragging:
             self._finish_drag(int(x), int(y))
-            return True
-        if self.hud.resize_key is not None:
+        elif resizing:
             self.hud.resize_key = None
-            return True
-        return False
+        return dragging or resizing
 
     def _finish_drag(self, x, y):
         key = self.hud.drag_key
-        from analysis.player.render import theme
-        # Sidepanel drop zone = anywhere at or right of the sidebar's
-        # left edge. Everything else = free region.
         sidebar_x = self.W - theme.SIDEBAR_WIDTH
         dropped_in_sidepanel = x >= sidebar_x
+
         if dropped_in_sidepanel:
-            self.plugins.sidebar.set_section_region(key, 'sidepanel')
-            # Recompute order: find the two adjacent sidepanel sections
-            # at cursor Y and set order to midpoint. When there are no
-            # neighbors we leave the declared priority intact.
-            new_order = self._compute_drop_order(y)
-            if new_order is not None:
-                self.plugins.sidebar.set_section_order(key, new_order)
+            self._drop_in_sidepanel(key, y)
         else:
-            self.plugins.sidebar.set_section_region(key, 'free')
-            # Translate the cursor back to the rect's top-left using
-            # the grab offset so the drop lands where the user sees
-            # the ghost.
-            dx, dy = self.hud.drag_offset
-            # Look up the section's size (from saved rect if any, else
-            # the plugin default).
-            section = None
-            for s in self.plugins.sidebar.all_sections():
-                if s.key == key:
-                    section = s
-                    break
-            if section is not None:
-                _rx, _ry, w, h = self.plugins.sidebar.section_free_rect(
-                    section, self.W, self.H)
-                new_x = max(0, min(self.W - w, x - dx))
-                new_y = max(0, min(self.H - h, y - dy))
-                self.plugins.sidebar.set_section_free_rect(
-                    key, new_x, new_y, w, h)
+            self._drop_in_free_region(key, x, y)
+
         self.hud.drag_key = None
         self.hud.drag_origin_region = None
+
+    def _drop_in_sidepanel(self, key, y):
+        """Dock the section to the sidepanel, inserting its order between
+        whichever two sidepanel sections bracket the cursor. When the
+        cursor has no neighbors above or below, the declared priority
+        order is preserved."""
+        self.plugins.sidebar.set_section_region(key, 'sidepanel')
+        new_order = self._compute_drop_order(y)
+        if new_order is not None:
+            self.plugins.sidebar.set_section_order(key, new_order)
+
+    def _drop_in_free_region(self, key, x, y):
+        """Move the section to the free region, positioning its rect's
+        top-left where the drag ghost was (cursor minus grab offset),
+        clamped to screen bounds. Size is preserved from the section's
+        saved rect, falling back to the plugin default."""
+        self.plugins.sidebar.set_section_region(key, 'free')
+        section = self.plugins.sidebar.find_section(key)
+        if section is None:
+            return
+        _, _, w, h = self.plugins.sidebar.section_free_rect(
+            section, self.W, self.H)
+        dx, dy = self.hud.drag_offset
+        new_x = max(0, min(self.W - w, x - dx))
+        new_y = max(0, min(self.H - h, y - dy))
+        self.plugins.sidebar.set_section_free_rect(key, new_x, new_y, w, h)
 
     def _compute_drop_order(self, y):
         """Given a drop cursor Y, return the new ``order`` value for
@@ -726,8 +736,9 @@ class Player:
         rects so the insertion point lines up with what the user saw.
         Returns None when there are no other sidepanel sections."""
         reg = self.plugins.sidebar
-        # Non-pinned sidepanel neighbors — pinned-bottom sections live
-        # in a fixed band and don't participate in reordering.
+
+        # Reorder targets: non-pinned sidepanel sections other than the
+        # one being dragged. Pinned-bottom sections live in a fixed band.
         others = [s for s in reg.all_sections()
                   if s.enabled
                   and reg.section_region(s.key) == 'sidepanel'
@@ -735,36 +746,33 @@ class Player:
                   and not s.pin_bottom]
         if not others:
             return None
-        # Pair each neighbor with its last-frame Y-midpoint; fall back
-        # to section_order when the rect isn't available (first frame
-        # after enabling edit mode).
+
+        # Each target carries (y_mid, order). y_mid is last frame's
+        # painted midpoint, or None if the section hasn't been drawn yet
+        # (first frame after enabling edit mode).
         rects = self.hud.frame_sidepanel_rects or {}
-        pairs = []
-        for s in others:
-            r = rects.get(s.key)
-            y_mid = (r[1] + r[3] / 2) if r else None
-            pairs.append((s, y_mid, reg.section_order(s)))
-        pairs.sort(key=lambda p: p[2])
-        ordered_vals = [p[2] for p in pairs]
-        first = ordered_vals[0] - 10.0
-        last = ordered_vals[-1] + 10.0
-        # Use the pixel-accurate split when we have rects; otherwise
-        # fall back to the cursor-fraction heuristic.
-        have_rects = all(p[1] is not None for p in pairs)
+        mids = [(rects[s.key][1] + rects[s.key][3] / 2) if s.key in rects
+                else None
+                for s in others]
+        orders = [reg.section_order(s) for s in others]
+        sorted_idx = sorted(range(len(others)), key=lambda i: orders[i])
+        mids = [mids[i] for i in sorted_idx]
+        orders = [orders[i] for i in sorted_idx]
+
+        # Decide where in the sorted list the drop belongs. `slot` is in
+        # [0, n] where 0 means "before all" and n means "after all".
+        have_rects = all(m is not None for m in mids)
         if have_rects:
-            for i, p in enumerate(pairs):
-                if y < p[1]:
-                    if i == 0:
-                        return first
-                    return (ordered_vals[i - 1] + ordered_vals[i]) / 2.0
-            return last
-        frac = max(0.0, min(1.0, y / max(1, self.H)))
-        idx = int(round(frac * len(pairs)))
-        if idx <= 0:
-            return first
-        if idx >= len(pairs):
-            return last
-        return (ordered_vals[idx - 1] + ordered_vals[idx]) / 2.0
+            slot = next((i for i, m in enumerate(mids) if y < m), len(mids))
+        else:
+            frac = max(0.0, min(1.0, y / max(1, self.H)))
+            slot = max(0, min(len(mids), int(round(frac * len(mids)))))
+
+        # Map slot -> order value via the midpoint of its two bounds.
+        # Synthetic sentinels extend the range so the 0-th and n-th slot
+        # use the same formula as the interior ones.
+        bounds = [orders[0] - _ORDER_GAP, *orders, orders[-1] + _ORDER_GAP]
+        return (bounds[slot] + bounds[slot + 1]) / 2.0
 
     def toggle_edit_mode(self):
         """Flip layout-edit mode. While on, draggable sidebar
@@ -826,19 +834,17 @@ class Player:
         if new_val == self._active_judge:
             return
         self._active_judge = new_val
-        self._apply_judge(rebuild_counts=True)
+        self._apply_judge()
 
-    def _apply_judge(self, *, rebuild_counts):
-        """Recompute windows + label + per-note judgments from the
-        adapter, using self._active_judge. Called once during
-        construction (rebuild_counts=False: note_judges built right
-        after) and every time nudge_judge changes the value."""
+    def _apply_judge(self):
+        """Recompute windows, label, and per-note judgments from the
+        adapter using self._active_judge. Called at construction and
+        whenever nudge_judge changes the value."""
         kw = {self._adapter.judge_kwarg_name(): self._active_judge}
         self.windows = self._adapter.judgement_windows(self.replay, **kw)
         self.judge_label = self._adapter.judge_label(self.replay, **kw)
-        if rebuild_counts:
-            self.note_judges = [judge(off, self.windows, mi)
-                                for off, mi in zip(self.offsets, self.misses)]
+        self.note_judges = [judge(off, self.windows, mi)
+                            for off, mi in zip(self.offsets, self.misses)]
 
     def restart(self):
         self.t = self.t_min
