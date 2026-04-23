@@ -59,7 +59,7 @@ REM (not a release zip, or a stripped zip), fall back to source build
 REM instructions rather than crashing silently.
 if exist "native\*.whl" (
     echo [setup] installing bundled osu_memory_native wheel...
-    for %%W in (native\*.whl) do "%VENV_PIP%" install "%%W" || goto :fail
+    for %%W in (native\*.whl) do "%VENV_PIP%" install "%%W"
 ) else (
     echo.
     echo [setup] native\*.whl not found.
@@ -67,6 +67,7 @@ if exist "native\*.whl" (
     echo         zip. For source builds, run "make.bat all" instead.
     echo         osu_live will fall back to the tosu HTTP bridge at runtime.
 )
+if errorlevel 1 goto :fail
 
 REM Stage the overlay DLL + injector under the path the plugin looks
 REM for (matches what make.bat overlay produces, so runtime is identical).
