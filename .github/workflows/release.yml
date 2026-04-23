@@ -52,13 +52,16 @@ jobs:
         if: startsWith(matrix.os, 'ubuntu-')
         run: |
           sudo apt-get update
-          # gcc-multilib + libc6-dev-i386: the GL overlay also builds a
-          # 32-bit .so (lib32/) for osu!stable running under a 32-bit
-          # Wine prefix (classic wine, older winello builds, etc.).
-          # Needs 32-bit libc + GL headers.
-          sudo apt-get install -y pkg-config libx11-dev libxi-dev \
-              libgl1-mesa-dev libegl1-mesa-dev zip \
-              gcc-multilib g++-multilib libc6-dev-i386
+          # The release target also builds a 32-bit .so for osu!stable
+          # on classic 32-bit Wine prefixes. That needs multilib gcc
+          # plus i386 variants of every -dev lib we link against.
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y pkg-config zip \
+              libx11-dev libxi-dev libgl1-mesa-dev libegl1-mesa-dev \
+              gcc-multilib g++-multilib libc6-dev-i386 \
+              libx11-dev:i386 libxi-dev:i386 \
+              libgl1-mesa-dev:i386 libegl1-mesa-dev:i386
 
       - name: Build release zip
         run: ${{ matrix.script }}
