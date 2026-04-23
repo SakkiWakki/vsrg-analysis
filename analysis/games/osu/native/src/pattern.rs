@@ -43,9 +43,11 @@ impl Pattern {
         true
     }
 
-    /// First non-wildcard byte in the pattern, used by the scanner to
-    /// skip ahead quickly. Returns (index, value). None if the pattern
-    /// is all wildcards (useless, but handle it gracefully).
+    /// First non-wildcard byte in the pattern. Intended as a scanner
+    /// fast-path (memchr-and-verify); unused right now because our
+    /// patterns are short enough that the naive loop in `scan` wins.
+    /// Keeping it because the next scanner rewrite will want it.
+    #[allow(dead_code)]
     pub fn first_literal(&self) -> Option<(usize, u8)> {
         self.bytes
             .iter()

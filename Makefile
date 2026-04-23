@@ -122,6 +122,7 @@ $(OVERLAY_BIN): $(OVERLAY_SRCS)
 	    -Wno-unused-function -Wno-unused-parameter \
 	    -Wno-sign-compare -Wno-unused-but-set-variable \
 	    -Wno-misleading-indentation \
+	    -Wno-shift-negative-value -Wno-implicit-fallthrough \
 	    -o $@ \
 	    $(OVERLAY_DIR)/osu_overlay.c \
 	    $(RENDERER_DIR)/render.c \
@@ -168,6 +169,7 @@ GL_LAYER_CFLAGS_C := -std=c11 -O2 -fPIC -fvisibility=hidden \
                      -Wno-unused-function -Wno-unused-parameter \
                      -Wno-sign-compare -Wno-unused-but-set-variable \
                      -Wno-misleading-indentation \
+                     -Wno-shift-negative-value -Wno-implicit-fallthrough \
                      -I$(RENDERER_DIR) -I$(WIDGETS_DIR) -I$(INPUT_DIR) \
                      $(shell pkg-config --cflags x11 gl 2>/dev/null)
 GL_LAYER_LDFLAGS  := -shared -fvisibility=hidden
