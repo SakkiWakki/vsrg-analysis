@@ -31,7 +31,7 @@ if [[ ! -x "$VENV_PY" ]]; then
         echo
         if [[ "$(uname -s)" == "Darwin" ]]; then
             echo "  Install (Homebrew, recommended):"
-            echo "    brew install python@3.12"
+            echo "    brew install python@3.11"
             echo
             echo "  Or download from https://www.python.org/downloads/"
         else

@@ -29,7 +29,7 @@ if "%HAS_PY%"=="0" (
     echo [setup] Python is not installed or not on PATH.
     echo.
     echo   Install option 1 ^(winget, recommended^):
-    echo     winget install Python.Python.3.12
+    echo     winget install Python.Python.3.11
     echo.
     echo   Install option 2 ^(manual^):
     echo     https://www.python.org/downloads/
@@ -87,8 +87,14 @@ exit /b %ERRORLEVEL%
 :fail_venv
 echo.
 echo [setup] failed to create virtual environment.
-echo         Make sure your Python install includes the "venv" module
-echo         ^(standard; may be missing on some minimal distributions^).
+echo.
+echo Common causes:
+echo   1. Your Python install is missing the "venv" module
+echo      ^(standard; rare^).
+echo   2. The current folder isn't writable. If you extracted this
+echo      into C:\Program Files\ or a OneDrive-synced folder, move it
+echo      somewhere like %%USERPROFILE%%\Downloads\vsrg-analysis and try again.
+echo   3. Antivirus is blocking file creation. Whitelist this folder.
 pause
 exit /b 1
 
