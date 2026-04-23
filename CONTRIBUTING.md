@@ -1,8 +1,23 @@
 # Contributing
 
+## Security model
+
+Plugins in `plugins/builtin/` are **sandboxed and verified**, not trusted by
+location. An attacker could submit a malicious PR to add something to `builtin/`.
+The sandbox (import allow-list + restricted builtins) and symbolic verifier
+(Z3-assisted AST analysis) enforce the same rules on builtins as on any
+third-party plugin. Only `plugins/unsafe/` has full Python access, by explicit
+user opt-in.
+
+Furthermore, tests must be human readable. If the test actually needs a binary file, you must provide the code that generates that binary rather than including it directly within the repo. 
+
+Read [SECURITY.md](SECURITY.md) before contributing to anything under `plugins/`.
+Any plugin contribution must pass the verifier -- run
+`pytest tests/test_verifier.py tests/test_plugin_sandbox.py` to check.
+
 ## Honesty about LLM usage
 
-If you used an AI assistant (Claude, Cursor, Copilot, ChatGPT, etc.) to
+If you used a clanker (Claude, Cursor, Copilot, ChatGPT, etc.) to
 generate or substantially modify code in a pull request, say so in the
 PR description. Line-by-line attribution isn't required; something like
 "used Claude for the refactor in X" or "scaffolded with Cursor, hand-edited
@@ -10,6 +25,8 @@ throughout" is enough.
 
 This isn't a filter against AI. AI is fine. It's about keeping the review
 signal honest so reviewers know what to scrutinize.
+
+(Ironic considering I wrote this file using AI, but at least you know I read through everything!)
 
 ## Know what your code does
 
@@ -60,11 +77,11 @@ don't personally understand is not.
 - **Refactor as a human if needed.** You may ask clankers to refactor
   for you. But you must verify that the refactoring is up to code quality.
 
+(Currently in the process of hand refactoring these aspects of clanker code)
+
 ### Style
 
 - Python 3.10 or newer.
-- Follow PEP 8 for formatting. Don't fight the project's existing
-  conventions.
 - Tests live under `tests/`. Run `pytest` before pushing.
 
 ## Tools

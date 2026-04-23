@@ -1,30 +1,27 @@
-"""Sandbox for user-installed plugin bundles.
+"""Sandbox for plugin bundles.
 
-Pragmatic, import-time allow-list. This is *not* a security boundary —
-determined attackers can escape via numpy/ctypes tricks or frame walks.
-The goal is:
+Pragmatic, import-time allow-list combined with a symbolic verifier. This
+is a best-effort model, not a formal security guarantee. See SECURITY.md
+for the full threat model and known limitations.
 
-  1. Stop lazy or accidental harm (plugins calling ``os.system`` or
-     ``open`` on arbitrary paths).
-  2. Push plugin authors toward host-provided APIs for anything
-     side-effectful (FS, audio, chart loading, …).
-  3. Reserve room to tighten toward audit hooks / capability-based
-     mediation later without changing the plugin surface.
+Trust model
+-----------
+Only ``plugins/unsafe/`` is trusted (full Python, no sandbox). Everything
+else -- including ``plugins/builtin/`` -- is sandboxed. ``builtin/`` ships
+with the app but is treated as untrusted because a malicious contribution
+could be added to it; the sandbox and verifier enforce the same rules as
+any third-party plugin.
 
-Trust model:
-
-  * ``plugins/builtin/`` is trusted — ships with the app, runs with full
-    Python access. Tampering with it is equivalent to tampering with the
-    app itself, so no extra protection buys anything.
-  * ``plugins/unsafe/`` is also trusted — escape hatch for power users
-    who need raw Python (e.g. to prototype a plugin that will eventually
-    be promoted into builtin). Explicitly named so the user opts in.
-  * Everything else is sandboxed — restricted ``__builtins__`` and an
-    import finder that rejects non-allow-listed modules.
-
-Sandboxed plugins that try to import a blocked module fail to load.
-Their bundle is surfaced to the user as "refused" via
-``bundle.load_errors`` so the Plugins panel can flag it.
+Enforcement layers applied to all non-``unsafe/`` plugins
+----------------------------------------------------------
+1. Import allow-list: a patched ``__import__`` raises ``SandboxViolation``
+   for any module not on ``_HOST_API_ALLOW | _STDLIB_ALLOW | _THIRDPARTY_ALLOW``.
+2. Restricted builtins: ``open``, ``eval``, ``exec``, ``compile``,
+   ``memoryview``, ``globals``, ``locals``, ``vars`` and all ``_``-prefixed
+   names (except ``__build_class__``, ``__name__``, ``__doc__``) are removed.
+3. Symbolic verifier (``analysis/plugins/verifier/``): analyses the AST
+   before execution; hard-blocks on static sinks and uses Z3 to check
+   config-namespace isolation.
 """
 from __future__ import annotations
 
@@ -51,11 +48,12 @@ _STDLIB_ALLOW = frozenset({
     '__future__',
 })
 
-# Third-party libraries plugins may depend on. NumPy is allowed despite
-# being a known escape vector (ctypeslib) — usability outweighs paranoia
-# for v1. Revisit if we tighten toward audit hooks.
+# Third-party libraries plugins may depend on. Submodules with escape
+# vectors are denied explicitly below in _EXPLICIT_DENY, which beats
+# the allow-list entry for the parent package.
 _THIRDPARTY_ALLOW = frozenset({
     'numpy',
+    'matplotlib',
 })
 
 # Host API modules exposed to sandboxed plugins. Keep this list narrow;
@@ -75,6 +73,16 @@ _HOST_API_ALLOW = frozenset({
     'analysis.ui.components',
     'analysis.ui.render_sidebar',
     'analysis.overlay.api',
+    # Component registration API -- needed by builtin sidepanel plugins.
+    'analysis.components',
+    'analysis.components.api',
+    'analysis.components.overlay_backend',
+    # Visualization helpers -- needed by builtin viz plugins.
+    # analysis.viz.plots provides only plotting functions, no FS/network access.
+    'analysis.viz.plots',
+    'analysis.viz',
+    # sidepanel plugin package -- exports frozen dataclasses and constants only.
+    'plugins.builtin.sidepanel',
 })
 
 # Explicit deny-list for obviously dangerous modules. The allow-list is
@@ -82,17 +90,41 @@ _HOST_API_ALLOW = frozenset({
 # who adds ``urllib`` to the stdlib allow-list without thinking should
 # still get caught here. Checked before the allow-list in ``_is_allowed``.
 _EXPLICIT_DENY = frozenset({
+    # Network
     'socket', 'ssl', 'select', 'selectors', 'asyncio',
     'http', 'urllib', 'urllib3', 'requests', 'httpx', 'aiohttp',
     'ftplib', 'smtplib', 'poplib', 'imaplib', 'telnetlib', 'nntplib',
     'xmlrpc', 'webbrowser',
+    # Process / threading
     'subprocess', 'multiprocessing', 'threading', '_thread',
+    # Filesystem / OS
     'os', 'sys', 'pathlib', 'shutil', 'tempfile', 'glob', 'fnmatch',
     'io', 'mmap', 'fcntl', 'pty', 'pwd', 'grp', 'resource', 'signal',
+    # FFI / raw memory
     'ctypes', 'cffi',
+    # Import machinery
     'importlib', 'pkgutil', 'runpy', 'zipimport',
+    # Serialisation with exec paths
     'pickle', 'shelve', 'marshal',
+    # Code introspection / execution
     'code', 'codeop', 'ast',
+    # Frame walking -- these give access to live frame objects and globals
+    # even without importing sys. gc.get_objects() walks to frame objects;
+    # inspect/traceback expose sys._getframe equivalents.
+    'gc', 'inspect', 'traceback', 'linecache',
+    # NumPy escape vectors -- denied even though 'numpy' is allowed.
+    # numpy.ctypeslib.load_library() loads arbitrary shared libraries;
+    # numpy.ctypes is a module-level alias to ctypes.
+    # numpy.distutils/f2py invoke subprocesses and compilers.
+    # numpy.testing runs pytest as a subprocess.
+    # The deny-list is checked before the allow-list so these beat 'numpy'.
+    'numpy.ctypeslib', 'numpy.ctypes', 'numpy.distutils',
+    'numpy.f2py', 'numpy.testing',
+    # matplotlib escape vectors -- denied even though 'matplotlib' is allowed.
+    # matplotlib.backends.backend_agg and gtk/wx/wx backends open display
+    # connections; the Qt backend is handled by PySide6 being unlisted.
+    # matplotlib.testing runs subprocess-based comparison tests.
+    'matplotlib.testing',
 })
 
 
@@ -236,19 +268,14 @@ def _restricted_builtins() -> dict:
 
 
 def is_trusted_bundle(path: Path) -> bool:
-    """A bundle is trusted iff it lives under ``plugins/builtin/`` or
-    ``plugins/unsafe/`` inside the repo. ``unsafe/`` is an opt-in escape
-    hatch for bundles that legitimately need raw Python — naming it
-    ``unsafe`` makes the user's choice explicit. Everything else —
-    including user bundles directly under ``plugins/`` — is sandboxed."""
+    """Only ``plugins/unsafe/`` is trusted (full Python, no restrictions).
+    All other plugin locations -- including ``plugins/builtin/`` -- are
+    sandboxed. See SECURITY.md for the rationale."""
     try:
         repo_root = Path(__file__).resolve().parents[2]
         resolved = path.resolve()
-        for trusted_dir in ('builtin', 'unsafe'):
-            root = (repo_root / 'plugins' / trusted_dir).resolve()
-            if resolved.is_relative_to(root):
-                return True
-        return False
+        unsafe_root = (repo_root / 'plugins' / 'unsafe').resolve()
+        return resolved.is_relative_to(unsafe_root)
     except (ValueError, OSError):
         return False
 

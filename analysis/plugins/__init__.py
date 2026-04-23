@@ -121,11 +121,23 @@ def _load_module(file_path: Path, bundle_key: str, role: str,
     mod.__package__ = pkg_name
     if sandboxed:
         prepare_sandboxed_module(mod)
+        try:
+            from analysis.plugins.verifier import verify
+            verify(file_path, bundle_key)
+        except Exception as exc:
+            return None, exc
     sys.modules[mod_name] = mod
     try:
         spec.loader.exec_module(mod)
     except Exception as exc:
         sys.modules.pop(mod_name, None)
+        if sandboxed:
+            # Strip the traceback before returning. A sandboxed plugin that
+            # catches an exception during its own load could otherwise walk
+            # exc.__traceback__.tb_frame.f_globals to recover blocked
+            # builtins -- no import required. with_traceback(None) severs
+            # that link before the exception crosses into caller code.
+            return None, exc.with_traceback(None)
         return None, exc
     return mod, None
 

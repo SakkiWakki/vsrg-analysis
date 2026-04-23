@@ -51,15 +51,39 @@ def test_allowed_modules(module):
     'threading', '_thread', 'multiprocessing', 'asyncio',
     # Code-loading
     'importlib', 'importlib.util', 'pickle', 'marshal', 'ast', 'code',
+    # Frame-walking (denied even though some are stdlib)
+    'gc', 'inspect', 'traceback', 'linecache',
+    # NumPy escape vectors (denied even though 'numpy' is allowed)
+    'numpy.ctypeslib', 'numpy.ctypes', 'numpy.distutils',
+    'numpy.f2py', 'numpy.testing',
+    # matplotlib escape vector
+    'matplotlib.testing',
     # Random non-allow-listed stdlib
     'logging', 'unittest', 'argparse',
     # Third-party not on the allow-list
-    'pytest', 'matplotlib', 'PySide6',
+    'pytest', 'PySide6',
     # Overlay host runtime touches shm/threads and is not sandbox-safe.
     'analysis.overlay.publisher',
 ])
 def test_denied_modules(module):
     assert not _is_allowed(module)
+
+
+def test_numpy_submodule_deny_beats_parent_allow():
+    """numpy is allowed but its escape-vector submodules are explicitly
+    denied -- the deny-list must be checked before the allow-list."""
+    assert _is_allowed('numpy') is True
+    assert _is_allowed('numpy.ctypeslib') is False
+    assert _is_allowed('numpy.ctypes') is False
+    assert _is_allowed('numpy.f2py') is False
+    assert _is_allowed('numpy.testing') is False
+
+
+def test_frame_walking_modules_are_denied():
+    assert _is_allowed('gc') is False
+    assert _is_allowed('inspect') is False
+    assert _is_allowed('traceback') is False
+    assert _is_allowed('linecache') is False
 
 
 def test_explicit_deny_beats_allow():
@@ -77,9 +101,10 @@ def test_explicit_deny_beats_allow():
 
 # ─── Trust classification ──────────────────────────────────────────────────
 
-def test_builtin_is_trusted():
+def test_builtin_is_not_trusted():
+    # builtin/ is sandboxed -- see SECURITY.md. Only unsafe/ is trusted.
     repo_root = Path(__file__).resolve().parents[1]
-    assert is_trusted_bundle(repo_root / 'plugins' / 'builtin')
+    assert not is_trusted_bundle(repo_root / 'plugins' / 'builtin')
 
 
 def test_unsafe_is_trusted():
@@ -175,8 +200,8 @@ def test_sandboxed_plugin_refuses_dangerous_imports(sandboxed_root, forbidden):
 
 
 def test_sandboxed_plugin_cannot_call_open(sandboxed_root):
-    """``open`` is stripped from the restricted builtins, so even a plugin
-    that gets past the import check can't touch the FS directly."""
+    """``open`` is caught at verification time (static sink) before the
+    module even loads -- the verifier hard-blocks it."""
     _write_bundle(sandboxed_root, 'fs_bundle', {
         'fs.py': '''
             def register_sidebar(add):
@@ -185,16 +210,13 @@ def test_sandboxed_plugin_cannot_call_open(sandboxed_root):
     })
     bundles = discover_bundles()
     fs = next(b for b in bundles if b.key == 'fs_bundle')
-    # Module imports fine (no ``import`` statements), but calling the
-    # registered hook should fail because ``open`` is missing.
-    assert fs.load_errors == []
-    assert len(fs.sidebar_modules) == 1
-    mod = fs.sidebar_modules[0]
-    with pytest.raises(NameError):
-        mod.register_sidebar(lambda *a, **kw: None)
+    assert len(fs.load_errors) > 0
+    assert fs.sidebar_modules == []
 
 
 def test_sandboxed_plugin_cannot_call_eval(sandboxed_root):
+    """``eval`` is caught at verification time (static sink) before the
+    module even loads -- the verifier hard-blocks it."""
     _write_bundle(sandboxed_root, 'eval_bundle', {
         'ev.py': '''
             def register_sidebar(add):
@@ -203,9 +225,8 @@ def test_sandboxed_plugin_cannot_call_eval(sandboxed_root):
     })
     bundles = discover_bundles()
     b = next(x for x in bundles if x.key == 'eval_bundle')
-    mod = b.sidebar_modules[0]
-    with pytest.raises(NameError):
-        mod.register_sidebar(lambda *a, **kw: None)
+    assert len(b.load_errors) > 0
+    assert b.sidebar_modules == []
 
 
 def test_sandboxed_relative_import_within_bundle_works(sandboxed_root):

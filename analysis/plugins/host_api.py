@@ -19,9 +19,6 @@ request completes.
 """
 from __future__ import annotations
 
-import threading
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -80,6 +77,7 @@ def http_get(plugin_key: str, url: str, *, timeout: float = 5.0) -> bytes:
             raise NetworkAccessDenied(f'{plugin_key} denied access to {url!r}')
         # 'allow_once' falls through
 
+    import urllib.request
     req = urllib.request.Request(url, headers={'Accept': '*/*'})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
@@ -94,6 +92,7 @@ def _ask_permission(plugin_key: str, url: str) -> str:
         # No Qt host registered (tests, headless). Deny by default.
         return 'deny_once'
 
+    import threading
     result_holder: list[str] = []
     done = threading.Event()
 
