@@ -97,6 +97,19 @@ jobs:
                   -f prerelease=true > /dev/null
           done
 
+      - name: Prune stale assets on this tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag='${{ github.ref_name }}'
+          if gh release view "$tag" --json assets \
+              --jq '.assets[].name' 2>/dev/null \
+              | while read -r a; do
+                  [ -n "$a" ] || continue
+                  echo "[prune] $a"
+                  gh release delete-asset "$tag" "$a" --yes || true
+              done; then :; fi
+
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*.zip
