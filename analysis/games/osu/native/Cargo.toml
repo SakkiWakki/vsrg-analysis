@@ -5,15 +5,17 @@ edition = "2021"
 rust-version = "1.75"
 
 # Built as a PyO3 extension module (importable from Python as
-# ``osu_memory_native``). Linked dynamically against libpython via
-# PyO3's ``extension-module`` feature so the same build works across
-# Python 3.10+.
+# ``osu_memory_native``). The ``abi3-py310`` feature builds against
+# CPython's stable ABI — one ``abi3`` wheel loads on 3.10 through
+# whatever CPython ships next, so we don't have to matrix-build a
+# per-version wheel and ``run.sh`` can pick whichever ``python3`` the
+# user has (Arch on 3.14, Debian on 3.11, Ubuntu 22.04 on 3.10, etc.).
 [lib]
 name = "osu_memory_native"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.28", features = ["extension-module"] }
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py310"] }
 thiserror = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
