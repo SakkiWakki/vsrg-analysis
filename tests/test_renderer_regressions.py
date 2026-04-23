@@ -30,7 +30,8 @@ def _make_press_ctx(renderer, miss_pressed=(True,)):
         judge_colors={'miss': (255, 0, 0)},
     )
     return SimpleNamespace(player=player, lane_w=80,
-                            drawers=renderer._defaults)
+                            drawers=renderer._defaults,
+                            scroll_speed=player.scroll_speed)
 
 
 def _patch_draw_recorders(renderer):

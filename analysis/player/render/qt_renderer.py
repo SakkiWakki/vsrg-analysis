@@ -241,6 +241,7 @@ class QtPlayerRenderer:
             lane_w=lane_w,
             judge_y=int(player.H * player.hit_line_y_frac),
             painter=painter,
+            _scroll_speed=float(player.scroll_speed),
         )
         ctx.drawers = self._resolve_drawers(player)
         culling.prepare_time_window(ctx)
@@ -329,9 +330,10 @@ class QtPlayerRenderer:
 
     def _draw_judgment(self, ctx, painter):
         p = ctx.player
+        sps = ctx.scroll_speed
         for name, w in reversed(p.windows):
-            top = ctx.judge_y - w * p.scroll_speed
-            bot = ctx.judge_y + w * p.scroll_speed
+            top = ctx.judge_y - w * sps
+            bot = ctx.judge_y + w * sps
             color = p.judge_colors[name]
             painter.fillRect(QRectF(ctx.x0, top, p.keycount * ctx.lane_w,
                                     bot - top),
@@ -443,7 +445,7 @@ class QtPlayerRenderer:
         eligible_state = n.ln_state != 'released' and not n.miss
         if not (has_release_offset and eligible_state and not p.press_hide):
             return
-        rel_y = n.y_end + n.rel_off * p.scroll_speed
+        rel_y = n.y_end + n.rel_off * ctx.scroll_speed
         ctx.drawers['ln_release_guide'](painter, n.lx, ctx.lane_w,
                                          n.y_end, rel_y)
 
@@ -509,7 +511,7 @@ class QtPlayerRenderer:
     def _draw_press_mark(self, ctx, painter, n):
         """Thin vertical line + tick showing where the player hit relative
         to the note head. Skipped for missed LNs entirely for readability,
-        and for any miss where the player never actually pressed — the
+        and for any miss where the player never actually pressed - the
         parser writes a 1.0s sentinel offset for those, which would
         otherwise draw a full-second line that crosses unrelated notes."""
         p = ctx.player
@@ -520,7 +522,7 @@ class QtPlayerRenderer:
         if n.is_ln and n.ln_state == 'held' and p.press_hide:
             return
 
-        press_y = n.y + n.off * p.scroll_speed
+        press_y = n.y + n.off * ctx.scroll_speed
         color = p.judge_colors['miss'] if n.miss else n.jcolor
         ctx.drawers['press_mark'](painter, n.lx, ctx.lane_w, n.y, press_y,
                                    color)

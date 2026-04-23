@@ -24,6 +24,7 @@ class RenderContext:
     visible_miss_holds: list[int] = field(default_factory=list)
     visible_ghost_taps: list[int] = field(default_factory=list)
     plugin_data: dict = field(default_factory=dict)
+    _scroll_speed: float = 0.0
 
     @property
     def width(self):
@@ -39,10 +40,14 @@ class RenderContext:
 
     @property
     def scroll_speed(self):
-        return self.player.scroll_speed
+        return self._scroll_speed
 
     def time_to_y(self, t):
-        return self.player._time_to_y(float(t), self.t_now)
+        judge_y = self.player.H * self.player.hit_line_y_frac
+        return judge_y - self.player._sv_distance(
+            self.t_now,
+            float(t),
+        ) * self._scroll_speed
 
     def lane_x(self, col):
         return self.x0 + int(col) * self.lane_w

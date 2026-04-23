@@ -8,7 +8,7 @@ import numpy as np
 
 def prepare_time_window(ctx):
     p = ctx.player
-    sps = max(1e-3, p.scroll_speed)
+    sps = max(1e-3, ctx.scroll_speed)
     sv_hi = (ctx.judge_y + ctx.screen_margin) / sps
     sv_lo = (ctx.judge_y - (p.H + ctx.screen_margin)) / sps
     ctx.use_sv_space = bool(p.sv_enabled and p.sv_sections)
