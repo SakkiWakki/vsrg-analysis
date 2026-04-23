@@ -19,11 +19,11 @@ Shape:
 
     ComponentContext   (protocol, see below)
         geometry (w, h, cursor y), primitives (text, rect, line, button,
-        heading, ...), access to a ``ComponentDataSource`` that each
+        heading, ...), access to a ``ComponentGameState`` that each
         backend populates from the live source of truth (the ``Player``
         in-app, the ``OverlayGameState`` in-game).
 
-    ComponentDataSource (protocol)
+    ComponentGameState (protocol)
         Methods a component may call to read live data. A backend
         implementation wraps its world (``Player`` / ``OverlayGameState``)
         and answers the subset it can. Unknown methods raise
@@ -59,7 +59,7 @@ REGION_FREE = 'free'
 # ── Data access ─────────────────────────────────────────────────────
 
 class DataNotAvailable(Exception):
-    """Raised by a :class:`ComponentDataSource` when a field the caller
+    """Raised by a :class:`ComponentGameState` when a field the caller
     asked for isn't provided by the current surface. Components that
     want to degrade gracefully should catch this; manifests that list
     the field in ``requires_data`` never observe it (registration would
@@ -67,7 +67,7 @@ class DataNotAvailable(Exception):
 
 
 @runtime_checkable
-class ComponentDataSource(Protocol):
+class ComponentGameState(Protocol):
     """Read-only view over whatever the surface uses as its source of
     truth. Methods grow over time as components need more. Each backend
     implements the subset that makes sense for its world; calling an
@@ -102,6 +102,38 @@ class ComponentDataSource(Protocol):
     def judgment_colors(self) -> dict[str, tuple]: ...
     def judge_label(self) -> str: ...
 
+    # ── Raw game memory (osu! only for now) ──
+    # Returns None when the native reader is unavailable or the player
+    # is not in an active gameplay session. Components should degrade
+    # gracefully rather than requiring this field via requires_data.
+    def game_memory(self) -> 'GameMemoryState | None': ...
+
+
+# ── Game memory snapshot ───────────────────────────────────────────
+
+@dataclass(frozen=True)
+class GameMemoryState:
+    """Read-only snapshot of live game memory, delivered via
+    ComponentGameState.game_memory(). Fields reflect what the native
+    reader can extract cross-platform; platform-specific internals stay
+    in the trusted host layer.
+
+    All fields are as-read at poll time. None values indicate the field
+    was not populated (e.g. hit_errors_ms when not in gameplay)."""
+    in_gameplay: bool
+    combo: int
+    max_combo: int
+    accuracy: float                    # 0.0 - 1.0
+    hit_300: int
+    hit_100: int
+    hit_50: int
+    hit_miss: int
+    hit_geki: int
+    hit_katu: int
+    hit_errors_ms: tuple[int, ...]     # raw per-hit offset errors in ms
+    map_md5: str
+    map_title: str
+
 
 # ── Drawing primitives ─────────────────────────────────────────────
 
@@ -128,7 +160,7 @@ class ComponentContext(Protocol):
     h: int                        # component-local height, px (0 == grow)
     y: int                        # paint cursor, advances as rows emit
     measure_only: bool
-    data: ComponentDataSource
+    data: ComponentGameState
 
     # ── Geometry helpers ──
     def split_row(self, n: int = 2, gap: int = 4) -> list[tuple[int, int]]:

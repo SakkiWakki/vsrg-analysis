@@ -8,14 +8,14 @@ advances the section's paint cursor to match.
 
 Data: the GUI surface source of truth is the live ``Player`` instance.
 :class:`PlayerDataSource` wraps it and answers the subset of
-``ComponentDataSource`` fields the player actually has. Methods not
+``ComponentGameState`` fields the player actually has. Methods not
 answerable (e.g. live ``accuracy`` -- not meaningful mid-replay) raise
 :class:`DataNotAvailable`.
 """
 from __future__ import annotations
 
 from analysis.components.api import (
-    ComponentDataSource,
+    ComponentGameState,
     DataNotAvailable,
     SURFACE_GUI,
 )
@@ -25,7 +25,7 @@ from analysis.player.render import theme
 # ── Data source ─────────────────────────────────────────────────────
 
 class PlayerDataSource:
-    """Implements :class:`ComponentDataSource` against a live
+    """Implements :class:`ComponentGameState` against a live
     :class:`~analysis.player.player.Player`.
 
     Kept read-only on purpose. Components that want to *change* state
@@ -98,6 +98,11 @@ class PlayerDataSource:
             raise DataNotAvailable('judge_label')
         return str(lbl)
 
+    def game_memory(self):
+        # GUI backend reads from the replay player, not from live memory.
+        # Components that need live game state should target SURFACE_OVERLAY.
+        return None
+
 
 # Sanity check at import time: a component declaring this field really
 # can assume the source will answer.
@@ -124,7 +129,7 @@ class SidebarComponentContext:
     surface = SURFACE_GUI
 
     def __init__(self, sctx, *, x0: int, y0: int, w: int, h: int,
-                 data_source: ComponentDataSource):
+                 data_source: ComponentGameState):
         self._sctx = sctx
         self._x0 = int(x0)
         self._y0 = int(y0)

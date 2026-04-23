@@ -12,7 +12,7 @@ from analysis.overlay.api import (
     OverlayGameState,
     OverlayStateTracker,
 )
-from plugins.unsafe.osu_live.client import LiveSnapshot
+from analysis.components.api import GameMemoryState
 from plugins.unsafe.osu_live.state import snapshot_to_overlay_state
 
 
@@ -63,21 +63,20 @@ def test_tracker_does_not_restart_every_frame_without_song_id():
 
 
 def test_osu_snapshot_adapts_to_overlay_state():
-    snap = LiveSnapshot(
-        connected=True,
+    snap = GameMemoryState(
         in_gameplay=True,
-        map_title='Example Map',
         combo=123,
         max_combo=456,
-        accuracy=98.76,
-        unstable_rate=88.0,
-        hits_300=10,
-        hits_100=2,
-        hits_50=1,
-        hits_miss=0,
-        offsets=np.asarray([0.01, -0.02], dtype=np.float64),
-        columns=np.asarray([0, 3], dtype=np.int32),
-        keycount=4,
+        accuracy=0.9876,
+        hit_300=10,
+        hit_100=2,
+        hit_50=1,
+        hit_miss=0,
+        hit_geki=0,
+        hit_katu=0,
+        hit_errors_ms=(10, -20),   # ms; state.py converts to seconds
+        map_md5='abc123',
+        map_title='Example Map',
     )
 
     state = snapshot_to_overlay_state(snap)
@@ -85,8 +84,12 @@ def test_osu_snapshot_adapts_to_overlay_state():
     assert state.game == 'osu'
     assert state.is_playing
     assert state.song_title == 'Example Map'
-    assert state.keycount == 4
     assert state.combo == 123
     assert state.judgment('300') == 10
     assert state.hit_offsets_s == (0.01, -0.02)
-    assert state.hit_lanes == (0, 3)
+
+
+def test_none_snapshot_returns_disconnected():
+    state = snapshot_to_overlay_state(None)
+    assert not state.is_playing
+    assert state.phase == 'disconnected'

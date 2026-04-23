@@ -1,55 +1,40 @@
-"""Adapter from osu live snapshots to the generic overlay state model."""
+"""Adapter from native osu! game memory to the generic overlay state model."""
 from __future__ import annotations
 
+from analysis.components.api import GameMemoryState
 from analysis.overlay.api import (PHASE_DISCONNECTED, PHASE_IDLE,
                                   PHASE_PLAYING, OverlayGameState)
 
-from plugins.unsafe.osu_live.client import LiveSnapshot
 
+def snapshot_to_overlay_state(snap: GameMemoryState | None) -> OverlayGameState:
+    """Translate a native memory snapshot into game-agnostic overlay state.
+    Returns a disconnected state when snap is None."""
+    if snap is None:
+        return OverlayGameState(game='osu', phase=PHASE_DISCONNECTED,
+                                keycount=0)
 
-def snapshot_to_overlay_state(snap: LiveSnapshot) -> OverlayGameState:
-    """Translate osu's live snapshot into game-agnostic overlay state."""
-    if not snap.connected:
-        phase = PHASE_DISCONNECTED
-    elif snap.in_gameplay:
-        phase = PHASE_PLAYING
-    else:
-        phase = PHASE_IDLE
-
-    keycount = max(0, int(snap.keycount))
-    hit_lanes = tuple(_valid_lanes(snap.columns, keycount))
-    offsets = tuple(float(x) for x in snap.offsets)
-
+    phase = PHASE_PLAYING if snap.in_gameplay else PHASE_IDLE
+    offsets = tuple(e / 1000.0 for e in snap.hit_errors_ms)
     judgments = (
-        ('300', int(snap.hits_300)),
-        ('100', int(snap.hits_100)),
-        ('50', int(snap.hits_50)),
-        ('miss', int(snap.hits_miss)),
+        ('300', snap.hit_300),
+        ('geki', snap.hit_geki),
+        ('200', snap.hit_katu),
+        ('100', snap.hit_100),
+        ('50', snap.hit_50),
+        ('miss', snap.hit_miss),
     )
 
     return OverlayGameState(
         game='osu',
         phase=phase,
-        song_id=str(snap.map_title or ''),
-        song_title=str(snap.map_title or ''),
-        keycount=keycount,
-        combo=int(snap.combo),
-        max_combo=int(snap.max_combo),
-        accuracy=float(snap.accuracy),
-        unstable_rate=float(snap.unstable_rate),
+        song_id=snap.map_md5,
+        song_title=snap.map_title,
+        keycount=4,
+        combo=snap.combo,
+        max_combo=snap.max_combo,
+        accuracy=snap.accuracy,
         judgments=judgments,
         hit_offsets_s=offsets,
-        hit_lanes=hit_lanes,
+        hit_lanes=(),
         pressed_lanes=(),
     )
-
-
-def _valid_lanes(values, keycount: int) -> tuple[int, ...]:
-    if keycount <= 0:
-        return ()
-    out = []
-    for v in values:
-        lane = int(v)
-        if 0 <= lane < keycount:
-            out.append(lane)
-    return tuple(out)

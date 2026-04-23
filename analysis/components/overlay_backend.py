@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from analysis.components.api import (
-    ComponentDataSource,
+    ComponentGameState,
     DataNotAvailable,
     REGION_FREE,
     SURFACE_OVERLAY,
@@ -57,7 +57,7 @@ class OverlayFields:
 
 
 class OverlayGameStateDataSource:
-    """Implements :class:`ComponentDataSource` against an
+    """Implements :class:`ComponentGameState` against an
     :class:`~analysis.overlay.api.OverlayGameState` snapshot.
 
     Each field the overlay snapshot actually carries is answered from
@@ -105,6 +105,14 @@ class OverlayGameStateDataSource:
 
     def judge_label(self) -> str:
         raise DataNotAvailable('overlay game state has no judge label')
+
+    def game_memory(self):
+        # The overlay backend delivers the live native snapshot produced
+        # by OsuLiveClient and published via the game adapter's state hook.
+        # Returns None when no snapshot is available (osu! not running,
+        # native extension missing, or not in active gameplay).
+        from analysis.components.provider import current_game_memory
+        return current_game_memory()
 
 
 # ── Color + font conversions ────────────────────────────────────────
@@ -156,7 +164,7 @@ class OverlayComponentContext:
     def __init__(self, frame: OverlayFrame, *,
                  component_key: str, origin_px: tuple, size_px: tuple,
                  fb_w: int, fb_h: int,
-                 data_source: ComponentDataSource,
+                 data_source: ComponentGameState,
                  supports_input: bool = False):
         self._frame = frame
         self._key = str(component_key)

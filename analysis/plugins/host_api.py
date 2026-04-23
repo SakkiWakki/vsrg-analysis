@@ -8,16 +8,125 @@ register UI via ``SidebarContext`` as before.
 Persistence: plugins obtain a scoped config handle via
 :func:`plugin_config`, which reads/writes/subscribes under
 ``plugins.<plugin_key>.settings`` in the shared config store. This is
-the only way a sandboxed plugin gets durable per-user state — the
+the only way a sandboxed plugin gets durable per-user state -- the
 sandbox blocks direct filesystem access.
 
-Future work: expose read-only chart/replay snapshots, a scoped FS API
-("load replay by id"), etc., without giving plugins arbitrary path access.
+Network: plugins may call :func:`http_get` to fetch a URL. Every URL
+requires user consent; the host shows a dialog on first access and
+persists the decision (always/never) per plugin+URL. Call only from a
+plugin's own thread -- this call blocks until the user responds or the
+request completes.
 """
 from __future__ import annotations
 
+import threading
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
+
+
+# ── Network permission dialog hook ────────────────────────────────────────
+#
+# The Qt host sets this at startup. Signature:
+#   _show_permission_dialog(plugin_key: str, url: str) -> str
+# Returns one of: 'always', 'allow_once', 'deny_once', 'never'.
+# Called on Qt's main thread (host marshals it there). The plugin thread
+# waits on a threading.Event while this runs.
+_show_permission_dialog: Callable[[str, str], str] | None = None
+
+
+def set_permission_dialog(fn: Callable[[str, str], str]) -> None:
+    """Called by the Qt host at startup to register the dialog callback."""
+    global _show_permission_dialog
+    _show_permission_dialog = fn
+
+
+class NetworkAccessDenied(Exception):
+    """Raised by :func:`http_get` when the user denied network access."""
+
+
+def http_get(plugin_key: str, url: str, *, timeout: float = 5.0) -> bytes:
+    """Fetch ``url`` and return the raw response body.
+
+    Blocks the calling thread until the user grants or denies access (on
+    first call for this plugin+URL combination), then performs the HTTP
+    request. Must be called from a plugin's own thread, not the Qt main
+    thread.
+
+    Raises :class:`NetworkAccessDenied` if the user denies access.
+    Raises :class:`urllib.error.URLError` on network errors.
+
+    Examples:
+        Permanent decisions (always/never) are stored and skip the dialog
+        on future calls. One-time decisions (allow_once/deny_once) apply
+        only to this call.
+    """
+    from analysis.plugins.permissions import Decision, stored, record
+
+    decision = stored(plugin_key, url)
+
+    if decision == Decision.NEVER:
+        raise NetworkAccessDenied(f'{plugin_key} access to {url!r} is set to never')
+
+    if decision != Decision.ALWAYS:
+        result = _ask_permission(plugin_key, url)
+        if result == 'always':
+            record(plugin_key, url, Decision.ALWAYS)
+        elif result == 'never':
+            record(plugin_key, url, Decision.NEVER)
+            raise NetworkAccessDenied(f'{plugin_key} denied access to {url!r}')
+        elif result == 'deny_once':
+            raise NetworkAccessDenied(f'{plugin_key} denied access to {url!r}')
+        # 'allow_once' falls through
+
+    req = urllib.request.Request(url, headers={'Accept': '*/*'})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
+def _ask_permission(plugin_key: str, url: str) -> str:
+    """Block the calling thread until the Qt dialog resolves.
+
+    Marshals the dialog to Qt's main thread via the registered callback,
+    using a threading.Event so this thread waits without spinning."""
+    if _show_permission_dialog is None:
+        # No Qt host registered (tests, headless). Deny by default.
+        return 'deny_once'
+
+    result_holder: list[str] = []
+    done = threading.Event()
+
+    def _on_main_thread():
+        try:
+            result_holder.append(_show_permission_dialog(plugin_key, url))
+        except Exception:
+            result_holder.append('deny_once')
+        finally:
+            done.set()
+
+    # Qt host must call _on_main_thread() on the Qt main thread.
+    # This is done via QMetaObject.invokeMethod or a queued signal
+    # registered by set_permission_dialog's companion set_invoke_on_main.
+    _invoke_on_main(_on_main_thread)
+    done.wait()
+    return result_holder[0] if result_holder else 'deny_once'
+
+
+_invoke_on_main: Callable[[Callable], None] = lambda fn: fn()
+
+
+def set_invoke_on_main(fn: Callable[[Callable], None]) -> None:
+    """Called by the Qt host to register how to marshal a callable to the
+    Qt main thread (e.g. via QMetaObject.invokeMethod + Qt.QueuedConnection).
+
+    Examples:
+        from PySide6.QtCore import QMetaObject, Qt
+        set_invoke_on_main(
+            lambda fn: QMetaObject.invokeMethod(app, fn, Qt.QueuedConnection))
+    """
+    global _invoke_on_main
+    _invoke_on_main = fn
 
 
 @dataclass(frozen=True)
