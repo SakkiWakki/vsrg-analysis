@@ -224,6 +224,8 @@ fn read_state<'py>(py: Python<'py>, handle: &ResolvedHandle) -> PyResult<Bound<'
         d.set_item("max_combo", s.max_combo)?;
         d.set_item("mode", s.mode)?;
         d.set_item("accuracy", s.accuracy)?;
+
+        // Per-play judgment counters.
         d.set_item("hit_300", s.hit_300)?;
         d.set_item("hit_100", s.hit_100)?;
         d.set_item("hit_50", s.hit_50)?;
@@ -231,9 +233,34 @@ fn read_state<'py>(py: Python<'py>, handle: &ResolvedHandle) -> PyResult<Bound<'
         d.set_item("hit_katu", s.hit_katu)?;
         d.set_item("hit_miss", s.hit_miss)?;
         d.set_item("hit_errors_ms", s.hit_errors_ms)?;
-        d.set_item("map_md5", s.map_md5)?;
-        d.set_item("map_title", s.map_title)?;
-        d.set_item("map_cs", s.map_cs)?;
+
+        // Chart identity bundle (mirrors Python ChartMetadata).
+        let cm = PyDict::new(py);
+        cm.set_item("md5",                 s.chart_meta.md5)?;
+        cm.set_item("filename",            s.chart_meta.filename)?;
+        cm.set_item("artist",              s.chart_meta.artist)?;
+        cm.set_item("artist_unicode",      s.chart_meta.artist_unicode)?;
+        cm.set_item("title",               s.chart_meta.title)?;
+        cm.set_item("title_unicode",       s.chart_meta.title_unicode)?;
+        cm.set_item("creator",             s.chart_meta.creator)?;
+        cm.set_item("version",             s.chart_meta.version)?;
+        cm.set_item("audio_filename",      s.chart_meta.audio_filename)?;
+        cm.set_item("background_filename", s.chart_meta.background_filename)?;
+        cm.set_item("folder",              s.chart_meta.folder)?;
+        cm.set_item("beatmap_id",          s.chart_meta.beatmap_id)?;
+        cm.set_item("beatmap_set_id",      s.chart_meta.beatmap_set_id)?;
+        cm.set_item("ranked_status",       s.chart_meta.ranked_status)?;
+        d.set_item("chart_meta", cm)?;
+
+        // Chart difficulty stats (osu-native; keycount=CS for mania).
+        let cs_ = PyDict::new(py);
+        cs_.set_item("ar",           s.chart_stats.ar)?;
+        cs_.set_item("cs",           s.chart_stats.cs)?;
+        cs_.set_item("hp",           s.chart_stats.hp)?;
+        cs_.set_item("od",           s.chart_stats.od)?;
+        cs_.set_item("object_count", s.chart_stats.object_count)?;
+        d.set_item("chart_stats", cs_)?;
+
         d.set_item("game_state", s.game_state)?;
         d.set_item("in_gameplay", s.in_gameplay)?;
         Ok(d)

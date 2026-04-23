@@ -89,20 +89,38 @@ class OsuLiveClient:
 
 
 def _raw_to_game_memory(raw: dict) -> GameMemoryState:
+    # osu judgment names used by the rest of the app. The nested
+    # ``chart_meta`` dict (added alongside new memory offsets) supplies
+    # map identity fields; legacy top-level ``map_md5``/``map_title``
+    # keys are still honored for older native builds.
+    judgment_counts = {
+        '300':  int(raw.get('hit_300',  0) or 0),
+        '100':  int(raw.get('hit_100',  0) or 0),
+        '50':   int(raw.get('hit_50',   0) or 0),
+        'miss': int(raw.get('hit_miss', 0) or 0),
+        'geki': int(raw.get('hit_geki', 0) or 0),
+        'katu': int(raw.get('hit_katu', 0) or 0),
+    }
+    chart_meta = raw.get('chart_meta') or {}
+    chart_stats = raw.get('chart_stats') or {}
+    md5 = chart_meta.get('md5') or raw.get('map_md5') or ''
+    title = chart_meta.get('title') or raw.get('map_title') or ''
+    # Stash the full chart_meta/stats in .extra so consumers (e.g. the
+    # tosu overlay plugin) can expose them through ChartMetadata /
+    # ChartStats without a second memory probe.
     return GameMemoryState(
         in_gameplay=bool(raw.get('in_gameplay', False)),
         combo=int(raw.get('combo', 0) or 0),
         max_combo=int(raw.get('max_combo', 0) or 0),
         accuracy=float(raw.get('accuracy', 0.0) or 0.0),
-        hit_300=int(raw.get('hit_300', 0) or 0),
-        hit_100=int(raw.get('hit_100', 0) or 0),
-        hit_50=int(raw.get('hit_50', 0) or 0),
-        hit_miss=int(raw.get('hit_miss', 0) or 0),
-        hit_geki=int(raw.get('hit_geki', 0) or 0),
-        hit_katu=int(raw.get('hit_katu', 0) or 0),
+        judgment_counts=judgment_counts,
         hit_errors_ms=tuple(int(e) for e in (raw.get('hit_errors_ms') or [])),
-        map_md5=str(raw.get('map_md5') or ''),
-        map_title=str(raw.get('map_title') or ''),
+        map_md5=str(md5),
+        map_title=str(title),
+        extra={
+            'chart_meta': dict(chart_meta),
+            'chart_stats': dict(chart_stats),
+        },
     )
 
 

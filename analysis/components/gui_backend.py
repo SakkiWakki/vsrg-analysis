@@ -48,6 +48,11 @@ class PlayerDataSource:
         'sv_enabled', 'sv_suspended', 'sv_sections',
         'skin', 'press_hide', 'scroll_mode', 'scroll_value',
         'effective_scroll_ms', 'layer_visible', 'layer_tree',
+        # Chart + play snapshots (all surfaces with a loaded replay)
+        'chart_metadata', 'chart_stats', 'chart_paths',
+        'player_name', 'score', 'max_combo', 'current_grade',
+        'mods_short', 'mods_raw', 'play_rate_effective',
+        'hit_errors_ms', 'unstable_rate',
     })
 
     def __init__(self, player):
@@ -110,6 +115,217 @@ class PlayerDataSource:
         # GUI backend reads from the replay player, not from live memory.
         # Components that need live game state should target SURFACE_OVERLAY.
         return None
+
+    # ── Chart snapshots ──
+
+    def chart_metadata(self):
+        from analysis.components.api import ChartMetadata
+        rep = getattr(self._p, 'replay', None)
+        if not isinstance(rep, dict):
+            return ChartMetadata()
+        cm = rep.get('chart_meta') or {}
+        meta = rep.get('meta') or {}
+        return ChartMetadata(
+            artist=str(cm.get('artist') or ''),
+            artist_unicode=str(cm.get('artist_unicode') or cm.get('artist') or ''),
+            title=str(cm.get('title') or ''),
+            title_unicode=str(cm.get('title_unicode') or cm.get('title') or ''),
+            creator=str(cm.get('creator') or ''),
+            version=str(cm.get('version') or ''),
+            md5=str(rep.get('beatmap_hash') or meta.get('beatmap_hash') or ''),
+            beatmap_id=int(cm.get('beatmap_id') or 0),
+            beatmap_set_id=int(cm.get('beatmap_set_id') or 0),
+            source=str(cm.get('source') or ''),
+            tags=str(cm.get('tags') or ''),
+        )
+
+    def chart_stats(self):
+        from analysis.components.api import ChartStats
+        rep = getattr(self._p, 'replay', None)
+        times = getattr(self._p, 'times', None)
+        first_ms = int(times[0] * 1000) if times is not None and len(times) else 0
+        last_ms = int(times[-1] * 1000) if times is not None and len(times) else 0
+        holds = rep.get('holds') if isinstance(rep, dict) else None
+        hold_count = int(len(holds)) if holds is not None else 0
+        total_objects = int(len(times)) if times is not None else 0
+
+        # Let the adapter fill in its own difficulty scalar and extras.
+        adapter = self._adapter()
+        if adapter is not None and hasattr(adapter, 'chart_stats_extra'):
+            try:
+                difficulty, rating, extra = adapter.chart_stats_extra(rep)
+            except Exception:
+                difficulty, rating, extra = 0.0, 0.0, {}
+        else:
+            # Fallback: osu stores 'od' at top level of the replay dict.
+            difficulty = (float(rep.get('od', 0.0))
+                          if isinstance(rep, dict) else 0.0)
+            rating = 0.0
+            extra = {}
+
+        bpm = self._bpm_common()
+        return ChartStats(
+            mode_name=str(getattr(self._p, 'game', '') or ''),
+            difficulty=float(difficulty),
+            rating=float(rating),
+            bpm_common=bpm, bpm_min=bpm, bpm_max=bpm,
+            length_ms=max(0, last_ms - first_ms),
+            first_object_ms=first_ms,
+            last_object_ms=last_ms,
+            total_objects=total_objects,
+            hold_count=hold_count,
+            max_combo=total_objects + hold_count,
+            extra=dict(extra),
+        )
+
+    def chart_paths(self):
+        from analysis.components.api import ChartPaths
+        import os
+        rep = getattr(self._p, 'replay', None)
+        if not isinstance(rep, dict):
+            return ChartPaths()
+        chart_path = rep.get('chart_path') or ''
+        chart_folder = (os.path.basename(os.path.dirname(chart_path))
+                        if chart_path else '')
+        library_root = (os.path.dirname(os.path.dirname(chart_path))
+                        if chart_path else '')
+        cm = rep.get('chart_meta') or {}
+        return ChartPaths(
+            chart_folder=str(chart_folder),
+            audio_filename=str(cm.get('audio') or ''),
+            background_filename=str(cm.get('background') or ''),
+            skin_folder=str(getattr(self._p, 'skin', '') or ''),
+            library_root=str(library_root),
+        )
+
+    def _bpm_common(self) -> float:
+        ref = getattr(self._p, '_xmod_reference_bpm', None)
+        if ref is not None:
+            return float(ref)
+        rep = getattr(self._p, 'replay', None)
+        bpms = rep.get('bpms') if isinstance(rep, dict) else None
+        if bpms:
+            try:
+                return float(bpms[0][1])
+            except (IndexError, TypeError, ValueError):
+                pass
+        return 0.0
+
+    # ── Play identity / state ──
+
+    def player_name(self) -> str:
+        rep = getattr(self._p, 'replay', None)
+        if not isinstance(rep, dict):
+            return ''
+        return str(rep.get('player') or (rep.get('meta') or {}).get('player') or '')
+
+    def score(self) -> int:
+        rep = getattr(self._p, 'replay', None)
+        if not isinstance(rep, dict):
+            return 0
+        return int(rep.get('score') or (rep.get('meta') or {}).get('score') or 0)
+
+    def max_combo(self) -> int:
+        # Running max combo from note_judges up to the current frame.
+        note_judges = getattr(self._p, 'note_judges', None)
+        if not note_judges:
+            return 0
+        cur = best = 0
+        for j in note_judges:
+            if j == 'miss':
+                cur = 0
+            else:
+                cur += 1
+                if cur > best:
+                    best = cur
+        return best
+
+    def current_grade(self) -> str:
+        try:
+            counts = self.judgment_counts()
+            windows = self.judgment_windows()
+        except DataNotAvailable:
+            return ''
+        total = sum(counts.values()) if counts else 0
+        if total == 0:
+            return ''
+        names = [n for n, _ in windows]
+        n = len(names)
+        # osu!mania: weight best=n, worst=1, miss=0
+        weighted = sum((n - i) * counts.get(nm, 0) for i, nm in enumerate(names))
+        max_weighted = total * n
+        acc = weighted / max_weighted if max_weighted else 0.0
+        misses = counts.get('miss', 0)
+        if acc >= 1.0:
+            return 'X'
+        if misses == 0 and acc >= 0.95:
+            return 'S'
+        if acc >= 0.95:
+            return 'A'
+        if acc >= 0.90:
+            return 'B'
+        if acc >= 0.80:
+            return 'C'
+        if acc > 0.0:
+            return 'D'
+        return 'F'
+
+    def mods_short(self) -> str:
+        adapter = self._adapter()
+        if adapter is not None and hasattr(adapter, 'mods_short'):
+            try:
+                return str(adapter.mods_short(self._p.replay) or '')
+            except Exception:
+                pass
+        return ''
+
+    def mods_raw(self) -> dict:
+        adapter = self._adapter()
+        if adapter is not None and hasattr(adapter, 'mods_raw'):
+            try:
+                return dict(adapter.mods_raw(self._p.replay) or {})
+            except Exception:
+                pass
+        return {}
+
+    def play_rate_effective(self) -> float:
+        base = float(getattr(self._p, 'play_rate', 1.0))
+        adapter = self._adapter()
+        if adapter is not None and hasattr(adapter, 'mods_rate_multiplier'):
+            try:
+                base *= float(adapter.mods_rate_multiplier(self._p.replay))
+            except Exception:
+                pass
+        return base
+
+    def _adapter(self):
+        """Return the game adapter, or None if not resolvable. Cached."""
+        adapter = getattr(self._p, '_adapter', None)
+        if adapter is not None:
+            return adapter
+        try:
+            from analysis.core import game as game_mod
+            return game_mod.get(getattr(self._p, 'game', ''))
+        except Exception:
+            return None
+
+    def hit_errors_ms(self) -> tuple[int, ...]:
+        offsets = getattr(self._p, 'offsets', None)
+        misses = getattr(self._p, 'misses', None)
+        if offsets is None:
+            return ()
+        if misses is not None:
+            offsets = offsets[~misses]
+        return tuple(int(round(float(v) * 1000)) for v in offsets)
+
+    def unstable_rate(self) -> float:
+        errs = self.hit_errors_ms()
+        n = len(errs)
+        if n < 2:
+            return 0.0
+        mean = sum(errs) / n
+        var = sum((x - mean) ** 2 for x in errs) / n
+        return 10.0 * (var ** 0.5)
 
     # ── Playback state ──
     def t_now(self) -> float:

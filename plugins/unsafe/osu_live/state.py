@@ -15,13 +15,17 @@ def snapshot_to_overlay_state(snap: GameMemoryState | None) -> OverlayGameState:
 
     phase = PHASE_PLAYING if snap.in_gameplay else PHASE_IDLE
     offsets = tuple(e / 1000.0 for e in snap.hit_errors_ms)
+    # osu judgment ordering for the overlay (best->worst). Each key is
+    # expected to exist in judgment_counts after _raw_to_game_memory; we
+    # fall back to 0 so etterna snapshots with different keys don't crash.
+    c = snap.judgment_counts
     judgments = (
-        ('300', snap.hit_300),
-        ('geki', snap.hit_geki),
-        ('200', snap.hit_katu),
-        ('100', snap.hit_100),
-        ('50', snap.hit_50),
-        ('miss', snap.hit_miss),
+        ('300',  c.get('300', 0)),
+        ('geki', c.get('geki', 0)),
+        ('200',  c.get('katu', 0)),
+        ('100',  c.get('100', 0)),
+        ('50',   c.get('50', 0)),
+        ('miss', c.get('miss', 0)),
     )
 
     return OverlayGameState(

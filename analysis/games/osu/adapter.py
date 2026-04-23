@@ -78,6 +78,41 @@ class OsuAdapter(GameAdapter):
     def player_kwargs(self, replay, od=None, **_):
         return {'od': self.effective_od(replay, od)}
 
+    # ── Cross-game mod hooks (used by PlayerDataSource) ──
+
+    def mods_short(self, replay) -> str:
+        m = int((replay or {}).get('mods', 0) or 0)
+        return _osu_mods_string(m)
+
+    def mods_raw(self, replay) -> dict:
+        m = int((replay or {}).get('mods', 0) or 0)
+        return {'bitfield': m, 'rate': _osu_mods_rate(m)}
+
+    def mods_rate_multiplier(self, replay) -> float:
+        m = int((replay or {}).get('mods', 0) or 0)
+        return _osu_mods_rate(m)
+
+    def chart_stats_extra(self, replay):
+        """Return (difficulty, rating, extra) for ChartStats.
+
+        difficulty: effective OD (uncapped for HR/EZ).
+        rating:     star rating if cached, else 0.
+        extra:      full osu-native {ar, cs, hp, od, stars}.
+        """
+        if not isinstance(replay, dict):
+            return 0.0, 0.0, {}
+        base_od = float(replay.get('od', 0.0))
+        mods = int(replay.get('mods', 0) or 0)
+        eff_od = _apply_od_mods(base_od, mods)
+        cm = replay.get('chart_meta') or {}
+        cs = float(cm.get('keycount', 0) or 0)   # mania only
+        ar = float(cm.get('ar', 0) or 0)
+        hp = float(cm.get('hp', 0) or 0)
+        stars = float(cm.get('stars', 0) or 0)
+        return eff_od, stars, {
+            'od': eff_od, 'cs': cs, 'ar': ar, 'hp': hp, 'stars': stars,
+        }
+
     # --- library scan -----------------------------------------------------
     def scan_library(self, progress=None):
         """Parse every .osr on disk into a placeholder entry (no song
@@ -383,3 +418,44 @@ scroll.register(scroll.ScrollMode(
 
 
 ADAPTER = OsuAdapter()
+
+
+# ── Mod bitfield helpers (shared by adapter methods) ──
+
+# osu! stable mod bits. Order matters for display: NC follows DT
+# because real stable activates DT alongside NC.
+_OSU_MOD_BITS = (
+    (1 << 0, 'NF'),  (1 << 1, 'EZ'),  (1 << 2, 'TD'),  (1 << 3, 'HD'),
+    (1 << 4, 'HR'),  (1 << 5, 'SD'),  (1 << 6, 'DT'),  (1 << 7, 'RX'),
+    (1 << 8, 'HT'),  (1 << 9, 'NC'),  (1 << 10, 'FL'), (1 << 11, 'AU'),
+    (1 << 12, 'SO'), (1 << 13, 'AP'), (1 << 14, 'PF'), (1 << 15, '4K'),
+    (1 << 16, '5K'), (1 << 17, '6K'), (1 << 18, '7K'), (1 << 19, '8K'),
+    (1 << 20, 'FI'), (1 << 21, 'RD'), (1 << 22, 'CN'), (1 << 23, 'TP'),
+    (1 << 24, '9K'), (1 << 25, 'KC'), (1 << 26, '1K'), (1 << 27, '3K'),
+    (1 << 28, '2K'), (1 << 29, 'V2'), (1 << 30, 'MR'),
+)
+
+
+def _osu_mods_string(mods: int) -> str:
+    if mods == 0:
+        return 'NM'
+    names = [name for bit, name in _OSU_MOD_BITS if mods & bit]
+    return ''.join(names) if names else 'NM'
+
+
+def _osu_mods_rate(mods: int) -> float:
+    if mods & (1 << 6) or mods & (1 << 9):   # DT / NC
+        return 1.5
+    if mods & (1 << 8):                      # HT
+        return 0.75
+    return 1.0
+
+
+def _apply_od_mods(od: float, mods: int) -> float:
+    # HR multiplies OD by 1.4 (capped at 10 in stable, but effective
+    # windows go higher); EZ halves it.
+    if mods & (1 << 4):
+        od *= 1.4
+    if mods & (1 << 1):
+        od *= 0.5
+    return od

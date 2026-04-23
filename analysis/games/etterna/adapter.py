@@ -349,6 +349,34 @@ class EtternaAdapter(GameAdapter):
     def player_kwargs(self, replay, judge=None, **_):
         return {'ett_judge': judge or 'J4'}
 
+    # ── Cross-game mod hooks ──
+
+    def mods_short(self, replay) -> str:
+        rate = self._etterna_rate(replay)
+        return '' if abs(rate - 1.0) < 1e-4 else f'{rate:g}x'
+
+    def mods_raw(self, replay) -> dict:
+        return {'rate': self._etterna_rate(replay), 'flags': []}
+
+    def mods_rate_multiplier(self, replay) -> float:
+        return self._etterna_rate(replay)
+
+    def chart_stats_extra(self, replay):
+        cm = (replay or {}).get('chart_meta') or {}
+        msd = float(cm.get('msd', 0) or 0)   # overall MSD
+        extra = {k: float(v) for k, v in (cm.get('msd_skills') or {}).items()}
+        return msd, msd, extra
+
+    @staticmethod
+    def _etterna_rate(replay) -> float:
+        if not isinstance(replay, dict):
+            return 1.0
+        r = replay.get('rate') or (replay.get('meta') or {}).get('rate')
+        try:
+            return float(r) if r is not None else 1.0
+        except (TypeError, ValueError):
+            return 1.0
+
     # --- library scan -----------------------------------------------------
     _STEPSTYPE_KEYCOUNT = {
         'dance-single': 4, 'dance-solo': 6, 'dance-double': 8,

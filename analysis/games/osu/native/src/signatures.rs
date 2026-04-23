@@ -174,14 +174,35 @@ pub mod accuracy {
 pub mod beatmap {
     /// Pointer to the md5 checksum string.
     pub const MD5: u64 = 0x6c;
-    /// Pointer to the romanized artist string.
+    /// Pointer to the .osu filename string.
+    pub const FILENAME: u64 = 0x90;
+
+    /// Metadata string pointers (all .NET System.String refs; decode
+    /// with ``dotnet_string``).
     pub const ARTIST: u64 = 0x18;
-    /// Pointer to the romanized title string. ``TITLE_UNICODE`` is the
-    /// original (CJK etc.); tosu prefers romanized — we match.
+    pub const ARTIST_UNICODE: u64 = 0x1c;
+    /// Romanized title. tosu calls this ``title``; the original
+    /// (CJK/etc.) string is at ``TITLE_UNICODE``.
     pub const TITLE: u64 = 0x24;
     pub const TITLE_UNICODE: u64 = 0x28;
-    /// Float fields: approach rate, circle size, HP drain, overall difficulty.
+    pub const AUDIO_FILENAME: u64 = 0x64;
+    pub const BACKGROUND_FILENAME: u64 = 0x68;
+    pub const FOLDER: u64 = 0x78;
+    pub const CREATOR: u64 = 0x7c;
+    pub const VERSION: u64 = 0xac;
+
+    /// Float difficulty stats (single-precision). Order in memory is
+    /// AR, CS, HP, OD at consecutive +0x4 slots starting at +0x2c.
+    pub const AR: u64 = 0x2c;
     pub const CS: u64 = 0x30;
+    pub const HP: u64 = 0x34;
+    pub const OD: u64 = 0x38;
+
+    /// Integer fields.
+    pub const BEATMAP_ID: u64 = 0xc8;
+    pub const BEATMAP_SET_ID: u64 = 0xcc;
+    pub const OBJECT_COUNT: u64 = 0xf8;
+    pub const RANKED_STATUS: u64 = 0x12c;
 }
 
 /// Offsets inside a .NET ``System.String`` (32-bit CLR).

@@ -166,3 +166,6 @@ Thumbs.db
 
 # For personal use
 tools
+
+# Community tosu overlays dropped in locally; not part of the repo.
+plugins/overlays/

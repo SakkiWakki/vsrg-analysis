@@ -145,6 +145,12 @@ pub fn gameplay_pointers(r: &Resolved) -> io::Result<GameplayPointers> {
 /// Mania gameplay state. Fields are ``Option`` where null-in-osu
 /// means "not playing"; the scalar fields (``combo`` etc.) are zero
 /// when not playing, matching osu!'s in-memory defaults.
+///
+/// Shape mirrors the Python-side ``GameMemoryState`` / ``ChartMetadata``
+/// / ``ChartStats`` split: per-play counters stay on the top level;
+/// chart identity and difficulty stats live in ``chart_meta`` and
+/// ``chart_stats`` bundles that are populated independently of the
+/// gameplay pointer chain.
 #[derive(Debug, Clone, Default)]
 pub struct ManiaState {
     pub playing: bool,
@@ -152,34 +158,68 @@ pub struct ManiaState {
     pub max_combo: u16,
     pub mode: u32,
     pub accuracy: f64,
+
+    /// Per-play judgment counters. Kept individually (not a hashmap)
+    /// because the Rust side is a pure C-ABI shuttle; the Python
+    /// wrapper repackages these into a judgment_counts dict for
+    /// GameMemoryState.
     pub hit_300: u16,
     pub hit_100: u16,
     pub hit_50: u16,
     pub hit_geki: u16,
     pub hit_katu: u16,
     pub hit_miss: u16,
+
     /// Hit-error offsets in ms. Tosu clamps to [-10_000, 10_000]; we
     /// apply the same clamp to reject obvious garbage from stale
     /// pointers.
     pub hit_errors_ms: Vec<i32>,
-    /// Beatmap md5 checksum (hex string). Empty if the beatmap
-    /// pointer is null or the string can't be decoded.
-    pub map_md5: String,
-    /// Romanized title (tosu ships ``titleUnicode`` separately; we
-    /// match their convention and use the romanized field).
-    pub map_title: String,
-    /// Circle Size — the mania keycount for mania maps. 0 if the
-    /// beatmap pointer is null.
-    pub map_cs: f32,
+
+    /// Chart identity + difficulty, populated whenever the beatmap
+    /// pointer is live (works on song select too, not just gameplay).
+    pub chart_meta: ChartMeta,
+    pub chart_stats: ChartStats,
+
     /// Raw ``osu::GameState`` enum value. 2 == play (actively in
     /// gameplay); other values indicate menu, results, song select,
-    /// etc. Exposed as-is so callers can filter however they want
-    /// (the overlay only shows on ``play``).
+    /// etc. Exposed as-is so callers can filter however they want.
     pub game_state: u32,
-    /// Convenience flag: ``game_state == GAME_STATE_PLAY``. Callers
-    /// that only need the boolean don't have to import the enum
-    /// constant.
+    /// Convenience flag: ``game_state == GAME_STATE_PLAY``.
     pub in_gameplay: bool,
+}
+
+/// Chart identity strings. Empty strings mean the beatmap pointer
+/// was null or the field was unreadable. Mirrors Python's
+/// ``ChartMetadata``.
+#[derive(Debug, Clone, Default)]
+pub struct ChartMeta {
+    pub md5: String,
+    pub filename: String,
+    pub artist: String,
+    pub artist_unicode: String,
+    pub title: String,
+    pub title_unicode: String,
+    pub creator: String,
+    pub version: String,
+    pub audio_filename: String,
+    pub background_filename: String,
+    pub folder: String,
+    pub beatmap_id: u32,
+    pub beatmap_set_id: u32,
+    pub ranked_status: u32,
+}
+
+/// Chart difficulty stats. Mirrors Python's ``ChartStats`` but with
+/// osu's native fields kept individually (AR/CS/HP/OD); the Python
+/// side stashes them under ``ChartStats.extra`` to keep the dataclass
+/// game-agnostic.
+#[derive(Debug, Clone, Default)]
+pub struct ChartStats {
+    pub ar: f32,
+    pub cs: f32,
+    pub hp: f32,
+    pub od: f32,
+    pub object_count: u32,
 }
 
 pub fn read_mania_state(r: &Resolved) -> io::Result<ManiaState> {
@@ -193,11 +233,10 @@ pub fn read_mania_state(r: &Resolved) -> io::Result<ManiaState> {
     // Beatmap data is readable independently of the gameplay chain
     // (the player can be on the song select screen with a map
     // highlighted but no active ruleset), so read it first and
-    // unconditionally.
+    // unconditionally. A null beatmap pointer leaves the defaults.
     if let Some(bm_base) = read_beatmap_ptr(r)? {
-        out.map_md5 = read_string_at_ptr(r.pid, bm_base + beatmap::MD5)?;
-        out.map_title = read_string_at_ptr(r.pid, bm_base + beatmap::TITLE)?;
-        out.map_cs = read_f32(r.pid, bm_base + beatmap::CS)?;
+        out.chart_meta = read_chart_meta(r.pid, bm_base)?;
+        out.chart_stats = read_chart_stats(r.pid, bm_base)?;
     }
 
     let ptrs = gameplay_pointers(r)?;
@@ -250,6 +289,42 @@ fn read_beatmap_ptr(r: &Resolved) -> io::Result<Option<u64>> {
     }
     let bm = read_u32_as_u64(r.pid, slot)?;
     Ok(if bm == 0 { None } else { Some(bm) })
+}
+
+/// Populate chart identity strings + IDs from the beatmap struct.
+///
+/// Each field is read independently; a failure on any one doesn't
+/// abort the read (beatmaps sometimes have null pointers for optional
+/// fields like ``title_unicode`` on ASCII-only charts). Errors from
+/// the underlying ``read_string_at_ptr`` propagate -- those indicate
+/// genuine memory-access failures, not missing optional fields.
+fn read_chart_meta(pid: u32, bm: u64) -> io::Result<ChartMeta> {
+    Ok(ChartMeta {
+        md5:                 read_string_at_ptr(pid, bm + beatmap::MD5)?,
+        filename:            read_string_at_ptr(pid, bm + beatmap::FILENAME)?,
+        artist:              read_string_at_ptr(pid, bm + beatmap::ARTIST)?,
+        artist_unicode:      read_string_at_ptr(pid, bm + beatmap::ARTIST_UNICODE)?,
+        title:               read_string_at_ptr(pid, bm + beatmap::TITLE)?,
+        title_unicode:       read_string_at_ptr(pid, bm + beatmap::TITLE_UNICODE)?,
+        creator:             read_string_at_ptr(pid, bm + beatmap::CREATOR)?,
+        version:             read_string_at_ptr(pid, bm + beatmap::VERSION)?,
+        audio_filename:      read_string_at_ptr(pid, bm + beatmap::AUDIO_FILENAME)?,
+        background_filename: read_string_at_ptr(pid, bm + beatmap::BACKGROUND_FILENAME)?,
+        folder:              read_string_at_ptr(pid, bm + beatmap::FOLDER)?,
+        beatmap_id:          read_u32(pid, bm + beatmap::BEATMAP_ID)?,
+        beatmap_set_id:      read_u32(pid, bm + beatmap::BEATMAP_SET_ID)?,
+        ranked_status:       read_u32(pid, bm + beatmap::RANKED_STATUS)?,
+    })
+}
+
+fn read_chart_stats(pid: u32, bm: u64) -> io::Result<ChartStats> {
+    Ok(ChartStats {
+        ar:           read_f32(pid, bm + beatmap::AR)?,
+        cs:           read_f32(pid, bm + beatmap::CS)?,
+        hp:           read_f32(pid, bm + beatmap::HP)?,
+        od:           read_f32(pid, bm + beatmap::OD)?,
+        object_count: read_u32(pid, bm + beatmap::OBJECT_COUNT)?,
+    })
 }
 
 /// Given a pointer-to-a-pointer-to-a-.NET-string, read the string.

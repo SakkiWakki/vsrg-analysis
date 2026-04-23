@@ -165,6 +165,41 @@ class GameState(Protocol):
     # gracefully rather than requiring this field via requires_data.
     def game_memory(self) -> 'GameMemoryState | None': ...
 
+    # ── Chart snapshots ──
+    # All three return a dataclass populated with whatever the current
+    # source knows; unknown string fields are '', unknown numeric fields
+    # are 0. Components needing partial info should read specific fields.
+    def chart_metadata(self) -> 'ChartMetadata': ...
+    def chart_stats(self) -> 'ChartStats': ...
+    def chart_paths(self) -> 'ChartPaths': ...
+
+    # ── Play identity / state ──
+    def player_name(self) -> str: ...
+    def score(self) -> int: ...
+    def max_combo(self) -> int: ...
+    def current_grade(self) -> str: ...
+    def mods_short(self) -> str:
+        """Game-agnostic short mod string (e.g. 'HDDT' for osu,
+        'MX1.2' for etterna rate 1.2, '' for none). Suitable for
+        display; machine-readable variants are game-specific."""
+        ...
+    def mods_raw(self) -> dict:
+        """Game-defined raw mod representation. Keys are per-game:
+        osu uses {'bitfield': int, 'rate': float}; etterna uses
+        {'rate': float, 'flags': list[str]}. Consumers that read this
+        MUST branch on ``game()`` to interpret."""
+        ...
+    def play_rate_effective(self) -> float:
+        """Effective time scale incl. rate mods (DT=1.5, HT=0.75 for
+        osu; XML rate for etterna). 1.0 = nominal."""
+        ...
+    def hit_errors_ms(self) -> tuple[int, ...]:
+        """Per-hit signed offsets in ms (misses excluded). Replay surface
+        returns the full array; live-memory surface returns what the
+        native reader has in its buffer (usually last N)."""
+        ...
+    def unstable_rate(self) -> float: ...
+
     # ── Playback state (GUI surface only) ──
     # All raise DataNotAvailable on the overlay surface.
     def t_now(self) -> float: ...
@@ -188,25 +223,91 @@ class GameState(Protocol):
 @dataclass(frozen=True)
 class GameMemoryState:
     """Read-only snapshot of live game memory, delivered via
-    GameState.game_memory(). Fields reflect what the native
-    reader can extract cross-platform; platform-specific internals stay
-    in the trusted host layer.
+    GameState.game_memory(). Cross-game fields only; judgment counts
+    and any game-specific extras are stashed in ``judgment_counts`` and
+    ``extra`` so this struct stays neutral.
 
-    All fields are as-read at poll time. None values indicate the field
-    was not populated (e.g. hit_errors_ms when not in gameplay)."""
+    All fields are as-read at poll time. Empty tuple / {} indicate the
+    field was not populated (e.g. hit_errors_ms when not in gameplay)."""
     in_gameplay: bool
     combo: int
     max_combo: int
     accuracy: float                    # 0.0 - 1.0
-    hit_300: int
-    hit_100: int
-    hit_50: int
-    hit_miss: int
-    hit_geki: int
-    hit_katu: int
+    judgment_counts: dict              # {judge_name: count}, game-defined keys
     hit_errors_ms: tuple[int, ...]     # raw per-hit offset errors in ms
     map_md5: str
     map_title: str
+    # Game-specific extras (osu: 'grade', etterna: 'rate_str', etc.).
+    # Consumers must branch on the surrounding GameState.game() key.
+    extra: dict = field(default_factory=dict)
+
+
+# ── Chart metadata snapshot ─────────────────────────────────────────
+
+@dataclass(frozen=True)
+class ChartMetadata:
+    """Read-only snapshot of chart-identifying metadata, delivered via
+    GameState.chart_metadata(). All string fields default to '' and
+    integer IDs to 0 when unknown. Fields here are stable across the
+    play and may be computed once at chart load time."""
+    artist: str = ''
+    artist_unicode: str = ''
+    title: str = ''
+    title_unicode: str = ''
+    creator: str = ''       # mapper name (.osu "Creator")
+    version: str = ''       # difficulty name (.osu "Version")
+    md5: str = ''           # beatmap file hash
+    beatmap_id: int = 0
+    beatmap_set_id: int = 0
+    source: str = ''
+    tags: str = ''
+
+
+# ── Chart stats snapshot ────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class ChartStats:
+    """Read-only snapshot of chart difficulty stats, delivered via
+    GameState.chart_stats(). Cross-game fields only; anything specific
+    to a single game (osu AR/CS/HP, etterna MSD breakdown, etc.) goes
+    into ``extra`` keyed by a game-defined string.
+
+    Mode name is the parent-game label ('osu' / 'etterna' / ...); rely
+    on GameState.keycount() for the column count when relevant.
+    """
+    mode_name: str = ''
+    difficulty: float = 0.0   # neutral difficulty scalar (OD for osu,
+                              # MSD for etterna, 0 if none)
+    rating: float = 0.0       # computed rating (stars for osu, 0 if n/a)
+    bpm_common: float = 0.0
+    bpm_min: float = 0.0
+    bpm_max: float = 0.0
+    length_ms: int = 0        # chart length from first to last note
+    first_object_ms: int = 0
+    last_object_ms: int = 0
+    total_objects: int = 0
+    hold_count: int = 0
+    max_combo: int = 0        # theoretical chart max combo
+    # Game-specific extras (osu: {'ar', 'cs', 'hp', 'stars'};
+    # etterna: {'msd_stream', 'msd_jumpstream', ...}).
+    extra: dict = field(default_factory=dict)
+
+
+# ── Chart paths snapshot ────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class ChartPaths:
+    """Filesystem locations for chart assets. Relative paths are
+    interpreted against the library root; empty strings mean unknown.
+    Delivered via GameState.chart_paths(); may be called from any
+    surface that has a loaded chart."""
+    chart_folder: str = ''         # chart's containing directory name
+    audio_filename: str = ''       # audio file within chart folder
+    background_filename: str = ''
+    skin_folder: str = ''          # active skin folder name (osu),
+                                   # noteskin name (etterna), etc.
+    library_root: str = ''         # game's chart library root
+                                   # (osu! Songs dir, etterna Songs dir)
 
 
 # ── HUD flags snapshot ────────────────────────────────────────────
