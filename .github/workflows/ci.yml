@@ -12,6 +12,12 @@ defaults:
   run:
     shell: bash
 
+# Opt into Node 24 for JS actions now. Node 20 is deprecated on runners
+# and warns on every run; the forced switch lands Jun 2026, so we flip
+# early to silence the warning without changing behavior.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
 jobs:
   build:
     strategy:

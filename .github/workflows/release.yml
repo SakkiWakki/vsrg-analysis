@@ -7,12 +7,12 @@ on:
 permissions:
   contents: write
 
-# Every step runs under Git Bash on Windows, real bash on Linux. Avoids
-# the `${{ matrix.shell }}` lint-time error where GitHub's parser can't
-# statically resolve matrix expressions in the `shell:` field.
 defaults:
   run:
     shell: bash
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
 jobs:
   build:
