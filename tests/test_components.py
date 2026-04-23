@@ -1,14 +1,14 @@
 """Tests for the unified component API.
 
 Covers:
-- ComponentManifest frozenset normalisation
+- Manifest frozenset normalisation
 - ComponentRegistry filters by supported_surfaces + requires_data
 - PlayerDataSource answers the fields it claims to support
 - OverlayGameStateDataSource answers overlay fields + raises
   DataNotAvailable for sidebar-only ones
-- SidebarComponentContext advances the outer sctx.y correctly and
+- SidebarContext advances the outer sctx.y correctly and
   translates local coords into absolute
-- OverlayComponentContext produces a PAL frame with grouped records
+- OverlayContext produces a PAL frame with grouped records
   in normalized coords
 - Null + Gamescope PAL detection + replay of frames
 - Judgments component registers through the unified path
@@ -19,7 +19,7 @@ from types import SimpleNamespace
 
 from analysis.components import (
     Component,
-    ComponentManifest,
+    Manifest,
     ComponentRegistry,
     DataNotAvailable,
     SURFACE_OVERLAY,
@@ -35,22 +35,22 @@ from analysis.components.pal.base import (
 )
 from analysis.components.pal.null import NullOverlayPlatform
 from analysis.components.overlay_backend import (
-    OverlayComponentContext,
+    OverlayContext,
     OverlayGameStateDataSource,
     draw_component_into_frame,
 )
 from analysis.components.gui_backend import (
     PlayerDataSource,
-    SidebarComponentContext,
+    SidebarContext,
 )
 from analysis.overlay.api import OverlayGameState
 
 
-# ── ComponentManifest ────────────────────────────────────────────
+# ── Manifest ────────────────────────────────────────────
 
 
 def test_manifest_normalises_sets():
-    m = ComponentManifest(
+    m = Manifest(
         key='k', name='n',
         supported_surfaces=[SURFACE_GUI, SURFACE_OVERLAY],
         requires_data=['judgment_counts'],
@@ -66,9 +66,9 @@ def test_manifest_normalises_sets():
 
 def test_registry_gates_by_surface():
     reg = ComponentRegistry()
-    m_sidebar = ComponentManifest(
+    m_sidebar = Manifest(
         key='a', name='A', supported_surfaces={SURFACE_GUI})
-    m_both = ComponentManifest(
+    m_both = Manifest(
         key='b', name='B',
         supported_surfaces={SURFACE_GUI, SURFACE_OVERLAY})
     reg.add(m_sidebar, lambda ctx: None)
@@ -83,7 +83,7 @@ def test_registry_gates_by_surface():
 
 def test_registry_gates_by_required_data():
     reg = ComponentRegistry()
-    m = ComponentManifest(
+    m = Manifest(
         key='needs_windows', name='X',
         supported_surfaces={SURFACE_OVERLAY},
         requires_data={'judgment_windows'})
@@ -192,7 +192,7 @@ class _FakeSctx:
 def test_sidebar_ctx_translates_local_to_absolute():
     sctx = _FakeSctx(col_x=500, col_w=200, y=100)
     ds = PlayerDataSource(_fake_player())
-    cctx = SidebarComponentContext(
+    cctx = SidebarContext(
         sctx, x0=500, y0=100, w=200, h=0, data_source=ds)
     # Local (10, 20) should land at absolute (510, 120).
     cctx.rect((10, 20, 50, 30))
@@ -202,7 +202,7 @@ def test_sidebar_ctx_translates_local_to_absolute():
 def test_sidebar_ctx_advances_outer_y_on_row_helpers():
     sctx = _FakeSctx(y=100)
     ds = PlayerDataSource(_fake_player())
-    cctx = SidebarComponentContext(
+    cctx = SidebarContext(
         sctx, x0=0, y0=100, w=200, h=0, data_source=ds)
     cctx.draw_text('hello')
     # draw_text advances by ROW_TEXT_H (18) by default.
@@ -216,7 +216,7 @@ def test_sidebar_ctx_button_registers_hitbox_at_absolute_rect():
     # measure_only on sctx is True which would swallow hitboxes in a real
     # sidebar flow, but our fake records every hitbox regardless — so
     # we can assert on the absolute coords.
-    cctx = SidebarComponentContext(
+    cctx = SidebarContext(
         sctx, x0=500, y0=100, w=200, h=0, data_source=ds)
     cctx.draw_button('go', 'noop')
     assert sctx.hitboxes
@@ -232,7 +232,7 @@ def test_overlay_ctx_normalises_coords_and_groups():
     frame = OverlayFrame(width=1000, height=500)
     state = OverlayGameState(game='osu', keycount=4, combo=1)
     ds = OverlayGameStateDataSource(state)
-    manifest = ComponentManifest(
+    manifest = Manifest(
         key='x', name='X', supported_surfaces={SURFACE_OVERLAY})
     comp = Component(manifest=manifest, draw=lambda ctx: ctx.rect(
         (0, 0, 100, 50), color=(200, 200, 200)))
@@ -256,7 +256,7 @@ def test_overlay_ctx_text_emits_record():
     frame = OverlayFrame(width=1000, height=500)
     state = OverlayGameState(game='osu', keycount=4)
     ds = OverlayGameStateDataSource(state)
-    cctx = OverlayComponentContext(
+    cctx = OverlayContext(
         frame, component_key='x', origin_px=(0, 0),
         size_px=(200, 100), fb_w=1000, fb_h=500,
         data_source=ds)
@@ -269,7 +269,7 @@ def test_overlay_ctx_has_no_input():
     frame = OverlayFrame(width=1000, height=500)
     state = OverlayGameState(game='osu', keycount=4)
     ds = OverlayGameStateDataSource(state)
-    cctx = OverlayComponentContext(
+    cctx = OverlayContext(
         frame, component_key='x', origin_px=(0, 0), size_px=(100, 100),
         fb_w=1000, fb_h=500, data_source=ds, supports_input=False)
     assert cctx.supports_input is False

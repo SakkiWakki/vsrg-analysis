@@ -64,11 +64,13 @@ _HOST_API_ALLOW = frozenset({
     'analysis.player.plugin_api',
     'analysis.player.events',
     'analysis.plugins.host_api',
-    # host_api resolves these lazily; plugins don't import them directly
-    # but the import graph passes through them on first call.
-    'analysis.config',
-    'analysis.config.store',
+    # permissions is resolved lazily by host_api.http_get; plugins don't
+    # import it directly but the import graph passes through it.
     'analysis.plugins.permissions',
+    # analysis.config is intentionally NOT here. Plugins must not call
+    # get_config() directly -- that gives read/write access to the entire
+    # application config store. Scoped config access goes through ctx.config
+    # (read/write own namespace only) or host_api.plugin_config().
     'analysis.ui',
     'analysis.ui.components',
     'analysis.ui.render_sidebar',

@@ -9,21 +9,21 @@ native primitives (QPainter for the sidebar, shared-memory widgets for
 the gamescope overlay, and so on).
 
 Guiding principle: the component never imports Qt, mmap, the player, or
-the overlay publisher. It only touches ``ComponentContext``. This keeps
+the overlay publisher. It only touches ``Context``. This keeps
 the port surface small and the sandbox story honest.
 
 Shape:
 
-    ComponentManifest
+    Manifest
         key, name, supported_surfaces, data requirements, default layout
 
-    ComponentContext   (protocol, see below)
+    Context   (protocol, see below)
         geometry (w, h, cursor y), primitives (text, rect, line, button,
-        heading, ...), access to a ``ComponentGameState`` that each
+        heading, ...), access to a ``GameState`` that each
         backend populates from the live source of truth (the ``Player``
         in-app, the ``OverlayGameState`` in-game).
 
-    ComponentGameState (protocol)
+    GameState (protocol)
         Methods a component may call to read live data. A backend
         implementation wraps its world (``Player`` / ``OverlayGameState``)
         and answers the subset it can. Unknown methods raise
@@ -62,7 +62,7 @@ REGION_FREE = 'free'
 # ── Data access ─────────────────────────────────────────────────────
 
 class DataNotAvailable(Exception):
-    """Raised by a :class:`ComponentGameState` when a field the caller
+    """Raised by a :class:`GameState` when a field the caller
     asked for isn't provided by the current surface. Components that
     want to degrade gracefully should catch this; manifests that list
     the field in ``requires_data`` never observe it (registration would
@@ -70,7 +70,7 @@ class DataNotAvailable(Exception):
 
 
 @runtime_checkable
-class ComponentGameState(Protocol):
+class GameState(Protocol):
     """Read-only view over whatever the surface uses as its source of
     truth. Methods grow over time as components need more. Each backend
     implements the subset that makes sense for its world; calling an
@@ -111,13 +111,29 @@ class ComponentGameState(Protocol):
     # gracefully rather than requiring this field via requires_data.
     def game_memory(self) -> 'GameMemoryState | None': ...
 
+    # ── Playback state (GUI surface only) ──
+    # All raise DataNotAvailable on the overlay surface.
+    def t_now(self) -> float: ...
+    def play_rate(self) -> float: ...
+    def paused(self) -> bool: ...
+    def note_count(self) -> int: ...
+    def sv_enabled(self) -> bool: ...
+    def sv_suspended(self) -> bool: ...
+    def sv_sections(self) -> list: ...
+    def skin(self) -> str: ...
+    def press_hide(self) -> bool: ...
+    def scroll_mode(self) -> str: ...
+    def scroll_value(self) -> float: ...
+    def effective_scroll_ms(self) -> float: ...
+    def layer_visible(self, layer: str) -> bool: ...
+
 
 # ── Game memory snapshot ───────────────────────────────────────────
 
 @dataclass(frozen=True)
 class GameMemoryState:
     """Read-only snapshot of live game memory, delivered via
-    ComponentGameState.game_memory(). Fields reflect what the native
+    GameState.game_memory(). Fields reflect what the native
     reader can extract cross-platform; platform-specific internals stay
     in the trusted host layer.
 
@@ -138,10 +154,38 @@ class GameMemoryState:
     map_title: str
 
 
+# ── HUD flags snapshot ────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class HudFlags:
+    """Read-only snapshot of the HUD overlay state for this frame.
+    Delivered via ctx.hud_flags. Fields relevant to components that
+    need to react to edit mode or panel open/close state."""
+    edit_mode: bool
+    layers_panel_open: bool
+    plugin_panel_open: bool
+    open_flyout: str | None
+
+
+# ── Scoped config access ───────────────────────────────────────────
+
+@runtime_checkable
+class Config(Protocol):
+    """Scoped, per-component config handle. Reads and writes are
+    restricted to this component's own namespace in the shared config
+    store. A component cannot access another component's settings."""
+
+    def get(self, field: str, default: Any = None) -> Any: ...
+    def set(self, field: str, value: Any) -> bool: ...
+    def delete(self, field: str) -> bool: ...
+    def subscribe(self, fn) -> Any: ...
+    def unsubscribe(self, handle) -> bool: ...
+
+
 # ── Replay state ──────────────────────────────────────────────────
 
 @runtime_checkable
-class ComponentReplayState(Protocol):
+class ReplayState(Protocol):
     """Read-only view over the post-analysis replay data for the current
     session. Available on surfaces that host a live Player (GUI sidebar).
     Raises DataNotAvailable on surfaces without replay context (overlay).
@@ -166,7 +210,7 @@ class ComponentReplayState(Protocol):
 # ── Data analysis utilities ────────────────────────────────────────
 
 @runtime_checkable
-class ComponentDataAnalysis(Protocol):
+class DataAnalysis(Protocol):
     """Pure data-analysis utilities over replay arrays. All methods take
     explicit array arguments and have no side effects -- they're stateless
     helpers exposed through the component API so plugins don't need to
@@ -221,7 +265,7 @@ class ComponentDataAnalysis(Protocol):
 
 # ── Drawing primitives ─────────────────────────────────────────────
 
-# All coordinates passed to :class:`ComponentContext` are *component-local
+# All coordinates passed to :class:`Context` are *component-local
 # pixels* — the component thinks of itself as painting into its own
 # ``(0, 0, ctx.w, ctx.h)`` box. Each backend translates to its native
 # coord system: sidebar adds the column offset; overlay normalises to
@@ -229,7 +273,7 @@ class ComponentDataAnalysis(Protocol):
 
 
 @runtime_checkable
-class ComponentContext(Protocol):
+class Context(Protocol):
     """Per-frame context handed to a component's draw callable.
 
     The plugin calls geometry helpers + primitives; the backend decides
@@ -244,9 +288,11 @@ class ComponentContext(Protocol):
     h: int                        # component-local height, px (0 == grow)
     y: int                        # paint cursor, advances as rows emit
     measure_only: bool
-    data: ComponentGameState
-    replay: ComponentReplayState
-    analysis: ComponentDataAnalysis
+    data: GameState
+    replay: ReplayState
+    analysis: DataAnalysis
+    hud_flags: HudFlags
+    config: Config
 
     # ── Geometry helpers ──
     def split_row(self, n: int = 2, gap: int = 4) -> list[tuple[int, int]]:
@@ -289,7 +335,7 @@ class ComponentContext(Protocol):
 # ── Manifest ────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
-class ComponentManifest:
+class Manifest:
     """Declarative spec for a component. One per plugin; lists every
     surface the component is allowed on and what data it needs. The
     registry refuses to mount a component on a surface whose data source
@@ -320,12 +366,12 @@ class ComponentManifest:
 
 # The draw callable's type alias. ``None`` return — the backend owns
 # cursor flushing and hitbox commit.
-DrawFn = Callable[[ComponentContext], None]
+DrawFn = Callable[[Context], None]
 
 
 @dataclass(frozen=True)
 class Component:
     """Registered pair of (manifest, draw). Produced by registration
     helpers; consumed by each surface backend."""
-    manifest: ComponentManifest
+    manifest: Manifest
     draw: DrawFn

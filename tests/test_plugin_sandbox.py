@@ -64,6 +64,8 @@ def test_allowed_modules(module):
     'pytest', 'PySide6',
     # Overlay host runtime touches shm/threads and is not sandbox-safe.
     'analysis.overlay.publisher',
+    # Global config store -- plugins must use ctx.config (scoped) instead.
+    'analysis.config', 'analysis.config.store',
 ])
 def test_denied_modules(module):
     assert not _is_allowed(module)

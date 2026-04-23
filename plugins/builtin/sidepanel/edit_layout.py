@@ -7,17 +7,27 @@ is the keyboard shortcut for the same toggle.
 """
 from __future__ import annotations
 
-
-_KEY = 'builtin:edit_layout'
-
-
-def _draw(sctx):
-    p = sctx.player
-    label = 'Exit edit mode' if p.hud.edit_mode else 'Edit layout'
-    sctx.draw_button(label, 'toggle_edit_mode')
+from analysis.components import Manifest, SURFACE_GUI
+from plugins.builtin.sidepanel import SidebarFields
 
 
-def register_sidebar(add):
-    # Pinned to the bottom, priority 850 — sits between Scroll (800)
-    # and Options (900) so it's reachable without scrolling.
-    add('Edit layout', _draw, priority=850, key=_KEY, pin_bottom=True)
+MANIFEST = Manifest(
+    key='builtin:edit_layout',
+    name='Edit layout',
+    supported_surfaces={SURFACE_GUI},
+    plugin_fields={
+        'sidebar': SidebarFields(
+            priority=850,
+            pin_bottom=True,
+        ),
+    },
+)
+
+
+def _draw(ctx):
+    label = 'Exit edit mode' if ctx.hud_flags.edit_mode else 'Edit layout'
+    ctx.draw_button(label, 'toggle_edit_mode')
+
+
+def register_components(add):
+    add(MANIFEST, _draw)

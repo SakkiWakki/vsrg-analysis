@@ -1,7 +1,7 @@
 """Unified plugin-component API.
 
 Plugins that want to run on multiple surfaces (gui, overlay, ...)
-register a single ``(ComponentManifest, draw)`` pair. Each surface
+register a single ``(Manifest, draw)`` pair. Each surface
 picks up the component through its backend:
 
     GuiBackend      — draws via QPainter, routes clicks via hitboxes
@@ -13,11 +13,13 @@ drawing code.
 """
 from analysis.components.api import (
     Component,
-    ComponentContext,
-    ComponentDataAnalysis,
-    ComponentGameState,
-    ComponentManifest,
-    ComponentReplayState,
+    Config,
+    Context,
+    DataAnalysis,
+    GameState,
+    HudFlags,
+    Manifest,
+    ReplayState,
     DataNotAvailable,
     DrawFn,
     GameMemoryState,
@@ -34,12 +36,14 @@ from analysis.components.registry import (
 
 __all__ = [
     'Component',
-    'ComponentContext',
-    'ComponentGameState',
-    'ComponentManifest',
+    'Context',
+    'GameState',
+    'Manifest',
     'ComponentRegistry',
-    'ComponentDataAnalysis',
-    'ComponentReplayState',
+    'Config',
+    'DataAnalysis',
+    'HudFlags',
+    'ReplayState',
     'DataNotAvailable',
     'DrawFn',
     'GameMemoryState',

@@ -7,7 +7,7 @@ in their manifest's ``plugin_fields`` dict under the key ``'sidebar'``.
     from plugins.builtin.sidepanel import SidebarFields, REGION_PANEL
     from analysis.components.api import REGION_FREE
 
-    MANIFEST = ComponentManifest(
+    MANIFEST = Manifest(
         key='my:component',
         name='My Component',
         supported_surfaces={SURFACE_GUI},

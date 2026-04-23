@@ -7,8 +7,9 @@ replay plugin republishes the map on the next frame.
 """
 from __future__ import annotations
 
-from analysis.config import get_config
+from analysis.components import Manifest, SURFACE_GUI
 from analysis.player.render import theme
+from plugins.builtin.sidepanel import SidebarFields
 
 
 _LAYERS = (
@@ -26,38 +27,47 @@ _CHECKBOX_INSET_Y = 3
 _LABEL_INDENT = 22
 _ROW_PANEL_H = 18
 
+MANIFEST = Manifest(
+    key='builtin:layers',
+    name='Layers',
+    supported_surfaces={SURFACE_GUI},
+    plugin_fields={
+        'sidebar': SidebarFields(
+            priority=450,
+            draggable=True,
+            default_free_xy=(0.02, 0.78),
+            default_size=(210, 180),
+        ),
+    },
+)
 
-def _draw_layers_panel(sctx):
-    p = sctx.player
-    cfg = get_config()
-    open_ = getattr(p.hud, 'layers_panel_open', False)
 
-    sctx.spacer()
-    shown = sum(1 for key, _ in _LAYERS
-                if cfg.get(f'player.layer_visibility.{key}', True))
-    sctx.draw_button(
-        f'{"[-]" if open_ else "[+]"} Layers {shown}/{len(_LAYERS)}',
+def _draw(ctx):
+    open_ = ctx.hud_flags.layers_panel_open
+    shown = sum(1 for key, _ in _LAYERS if ctx.data.layer_visible(key))
+
+    ctx.spacer()
+    ctx.draw_heading('Layers')
+    ctx.draw_button(
+        f'{"[-]" if open_ else "[+]"} {shown}/{len(_LAYERS)} visible',
         'toggle_layers_panel',
     )
     if not open_:
         return
 
     for key, label in _LAYERS:
-        checked = bool(cfg.get(f'player.layer_visibility.{key}', True))
-        row = (sctx.col_x, sctx.y, sctx.col_w, _ROW_PANEL_H)
-        sctx.add_hitbox(row, 'toggle_layer', key)
-        sctx.checkbox(sctx.col_x + _CHECKBOX_INSET_X,
-                      sctx.y + _CHECKBOX_INSET_Y,
-                      checked=checked)
+        checked = ctx.data.layer_visible(key)
+        row = (ctx.col_x, ctx.y, ctx.w, _ROW_PANEL_H)
+        ctx.button_at(row, '', 'toggle_layer', key)
+        ctx.checkbox(ctx.col_x + _CHECKBOX_INSET_X,
+                     ctx.y + _CHECKBOX_INSET_Y,
+                     checked=checked)
         color = (theme.COLOR_PLUGIN_ENABLED if checked
                  else theme.COLOR_PLUGIN_DISABLED)
-        sctx.text(label, sctx.col_x + _LABEL_INDENT,
-                  sctx.y + theme.TEXT_BASELINE_ROW, color)
-        sctx.y += _ROW_PANEL_H
+        ctx.text(label, ctx.col_x + _LABEL_INDENT,
+                 ctx.y + theme.TEXT_BASELINE_ROW, color)
+        ctx.y += _ROW_PANEL_H
 
 
-def register_sidebar(add):
-    add('Layers', _draw_layers_panel, priority=450,
-        key='builtin:layers',
-        draggable=True, default_free_xy=(0.02, 0.78),
-        default_size=(210, 180))
+def register_components(add):
+    add(MANIFEST, _draw)

@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from analysis.components.api import (
-    ComponentGameState,
+    GameState,
     DataNotAvailable,
     REGION_FREE,
     SURFACE_OVERLAY,
@@ -57,7 +57,7 @@ class OverlayFields:
 
 
 class OverlayGameStateDataSource:
-    """Implements :class:`ComponentGameState` against an
+    """Implements :class:`GameState` against an
     :class:`~analysis.overlay.api.OverlayGameState` snapshot.
 
     Each field the overlay snapshot actually carries is answered from
@@ -119,7 +119,7 @@ class OverlayGameStateDataSource:
 
 
 def _color_to_rgba(color) -> int:
-    """``ComponentContext`` colors match the theme convention: 3-tuple
+    """``Context`` colors match the theme convention: 3-tuple
     ``(r, g, b)`` or 4-tuple with alpha. The overlay wants a packed
     RGBA uint32. Accept either.
     """
@@ -171,7 +171,7 @@ class _OverlayNoAnalysis:
 # ── Context ─────────────────────────────────────────────────────────
 
 
-class OverlayComponentContext:
+class OverlayContext:
     """Component context that serializes primitives to an
     :class:`OverlayFrame`.
 
@@ -187,7 +187,7 @@ class OverlayComponentContext:
     def __init__(self, frame: OverlayFrame, *,
                  component_key: str, origin_px: tuple, size_px: tuple,
                  fb_w: int, fb_h: int,
-                 data_source: ComponentGameState,
+                 data_source: GameState,
                  supports_input: bool = False):
         self._frame = frame
         self._key = str(component_key)
@@ -364,7 +364,7 @@ def draw_component_into_frame(component, frame: OverlayFrame, *,
     data_source = OverlayGameStateDataSource(game_state)
     frame.begin_group(component.manifest.key)
     try:
-        cctx = OverlayComponentContext(
+        cctx = OverlayContext(
             frame,
             component_key=component.manifest.key,
             origin_px=origin_px, size_px=size_px,
@@ -378,6 +378,6 @@ def draw_component_into_frame(component, frame: OverlayFrame, *,
 
 __all__ = [
     'OverlayGameStateDataSource',
-    'OverlayComponentContext',
+    'OverlayContext',
     'draw_component_into_frame',
 ]

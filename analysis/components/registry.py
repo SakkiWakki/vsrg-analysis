@@ -2,10 +2,10 @@
 
 A plugin module exposes::
 
-    from analysis.components import ComponentManifest, SURFACE_GUI
+    from analysis.components import Manifest, SURFACE_GUI
     from plugins.builtin.sidepanel import SidebarFields
 
-    MANIFEST = ComponentManifest(
+    MANIFEST = Manifest(
         key='builtin:judgments',
         name='Judgments',
         supported_surfaces={SURFACE_GUI},
@@ -34,7 +34,7 @@ from dataclasses import dataclass
 
 from analysis.components.api import (
     Component,
-    ComponentManifest,
+    Manifest,
     SURFACE_GUI,
     SURFACE_OVERLAY,
 )
@@ -70,7 +70,7 @@ class ComponentRegistry:
 
     # ── Registration ─────────────────────────────────────────────
 
-    def add(self, manifest: ComponentManifest, draw) -> None:
+    def add(self, manifest: Manifest, draw) -> None:
         if not manifest.supported_surfaces:
             print(f'component {manifest.key}: no surfaces declared, skipping')
             return
@@ -144,7 +144,7 @@ def discover_from_bundles(bundles) -> ComponentRegistry:
                 continue
             module_name = f'{bundle.key}/{getattr(mod, "__name__", "")}'
 
-            def _add(manifest: ComponentManifest, draw,
+            def _add(manifest: Manifest, draw,
                      _module_name=module_name):
                 # Re-emit with module attribution. The manifest is
                 # frozen, so we build a replacement dataclass with the
@@ -208,7 +208,7 @@ def bridge_into_gui_registry(components: ComponentRegistry,
 
 from analysis.components.overlay_backend import (
         OverlayGameStateDataSource,
-        OverlayComponentContext,
+        OverlayContext,
     )
 from analysis.components.pal.base import OverlayFrame
 
@@ -281,7 +281,7 @@ def bridge_into_overlay_registry(components: ComponentRegistry,
             oy = int(_of.default_xy[1] * neutral.height)
             sw = int(_of.default_size[0] * neutral.width)
             sh = int(_of.default_size[1] * neutral.height)
-            cctx = OverlayComponentContext(
+            cctx = OverlayContext(
                 neutral, component_key=_m.key,
                 origin_px=(ox, oy), size_px=(sw, sh),
                 fb_w=neutral.width, fb_h=neutral.height,

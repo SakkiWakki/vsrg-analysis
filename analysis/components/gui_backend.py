@@ -1,6 +1,6 @@
 """GUI surface backend for the unified component API.
 
-Translates a plugin's calls against :class:`~analysis.components.api.ComponentContext`
+Translates a plugin's calls against :class:`~analysis.components.api.Context`
 into the existing ``SidebarContext`` primitives (QPainter + ``hud.add_hitbox``).
 The component thinks in *local pixels* (``0..w`` x ``0..h``) from its own
 top-left; this backend shifts those coords into the sidebar column and
@@ -8,7 +8,7 @@ advances the section's paint cursor to match.
 
 Data: the GUI surface source of truth is the live ``Player`` instance.
 :class:`PlayerDataSource` wraps it and answers the subset of
-``ComponentGameState`` fields the player actually has. Methods not
+``GameState`` fields the player actually has. Methods not
 answerable (e.g. live ``accuracy`` -- not meaningful mid-replay) raise
 :class:`DataNotAvailable`.
 """
@@ -17,17 +17,19 @@ from __future__ import annotations
 import numpy as np
 
 from analysis.components.api import (
-    ComponentGameState,
+    GameState,
+    HudFlags,
     DataNotAvailable,
     SURFACE_GUI,
 )
 from analysis.player.render import theme
+from analysis.plugins.host_api import PluginConfig
 
 
 # ── Data source ─────────────────────────────────────────────────────
 
 class PlayerDataSource:
-    """Implements :class:`ComponentGameState` against a live
+    """Implements :class:`GameState` against a live
     :class:`~analysis.player.player.Player`.
 
     Kept read-only on purpose. Components that want to *change* state
@@ -105,6 +107,57 @@ class PlayerDataSource:
         # Components that need live game state should target SURFACE_OVERLAY.
         return None
 
+    # ── Playback state ──
+    def t_now(self) -> float:
+        t = getattr(self._p, '_render_t_now', None)
+        if t is None:
+            raise DataNotAvailable('t_now')
+        return float(t)
+
+    def play_rate(self) -> float:
+        return float(getattr(self._p, 'play_rate', 1.0))
+
+    def paused(self) -> bool:
+        return bool(getattr(self._p, 'paused', True))
+
+    def sv_enabled(self) -> bool:
+        return bool(getattr(self._p, 'sv_enabled', False))
+
+    def sv_suspended(self) -> bool:
+        return bool(getattr(self._p, 'sv_suspended', lambda: False)())
+
+    def skin(self) -> str:
+        return str(getattr(self._p, 'skin', 'bar'))
+
+    def press_hide(self) -> bool:
+        return bool(getattr(self._p, 'press_hide', False))
+
+    def scroll_mode(self) -> str:
+        return str(getattr(self._p, 'scroll_mode', 'ms'))
+
+    def scroll_value(self) -> float:
+        try:
+            return float(self._p._current_mode_value())
+        except Exception:
+            raise DataNotAvailable('scroll_value')
+
+    def effective_scroll_ms(self) -> float:
+        v = getattr(self._p, 'effective_scroll_ms', None)
+        if v is None:
+            raise DataNotAvailable('effective_scroll_ms')
+        return float(v)
+
+    def note_count(self) -> int:
+        times = getattr(self._p, 'times', None)
+        return int(len(times)) if times is not None else 0
+
+    def sv_sections(self) -> list:
+        return list(getattr(self._p, 'sv_sections', []))
+
+    def layer_visible(self, layer: str) -> bool:
+        from analysis.config import get_config
+        return bool(get_config().get(f'player.layer_visibility.{layer}', True))
+
 
 # Sanity check at import time: a component declaring this field really
 # can assume the source will answer.
@@ -114,7 +167,7 @@ assert isinstance(PlayerDataSource.__mro__[0]._FIELDS, frozenset)
 # ── Replay state ─────────────────────────────────────────────────────
 
 class PlayerReplayState:
-    """Implements ComponentReplayState against a live Player instance.
+    """Implements ReplayState against a live Player instance.
     Raises DataNotAvailable when the player has no replay loaded."""
 
     def __init__(self, player):
@@ -167,7 +220,7 @@ class PlayerReplayState:
 # ── Data analysis utilities ───────────────────────────────────────────
 
 class PlayerDataAnalysis:
-    """Implements ComponentDataAnalysis using analysis/core/timing.py.
+    """Implements DataAnalysis using analysis/core/timing.py.
     Stateless -- all methods are pure functions over the provided arrays.
     The instance is cheap to construct; all heavy work is in the methods."""
 
@@ -218,13 +271,40 @@ class PlayerDataAnalysis:
 _SHARED_ANALYSIS = PlayerDataAnalysis()
 
 
+# ── Null config (used when no manifest key is provided) ──────────────
+
+class _NullConfig:
+    """Stub config used when a context has no manifest key. All reads
+    return the default; writes are silently dropped."""
+    def get(self, *args, **kwargs): return kwargs.get('default', args[1] if len(args) > 1 else None)
+    def set(self, *_): return False
+    def delete(self, *_): return False
+    def subscribe(self, *_): return None
+    def unsubscribe(self, *_): return False
+
+
+# ── HUD flags ────────────────────────────────────────────────────────
+
+def _hud_flags_from_player(player) -> HudFlags:
+    hud = getattr(player, 'hud', None)
+    if hud is None:
+        return HudFlags(edit_mode=False, layers_panel_open=False,
+                        plugin_panel_open=False, open_flyout=None)
+    return HudFlags(
+        edit_mode=bool(getattr(hud, 'edit_mode', False)),
+        layers_panel_open=bool(getattr(hud, 'layers_panel_open', False)),
+        plugin_panel_open=bool(getattr(hud, 'plugin_panel_open', False)),
+        open_flyout=getattr(hud, 'open_flyout', None),
+    )
+
+
 # ── Context ─────────────────────────────────────────────────────────
 
 _CHAR_PX = 6  # matches SidebarContext._CHAR_PX for label centering
 
 
-class SidebarComponentContext:
-    """:class:`ComponentContext` implementation that defers to a
+class SidebarContext:
+    """:class:`Context` implementation that defers to a
     wrapped :class:`~analysis.player.hud.sidebar_api.SidebarContext`.
 
     The key translation is coordinates: the component thinks in its own
@@ -238,7 +318,7 @@ class SidebarComponentContext:
     surface = SURFACE_GUI
 
     def __init__(self, sctx, *, x0: int, y0: int, w: int, h: int,
-                 data_source: ComponentGameState):
+                 data_source: GameState, manifest_key: str = ''):
         self._sctx = sctx
         self._x0 = int(x0)
         self._y0 = int(y0)
@@ -248,6 +328,8 @@ class SidebarComponentContext:
         self.data = data_source
         self.replay = PlayerReplayState(sctx.player)
         self.analysis = _SHARED_ANALYSIS
+        self.hud_flags = _hud_flags_from_player(sctx.player)
+        self.config = PluginConfig(manifest_key) if manifest_key else _NullConfig()
         # Local cursor starts at 0. We mirror sctx.y so advancing either
         # keeps them in lockstep.
         self.y = 0
@@ -393,7 +475,7 @@ def draw_component_in_sidebar(component, sctx, *, player) -> None:
     x0 = sctx.col_x
     y0 = sctx.y
     w = sctx.col_w
-    cctx = SidebarComponentContext(
+    cctx = SidebarContext(
         sctx, x0=x0, y0=y0, w=w, h=0, data_source=data_source)
     component.draw(cctx)
     # Ensure the outer sidebar cursor reflects whatever the component

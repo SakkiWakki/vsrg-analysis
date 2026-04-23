@@ -13,7 +13,7 @@ the useful part there.
 from __future__ import annotations
 
 from analysis.components import (
-    ComponentManifest,
+    Manifest,
     DataNotAvailable,
     SURFACE_OVERLAY,
     SURFACE_GUI,
@@ -86,7 +86,7 @@ def _draw(ctx):
                   color=colors.get('miss', (220, 60, 60)))
 
 
-MANIFEST = ComponentManifest(
+MANIFEST = Manifest(
     key='builtin:judgments',
     name='Judgments',
     supported_surfaces={SURFACE_GUI, SURFACE_OVERLAY},
