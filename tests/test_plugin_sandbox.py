@@ -29,6 +29,7 @@ from analysis.plugins.sandbox import (
     'numpy', 'numpy.linalg',
     'analysis.player.render.theme', 'analysis.player.hud.sidebar_api',
     'analysis.plugins.host_api',
+    'analysis.components.viz_backend',
     'analysis.overlay.api',
     # Parent of an allow-listed submodule — required for
     # ``from analysis.player.render import theme`` (__import__ fetches parent).
@@ -158,6 +159,25 @@ def test_sandboxed_plugin_allowed_imports_succeed(sandboxed_root, capsys):
     assert good.trusted is False
     assert good.load_errors == []
     assert len(good.sidebar_modules) == 1
+
+
+def test_builtin_viz_bundle_loads_without_sandbox_refusals():
+    bundles = discover_bundles()
+    builtin = next(b for b in bundles if b.key == 'builtin')
+    refused = {
+        fname for role, fname, _exc in builtin.load_errors
+        if role == 'viz'
+    }
+    assert 'chord_sizes.py' not in refused
+    assert 'column_heatmap.py' not in refused
+    assert 'coupling.py' not in refused
+    assert 'drift.py' not in refused
+    assert 'full_report.py' not in refused
+    assert 'note_viewer.py' not in refused
+    assert 'offset_distribution.py' not in refused
+    assert 'per_column.py' not in refused
+    assert 'rolling_stability.py' not in refused
+    assert 'scatter_timeline.py' not in refused
 
 
 def test_sandboxed_plugin_os_import_refused(sandboxed_root, capsys):

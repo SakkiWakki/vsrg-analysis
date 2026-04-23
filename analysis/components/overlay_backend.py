@@ -114,6 +114,12 @@ class OverlayGameStateDataSource:
         from analysis.components.provider import current_game_memory
         return current_game_memory()
 
+    def layer_visible(self, layer: str) -> bool:
+        raise DataNotAvailable('replay layers are not available on the overlay surface')
+
+    def layer_tree(self):
+        raise DataNotAvailable('replay layers are not available on the overlay surface')
+
 
 # ── Color + font conversions ────────────────────────────────────────
 

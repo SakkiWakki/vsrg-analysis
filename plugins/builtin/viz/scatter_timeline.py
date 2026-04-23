@@ -1,31 +1,46 @@
-"""Timing offsets scattered over chart progression (x-axis in seconds)."""
-import numpy as np
-
-from analysis.viz.plots import plot_scatter_timeline
-from ._common import clean_arrays, new_fig
-
-
-def _noterows_to_seconds(rows, replay):
-    """Convert a replay's noterows to seconds. osu rows are already ms; Etterna
-    rows need the chart's BPM map if available, else a safe fallback."""
-    if replay.get('chart_path'):  # osu
-        return rows.astype(np.float64) / 1000.0
-    bpms = replay.get('bpms')
-    sm_offset = replay.get('sm_offset', 0.0)
-    if bpms is not None:
-        from analysis.games.etterna.sm_chart import row_to_time
-        return np.array([row_to_time(int(r), bpms, sm_offset) for r in rows])
-    # Fallback used elsewhere: 48 rows/beat @ 120 BPM = 96 rows/sec.
-    return rows.astype(np.float64) / 96.0
+"""Timing offsets scattered over chart progression."""
+from analysis.components import Manifest, SURFACE_VIZ, VizFields
+from analysis.components.viz_backend import (
+    LEFT_CLR,
+    RIGHT_CLR,
+    VIZ_CATEGORY_CHART,
+    MS,
+    new_figure,
+)
 
 
-def build(replay, game='etterna', **_):
-    rows, offs, cols = clean_arrays(replay)
-    t_sec = _noterows_to_seconds(rows, replay)
-    fig, ax = new_fig(12, 5)
-    plot_scatter_timeline(t_sec, offs, cols, ax=ax, xlabel='time (s)')
-    return fig
+MANIFEST = Manifest(
+    key='builtin:viz:scatter_timeline',
+    name='Timing scatter',
+    supported_surfaces={SURFACE_VIZ},
+    plugin_fields={'viz': VizFields(category=VIZ_CATEGORY_CHART)},
+)
 
 
-def register(add):
-    add('Timing scatter', build, category='chart')
+def _draw(ctx):
+    import numpy as np
+
+    rows = ctx.replay.noterows_clean()
+    offs = ctx.replay.offsets_clean()
+    cols = ctx.replay.columns_clean()
+    time_sec = ctx.noterows_to_seconds(rows)
+    fig, ax = new_figure(12, 5)
+    keycount = ctx.replay.keycount()
+    left_cols, right_cols = ctx.analysis.default_hands(keycount)
+    left = np.isin(cols, left_cols)
+    right = np.isin(cols, right_cols)
+    ax.scatter(time_sec[left], offs[left] * MS, s=4, c=LEFT_CLR,
+               alpha=0.45, label='Left')
+    ax.scatter(time_sec[right], offs[right] * MS, s=4, c=RIGHT_CLR,
+               alpha=0.45, label='Right')
+    ax.axhline(0, color='w', lw=0.5, alpha=0.4)
+    ax.set_xlabel('time (s)')
+    ax.set_ylabel('offset (ms)')
+    ax.set_title('Timing offsets over chart')
+    ax.set_ylim(-80, 80)
+    ax.legend(markerscale=3)
+    ctx.figure(fig)
+
+
+def register_components(add):
+    add(MANIFEST, _draw)

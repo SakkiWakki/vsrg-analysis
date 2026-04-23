@@ -568,7 +568,7 @@ class LibraryTab(QWidget):
             rep = self._replay_cache.get(entry)
             if category == 'chart':
                 progress(f'rendering {name}…')
-                result = builder(rep, game=entry['game'])
+                result = builder(rep, game=entry['game'], entry=entry)
                 return ('chart', rep, result)
             return ('widget', rep, None)
 
@@ -590,9 +590,9 @@ class LibraryTab(QWidget):
                 real = MplTab(prebuilt, on_play=on_play)
             else:
                 try:
-                    result = builder(rep, game=entry['game'], on_play=on_play)
+                    result = builder(rep, game=entry['game'], on_play=on_play, entry=entry)
                 except TypeError:
-                    result = builder(rep, game=entry['game'])
+                    result = builder(rep, game=entry['game'], entry=entry)
                 if isinstance(result, QWidget) and not getattr(result, '_has_play_btn', False):
                     wrapper = QWidget()
                     wl = QVBoxLayout(wrapper)

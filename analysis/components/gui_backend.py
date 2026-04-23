@@ -44,6 +44,10 @@ class PlayerDataSource:
     _FIELDS = frozenset({
         'game', 'keycount', 'combo', 'judgment_windows',
         'judgment_counts', 'judgment_colors', 'judge_label',
+        't_now', 'play_rate', 'paused', 'note_count',
+        'sv_enabled', 'sv_suspended', 'sv_sections',
+        'skin', 'press_hide', 'scroll_mode', 'scroll_value',
+        'effective_scroll_ms', 'layer_visible', 'layer_tree',
     })
 
     def __init__(self, player):
@@ -155,8 +159,17 @@ class PlayerDataSource:
         return list(getattr(self._p, 'sv_sections', []))
 
     def layer_visible(self, layer: str) -> bool:
+        registry = getattr(getattr(self._p, 'plugins', None), 'layers', None)
+        if registry is not None:
+            return registry.layer_visible(layer)
         from analysis.config import get_config
         return bool(get_config().get(f'player.layer_visibility.{layer}', True))
+
+    def layer_tree(self):
+        registry = getattr(getattr(self._p, 'plugins', None), 'layers', None)
+        if registry is None:
+            return ()
+        return registry.layer_tree()
 
 
 # Sanity check at import time: a component declaring this field really
@@ -224,48 +237,66 @@ class PlayerDataAnalysis:
     Stateless -- all methods are pure functions over the provided arrays.
     The instance is cheap to construct; all heavy work is in the methods."""
 
-    @staticmethod
-    def default_hands(keycount):
-        from analysis.core.timing import default_hands
-        return default_hands(keycount)
+    def __init__(self):
+        from analysis.core.timing import (
+            chord_vs_single,
+            coupling_analysis,
+            default_hands,
+            hand_split,
+            per_column_stats,
+            rolling_stability,
+            timing_drift,
+        )
+        self._chord_vs_single = chord_vs_single
+        self._coupling_analysis = coupling_analysis
+        self._default_hands = default_hands
+        self._hand_split = hand_split
+        self._per_column_stats = per_column_stats
+        self._rolling_stability = rolling_stability
+        self._timing_drift = timing_drift
 
-    @staticmethod
-    def hand_split(columns, offsets, left_cols, right_cols):
-        from analysis.core.timing import hand_split
-        return hand_split(columns, offsets, left_cols, right_cols)
+    def default_hands(self, keycount):
+        return self._default_hands(keycount)
 
-    @staticmethod
-    def per_column_stats(columns, offsets):
-        from analysis.core.timing import per_column_stats
-        return per_column_stats(columns, offsets)
+    def hand_split(self, columns, offsets, left_cols, right_cols):
+        return self._hand_split(columns, offsets, left_cols, right_cols)
 
-    @staticmethod
-    def timing_drift(noterows, offsets, columns, *,
+    def per_column_stats(self, columns, offsets):
+        return self._per_column_stats(columns, offsets)
+
+    def timing_drift(self, noterows, offsets, columns, *,
                      n_segments=4, left_cols=(0, 1), right_cols=(2, 3)):
-        from analysis.core.timing import timing_drift
-        return timing_drift(noterows, offsets, columns,
-                            n_segments=n_segments,
-                            left_cols=left_cols, right_cols=right_cols)
+        return self._timing_drift(
+            noterows,
+            offsets,
+            columns,
+            n_segments=n_segments,
+            left_cols=left_cols,
+            right_cols=right_cols,
+        )
 
-    @staticmethod
-    def rolling_stability(offsets, columns, *,
+    def rolling_stability(self, offsets, columns, *,
                           window=200, left_cols=(0, 1), right_cols=(2, 3)):
-        from analysis.core.timing import rolling_stability
-        return rolling_stability(offsets, columns,
-                                 window=window,
-                                 left_cols=left_cols, right_cols=right_cols)
+        return self._rolling_stability(
+            offsets,
+            columns,
+            window=window,
+            left_cols=left_cols,
+            right_cols=right_cols,
+        )
 
-    @staticmethod
-    def coupling_analysis(noterows, offsets, columns, *,
+    def coupling_analysis(self, noterows, offsets, columns, *,
                           left_cols=(0, 1), right_cols=(2, 3)):
-        from analysis.core.timing import coupling_analysis
-        return coupling_analysis(noterows, offsets, columns,
-                                 left_cols=left_cols, right_cols=right_cols)
+        return self._coupling_analysis(
+            noterows,
+            offsets,
+            columns,
+            left_cols=left_cols,
+            right_cols=right_cols,
+        )
 
-    @staticmethod
-    def chord_vs_single(noterows, offsets, columns):
-        from analysis.core.timing import chord_vs_single
-        return chord_vs_single(noterows, offsets, columns)
+    def chord_vs_single(self, noterows, offsets, columns):
+        return self._chord_vs_single(noterows, offsets, columns)
 
 
 _SHARED_ANALYSIS = PlayerDataAnalysis()

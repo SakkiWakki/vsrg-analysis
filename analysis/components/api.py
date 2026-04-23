@@ -50,6 +50,7 @@ if TYPE_CHECKING:
 # editing this file. The two surfaces we ship today:
 SURFACE_GUI = 'gui'        # in-app Qt surface (sidebar + any future GUI widgets)
 SURFACE_OVERLAY = 'overlay'  # in-game overlay surface (gamescope, gl_layer, etc.)
+SURFACE_VIZ = 'viz'        # visualization host surface (tab, window, etc.)
 
 # ── Regions ─────────────────────────────────────────────────────────
 
@@ -57,6 +58,59 @@ SURFACE_OVERLAY = 'overlay'  # in-game overlay surface (gamescope, gl_layer, etc
 # floating freely on the surface instead. Surface plugins define their
 # own panel region names (e.g. REGION_PANEL in plugins/builtin/sidepanel).
 REGION_FREE = 'free'
+
+
+# -- Layers ---------------------------------------------------------
+
+LAYER_GROUP = 'group'
+LAYER_LEAF = 'leaf'
+LAYER_BEFORE = 'before'
+LAYER_AFTER = 'after'
+LAYER_INSIDE = 'inside'
+
+
+@dataclass(frozen=True)
+class LayerPlacement:
+    relation: str
+    target: str
+
+    def __post_init__(self):
+        object.__setattr__(self, 'relation', str(self.relation))
+        object.__setattr__(self, 'target', str(self.target))
+
+
+@dataclass(frozen=True)
+class LayerDeclaration:
+    key: str
+    name: str
+    placement: LayerPlacement
+    kind: str = LAYER_LEAF
+    default_visible: bool = True
+    can_hide: bool = True
+    listed: bool = True
+    accepts_children: frozenset[str] = field(default_factory=frozenset)
+
+    def __post_init__(self):
+        object.__setattr__(self, 'key', str(self.key))
+        object.__setattr__(self, 'name', str(self.name))
+        object.__setattr__(self, 'kind', str(self.kind))
+        object.__setattr__(self, 'accepts_children',
+                           frozenset(self.accepts_children))
+
+
+@dataclass(frozen=True)
+class LayerState:
+    key: str
+    name: str
+    kind: str
+    owner: str
+    parent: str | None
+    depth: int
+    local_visible: bool
+    visible: bool
+    can_hide: bool
+    listed: bool
+    children: tuple['LayerState', ...] = field(default_factory=tuple)
 
 
 # ── Data access ─────────────────────────────────────────────────────
@@ -126,6 +180,7 @@ class GameState(Protocol):
     def scroll_value(self) -> float: ...
     def effective_scroll_ms(self) -> float: ...
     def layer_visible(self, layer: str) -> bool: ...
+    def layer_tree(self) -> tuple[LayerState, ...]: ...
 
 
 # ── Game memory snapshot ───────────────────────────────────────────
@@ -352,6 +407,7 @@ class Manifest:
     supported_surfaces: frozenset[str]
     requires_data: frozenset[str] = field(default_factory=frozenset)
     optional_data: frozenset[str] = field(default_factory=frozenset)
+    layers: tuple[LayerDeclaration, ...] = field(default_factory=tuple)
     plugin_fields: dict[str, Any] = field(default_factory=dict)
     module: str = ''
 
@@ -362,6 +418,7 @@ class Manifest:
                            frozenset(self.requires_data))
         object.__setattr__(self, 'optional_data',
                            frozenset(self.optional_data))
+        object.__setattr__(self, 'layers', tuple(self.layers))
 
 
 # The draw callable's type alias. ``None`` return — the backend owns

@@ -118,20 +118,27 @@ def _z3_check_prefix(node: ast.Call, plugin_key: str) -> SinkViolation | None:
     """Ask Z3 whether there exists a value for the field argument that
     does not start with the plugin's escaped key. Returns a violation if
     SAT (i.e. escape is possible), None if UNSAT (always safe)."""
+    lineno = getattr(node, 'lineno', 0)
+    col = getattr(node, 'col_offset', 0)
+    field_arg = node.args[0]
+
     try:
         import z3
     except ImportError:
-        return None  # z3 not available; skip constraint check
+        return SinkViolation(
+            'constraint',
+            'config.set() field argument cannot be verified without z3',
+            lineno,
+            col)
 
-    field_arg = node.args[0]
     if not isinstance(field_arg, ast.Name):
         # Non-literal, non-Name argument -- conservative: flag it
         return SinkViolation(
             'constraint',
             'config.set() called with non-literal field argument; '
             'cannot verify namespace isolation',
-            getattr(node, 'lineno', 0),
-            getattr(node, 'col_offset', 0))
+            lineno,
+            col)
 
     # Encode: does there exist a string s such that s does NOT start with
     # the escaped plugin key prefix?
@@ -146,8 +153,8 @@ def _z3_check_prefix(node: ast.Call, plugin_key: str) -> SinkViolation | None:
             'constraint',
             f'config.set() field argument is not provably scoped to '
             f'plugin {plugin_key!r}; escape is satisfiable',
-            getattr(node, 'lineno', 0),
-            getattr(node, 'col_offset', 0))
+            lineno,
+            col)
     return None
 
 

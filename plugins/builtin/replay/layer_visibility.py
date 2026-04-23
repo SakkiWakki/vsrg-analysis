@@ -1,35 +1,24 @@
-"""Per-layer visibility toggles.
-
-The Qt renderer draws in ordered layers (background, lanes, judgment,
-notes, chart_extras, miss_holds, ghost_taps, hud). This plugin reads a
-per-layer on/off map from the config store and publishes it into
-``ctx.plugin_data['layer_visibility']`` once per frame, before any
-layer draws. Missing keys default to visible, so an empty config
-matches the legacy "draw everything" behavior.
-
-Config path: ``player.layer_visibility.<layer_name>`` (bool).
-"""
+"""Publish the current replay-layer tree into ``ctx.plugin_data``."""
 from __future__ import annotations
 
 from analysis.player.plugin_api import Stage
 
-_LAYERS = (
-    'background', 'lanes', 'judgment', 'notes',
-    'chart_extras', 'miss_holds', 'ghost_taps', 'hud',
-)
-
-
-def _build_visibility(config):
-    out = {}
-    for name in _LAYERS:
-        out[name] = bool(config.get(
-            f'player.layer_visibility.{name}', True))
-    return out
+def _flatten(states, out):
+    for state in states:
+        out[state.key] = state.visible
+        _flatten(state.children, out)
 
 
 def _draw(ctx, stage):
-    from analysis.config import get_config
-    ctx.plugin_data['layer_visibility'] = _build_visibility(get_config())
+    try:
+        registry = ctx.player.plugins.layers
+    except Exception:
+        return
+    tree = registry.layer_tree()
+    ctx.plugin_data['layer_visibility_tree'] = tree
+    flat = {}
+    _flatten(tree, flat)
+    ctx.plugin_data['layer_visibility'] = flat
 
 
 def register(add):

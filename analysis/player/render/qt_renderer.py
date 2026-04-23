@@ -229,6 +229,7 @@ class QtPlayerRenderer:
         return drawers
 
     def build_context(self, player, painter, t_now):
+        player._render_t_now = float(t_now)
         x0, lane_w = player._lane_geom()
         ctx = RenderContext(
             player=player,
@@ -246,23 +247,22 @@ class QtPlayerRenderer:
         ctx.candidates = culling.select_note_candidates(ctx)
         return ctx
 
-    # Ordered draw layers. Each entry is (name, draw_fn, after_stage).
-    # Layer names drive the `layer_visibility` dict in `ctx.plugin_data`
-    # — missing/True = draw, False = skip the built-in (plugins still
-    # fire, so a plugin can replace the layer). `after_stage` is the
-    # plugin Stage fired after that layer (None for no hook).
     @property
     def _layers(self):
-        return (
-            ('background',    self._draw_background,   None),
-            ('lanes',         self._draw_lanes,        Stage.AFTER_LANES),
-            ('judgment',      self._draw_judgment,     Stage.AFTER_JUDGMENT),
-            ('notes',         self._draw_notes,        None),
-            ('chart_extras',  self._draw_chart_extras, Stage.AFTER_NOTES),
-            ('miss_holds',    self._draw_miss_holds,   None),
-            ('ghost_taps',    self._draw_ghost_taps,   Stage.AFTER_GHOSTS),
-            ('hud',           self._draw_hud,          Stage.HUD),
-        )
+        registry = getattr(self.plugins, 'layers', None)
+        if registry is None:
+            return (
+                ('background',    self._draw_background,   None),
+                ('lanes',         self._draw_lanes,        Stage.AFTER_LANES),
+                ('judgment',      self._draw_judgment,     Stage.AFTER_JUDGMENT),
+                ('notes',         self._draw_notes,        None),
+                ('chart_extras',  self._draw_chart_extras, Stage.AFTER_NOTES),
+                ('miss_holds',    self._draw_miss_holds,   None),
+                ('ghost_taps',    self._draw_ghost_taps,   Stage.AFTER_GHOSTS),
+                ('free_sections', self._draw_free_sections, None),
+                ('hud',           self._draw_hud,          Stage.HUD),
+            )
+        return registry.render_plan(self._layer_draw_fns())
 
     def draw(self, player, painter, t_now):
         ctx = self.build_context(player, painter, t_now)
@@ -273,16 +273,11 @@ class QtPlayerRenderer:
         if hud is not None:
             hud.clear_hitboxes()
         self.plugins.draw(Stage.PRE_FRAME, ctx)
-        visibility = ctx.plugin_data.get('layer_visibility') or {}
+        visibility = self._layer_visibility(ctx)
         for name, fn, stage in self._layers:
-            if name == 'hud':
-                # Free-region sections live above game content but below
-                # the sidebar so the drop zone still reads clearly during
-                # a drag. Drawn here (not as a regular layer) because
-                # they should never be toggled off via layer_visibility.
-                self._draw_free_sections(ctx, painter)
             if visibility.get(name, True):
-                fn(ctx, painter)
+                if fn is not None:
+                    fn(ctx, painter)
             if stage is not None:
                 self.plugins.draw(stage, ctx)
         # Drag affordances: ghost + blue insertion line. Drawn last so
@@ -290,6 +285,33 @@ class QtPlayerRenderer:
         if hud is not None and hud.edit_mode and hud.drag_key is not None:
             self._draw_drag_overlay(ctx, painter)
         self.plugins.draw(Stage.POST_FRAME, ctx)
+
+    def _layer_draw_fns(self):
+        return {
+            'background': self._draw_background,
+            'lanes': self._draw_lanes,
+            'judgment': self._draw_judgment,
+            'notes': self._draw_notes,
+            'chart_extras': self._draw_chart_extras,
+            'miss_holds': self._draw_miss_holds,
+            'ghost_taps': self._draw_ghost_taps,
+            'free_sections': self._draw_free_sections,
+            'hud': self._draw_hud,
+        }
+
+    def _layer_visibility(self, ctx):
+        tree = ctx.plugin_data.get('layer_visibility_tree')
+        if tree is not None:
+            out = {}
+            self._flatten_layer_tree(tree, out)
+            return out
+        return ctx.plugin_data.get('layer_visibility') or {}
+
+    @staticmethod
+    def _flatten_layer_tree(states, out):
+        for state in states:
+            out[state.key] = state.visible
+            QtPlayerRenderer._flatten_layer_tree(state.children, out)
 
     @staticmethod
     def _draw_background(ctx, painter):

@@ -21,6 +21,7 @@ plt.style.use('dark_background')
 
 from analysis.games.etterna.judgment import (
     ETT_JUDGE_SCALES, windows_for as _ett_windows_for)
+from analysis.games.osu.judgment import windows_for as _osu_windows_for
 
 # Per-window color palette (viz only — the player uses JCLR from
 # analysis.player.judgment for its hit marks).
@@ -53,9 +54,8 @@ def osu_mania_windows(od=8):
     """Hit windows for osu!mania based on OD (ms). Delegates the formula
     to analysis.games.osu.judgment; keeps the legacy '300g'/'300'/…
     labels the plotting code already matches on."""
-    from analysis.games.osu.judgment import windows_for
     out = []
-    for name, sec in windows_for(od):
+    for name, sec in _osu_windows_for(od):
         legacy = _OSU_LEGACY_NAMES[name]
         out.append((legacy, sec, _OSU_WCOLOR[legacy]))
     return out

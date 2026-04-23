@@ -288,10 +288,8 @@ def test_toggle_flyout_action_swaps_and_closes():
 
 
 def test_layer_visibility_gates_builtin_draws_but_not_plugin_stage():
-    """Regression: `ctx.plugin_data['layer_visibility']` with a layer set
-    to False must skip the built-in draw fn for that layer, but still
-    fire the plugin stage (so a plugin can replace the layer without
-    double-drawing)."""
+    """Regression: a hidden layer in the tree must skip the built-in draw
+    fn for that layer, but still fire the plugin stage."""
     drawn = []
     stages = []
 
@@ -318,7 +316,11 @@ def test_layer_visibility_gates_builtin_draws_but_not_plugin_stage():
     type(renderer)._layers = property(lambda self: fake_layers)
     try:
         ctx = SimpleNamespace(
-            plugin_data={'layer_visibility': {'lanes': False}},
+            plugin_data={'layer_visibility_tree': (
+                SimpleNamespace(key='background', visible=True, children=()),
+                SimpleNamespace(key='lanes', visible=False, children=()),
+                SimpleNamespace(key='hud', visible=True, children=()),
+            )},
         )
         # Stub build_context + PRE_FRAME write.
         renderer.build_context = lambda p, pa, t: ctx

@@ -22,6 +22,9 @@ from analysis.components import (
     Manifest,
     ComponentRegistry,
     DataNotAvailable,
+    LayerDeclaration,
+    LayerPlacement,
+    LAYER_AFTER,
     SURFACE_OVERLAY,
     SURFACE_GUI,
 )
@@ -42,8 +45,11 @@ from analysis.components.overlay_backend import (
 from analysis.components.gui_backend import (
     PlayerDataSource,
     SidebarContext,
+    draw_component_in_sidebar,
 )
 from analysis.overlay.api import OverlayGameState
+from analysis.config.store import ConfigStore
+from analysis.player.render.layer_registry import LayerRegistry
 
 
 # ── Manifest ────────────────────────────────────────────
@@ -59,6 +65,23 @@ def test_manifest_normalises_sets():
     assert isinstance(m.requires_data, frozenset)
     assert isinstance(m.optional_data, frozenset)
     assert SURFACE_GUI in m.supported_surfaces
+
+
+def test_manifest_normalises_layers():
+    m = Manifest(
+        key='k',
+        name='n',
+        supported_surfaces=[SURFACE_GUI],
+        layers=[
+            LayerDeclaration(
+                key='k:after_notes',
+                name='After notes',
+                placement=LayerPlacement(LAYER_AFTER, 'notes'),
+            ),
+        ],
+    )
+    assert isinstance(m.layers, tuple)
+    assert m.layers[0].placement.target == 'notes'
 
 
 # ── ComponentRegistry gating ─────────────────────────────────────
@@ -101,7 +124,20 @@ def test_registry_gates_by_required_data():
 # ── Data sources ─────────────────────────────────────────────────
 
 
-def _fake_player():
+def _store(tmp_path):
+    store = ConfigStore(tmp_path / 'config.json', autosave=False)
+    store.load()
+    return store
+
+
+def _fake_player(*, layer_registry=None, hud=None):
+    plugins = SimpleNamespace(
+        layers=(layer_registry if layer_registry is not None else
+                SimpleNamespace(
+                    layer_visible=lambda key: key != 'ghost_taps',
+                    layer_tree=lambda: (),
+                )),
+    )
     return SimpleNamespace(
         game='etterna',
         keycount=4,
@@ -111,12 +147,52 @@ def _fake_player():
                       'miss': (255, 0, 0)},
         judge_label='J4',
         combo=0,
+        _render_t_now=12.345,
+        play_rate=1.0,
+        paused=False,
+        sv_enabled=False,
+        sv_sections=[],
+        times=[0.0, 1.0, 2.0, 3.0],
+        skin='bar',
+        press_hide=False,
+        scroll_mode='ms',
+        effective_scroll_ms=1000.0,
+        plugins=plugins,
+        hud=(hud if hud is not None else SimpleNamespace(
+            edit_mode=False,
+            layers_panel_open=False,
+            plugin_panel_open=False,
+            open_flyout=None,
+        )),
+        _current_mode_value=lambda: 1000.0,
+        sv_suspended=lambda: False,
     )
+
+
+def _player_with_layer_registry(tmp_path, *, layers_panel_open=False):
+    hud = SimpleNamespace(
+        edit_mode=False,
+        layers_panel_open=layers_panel_open,
+        plugin_panel_open=False,
+        open_flyout=None,
+    )
+    registry = LayerRegistry(config=_store(tmp_path))
+    return _fake_player(layer_registry=registry, hud=hud)
+
+
+def _invoke_supported_field(ds, field):
+    match field:
+        case 'layer_visible':
+            return ds.layer_visible('notes')
+        case _:
+            return getattr(ds, field)()
 
 
 def test_player_data_source_answers_fields():
     ds = PlayerDataSource(_fake_player())
     assert ds.supports('judgment_counts')
+    assert ds.supports('t_now')
+    assert ds.supports('note_count')
     counts = ds.judgment_counts()
     assert counts == {'marv': 2, 'perf': 1, 'miss': 1}
     assert ds.judge_label() == 'J4'
@@ -133,6 +209,26 @@ def test_player_data_source_raises_for_accuracy():
         pass
     else:
         raise AssertionError('accuracy should raise DataNotAvailable')
+
+
+def test_player_data_source_delegates_layer_visibility():
+    ds = PlayerDataSource(_fake_player())
+    assert ds.layer_visible('notes') is True
+    assert ds.layer_visible('ghost_taps') is False
+
+
+def test_player_data_source_answers_all_supported_fields(tmp_path):
+    ds = PlayerDataSource(_player_with_layer_registry(tmp_path))
+    results = {
+        field: _invoke_supported_field(ds, field)
+        for field in sorted(ds._FIELDS)
+    }
+
+    assert results['game'] == 'etterna'
+    assert results['keycount'] == 4
+    assert results['t_now'] == 12.345
+    assert results['layer_visible'] is True
+    assert results['layer_tree']
 
 
 def test_overlay_data_source_answers_counts_only():
@@ -307,3 +403,50 @@ def test_judgments_registers_through_unified_path():
     sidebar_keys = {s.key for s in mgr.sidebar.all_sections()}
     assert 'builtin:judgments' in unified_keys
     assert 'builtin:judgments' in sidebar_keys
+
+
+def test_status_component_mounts_on_gui():
+    from analysis.player.plugin_loader import PluginManager
+
+    mgr = PluginManager.discover()
+    report = mgr.components.report('builtin:status')
+    assert report[SURFACE_GUI].mounted is True
+
+
+def test_mounted_gui_component_requirements_are_callable(tmp_path):
+    from analysis.player.plugin_loader import PluginManager
+
+    mgr = PluginManager.discover(config=_store(tmp_path))
+    try:
+        ds = PlayerDataSource(_player_with_layer_registry(tmp_path))
+        components = mgr.components.components_for(
+            SURFACE_GUI,
+            data_source_fields=PlayerDataSource._FIELDS,
+        )
+        for comp in components:
+            for field in sorted(comp.manifest.requires_data):
+                _invoke_supported_field(ds, field)
+    finally:
+        mgr.close()
+
+
+def test_layers_component_draws_builtin_layers(tmp_path):
+    from analysis.player.plugin_loader import PluginManager
+
+    mgr = PluginManager.discover(config=_store(tmp_path))
+    try:
+        comp = mgr.components.get('builtin:layers')
+        assert comp is not None
+        sctx = _FakeSctx(y=100)
+        sctx.player = _player_with_layer_registry(
+            tmp_path,
+            layers_panel_open=True,
+        )
+
+        draw_component_in_sidebar(comp, sctx, player=sctx.player)
+
+        labels = [text for text, _x, _y in sctx.texts]
+        assert 'Background' in labels
+        assert 'Notes' in labels
+    finally:
+        mgr.close()

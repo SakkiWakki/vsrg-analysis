@@ -9,6 +9,10 @@ MANIFEST = Manifest(
     key='builtin:status',
     name='Status',
     supported_surfaces={SURFACE_GUI},
+    requires_data={
+        't_now', 'play_rate', 'paused', 'note_count',
+        'keycount', 'sv_enabled', 'sv_suspended', 'sv_sections',
+    },
     plugin_fields={
         'sidebar': SidebarFields(
             priority=100,

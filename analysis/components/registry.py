@@ -130,7 +130,7 @@ def discover_from_bundles(bundles) -> ComponentRegistry:
 
     Looks for ``register_components(add)`` on any module in
     ``bundle.replay_modules``, ``bundle.sidebar_modules``,
-    ``bundle.overlay_modules``. This mirrors how the existing
+    ``bundle.overlay_modules``, ``bundle.viz_modules``. This mirrors how the existing
     sidebar/overlay registries search — a plugin author can put a
     unified component anywhere, and the right surface picks it up.
     """
@@ -139,7 +139,8 @@ def discover_from_bundles(bundles) -> ComponentRegistry:
         sidebar_mods = list(getattr(bundle, 'sidebar_modules', []) or [])
         overlay_mods = list(getattr(bundle, 'overlay_modules', []) or [])
         replay_mods = list(getattr(bundle, 'replay_modules', []) or [])
-        for mod in sidebar_mods + overlay_mods + replay_mods:
+        viz_mods = list(getattr(bundle, 'viz_modules', []) or [])
+        for mod in sidebar_mods + overlay_mods + replay_mods + viz_mods:
             if not hasattr(mod, 'register_components'):
                 continue
             module_name = f'{bundle.key}/{getattr(mod, "__name__", "")}'

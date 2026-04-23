@@ -603,9 +603,7 @@ class Player:
                 self.cycle_game()
                 self._notify_scroll_change()
             case 'toggle_layer':
-                cfg = get_config()
-                path = f'player.layer_visibility.{payload}'
-                cfg.set(path, not bool(cfg.get(path, True)))
+                self.plugins.layers.toggle(payload)
             case 'toggle_layers_panel':
                 self.hud.layers_panel_open = not getattr(
                     self.hud, 'layers_panel_open', False)

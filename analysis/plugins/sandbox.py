@@ -79,6 +79,7 @@ _HOST_API_ALLOW = frozenset({
     'analysis.components',
     'analysis.components.api',
     'analysis.components.overlay_backend',
+    'analysis.components.viz_backend',
     # Visualization helpers -- needed by builtin viz plugins.
     # analysis.viz.plots provides only plotting functions, no FS/network access.
     'analysis.viz.plots',

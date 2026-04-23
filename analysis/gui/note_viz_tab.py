@@ -5,20 +5,23 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
 
 import matplotlib
 matplotlib.use('QtAgg')
+from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavToolbar
 
+from analysis.core import gui_adapter as gui_mod
 from analysis.gui.widgets import _viz_toolbar
+from analysis.viz.note_visualizer import (
+    render_chart,
+    _judgment_counts,
+    _legend_axes,
+)
 
 
 class NoteVizTab(QWidget):
     """Scrollable note visualizer with a slider, embedded."""
     def __init__(self, replay, game='etterna', od=None, judge=None, on_play=None):
         super().__init__()
-        from matplotlib.figure import Figure
-        from analysis.viz.note_visualizer import (render_chart, _judgment_counts,
-                                      _legend_axes)
-        from analysis.core import gui_adapter as gui_mod
         self.replay = replay
         self.game = game
         cfg = gui_mod.get(game).note_viz_config(replay, judge=judge, od=od)

@@ -1,17 +1,24 @@
-"""Scrollable Quaver-style note + press visualizer. Keycount inferred from replay."""
+"""Scrollable Quaver-style note and press visualizer."""
+from analysis.components import Manifest, SURFACE_VIZ, VizFields
+from analysis.components.viz_backend import VIZ_CATEGORY_WIDGET
 
 
-def build(replay, game='etterna', on_play=None, od=None, judge=None, **_):
-    from analysis.gui.note_viz_tab import NoteVizTab
-    kwargs = {}
-    if od is not None:
-        kwargs['od'] = od
-    if judge is not None:
-        kwargs['judge'] = judge
-    w = NoteVizTab(replay, game=game, on_play=on_play, **kwargs)
-    w._has_play_btn = on_play is not None
-    return w
+MANIFEST = Manifest(
+    key='builtin:viz:note_viewer',
+    name='Note visualizer (scrollable)',
+    supported_surfaces={SURFACE_VIZ},
+    plugin_fields={'viz': VizFields(category=VIZ_CATEGORY_WIDGET)},
+)
 
 
-def register(add):
-    add('Note visualizer (scrollable)', build, category='widget')
+def _draw(ctx):
+    od = None
+    judge = None
+    if ctx.entry is not None:
+        od = ctx.entry.get('od')
+        judge = ctx.entry.get('judge')
+    ctx.widget(ctx.build_note_visualizer(od=od, judge=judge))
+
+
+def register_components(add):
+    add(MANIFEST, _draw)

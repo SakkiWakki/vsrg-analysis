@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from analysis.player.plugin_api import Stage, normalize_stage
 from analysis.player.hud.sidebar_api import SidebarSectionRegistry, _escape_key
+from analysis.player.render.layer_registry import LayerRegistry
 
 
 @dataclass
@@ -39,6 +40,7 @@ class PluginManager:
         self._config = config if config is not None else get_config()
         self._plugins: list[DrawPlugin] = []
         self.sidebar = SidebarSectionRegistry(config=self._config)
+        self.layers = LayerRegistry(config=self._config)
         # Unified component registry — the source of truth for plugins
         # that opted into the new cross-surface API. Ported sidebar
         # sections feed in here too; ``discover`` bridges them back
@@ -179,6 +181,7 @@ class PluginManager:
         # analysis/overlay/publisher.py::discover_overlays), since
         # the overlay registry has its own lifecycle.
         mgr.components = discover_from_bundles(mgr.bundles)
+        mgr.layers.register_components(mgr.components.all_components())
         bridge_into_gui_registry(mgr.components, mgr.sidebar)
         # Activate the user-chosen theme if the owning bundle was found.
         for bundle in mgr.bundles:
@@ -251,4 +254,3 @@ class PluginManager:
             mod.register_library_actions(add_action)
         except Exception as exc:
             print(f'library-action register failed: {module_name}: {exc}')
-
