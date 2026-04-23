@@ -20,49 +20,35 @@ if exist "%VENV_PY%" goto :launch
 
 echo [setup] first-run setup (this takes a minute)
 
-REM The bundled native wheel is built against Python 3.11 specifically
-REM (cp311 ABI tag). pip will refuse to install it on any other minor
-REM version, so we demand 3.11 up front rather than let setup fail
-REM halfway with a cryptic "not a supported wheel" error.
-set "PY311_CMD="
-
-REM Prefer the `py` launcher — it can target exactly 3.11 regardless of
-REM whatever `python` on PATH points at.
-where py >nul 2>&1
-if %ERRORLEVEL%==0 (
-    py -3.11 --version >nul 2>&1
-    if not errorlevel 1 set "PY311_CMD=py -3.11"
-)
-
-REM Fall back to a bare python3.11 command if py isn't installed but
-REM the user has python3.11.exe on PATH for some other reason.
-if not defined PY311_CMD (
-    where python3.11 >nul 2>&1
-    if not errorlevel 1 set "PY311_CMD=python3.11"
-)
-
-if not defined PY311_CMD (
+REM The bundled native wheel is built against the Python version the
+REM release workflow ships with. pip's ABI check will refuse a wheel
+REM built against a different minor version. We match by using the
+REM same version in CI + in the bootstrap; see run.bat's comment above.
+set "HAS_PY=0"
+where py >nul 2>&1     && set "HAS_PY=1"
+where python >nul 2>&1 && set "HAS_PY=1"
+if "%HAS_PY%"=="0" (
     echo.
-    echo [setup] Python 3.11 is required but not found.
-    echo.
-    echo The bundled native memory reader is built against Python 3.11
-    echo and will not load on any other version.
+    echo [setup] Python is not installed or not on PATH.
     echo.
     echo   Install option 1 ^(winget, recommended^):
-    echo     winget install Python.Python.3.11
+    echo     winget install Python.Python.3.12
     echo.
     echo   Install option 2 ^(manual^):
-    echo     https://www.python.org/downloads/release/python-3119/
+    echo     https://www.python.org/downloads/
     echo     Tick "Add python.exe to PATH" during install.
     echo.
     echo After installing, close this window and run "run.bat" again.
-    echo If you already have Python 3.11, run:   py -3.11 --version
-    echo to confirm the `py` launcher can see it.
     pause
     exit /b 1
 )
 
-%PY311_CMD% -m venv "%VENV%" || goto :fail_venv
+where py >nul 2>&1
+if %ERRORLEVEL%==0 (
+    py -3 -m venv "%VENV%" || goto :fail_venv
+) else (
+    python -m venv "%VENV%" || goto :fail_venv
+)
 
 "%VENV_PY%" -m pip install --upgrade pip wheel >nul || goto :fail
 echo [setup] installing requirements...

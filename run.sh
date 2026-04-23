@@ -19,28 +19,26 @@ VENV_PIP="$VENV/bin/pip"
 if [[ ! -x "$VENV_PY" ]]; then
     echo "[setup] first-run setup (this takes a minute)"
 
-    # The bundled native wheel is cp311-specific — pip will refuse to
-    # install it on any other minor version. Require python3.11 up
-    # front rather than fail halfway through setup.
     PY=""
-    if command -v python3.11 >/dev/null 2>&1; then
-        PY=python3.11
+    if command -v python3 >/dev/null 2>&1; then
+        PY=python3
+    elif command -v python >/dev/null 2>&1; then
+        PY=python
     fi
     if [[ -z "$PY" ]]; then
         echo
-        echo "[setup] Python 3.11 is required but not found."
-        echo
-        echo "The bundled native memory reader is built against Python 3.11"
-        echo "and will not load on any other version."
+        echo "[setup] Python is not installed or not on PATH."
         echo
         if [[ "$(uname -s)" == "Darwin" ]]; then
-            echo "  Install (Homebrew):"
-            echo "    brew install python@3.11"
+            echo "  Install (Homebrew, recommended):"
+            echo "    brew install python@3.12"
+            echo
+            echo "  Or download from https://www.python.org/downloads/"
         else
             echo "  Install via your package manager, e.g.:"
-            echo "    Debian/Ubuntu:  sudo apt install python3.11 python3.11-venv"
-            echo "    Arch:           sudo pacman -S python311        # AUR if needed"
-            echo "    Fedora:         sudo dnf install python3.11"
+            echo "    Debian/Ubuntu:  sudo apt install python3 python3-venv python3-pip"
+            echo "    Arch:           sudo pacman -S python python-pip"
+            echo "    Fedora:         sudo dnf install python3 python3-pip"
         fi
         echo
         echo "After installing, run ./run.sh again."

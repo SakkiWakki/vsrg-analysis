@@ -38,8 +38,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          # See ci.yml comment: 3.12 breaks PySide6+six import chain.
-          python-version: '3.11'
+          python-version: '3.12'
 
       - uses: dtolnay/rust-toolchain@stable
         with:

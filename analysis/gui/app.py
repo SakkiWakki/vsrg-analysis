@@ -12,6 +12,26 @@ This module is the app shell only — the real logic lives in:
 """
 import sys
 
+# Python 3.12 compatibility shim for PySide6 + six.
+#
+# shiboken's feature_imported hook runs on every import. On Python 3.12
+# it eventually calls inspect.getsourcefile(module), which walks into
+# importlib._bootstrap._module_repr_from_spec and asks the loader for a
+# `_path` attribute. six's `_SixMetaPathImporter` (the loader behind
+# `six.moves`) doesn't have one, and the whole chain raises
+# AttributeError: '_SixMetaPathImporter' object has no attribute '_path'.
+#
+# matplotlib → python-dateutil → six.moves is a common import chain, so
+# the crash hits before the app even opens a window. Patch before
+# importing PySide6 so the shiboken hook never sees an unpatched loader.
+import six as _six
+_cls = _six._SixMetaPathImporter
+if not hasattr(_cls, 'get_filename'):
+    _cls.get_filename = lambda self, fullname: None
+if not hasattr(_cls, '_path'):
+    _cls._path = None
+del _six, _cls
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QMainWindow, QTabWidget
 
