@@ -24,7 +24,7 @@
 
 use std::io;
 
-use crate::linux_mem;
+use crate::mem;
 use crate::pattern;
 use crate::signatures::{
     self as sig, accuracy, beatmap, dotnet_list, dotnet_string, gameplay, ruleset, score, Signature,
@@ -67,7 +67,7 @@ fn scan_required(pid: u32, s: &Signature) -> io::Result<u64> {
             format!("signature {:?} has invalid pattern: {e}", s.name),
         )
     })?;
-    let hit = linux_mem::scan(pid, &pat)?;
+    let hit = mem::scan(pid, &pat)?;
     let Some(addr) = hit else {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -275,7 +275,7 @@ fn read_dotnet_string(pid: u32, addr: u64) -> io::Result<String> {
     }
     let byte_len = (length as usize) * 2;
     let mut buf = vec![0u8; byte_len];
-    linux_mem::read_exact(pid, addr + dotnet_string::DATA_OFFSET, &mut buf)?;
+    mem::read_exact(pid, addr + dotnet_string::DATA_OFFSET, &mut buf)?;
     // .NET strings are UTF-16LE. Decode into a Vec<u16> first; use
     // String::from_utf16_lossy so malformed surrogates don't abort
     // the whole read (garbage pointers sometimes hit valid memory
@@ -318,7 +318,7 @@ fn read_hit_errors(pid: u32, score_base: u64) -> io::Result<Vec<i32>> {
     // element. Each entry is an i32.
     let bytes_len = (size as usize) * 4;
     let mut buf = vec![0u8; bytes_len];
-    linux_mem::read_exact(pid, items + dotnet_list::LEADER_START, &mut buf)?;
+    mem::read_exact(pid, items + dotnet_list::LEADER_START, &mut buf)?;
     for chunk in buf.chunks_exact(4) {
         let v = i32::from_le_bytes(chunk.try_into().unwrap());
         // Same clamp tosu applies — stale chains sometimes surface
@@ -335,7 +335,7 @@ fn read_hit_errors(pid: u32, score_base: u64) -> io::Result<Vec<i32>> {
 
 fn read_u32(pid: u32, addr: u64) -> io::Result<u32> {
     let mut buf = [0u8; 4];
-    linux_mem::read_exact(pid, addr, &mut buf)?;
+    mem::read_exact(pid, addr, &mut buf)?;
     Ok(u32::from_le_bytes(buf))
 }
 
@@ -345,18 +345,18 @@ fn read_u32_as_u64(pid: u32, addr: u64) -> io::Result<u64> {
 
 fn read_u16(pid: u32, addr: u64) -> io::Result<u16> {
     let mut buf = [0u8; 2];
-    linux_mem::read_exact(pid, addr, &mut buf)?;
+    mem::read_exact(pid, addr, &mut buf)?;
     Ok(u16::from_le_bytes(buf))
 }
 
 fn read_f64(pid: u32, addr: u64) -> io::Result<f64> {
     let mut buf = [0u8; 8];
-    linux_mem::read_exact(pid, addr, &mut buf)?;
+    mem::read_exact(pid, addr, &mut buf)?;
     Ok(f64::from_le_bytes(buf))
 }
 
 fn read_f32(pid: u32, addr: u64) -> io::Result<f32> {
     let mut buf = [0u8; 4];
-    linux_mem::read_exact(pid, addr, &mut buf)?;
+    mem::read_exact(pid, addr, &mut buf)?;
     Ok(f32::from_le_bytes(buf))
 }

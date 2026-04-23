@@ -2,9 +2,14 @@
 enrichment from .osu chart files, and note-viz config."""
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from analysis.core.gui_adapter import GuiAdapter
+
+
+_PLACEHOLDER_WIN = r'e.g. %LOCALAPPDATA%\osu!'
+_PLACEHOLDER_NIX = 'e.g. ~/.local/share/osu-wine/osu!'
 
 
 class OsuGuiAdapter(GuiAdapter):
@@ -13,7 +18,7 @@ class OsuGuiAdapter(GuiAdapter):
     hint = ('Point at your osu! install folder — the one that contains '
             "`osu!.<username>.cfg`. The Songs folder is resolved from "
             "the config's BeatmapDirectory setting.")
-    placeholder = 'e.g. ~/.local/share/osu-wine/osu!'
+    placeholder = _PLACEHOLDER_WIN if sys.platform == 'win32' else _PLACEHOLDER_NIX
     error_hint = 'no osu!.<user>.cfg in folder'
 
     def find_dirs(self):

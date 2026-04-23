@@ -140,7 +140,7 @@ overlay: $(OVERLAY_BIN)
 # 32-bit variants because old stable/Wine setups can use either Unix
 # process bitness.
 
-GL_LAYER_DIR := analysis/games/osu/gl_layer
+GL_LAYER_DIR := analysis/games/osu/gl_layer/linux
 GL_LAYER_SO  := $(GL_LAYER_DIR)/lib/libvsrg_gl_overlay.so
 GL_LAYER_SO64_ALT := $(GL_LAYER_DIR)/lib64/libvsrg_gl_overlay.so
 GL_LAYER_SO32 := $(GL_LAYER_DIR)/lib32/libvsrg_gl_overlay.so

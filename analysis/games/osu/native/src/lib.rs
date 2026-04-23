@@ -5,14 +5,18 @@
 //! exception — we keep the API small because each addition means one
 //! more thing that can drift against osu! binary updates.
 //!
-//! v1 surface (Linux/wine only, mania-only):
+//! Surface (Linux/wine and native Windows, mania-only):
 //!   - find_osu_pid() -> Optional[int]
 //!   - resolve(pid) -> ResolvedHandle      # cached signature addresses
 //!   - read_state(handle) -> dict           # live mania gameplay state
 //!   - scan_for_pattern(pid, pattern_hex)   # debug/verify
 //!   - read_u32(pid, addr)                  # debug/verify
+//!
+//! Everything above "mem" (signature scanning, pointer-chain walking,
+//! .NET object decoding) is OS-agnostic because osu! stable ships the
+//! same PE on both platforms and runs under the same CLR.
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 use pyo3::exceptions::PyNotImplementedError;
 use pyo3::exceptions::{PyOSError, PyValueError};
 use pyo3::prelude::*;
@@ -25,27 +29,35 @@ mod signatures;
 #[cfg(target_os = "linux")]
 mod linux_mem;
 
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "windows")]
+mod windows_mem;
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod mem;
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod reader;
 
-/// Locate a running osu! process. Returns None if not found, or the
-/// first matching PID if multiple exist (pathological — osu! usually
-/// singletons via wine).
+/// Locate a running osu! process. Returns None if not found.
 #[pyfunction]
 fn find_osu_pid() -> PyResult<Option<u32>> {
     #[cfg(target_os = "linux")]
     {
         Ok(process::find_osu_pid_linux())
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        Ok(process::find_osu_pid_windows())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         Err(PyNotImplementedError::new_err(
-            "find_osu_pid: only Linux/wine is implemented in v1",
+            "find_osu_pid: only Linux/wine and Windows are implemented",
         ))
     }
 }
 
-/// Scan the tosu-compatible Linux memory regions of ``pid`` for
+/// Scan the tosu-compatible memory regions of ``pid`` for
 /// ``pattern_hex``.
 ///
 /// Pattern syntax: whitespace-separated hex bytes, with ``??`` as a
@@ -57,15 +69,15 @@ fn find_osu_pid() -> PyResult<Option<u32>> {
 #[pyfunction]
 fn scan_for_pattern(pid: u32, pattern_hex: &str) -> PyResult<Option<u64>> {
     let pat = pattern::parse(pattern_hex).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
-        linux_mem::scan(pid, &pat).map_err(|e| PyOSError::new_err(e.to_string()))
+        mem::scan(pid, &pat).map_err(|e| PyOSError::new_err(e.to_string()))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         let _ = (pid, pat);
         Err(PyNotImplementedError::new_err(
-            "scan_for_pattern: only Linux/wine is implemented in v1",
+            "scan_for_pattern: only Linux/wine and Windows are implemented",
         ))
     }
 }
@@ -77,15 +89,15 @@ fn scan_for_pattern(pid: u32, pattern_hex: &str) -> PyResult<Option<u64>> {
 #[pyfunction]
 fn scan_all_for_pattern(pid: u32, pattern_hex: &str) -> PyResult<Vec<u64>> {
     let pat = pattern::parse(pattern_hex).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
-        linux_mem::scan_all(pid, &pat).map_err(|e| PyOSError::new_err(e.to_string()))
+        mem::scan_all(pid, &pat).map_err(|e| PyOSError::new_err(e.to_string()))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         let _ = (pid, pat);
         Err(PyNotImplementedError::new_err(
-            "scan_all_for_pattern: only Linux/wine is implemented in v1",
+            "scan_all_for_pattern: only Linux/wine and Windows are implemented",
         ))
     }
 }
@@ -94,19 +106,19 @@ fn scan_all_for_pattern(pid: u32, pattern_hex: &str) -> PyResult<Vec<u64>> {
 /// Returns None if the read fails.
 #[pyfunction]
 fn read_u32(pid: u32, addr: u64) -> PyResult<Option<u32>> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
         let mut buf = [0u8; 4];
-        match linux_mem::read_exact(pid, addr, &mut buf) {
+        match mem::read_exact(pid, addr, &mut buf) {
             Ok(()) => Ok(Some(u32::from_le_bytes(buf))),
             Err(_) => Ok(None),
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         let _ = (pid, addr);
         Err(PyNotImplementedError::new_err(
-            "read_u32: only Linux/wine is implemented in v1",
+            "read_u32: only Linux/wine and Windows are implemented",
         ))
     }
 }
@@ -118,7 +130,7 @@ fn read_u32(pid: u32, addr: u64) -> PyResult<Option<u32>> {
 #[pyclass(skip_from_py_object)]
 #[derive(Clone)]
 struct ResolvedHandle {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     inner: reader::Resolved,
 }
 
@@ -126,44 +138,44 @@ struct ResolvedHandle {
 impl ResolvedHandle {
     #[getter]
     fn pid(&self) -> u32 {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         {
             self.inner.pid
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         {
             0
         }
     }
     #[getter]
     fn rulesets_ptr(&self) -> u64 {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         {
             self.inner.rulesets_ptr
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         {
             0
         }
     }
     #[getter]
     fn base_addr(&self) -> u64 {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         {
             self.inner.base_addr
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         {
             0
         }
     }
     #[getter]
     fn status_ptr(&self) -> u64 {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         {
             self.inner.status_ptr
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         {
             0
         }
@@ -175,16 +187,16 @@ impl ResolvedHandle {
 /// (which means osu! updated and ``signatures.rs`` needs a refresh).
 #[pyfunction]
 fn resolve(pid: u32) -> PyResult<ResolvedHandle> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
         let inner = reader::resolve(pid).map_err(|e| PyOSError::new_err(e.to_string()))?;
         Ok(ResolvedHandle { inner })
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         let _ = pid;
         Err(PyNotImplementedError::new_err(
-            "resolve: only Linux/wine is implemented in v1",
+            "resolve: only Linux/wine and Windows are implemented",
         ))
     }
 }
@@ -202,7 +214,7 @@ fn resolve(pid: u32) -> PyResult<ResolvedHandle> {
 ///   - ``hit_errors_ms``: list[int] — per-hit timing offsets in ms
 #[pyfunction]
 fn read_state<'py>(py: Python<'py>, handle: &ResolvedHandle) -> PyResult<Bound<'py, PyDict>> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
         let s = reader::read_mania_state(&handle.inner)
             .map_err(|e| PyOSError::new_err(e.to_string()))?;
@@ -226,11 +238,11 @@ fn read_state<'py>(py: Python<'py>, handle: &ResolvedHandle) -> PyResult<Bound<'
         d.set_item("in_gameplay", s.in_gameplay)?;
         Ok(d)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         let _ = (py, handle);
         Err(PyNotImplementedError::new_err(
-            "read_state: only Linux/wine is implemented in v1",
+            "read_state: only Linux/wine and Windows are implemented",
         ))
     }
 }

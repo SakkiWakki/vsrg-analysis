@@ -1,14 +1,16 @@
 """Tiny diagnostic logger that bypasses stdout.
 
 Every other print in the codebase goes to stdout/stderr; under
-gamescope, those streams are buried by the compositor's own spam.
-``diag.log(tag, msg)`` writes one timestamped line to a dedicated
-file so the user can ``tail -f`` it without filtering.
+gamescope (and under a windowed osu!.exe on Windows) those streams are
+buried. ``diag.log(tag, msg)`` writes one timestamped line to a
+per-OS cache file so the user can tail it without filtering.
 
-Sink path:
-  $VSRG_DIAG_LOG  (override)         else
-  $XDG_CACHE_HOME/vsrg-analysis/vsrg-diag.log  else
-  ~/.cache/vsrg-analysis/vsrg-diag.log
+Sink path, in order of preference:
+  $VSRG_DIAG_LOG  (override)
+  Linux:    $XDG_CACHE_HOME/vsrg-analysis/vsrg-diag.log
+            ~/.cache/vsrg-analysis/vsrg-diag.log
+  macOS:    ~/Library/Caches/vsrg-analysis/vsrg-diag.log
+  Windows:  %LOCALAPPDATA%\\vsrg-analysis\\vsrg-diag.log
 
 Best-effort and lossy by design — if the file can't be opened we
 silently drop the line. Diagnostics must not raise into the caller.
@@ -16,6 +18,7 @@ silently drop the line. Diagnostics must not raise into the caller.
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -23,6 +26,16 @@ from pathlib import Path
 _lock = threading.Lock()
 _path: Path | None = None
 _resolved = False
+
+
+def _default_cache_root() -> Path:
+    if sys.platform == 'win32':
+        base = os.environ.get('LOCALAPPDATA') or str(Path.home() / 'AppData' / 'Local')
+    elif sys.platform == 'darwin':
+        base = str(Path.home() / 'Library' / 'Caches')
+    else:
+        base = os.environ.get('XDG_CACHE_HOME') or str(Path.home() / '.cache')
+    return Path(base)
 
 
 def _resolve_path() -> Path | None:
@@ -34,9 +47,7 @@ def _resolve_path() -> Path | None:
     if override:
         _path = Path(override)
     else:
-        cache = os.environ.get('XDG_CACHE_HOME') \
-            or str(Path.home() / '.cache')
-        _path = Path(cache) / 'vsrg-analysis' / 'vsrg-diag.log'
+        _path = _default_cache_root() / 'vsrg-analysis' / 'vsrg-diag.log'
     try:
         _path.parent.mkdir(parents=True, exist_ok=True)
     except OSError:

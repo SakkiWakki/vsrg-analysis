@@ -106,7 +106,7 @@ def _gl_layer_paths():
     """Built LD_PRELOAD hooks for osu!stable's OpenGL/EGL/GLX path."""
     from pathlib import Path
     repo_root = Path(__file__).resolve().parents[4]
-    gl_dir = repo_root / 'analysis/games/osu/gl_layer'
+    gl_dir = repo_root / 'analysis/games/osu/gl_layer/linux'
     return [
         gl_dir / 'lib/libvsrg_gl_overlay.so',
         gl_dir / 'lib64/libvsrg_gl_overlay.so',
@@ -132,7 +132,7 @@ def _gl_layer_preload_path() -> str:
     """
     from pathlib import Path
     repo_root = Path(__file__).resolve().parents[4]
-    return str(repo_root / 'analysis/games/osu/gl_layer/lib64/libvsrg_gl_overlay.so')
+    return str(repo_root / 'analysis/games/osu/gl_layer/linux/lib64/libvsrg_gl_overlay.so')
 
 
 def _gl_layer_built() -> bool:
@@ -163,12 +163,17 @@ def _start_osu_with_overlay():
     import os
     import shutil
     import subprocess
+    import sys
     from pathlib import Path
 
     from PySide6.QtWidgets import QApplication, QMessageBox
     from analysis.overlay.publisher import discover_overlays
 
     parent = QApplication.activeWindow()
+
+    if sys.platform == 'win32':
+        _start_osu_with_overlay_windows(parent)
+        return
 
     if shutil.which('osu-wine') is None:
         QMessageBox.warning(
@@ -281,3 +286,114 @@ def _start_osu_with_overlay():
         '--', str(runner),
     ]
     subprocess.Popen(cmd, start_new_session=True)
+
+
+def _start_osu_with_overlay_windows(parent):
+    """Windows path: launch osu!.exe with ``VSRG_GL_OVERLAY=1`` set, then
+    inject ``vsrg_gl_overlay.dll`` via our ``inject.exe`` helper.
+
+    There's no ``osu-wine`` wrapper on Windows and no LD_PRELOAD, so the
+    whole Linux launch machinery above is unusable here. Instead:
+    MinHook patches ``wglSwapBuffers`` from inside osu!.exe once the DLL
+    is loaded — see ``analysis/games/osu/gl_layer/win/win_gl_layer.cpp``.
+    """
+    import os
+    import subprocess
+    import sys
+    import time
+    from pathlib import Path
+
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    from analysis.games.osu.replay import find_osu_dirs
+    from analysis.overlay.publisher import discover_overlays
+
+    repo_root = Path(__file__).resolve().parents[4]
+    # One top-level CMake project builds both into build/win/. Path
+    # matches what make.bat `overlay` target produces.
+    overlay_out = (repo_root / 'build' / 'win' / 'analysis' / 'games'
+                   / 'osu' / 'gl_layer' / 'win' / 'Release')
+    dll_path = overlay_out / 'vsrg_gl_overlay.dll'
+    injector = overlay_out / 'inject.exe'
+
+    dirs = find_osu_dirs()
+    root = dirs.get('root')
+    osu_exe = Path(root) / 'osu!.exe' if root else None
+
+    missing = []
+    if not osu_exe or not osu_exe.is_file():
+        missing.append(f'osu!.exe (looked at: {osu_exe})')
+    if not dll_path.is_file():
+        missing.append(f'overlay DLL: {dll_path}\n  Build with: make.bat overlay')
+    if not injector.is_file():
+        missing.append(f'injector: {injector}\n  Build with: make.bat overlay')
+    if missing:
+        QMessageBox.warning(
+            parent, 'Start osu (with overlay)',
+            'Cannot start overlay — missing:\n\n  - '
+            + '\n  - '.join(missing))
+        return
+
+    try:
+        from analysis.config import get_config
+        cfg = get_config()
+    except Exception:
+        cfg = None
+    overlays = discover_overlays(config=cfg)
+    width = int(os.environ.get('GAMESCOPE_WIDTH',  '2560'))
+    height = int(os.environ.get('GAMESCOPE_HEIGHT', '1440'))
+    pub = overlays.start(width=width, height=height, config_store=cfg)
+
+    from analysis import diag as _diag
+    if _diag.path() is not None:
+        print(f'[osu_live] diagnostic log: {_diag.path()}', flush=True)
+        _diag.log('osu_live',
+                  '=== overlay session start (path=win-gl-layer) ===')
+    app = QApplication.instance()
+    if app is not None:
+        app._osu_live_overlay_registry = overlays
+        app._osu_live_shm_publisher = pub
+
+    env = dict(os.environ, VSRG_GL_OVERLAY='1')
+    env['VSRG_OVERLAY_FONT'] = str(
+        repo_root / 'analysis/overlay/assets/DejaVuSansMono.ttf')
+    if os.environ.get('VSRG_INPUT_DEBUG'):
+        env['VSRG_INPUT_DEBUG'] = os.environ['VSRG_INPUT_DEBUG']
+
+    # CREATE_NEW_PROCESS_GROUP so closing the GUI doesn't take osu! with
+    # it (the Windows equivalent of start_new_session=True on Linux).
+    proc = subprocess.Popen(
+        [str(osu_exe)],
+        env=env,
+        cwd=str(osu_exe.parent),
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+    )
+
+    # Inject after a delay: DllMain reads VSRG_GL_OVERLAY at attach time
+    # and hooks wglSwapBuffers, which means opengl32.dll must already be
+    # loaded by the time we inject. Osu!.exe loads GL during startup, so
+    # 2s is a comfortable margin. If the hook ever misses its first swap
+    # on slow machines, bump this or retry on failure.
+    def _do_inject():
+        if proc.poll() is not None:
+            print(f'[osu_live] osu! exited before injection (rc={proc.returncode})')
+            return
+        try:
+            result = subprocess.run(
+                [str(injector), str(proc.pid), str(dll_path)],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                QMessageBox.warning(
+                    parent, 'Start osu (with overlay)',
+                    f'Injection failed (rc={result.returncode}):\n\n'
+                    f'{result.stderr or result.stdout}')
+            else:
+                print(f'[osu_live] {result.stdout.strip()}')
+        except subprocess.TimeoutExpired:
+            QMessageBox.warning(
+                parent, 'Start osu (with overlay)',
+                'Injector timed out. Is osu! hung, or did Windows block '
+                'the remote thread?')
+
+    QTimer.singleShot(2000, _do_inject)

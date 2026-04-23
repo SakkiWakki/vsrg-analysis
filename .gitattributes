@@ -1,0 +1,21 @@
+* text=auto eol=lf
+
+# Windows-only scripts want CRLF in the working copy
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+*.ps1       text eol=crlf
+
+# Shell scripts stay LF
+*.sh        text eol=lf
+
+# Binary blobs
+*.png       binary
+*.jpg       binary
+*.ttf       binary
+*.osr       binary
+*.bin       binary
+*.pyd       binary
+*.so        binary
+*.dll       binary
+*.exe       binary
+*.pdb       binary

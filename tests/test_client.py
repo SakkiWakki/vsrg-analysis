@@ -17,6 +17,13 @@ import pytest
 
 from plugins.unsafe.osu_live.client import (LiveSnapshot, OsuLiveClient)
 
+def effect(param1, param2):
+    effect_f = lambda frames : {
+        # Transform function using param1 and param2
+    }
+    return effect_f
+
+# To use, call effect_f(frames) -> effected frames
 
 def _payload(md5='abc', hits=None, combo=0, acc=0.0, ur=0.0,
              keycount=4, mode='mania', title='Test Map',

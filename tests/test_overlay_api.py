@@ -28,10 +28,19 @@ from __future__ import annotations
 
 import os
 import struct
+import sys
 import textwrap
 import uuid
 
 import pytest
+
+# Every test in this module creates a /dev/shm segment via OverlayPublisher.
+# On Windows the publisher uses a named mapping instead, exercised by the
+# parallel test_win_overlay_api.py suite.
+pytestmark = pytest.mark.skipif(
+    sys.platform == 'win32',
+    reason='uses /dev/shm; Windows publisher covered by test_win_overlay_api',
+)
 
 from analysis.overlay.publisher import (
     _HEADER_SIZE,

@@ -369,7 +369,7 @@ img {{ max-width: 100%; margin: 10px 0; border-radius: 4px; }}
   <div><h2>Chord sizes</h2><img src="data:image/png;base64,{imgs['chord']}"></div>
 </div>
 </body></html>"""
-    with open(output_path, 'w') as f:
+    with open(output_path, 'w', encoding='utf-8') as f:
         f.write(html)
     return output_path
 

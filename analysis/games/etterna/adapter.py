@@ -1,6 +1,7 @@
 """Etterna game adapter + scroll modes (CMOD + XMOD)."""
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from analysis.core.cache import Cache
@@ -159,8 +160,16 @@ class EtternaAdapter(GameAdapter):
 
     @staticmethod
     def _case_insensitive_existing_path(path):
+        # On case-insensitive filesystems (default NTFS, HFS+), exists()
+        # returns True even when the input's case differs from the real
+        # on-disk name — and pathlib won't rewrite the case for us. So
+        # skip both exists() fast paths there and always walk with
+        # iterdir+casefold to recover the true on-disk spelling, which
+        # is what Etterna's FilenameDB promises callers.
+        case_sensitive_fs = sys.platform not in ('win32', 'darwin')
+
         path = Path(path)
-        if path.exists():
+        if case_sensitive_fs and path.exists():
             return path
         if path.is_absolute():
             cur = Path(path.anchor)
@@ -174,10 +183,11 @@ class EtternaAdapter(GameAdapter):
             if part == '..':
                 cur = cur.parent
                 continue
-            exact = cur / part
-            if exact.exists():
-                cur = exact
-                continue
+            if case_sensitive_fs:
+                exact = cur / part
+                if exact.exists():
+                    cur = exact
+                    continue
             if not cur.is_dir():
                 return None
             try:

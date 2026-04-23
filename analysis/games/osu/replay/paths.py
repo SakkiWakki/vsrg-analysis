@@ -5,6 +5,7 @@ common install locations and pick the first that has at least one
 `osu!.<user>.cfg` — then read `BeatmapDirectory` from that cfg to
 resolve the real Songs path."""
 import os
+import sys
 from pathlib import Path
 
 
@@ -101,12 +102,26 @@ def _osu_replays_for(root, songs_dir=None):
         _add(Path(songs_dir).parent / 'Data' / 'r')
     home = Path.home()
     _add(home / 'osu!' / 'Data' / 'r')
-    _add(home / '.local' / 'share' / 'osu-wine' / 'osu!' / 'Data' / 'r')
+    if sys.platform == 'win32':
+        local = os.environ.get('LOCALAPPDATA')
+        if local:
+            _add(Path(local) / 'osu!' / 'Data' / 'r')
+    else:
+        _add(home / '.local' / 'share' / 'osu-wine' / 'osu!' / 'Data' / 'r')
     return out
 
 
 def _root_candidates():
     home = Path.home()
+    if sys.platform == 'win32':
+        # Native Windows osu! default: %LOCALAPPDATA%\osu!
+        local = os.environ.get('LOCALAPPDATA')
+        out = []
+        if local:
+            out.append(Path(local) / 'osu!')
+        out += [home / 'osu!', home / 'Documents' / 'osu!']
+        return out
+    # Linux: bare install dir + wine prefixes + WSL interop.
     user = os.environ.get('USER', '')
     return [
         home / 'osu!',
@@ -121,6 +136,12 @@ def _root_candidates():
 
 def _songs_only_candidates():
     home = Path.home()
+    if sys.platform == 'win32':
+        local = os.environ.get('LOCALAPPDATA')
+        out = [home / 'osu!' / 'Songs']
+        if local:
+            out.append(Path(local) / 'osu!' / 'Songs')
+        return out
     return [home / 'osu!' / 'Songs',
             home / '.local' / 'share' / 'osu-wine' / 'osu!' / 'Songs']
 

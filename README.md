@@ -20,7 +20,7 @@ A Python toolkit for offline analysis of **Etterna** and **osu!mania** replays. 
 - **Per-note timing analysis** — mean/std offset, judgments, hand splits, per-column drift, rolling stability, chord-size timing, coupling (solo vs paired notes).
 - **Bundled plugin system** — visualizations, sidebar HUD sections, lane-space draw overlays, in-game overlays, and themes all ship as plugin **bundles** under `plugins/`. Sandboxed bundles get a restricted Python environment with an import allow-list; trusted bundles go under `plugins/builtin/` or `plugins/unsafe/`. See [plugins/README.md](plugins/README.md).
 - **Embedded replay player** — native Qt/QPainter chart view, with audio sync, playbar scrubbing, scroll/rate controls, swappable note skins (bar/circle), draw-stage plugins, and **SV (scroll velocity)** support for osu!mania.
-- **In-game overlay (Linux / gamescope)** — a standalone C renderer attaches to a shared-memory widget feed and draws a HUD on top of the running game. Plugins publish widgets through `analysis.overlay.api`; the host owns the `/dev/shm` publisher. Shipped adapter: the osu live bundle in `plugins/unsafe/osu_live/`.
+- **In-game overlay** — Linux uses a standalone C renderer under gamescope, or LD_PRELOAD hooks for bare Wine, or a Vulkan layer for DXVK/lazer. Windows uses an in-process DLL that MinHooks `wglSwapBuffers`, loaded into osu!.exe via a small `inject.exe`. All paths share the same widget feed (shared memory on Linux, a named memory-mapped file on Windows) and the same plugin API in `analysis.overlay.api`.
 - **HTML report export** — single-file self-contained summary report with all plots embedded as base64.
 - **Batch mode** — run analysis across every score in a profile and produce leaderboards / cross-chart comparisons.
 
@@ -35,49 +35,47 @@ Full-report export (osu!mania 10K — *xi - Aragami*):
 ![Example report](report.png)
 
 ## Requirements
-
-- **Python 3.10+**
-- [`numpy`](https://numpy.org/) — array math
-- [`matplotlib`](https://matplotlib.org/) — plotting + report generation
-- [`osrparse`](https://pypi.org/project/osrparse/) — osu! `.osr` parser
-- [`PySide6`](https://pypi.org/project/PySide6/) — Qt GUI
-
-Pitch-preserving rate changes use an in-house numpy phase vocoder — no
-extra audio deps.
-
-Install with pip:
-
+Install with pip
 ```bash
 pip install -r requirements.txt
 ```
 
 ### Setup from a fresh clone
 
-The toolkit runs on Linux, macOS, and Windows. The Python-only path is the
-same everywhere — the bundled Makefile also builds optional native pieces
-(osu memory reader, gamescope overlay) on Linux.
+The toolkit runs on Linux, macOS, and Windows. The Python-only path is
+the same everywhere; Linux builds extra native pieces via the Makefile
+(memory reader, gamescope overlay, Vulkan layer), and Windows does the
+same via `make.bat` (memory reader + in-process GL overlay DLL + DLL
+injector).
 
 ```bash
 git clone https://github.com/<you>/vsrg-analysis.git
 cd vsrg-analysis
 
-# --- Option A: Linux one-shot via Makefile -------------------------------
-# Builds venv + installs deps + compiles the native osu memory reader + the
-# gamescope overlay binary, then launches the GUI.
+# --- Linux / macOS: Makefile ---------------------------------------------
+# Builds venv + installs deps + compiles native pieces, then launches.
 make
 
-# --- Option B: Python-only (any OS) --------------------------------------
+# --- Windows: make.bat ---------------------------------------------------
+# Same idea. Requires Rust + CMake + MSVC build tools installed.
+.\make.bat            # venv + native reader + launch
+.\make.bat all        # also build the GL overlay DLL + injector
+
+# --- Python-only (any OS) ------------------------------------------------
 python -m venv .venv
 source .venv/bin/activate            # Linux / macOS
-# .venv\Scripts\activate             # Windows (cmd)
 # .venv\Scripts\Activate.ps1         # Windows (PowerShell)
 pip install -r requirements.txt
 python -m analysis.gui.app
 ```
 
-Useful Makefile targets (Linux): `make venv` (just the venv),
-`make native` (Rust PyO3 osu memory reader), `make overlay`
-(C gamescope overlay binary), `make test`, `make clean`, `make distclean`.
+Makefile targets (Linux): `make venv`, `make native`, `make overlay`,
+`make gl-layer`, `make vulkan-layer`, `make test`, `make clean`,
+`make distclean`.
+
+`make.bat` targets (Windows): `venv`, `native`, `overlay`
+(= DLL + injector), `gui`, `clean`. Default (no arg) = `venv + native +
+gui`.
 
 On first launch you'll be prompted for your osu! Songs folder and Etterna
 Save folder — both optional, both editable later via **Library → Paths…**.
@@ -89,29 +87,37 @@ Save folder — both optional, both editable later via **Library → Paths…**.
   packages if the app fails to create a window.
 - **macOS** — everything installs via pip directly. On Apple Silicon make
   sure you're on Python 3.11+ so the arm64 PySide6 wheels are used.
-- **Windows** — no extra system deps; all wheels ship with their DLLs. Use
-  the `python` launcher or `py -3.11 -m venv .venv` to pin a specific
-  Python version if you have multiple installed.
+- **Windows** — no extra system deps for the Python side; all PySide6
+  wheels ship with their DLLs. For the native pieces (memory reader + GL
+  overlay) you need Rust (`rustup`), CMake, and MSVC Build Tools. Both
+  the overlay DLL and injector build as **x86** to match osu!.exe's
+  bitness. Python itself should be 64-bit (WoW64 handles cross-bitness
+  memory reads from the 64-bit Python process into 32-bit osu!.exe).
 - **osu!-on-Wine (Linux)** — the autodetect looks in `~/.local/share/osu-wine/`
   and the standard Lutris/Bottles paths, but if yours is elsewhere just
   point Library → Paths… at it manually.
 
 ### Optional: convenience launchers
 
-The repo ships with a `run-gui.sh` shell script for Linux/macOS and an
-`analyze` CLI entrypoint. Both call `python3` — make sure your venv is
-activated, or invoke them through the venv's Python directly
-(`.venv/bin/python -m analysis.gui.app` / `.venv\Scripts\python -m analysis.gui.app`).
+- `run-gui.sh` — Linux/macOS shell script that activates the venv and
+  runs the GUI.
+- `make.bat gui` — Windows equivalent (no separate shell script; this
+  subcommand is the launcher).
+- `analyze` — CLI entrypoint on any OS.
 
-On Linux, `make` (or `make run`) will also launch the GUI after rebuilding
-whatever's out of date.
+All three assume either the venv is activated, or they invoke the venv's
+Python directly (`.venv/bin/python` / `.venv\Scripts\python.exe`).
+
+On Linux, `make` (or `make run`) rebuilds whatever's out of date and
+launches the GUI. On Windows, `make.bat` does the same.
 
 ## Running
 
 ```bash
 # GUI (recommended — library browser, embedded player, all plugins)
-./run-gui.sh                                         # convenience shell script
-python -m analysis.gui.app                           # direct
+./run-gui.sh                                         # Linux/macOS launcher
+.\make.bat                                           # Windows: build + launch
+python -m analysis.gui.app                           # direct (any OS)
 make                                                 # Linux: build + launch
 
 # Replay player standalone (Qt)
@@ -148,75 +154,6 @@ QT_QPA_PLATFORM=offscreen python -m pytest tests/ -q
 
 Currently covered: install-path overrides, validators, `find_*_dirs` override
 precedence, `PathsDialog` save/clear/prefill behavior, and first-run prompt gating.
-
-## Project layout
-
-```
-analysis/                         (Python package)
-├── games/                        per-game code behind a uniform adapter
-│   ├── etterna/
-│   │   ├── adapter.py            resolves audio + chart, judgment windows
-│   │   ├── replay.py             .bin parser + Etterna.xml score rows
-│   │   └── sm_chart.py           .sm / .ssc parser
-│   └── osu/
-│       ├── adapter.py            .osu alignment + SV integration + audio lookup
-│       ├── replay.py             .osr parser + songs-dir discovery
-│       ├── native/               optional Rust PyO3 osu memory reader
-│       └── gamescope_overlay/    C external-overlay renderer (shm attach)
-├── core/                         cross-game logic
-│   ├── game.py                   adapter registry + common replay dict shape
-│   ├── search.py                 unified library scan across both games
-│   ├── timing.py                 per-column/hand stats, chord detection, drift
-│   └── batch.py                  leaderboard-style analysis across a profile
-├── viz/                          plotting
-│   ├── plots.py                  matplotlib plotters + HTML report export
-│   ├── note_visualizer.py        scrollable chart renderer (Note Viewer plugin)
-│   └── plugins/                  legacy viz registry (delegates to analysis.plugins)
-├── player/
-│   ├── player.py                 replay player state/model + standalone launcher
-│   ├── qt_renderer.py            native Qt/QPainter pipeline + plugin hook dispatch
-│   ├── render_context.py         per-frame context passed to player draw plugins
-│   ├── audio.py                  streaming phase vocoder (pitch-correct rate)
-│   ├── culling.py                visible-window selection for notes/holds
-│   ├── scroll.py                 scroll/SV math shared across adapters
-│   ├── hud_state.py, events.py   HUD data feed + input events
-│   ├── plugin_api.py             Stage enum for lane-space draw plugins
-│   ├── sidebar_api.py            sidebar-section API + SidebarContext helpers
-│   ├── theme.py                  UI design tokens (proxies the active theme)
-│   └── plugin_loader.py          plugin discovery + persistence + dispatch
-├── overlay/                      in-game HUD runtime
-│   ├── api.py                    sandbox-safe overlay helpers (colors, anchors)
-│   └── publisher.py              /dev/shm feed publisher + edit-mode bridge
-├── plugins/                      bundle discovery + sandbox
-│   ├── host_api.py               plugin_config, shared registries
-│   └── sandbox.py                import allow-list + restricted builtins
-├── ui/                           declarative sidebar components
-│   ├── components.py             Column/Row/Heading/Button/Checkbox/Spacer/Box
-│   └── render_sidebar.py         render(sctx, tree)
-├── config/                       shared JSON-backed config store
-│   ├── store.py                  ~/.config/vsrg-analysis/config.json
-│   └── migrate.py                legacy QSettings migration
-└── gui/
-    ├── app.py                    PySide6 main app — library, tabs, player, plots
-    ├── settings.py               QSettings wrapper + install-path overrides
-    ├── paths_dialog.py           first-run / edit-anytime install-path prompt
-    ├── plugins_dialog.py         per-bundle plugin enable/disable UI
-    ├── library_tab.py            score tree, filters, open-viz/player flows
-    └── player_tab.py             embedded replay player tab
-
-plugins/                          bundles (see plugins/README.md)
-├── builtin/                      trusted; ships with the app
-│   ├── viz/                      scatter, distribution, drift, heatmap, report, …
-│   ├── sidebar/                  judgments, options, scroll, hints, status, plugins
-│   └── replay/                   lane-space draw overlays
-├── unsafe/osu_live/              trusted live-overlay adapter for osu!
-└── example_sandboxed/            minimal sandboxed example
-
-tests/                            pytest suite
-analyze                           CLI entry point
-run-gui.sh                        GUI launcher script
-Makefile                          Linux build orchestration (venv + native + overlay)
-```
 
 ## Plugin bundles
 

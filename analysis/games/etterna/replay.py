@@ -74,7 +74,7 @@ def parse_replay(filepath):
     noterows, offsets, columns, notetypes = [], [], [], []
     dropped_holds = []
     is_v1 = False
-    with open(filepath) as f:
+    with open(filepath, encoding='utf-8', errors='replace') as f:
         for line in f:
             line = line.strip()
             if not line:

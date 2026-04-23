@@ -51,6 +51,7 @@ import ctypes
 import mmap
 import os
 import struct
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -245,17 +246,19 @@ class OverlayPublisher:
     def start(self) -> None:
         if self._mm is not None:
             return
-        fd = os.open(self._shm_path, os.O_CREAT | os.O_RDWR, 0o600)
-        os.ftruncate(fd, _TOTAL_SIZE)
-        self._fd = fd
-        self._mm = mmap.mmap(fd, _TOTAL_SIZE,
-                             flags=mmap.MAP_SHARED,
-                             prot=mmap.PROT_READ | mmap.PROT_WRITE)
-        # Zero + write magic/version so a consumer that attaches
-        # before our first frame doesn't read garbage.
+        if sys.platform == 'win32':
+            tagname = os.path.basename(self._shm_path)
+            self._fd = None
+            self._mm = mmap.mmap(-1, _TOTAL_SIZE, tagname=tagname)
+        else:
+            fd = os.open(self._shm_path, os.O_CREAT | os.O_RDWR, 0o600)
+            os.ftruncate(fd, _TOTAL_SIZE)
+            self._fd = fd
+            self._mm = mmap.mmap(fd, _TOTAL_SIZE,
+                                 flags=mmap.MAP_SHARED,
+                                 prot=mmap.PROT_READ | mmap.PROT_WRITE)
         self._mm[:] = b'\x00' * _TOTAL_SIZE
         struct.pack_into('<II', self._mm, 0, MAGIC, VERSION)
-
         self._load_deltas_from_config()
 
     def stop(self) -> None:

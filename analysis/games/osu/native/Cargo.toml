@@ -20,6 +20,19 @@ thiserror = "1"
 # process_vm_readv lives in libc.
 libc = "0.2"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows analogues of libc's process_vm_readv + /proc walk. Features
+# enumerate every Win32 namespace we touch; the crate is strict about
+# cfg gating so undeclared symbols don't bloat the binary.
+windows = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_Security",
+] }
+
 # ``maturin develop`` will drop the built .so into the active venv's
 # site-packages. For now we build in debug; live reading is I/O-bound
 # on the syscall so release optimizations are a nice-to-have, not a

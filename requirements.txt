@@ -3,3 +3,6 @@ matplotlib
 osrparse
 PySide6
 sounddevice
+maturin
+soundfile 
+audioread

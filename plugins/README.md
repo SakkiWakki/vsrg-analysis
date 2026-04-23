@@ -132,25 +132,30 @@ with uppercase token names matching `analysis/player/theme.py`. Missing
 tokens fall through to the built-in defaults. Only one theme is active at
 a time.
 
-## In-game overlay (gamescope)
+## In-game overlay
 
-For games on Linux, we run through `gamescope`, a plugin
-can publish a HUD that renders on top of the game window. The overlay
-architecture is:
+Plugins publish a HUD widget feed; the host picks the right renderer for
+the OS and overlay backend. Architecture:
 
-- A single C renderer (`analysis/games/osu/gamescope_overlay/osu_overlay`)
-  attaches to a shared-memory widget array and draws rects + bitmap
-  text. It knows nothing about the plugin's semantics.
-- Plugins publish widgets from Python via the host-side overlay
-  registry in `analysis.overlay.publisher`. One session = one shm
-  segment (`/dev/shm/vsrg_overlay`) = one publisher. Every overlay
-  spec — both legacy `register_overlay` plugins and unified
-  components — shares that segment by drawing into the same frame
-  each tick.
+- Publisher: Python, in the GUI process. `analysis.overlay.publisher`
+  writes to a shared memory segment — `/dev/shm/vsrg_overlay` on Linux,
+  a named memory-mapped file (`vsrg_overlay`) on Windows.
+- Consumer/renderer: C code that attaches to the same SHM and draws
+  rects + text. Which consumer depends on backend:
+  - **Linux gamescope**: standalone binary
+    `analysis/games/osu/gamescope_overlay/osu_overlay`, launched via
+    `run-osu-gamescope-overlay.sh`.
+  - **Linux bare Wine**: `analysis/games/osu/gl_layer/linux/` LD_PRELOAD
+    .so hooking EGL/GLX swap.
+  - **Linux DXVK/lazer**: `analysis/games/osu/vulkan_layer/` Vulkan
+    implicit layer hooking `vkQueuePresentKHR`.
+  - **Windows osu!stable**: `analysis/games/osu/gl_layer/win/` DLL that
+    MinHooks `wglSwapBuffers`, loaded into osu!.exe by the same dir's
+    `inject.exe`.
 
-The renderer is launched once with `--feed /dev/shm/vsrg_overlay`.
-Adding a new overlay plugin doesn't require a second renderer or shm
-segment — your widgets just appear in the next merged frame.
+One session = one publisher = one SHM segment = one consumer. Every
+overlay spec — both `register_overlay` plugins and unified components
+— shares that segment by drawing into the same frame each tick.
 
 Most plugins should use the `overlay/*.py` role shown above. The lower
 level `OverlayPublisher` still exists for trusted host code that needs to
@@ -170,7 +175,7 @@ Key properties:
 - **Ref publisher:** [`plugins/unsafe/osu_live/shm_publisher.py`](unsafe/osu_live/shm_publisher.py).
 
 `analysis.overlay.publisher` is **not** reachable from sandboxed bundles:
-publishing writes to `/dev/shm` and needs `os`/`mmap`/`struct`, all
+publishing writes to shared memory and needs `os`/`mmap`/`struct`, all
 blocked by the sandbox. Sandboxed overlay plugins should use the
 `overlay/` role and import only `analysis.overlay.api`; the trusted host
 does the publishing on their behalf.
