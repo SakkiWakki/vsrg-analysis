@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows
+            build_cmd: .\make.bat all
+            test_cmd: .\.venv\Scripts\python.exe -m pytest tests\ -q
+            shell: cmd
+            rust_targets: i686-pc-windows-msvc
+            apt_deps: ''
+          - os: ubuntu-latest
+            name: linux
+            build_cmd: make all
+            test_cmd: .venv/bin/python -m pytest tests/ -q
+            shell: bash
+            rust_targets: ''
+            apt_deps: 'pkg-config libx11-dev libxi-dev libgl1-mesa-dev libegl1-mesa-dev libvulkan-dev'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.rust_targets }}
+
+      - name: Install Linux build deps
+        if: matrix.apt_deps != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt_deps }}
+
+      - name: Build everything
+        shell: ${{ matrix.shell }}
+        run: ${{ matrix.build_cmd }}
+
+      - name: Run pytest
+        shell: ${{ matrix.shell }}
+        run: ${{ matrix.test_cmd }}
+        env:
+          QT_QPA_PLATFORM: offscreen

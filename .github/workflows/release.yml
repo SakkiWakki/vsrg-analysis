@@ -1,0 +1,91 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  # Build the two OS-specific zips in parallel on matching runners, then
+  # gather them in a single publish job so the release has both assets
+  # and prior releases only get marked prerelease once (after both
+  # builds succeed).
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows
+            script: .\make.bat release
+            shell: cmd
+          - os: ubuntu-latest
+            name: linux
+            script: make release
+            shell: bash
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          # Injector + overlay DLL are 32-bit on Windows to match
+          # osu!.exe. Linux Wine/winello runs a 64-bit osu! so the .so
+          # doesn't need the i686 target.
+          targets: ${{ matrix.os == 'windows-latest' && 'i686-pc-windows-msvc' || '' }}
+
+      - name: Install Linux build deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libx11-dev libxi-dev \
+              libgl1-mesa-dev libegl1-mesa-dev zip
+
+      - name: Build release zip
+        shell: ${{ matrix.shell }}
+        run: ${{ matrix.script }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.name }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Deprecate every prior non-prerelease release by marking it
+      # prerelease=true. Users still see them listed but "Latest"
+      # points at whatever we're about to publish.
+      - name: Mark prior releases as prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag='${{ github.ref_name }}'
+          gh api "repos/${{ github.repository }}/releases" --paginate \
+              --jq '.[] | select(.tag_name != "'"$tag"'" and .prerelease == false) | .id' \
+          | while read -r id; do
+              echo "[deprecate] marking release $id as prerelease"
+              gh api -X PATCH "repos/${{ github.repository }}/releases/$id" \
+                  -f prerelease=true > /dev/null
+          done
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true

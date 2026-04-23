@@ -330,6 +330,40 @@ gui: venv
 
 # ─── clean ─────────────────────────────────────────────────────────────
 
+# ─── release ───────────────────────────────────────────────────────────
+# Build the Linux equivalent of `make.bat release`: a zip containing
+# the Python package + plugins, prebuilt .so overlay, the native wheel,
+# and run.sh. No source-only files (Rust, C, CMake, Makefile, tests).
+# Users extract and run ./run.sh.
+
+DIST_DIR    ?= dist
+REV         := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+PYVER       := $(shell $(VENV_PY) -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')")
+RELEASE_NAME := vsrg-analysis-linux-$(REV)-py$(PYVER)
+RELEASE_DIR  := $(DIST_DIR)/$(RELEASE_NAME)
+
+.PHONY: release
+release: build gl-layer
+	$(Q)echo "[release] staging $(RELEASE_DIR)"
+	$(Q)rm -rf $(RELEASE_DIR)
+	$(Q)mkdir -p $(RELEASE_DIR)/overlay $(RELEASE_DIR)/native
+	$(Q)rsync -a --exclude='__pycache__' --exclude='target' \
+	    --exclude='.maturin-stamp' analysis $(RELEASE_DIR)/
+	$(Q)rsync -a --exclude='__pycache__' plugins $(RELEASE_DIR)/
+	$(Q)cp run.sh requirements.txt $(RELEASE_DIR)/
+	$(Q)chmod +x $(RELEASE_DIR)/run.sh
+	$(Q)test -f analyze && cp analyze $(RELEASE_DIR)/ || true
+	$(Q)cp $(GL_LAYER_SO) $(RELEASE_DIR)/overlay/
+	$(Q)echo "[release] maturin build --release"
+	$(Q)cd $(NATIVE_DIR) && ../../../../$(VENV_MATURIN) build --release >/dev/null
+	$(Q)cp $(NATIVE_DIR)/target/wheels/*.whl $(RELEASE_DIR)/native/
+	$(Q)printf 'vsrg-analysis %s (Linux, Python 3.%s)\n\nHOW TO RUN:\n  ./run.sh\n\nFirst run installs Python dependencies into a local .venv folder.\nOnly Python 3.10+ is required; no Rust, C compiler, or CMake needed.\n' \
+	    "$(REV)" "$(patsubst 3%,%,$(PYVER))" > $(RELEASE_DIR)/README.txt
+	$(Q)cd $(DIST_DIR) && zip -qr $(RELEASE_NAME).zip $(RELEASE_NAME)
+	$(Q)echo "[release] done: $(DIST_DIR)/$(RELEASE_NAME).zip"
+
+# ─── clean ─────────────────────────────────────────────────────────────
+
 .PHONY: clean
 clean:
 	$(Q)echo "[clean] overlay binary + maturin stamp + target/"
