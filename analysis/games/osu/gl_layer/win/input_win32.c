@@ -1,8 +1,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-#include "../../../overlay/input/input.h"
-#include "../../../overlay/input/input_backend.h"
+#include "../../../../overlay/input/input.h"
+#include "../../../../overlay/input/input_backend.h"
 
 #include <stdio.h>
 #include <stdlib.h>

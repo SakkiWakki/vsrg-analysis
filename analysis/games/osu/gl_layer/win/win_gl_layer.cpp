@@ -3,15 +3,15 @@
 #include <cstdlib>
 #include <cstring>
 
-#include "../../../third_party/minhook/include/MinHook.h"
+#include "../../../../../third_party/minhook/include/MinHook.h"
 #include "win_log.h"
 
 extern "C" {
 #include "win_gl_loader.h"
 #include "win_shm_consumer.h"
-#include "../../../overlay/renderer/render.h"
-#include "../../../overlay/widgets/widgets.h"
-#include "../../../overlay/input/input.h"
+#include "../../../../overlay/renderer/render.h"
+#include "../../../../overlay/widgets/widgets.h"
+#include "../../../../overlay/input/input.h"
 }
 
 namespace {

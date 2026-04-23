@@ -97,16 +97,28 @@ Save folder — both optional, both editable later via **Library → Paths…**.
   and the standard Lutris/Bottles paths, but if yours is elsewhere just
   point Library → Paths… at it manually.
 
-### Optional: convenience launchers
+### Running from a release zip (end users)
 
-- `run-gui.sh` — Linux/macOS shell script that activates the venv and
-  runs the GUI.
-- `make.bat gui` — Windows equivalent (no separate shell script; this
-  subcommand is the launcher).
+Grab the appropriate zip from the [Releases page][rel] and extract it
+anywhere. Then:
+
+- **Windows:** double-click `run.bat` (or run it from a terminal).
+- **Linux / macOS:** `./run.sh`.
+
+First run creates a `.venv/` in the extracted folder, installs Python
+deps, and stages the prebuilt overlay + native reader. Subsequent runs
+jump straight to the GUI. Only Python 3.10+ is required; no Rust,
+CMake, or C compiler needed. If Python isn't installed, the launcher
+will tell you which package to install.
+
+[rel]: https://github.com/<you>/vsrg-analysis/releases
+
+### Optional: convenience launchers (source checkouts)
+
+- `run.sh` / `run.bat` — same scripts as the release, but detect a
+  source checkout (no `native/*.whl`) and tell you to run `make` first.
+- `make gui` / `make.bat gui` — run the GUI after a source build.
 - `analyze` — CLI entrypoint on any OS.
-
-All three assume either the venv is activated, or they invoke the venv's
-Python directly (`.venv/bin/python` / `.venv\Scripts\python.exe`).
 
 On Linux, `make` (or `make run`) rebuilds whatever's out of date and
 launches the GUI. On Windows, `make.bat` does the same.
@@ -115,10 +127,11 @@ launches the GUI. On Windows, `make.bat` does the same.
 
 ```bash
 # GUI (recommended — library browser, embedded player, all plugins)
-./run-gui.sh                                         # Linux/macOS launcher
-.\make.bat                                           # Windows: build + launch
-python -m analysis.gui.app                           # direct (any OS)
-make                                                 # Linux: build + launch
+./run.sh                                             # Linux/macOS
+.\run.bat                                            # Windows (release zip)
+.\make.bat                                           # Windows (source: build + launch)
+make                                                 # Linux (source: build + launch)
+python -m analysis.gui.app                           # direct (any OS, venv active)
 
 # Replay player standalone (Qt)
 python -m analysis.player.player /path/to/replay.osr                 # osu!mania
