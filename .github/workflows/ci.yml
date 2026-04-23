@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+# bash on Windows = Git Bash (preinstalled on windows-latest). Avoids
+# per-matrix-row `shell:` expressions which the workflow linter chokes
+# on before matrix expansion resolves.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   build:
     strategy:
@@ -13,16 +20,17 @@ jobs:
         include:
           - os: windows-latest
             name: windows
-            build_cmd: .\make.bat all
-            test_cmd: .\.venv\Scripts\python.exe -m pytest tests\ -q
-            shell: cmd
+            build_cmd: ./make.bat all
+            test_cmd: ./.venv/Scripts/python.exe -m pytest tests/ -q
             rust_targets: i686-pc-windows-msvc
             apt_deps: ''
-          - os: ubuntu-latest
+          # ubuntu-22.04 pins a lower glibc floor than -latest; the .so
+          # we build here has to load on users' distros, not just on
+          # the newest Ubuntu. Bump this deliberately when needed.
+          - os: ubuntu-22.04
             name: linux
             build_cmd: make all
             test_cmd: .venv/bin/python -m pytest tests/ -q
-            shell: bash
             rust_targets: ''
             apt_deps: 'pkg-config libx11-dev libxi-dev libgl1-mesa-dev libegl1-mesa-dev libvulkan-dev'
     runs-on: ${{ matrix.os }}
@@ -47,11 +55,9 @@ jobs:
           sudo apt-get install -y ${{ matrix.apt_deps }}
 
       - name: Build everything
-        shell: ${{ matrix.shell }}
         run: ${{ matrix.build_cmd }}
 
       - name: Run pytest
-        shell: ${{ matrix.shell }}
         run: ${{ matrix.test_cmd }}
         env:
           QT_QPA_PLATFORM: offscreen

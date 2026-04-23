@@ -7,23 +7,29 @@ on:
 permissions:
   contents: write
 
+# Every step runs under Git Bash on Windows, real bash on Linux. Avoids
+# the `${{ matrix.shell }}` lint-time error where GitHub's parser can't
+# statically resolve matrix expressions in the `shell:` field.
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  # Build the two OS-specific zips in parallel on matching runners, then
-  # gather them in a single publish job so the release has both assets
-  # and prior releases only get marked prerelease once (after both
-  # builds succeed).
   build:
     strategy:
       matrix:
         include:
           - os: windows-latest
             name: windows
-            script: .\make.bat release
-            shell: cmd
-          - os: ubuntu-latest
+            script: ./make.bat release
+          # ubuntu-22.04 (not -latest) pins glibc 2.35 as the minimum
+          # our .so requires. Upgrading to -latest bumps that floor to
+          # whatever the newest Ubuntu ships, which breaks users on
+          # slightly older distros (Debian stable, RHEL, etc.). Bump
+          # deliberately, not automatically.
+          - os: ubuntu-22.04
             name: linux
             script: make release
-            shell: bash
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -38,19 +44,18 @@ jobs:
         with:
           toolchain: stable
           # Injector + overlay DLL are 32-bit on Windows to match
-          # osu!.exe. Linux Wine/winello runs a 64-bit osu! so the .so
+          # osu!.exe. Linux Wine/winello runs 64-bit osu! so the .so
           # doesn't need the i686 target.
           targets: ${{ matrix.os == 'windows-latest' && 'i686-pc-windows-msvc' || '' }}
 
       - name: Install Linux build deps
-        if: matrix.os == 'ubuntu-latest'
+        if: startsWith(matrix.os, 'ubuntu-')
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libx11-dev libxi-dev \
               libgl1-mesa-dev libegl1-mesa-dev zip
 
       - name: Build release zip
-        shell: ${{ matrix.shell }}
         run: ${{ matrix.script }}
 
       - uses: actions/upload-artifact@v4
@@ -69,8 +74,8 @@ jobs:
           merge-multiple: true
 
       # Deprecate every prior non-prerelease release by marking it
-      # prerelease=true. Users still see them listed but "Latest"
-      # points at whatever we're about to publish.
+      # prerelease=true. Users still see them but "Latest" points at
+      # whatever we're about to publish.
       - name: Mark prior releases as prerelease
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -89,3 +94,7 @@ jobs:
           files: dist/*.zip
           generate_release_notes: true
           fail_on_unmatched_files: true
+          # Auto-detect prereleases from the tag: `v1.0.0` is a real
+          # release, `v1.0.0-rc.1` / `v0.1.0-pre` / `v1.0.0-beta` stay
+          # out of "Latest".
+          prerelease: ${{ contains(github.ref_name, '-') }}
