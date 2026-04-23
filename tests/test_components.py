@@ -172,6 +172,9 @@ class _FakeSctx:
         self.rects = []
         self.lines = []
         self.hitboxes = []
+        # PlayerReplayState is constructed lazily; player can be a stub.
+        from types import SimpleNamespace
+        self.player = SimpleNamespace()
 
     def text(self, s, x, baseline, color=None):
         self.texts.append((s, int(x), int(baseline)))

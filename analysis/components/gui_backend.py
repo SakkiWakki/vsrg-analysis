@@ -14,6 +14,8 @@ answerable (e.g. live ``accuracy`` -- not meaningful mid-replay) raise
 """
 from __future__ import annotations
 
+import numpy as np
+
 from analysis.components.api import (
     ComponentGameState,
     DataNotAvailable,
@@ -109,6 +111,113 @@ class PlayerDataSource:
 assert isinstance(PlayerDataSource.__mro__[0]._FIELDS, frozenset)
 
 
+# ── Replay state ─────────────────────────────────────────────────────
+
+class PlayerReplayState:
+    """Implements ComponentReplayState against a live Player instance.
+    Raises DataNotAvailable when the player has no replay loaded."""
+
+    def __init__(self, player):
+        self._p = player
+
+    def _require(self, attr):
+        val = getattr(self._p, attr, None)
+        if val is None:
+            raise DataNotAvailable(f'replay.{attr}')
+        return val
+
+    def _clean_mask(self):
+        misses = getattr(self._p, 'misses', None)
+        if misses is None:
+            raise DataNotAvailable('replay.misses')
+        return ~misses
+
+    def offsets(self) -> np.ndarray:
+        return self._require('offsets')
+
+    def offsets_clean(self) -> np.ndarray:
+        return self._require('offsets')[self._clean_mask()]
+
+    def columns(self) -> np.ndarray:
+        return self._require('columns')
+
+    def columns_clean(self) -> np.ndarray:
+        return self._require('columns')[self._clean_mask()]
+
+    def noterows(self) -> np.ndarray:
+        return self._require('noterows') if hasattr(self._p, 'noterows') \
+            else self._require('times')
+
+    def noterows_clean(self) -> np.ndarray:
+        return self.noterows()[self._clean_mask()]
+
+    def misses(self) -> np.ndarray:
+        return self._require('misses')
+
+    def notetypes(self) -> np.ndarray:
+        return self._require('notetypes')
+
+    def keycount(self) -> int:
+        return int(self._require('keycount'))
+
+    def game(self) -> str:
+        return str(getattr(self._p, 'game', 'unknown'))
+
+
+# ── Data analysis utilities ───────────────────────────────────────────
+
+class PlayerDataAnalysis:
+    """Implements ComponentDataAnalysis using analysis/core/timing.py.
+    Stateless -- all methods are pure functions over the provided arrays.
+    The instance is cheap to construct; all heavy work is in the methods."""
+
+    @staticmethod
+    def default_hands(keycount):
+        from analysis.core.timing import default_hands
+        return default_hands(keycount)
+
+    @staticmethod
+    def hand_split(columns, offsets, left_cols, right_cols):
+        from analysis.core.timing import hand_split
+        return hand_split(columns, offsets, left_cols, right_cols)
+
+    @staticmethod
+    def per_column_stats(columns, offsets):
+        from analysis.core.timing import per_column_stats
+        return per_column_stats(columns, offsets)
+
+    @staticmethod
+    def timing_drift(noterows, offsets, columns, *,
+                     n_segments=4, left_cols=(0, 1), right_cols=(2, 3)):
+        from analysis.core.timing import timing_drift
+        return timing_drift(noterows, offsets, columns,
+                            n_segments=n_segments,
+                            left_cols=left_cols, right_cols=right_cols)
+
+    @staticmethod
+    def rolling_stability(offsets, columns, *,
+                          window=200, left_cols=(0, 1), right_cols=(2, 3)):
+        from analysis.core.timing import rolling_stability
+        return rolling_stability(offsets, columns,
+                                 window=window,
+                                 left_cols=left_cols, right_cols=right_cols)
+
+    @staticmethod
+    def coupling_analysis(noterows, offsets, columns, *,
+                          left_cols=(0, 1), right_cols=(2, 3)):
+        from analysis.core.timing import coupling_analysis
+        return coupling_analysis(noterows, offsets, columns,
+                                 left_cols=left_cols, right_cols=right_cols)
+
+    @staticmethod
+    def chord_vs_single(noterows, offsets, columns):
+        from analysis.core.timing import chord_vs_single
+        return chord_vs_single(noterows, offsets, columns)
+
+
+_SHARED_ANALYSIS = PlayerDataAnalysis()
+
+
 # ── Context ─────────────────────────────────────────────────────────
 
 _CHAR_PX = 6  # matches SidebarContext._CHAR_PX for label centering
@@ -137,6 +246,8 @@ class SidebarComponentContext:
         self.h = int(h)
         self.measure_only = bool(sctx.measure_only)
         self.data = data_source
+        self.replay = PlayerReplayState(sctx.player)
+        self.analysis = _SHARED_ANALYSIS
         # Local cursor starts at 0. We mirror sctx.y so advancing either
         # keeps them in lockstep.
         self.y = 0

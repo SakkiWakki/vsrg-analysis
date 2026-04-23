@@ -2,9 +2,10 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-from analysis.games.etterna.replay import clean_offsets
-from analysis.core.timing import default_hands
-from analysis.viz.plots import col_colors, LEFT_CLR, RIGHT_CLR, MS
+from analysis.viz.plots import (
+    clean_offsets, default_hands,
+    col_colors, LEFT_CLR, RIGHT_CLR, MS,
+)
 
 
 plt.style.use('dark_background')

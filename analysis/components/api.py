@@ -37,7 +37,10 @@ on first frame.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Callable, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    import numpy as np
 
 
 # ── Surfaces ────────────────────────────────────────────────────────
@@ -135,6 +138,87 @@ class GameMemoryState:
     map_title: str
 
 
+# ── Replay state ──────────────────────────────────────────────────
+
+@runtime_checkable
+class ComponentReplayState(Protocol):
+    """Read-only view over the post-analysis replay data for the current
+    session. Available on surfaces that host a live Player (GUI sidebar).
+    Raises DataNotAvailable on surfaces without replay context (overlay).
+
+    `_clean` variants have misses filtered out -- use these for timing
+    analysis. Raw variants include misses so the renderer can draw miss
+    markers.
+    """
+
+    def offsets(self) -> 'np.ndarray': ...
+    def offsets_clean(self) -> 'np.ndarray': ...
+    def columns(self) -> 'np.ndarray': ...
+    def columns_clean(self) -> 'np.ndarray': ...
+    def noterows(self) -> 'np.ndarray': ...
+    def noterows_clean(self) -> 'np.ndarray': ...
+    def misses(self) -> 'np.ndarray': ...
+    def notetypes(self) -> 'np.ndarray': ...
+    def keycount(self) -> int: ...
+    def game(self) -> str: ...
+
+
+# ── Data analysis utilities ────────────────────────────────────────
+
+@runtime_checkable
+class ComponentDataAnalysis(Protocol):
+    """Pure data-analysis utilities over replay arrays. All methods take
+    explicit array arguments and have no side effects -- they're stateless
+    helpers exposed through the component API so plugins don't need to
+    import game-specific modules directly.
+
+    Examples:
+        left, right = ctx.analysis.default_hands(ctx.replay.keycount())
+        stats = ctx.analysis.per_column_stats(
+            ctx.replay.columns_clean(), ctx.replay.offsets_clean())
+    """
+
+    def default_hands(self, keycount: int,
+                      ) -> 'tuple[tuple[int,...], tuple[int,...]]': ...
+    """Split keycount into (left_cols, right_cols). Middle column on odd
+    key counts goes to the right hand."""
+
+    def hand_split(self, columns: 'np.ndarray', offsets: 'np.ndarray',
+                   left_cols: tuple, right_cols: tuple) -> dict: ...
+    """Per-hand timing statistics dict with keys 'left', 'right',
+    'left_cols', 'right_cols'. Each hand dict has n, mean, std, etc."""
+
+    def per_column_stats(self, columns: 'np.ndarray',
+                         offsets: 'np.ndarray') -> dict: ...
+    """Timing statistics keyed by column index."""
+
+    def timing_drift(self, noterows: 'np.ndarray', offsets: 'np.ndarray',
+                     columns: 'np.ndarray', *,
+                     n_segments: int = 4,
+                     left_cols: tuple = (0, 1),
+                     right_cols: tuple = (2, 3)) -> dict: ...
+    """Chart segmented into n_segments; per-segment timing stats."""
+
+    def rolling_stability(self, offsets: 'np.ndarray',
+                          columns: 'np.ndarray', *,
+                          window: int = 200,
+                          left_cols: tuple = (0, 1),
+                          right_cols: tuple = (2, 3)) -> dict: ...
+    """Rolling window std -- tracks consistency across a session."""
+
+    def coupling_analysis(self, noterows: 'np.ndarray',
+                          offsets: 'np.ndarray',
+                          columns: 'np.ndarray', *,
+                          left_cols: tuple = (0, 1),
+                          right_cols: tuple = (2, 3)) -> dict: ...
+    """Solo vs paired timing per column (chord partner effect)."""
+
+    def chord_vs_single(self, noterows: 'np.ndarray',
+                        offsets: 'np.ndarray',
+                        columns: 'np.ndarray') -> dict: ...
+    """Timing split by chord size (single, jump, hand, quad)."""
+
+
 # ── Drawing primitives ─────────────────────────────────────────────
 
 # All coordinates passed to :class:`ComponentContext` are *component-local
@@ -161,6 +245,8 @@ class ComponentContext(Protocol):
     y: int                        # paint cursor, advances as rows emit
     measure_only: bool
     data: ComponentGameState
+    replay: ComponentReplayState
+    analysis: ComponentDataAnalysis
 
     # ── Geometry helpers ──
     def split_row(self, n: int = 2, gap: int = 4) -> list[tuple[int, int]]:

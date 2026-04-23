@@ -32,6 +32,7 @@ from analysis.overlay.api import OverlayGameState
 
 _lock = threading.Lock()
 _provider: Callable[[], OverlayGameState | None] | None = None
+_memory_provider: Callable[[], 'GameMemoryState | None'] | None = None
 
 
 def set_game_state_provider(
@@ -40,6 +41,14 @@ def set_game_state_provider(
     global _provider
     with _lock:
         _provider = fn
+
+
+def set_game_memory_provider(fn: 'Callable[[], GameMemoryState | None] | None') -> None:
+    """Install (or clear with ``None``) the native game-memory provider.
+    Called by the osu live client when it starts polling."""
+    global _memory_provider
+    with _lock:
+        _memory_provider = fn
 
 
 def current_game_state() -> OverlayGameState | None:
@@ -52,3 +61,23 @@ def current_game_state() -> OverlayGameState | None:
     except Exception as exc:
         print(f'[components.provider] game-state provider raised: {exc}')
         return None
+
+
+def current_game_memory():
+    with _lock:
+        fn = _memory_provider
+    if fn is None:
+        return None
+    try:
+        return fn()
+    except Exception as exc:
+        print(f'[components.provider] game-memory provider raised: {exc}')
+        return None
+
+
+# Avoid a circular import: GameMemoryState lives in api.py which imports
+# nothing from provider.py.
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from analysis.components.api import GameMemoryState
+    from typing import Callable

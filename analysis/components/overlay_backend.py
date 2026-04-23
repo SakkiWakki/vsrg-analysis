@@ -145,6 +145,29 @@ def _color_to_rgba(color) -> int:
 _OVERLAY_PX_SCALE = 1.8
 
 
+# ── Replay / analysis stubs for the overlay surface ─────────────────
+# The overlay has no post-analysis replay session -- it reads live game
+# state from memory. Both protocols raise DataNotAvailable so components
+# can degrade gracefully rather than crash.
+
+class _OverlayNoReplay:
+    def _na(self, *_, **__):
+        raise DataNotAvailable(
+            'replay data is not available on the overlay surface')
+    offsets = offsets_clean = columns = columns_clean = _na
+    noterows = noterows_clean = misses = notetypes = _na
+    keycount = game = _na
+
+
+class _OverlayNoAnalysis:
+    def _na(self, *_, **__):
+        raise DataNotAvailable(
+            'analysis utilities require replay data; '
+            'not available on the overlay surface')
+    default_hands = hand_split = per_column_stats = _na
+    timing_drift = rolling_stability = coupling_analysis = chord_vs_single = _na
+
+
 # ── Context ─────────────────────────────────────────────────────────
 
 
@@ -175,6 +198,8 @@ class OverlayComponentContext:
         self._fb_h = max(1, int(fb_h))
         self.measure_only = False  # overlay has nothing to measure
         self.data = data_source
+        self.replay = _OverlayNoReplay()
+        self.analysis = _OverlayNoAnalysis()
         self.y = 0
         self._id_counter = 0
         self._input = bool(supports_input)
