@@ -1,0 +1,31 @@
+[package]
+name = "web_texture_ipc"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+# Built as a PyO3 extension module (importable from Python as
+# ``web_texture_ipc``). Linux-only: the whole point of the crate is
+# EGL + dmabuf + SCM_RIGHTS, all of which are Linux primitives. Windows
+# overlay builds use a different side-channel (shared NT handle via
+# DuplicateHandle); that code is absent today and will ship as a
+# sibling crate when the Windows gl_layer learns the feature.
+[lib]
+name = "web_texture_ipc"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py310"] }
+thiserror = "1"
+libc = "0.2"
+
+# We dlopen libEGL.so.1 ourselves and resolve MESA dmabuf-export
+# symbols via eglGetProcAddress. That keeps this crate self-contained
+# (no EGL_devel headers at build time, no linker-time dependency)
+# and matches how Qt itself loads EGL at runtime.
+libloading = "0.8"
+
+[build-dependencies]
+# Nothing for now. When we add bindgen for web_texture_ipc.h we'll
+# wire it here; for today the struct layout is re-declared in Rust
+# and pinned by test against the canonical C sizes (see tests/).
