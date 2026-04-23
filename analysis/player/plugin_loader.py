@@ -157,7 +157,7 @@ class PluginManager:
         from analysis.plugins import discover_bundles
         from analysis.player.render import theme as theme_mod
         from analysis.components.registry import (
-            bridge_into_sidebar_registry,
+            bridge_into_gui_registry,
             discover_from_bundles,
         )
         mgr = cls(config=config)
@@ -179,7 +179,7 @@ class PluginManager:
         # analysis/overlay/publisher.py::discover_overlays), since
         # the overlay registry has its own lifecycle.
         mgr.components = discover_from_bundles(mgr.bundles)
-        bridge_into_sidebar_registry(mgr.components, mgr.sidebar)
+        bridge_into_gui_registry(mgr.components, mgr.sidebar)
         # Activate the user-chosen theme if the owning bundle was found.
         for bundle in mgr.bundles:
             if bundle.theme_module and bundle.key == active_theme_key:

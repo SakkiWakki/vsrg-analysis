@@ -3,7 +3,7 @@
 Covers:
 - section_region / set_section_region persistence round-trip
 - free_sections() filters by effective region + order
-- default_region='free' makes a section start in free
+- default_region=REGION_FREE makes a section start in free
 - _run_sections records per-section rects + draws edit outlines
 - edit-mode suppresses non-edit hitbox actions in handle_mouse_down
 - begin_drag_section action kicks off a drag with the right offsets
@@ -21,6 +21,7 @@ from analysis.player.hud.sidebar_api import (
     SidebarSectionRegistry,
 )
 from analysis.player.hud.hud_state import HudState
+from plugins.builtin.sidepanel import REGION_FREE, REGION_PANEL
 from analysis.player.render.qt_renderer import QtPlayerRenderer
 
 
@@ -40,39 +41,39 @@ def _fresh_registry():
 def test_section_region_round_trip():
     reg = _fresh_registry()
     reg.add('one', lambda s: None, key='demo:one', priority=200,
-            draggable=True, default_region='sidepanel')
+            draggable=True, default_region=REGION_PANEL)
     reg.add('two', lambda s: None, key='demo:two', priority=300,
-            draggable=True, default_region='free')
+            draggable=True, default_region=REGION_FREE)
 
     # Defaults match declared default_region.
-    assert reg.section_region('demo:one') == 'sidepanel'
-    assert reg.section_region('demo:two') == 'free'
+    assert reg.section_region('demo:one') == REGION_PANEL
+    assert reg.section_region('demo:two') == REGION_FREE
 
     # Non-draggable sections are always sidepanel regardless of saved
     # value — the registry ignores the key rather than respecting a
     # nonsense override.
     reg.add('three', lambda s: None, key='demo:three',
-            draggable=False, default_region='free')
-    assert reg.section_region('demo:three') == 'sidepanel'
+            draggable=False, default_region=REGION_FREE)
+    assert reg.section_region('demo:three') == REGION_PANEL
 
-    reg.set_section_region('demo:one', 'free')
-    assert reg.section_region('demo:one') == 'free'
+    reg.set_section_region('demo:one', REGION_FREE)
+    assert reg.section_region('demo:one') == REGION_FREE
     reg.close()
 
 
 def test_free_sections_filters_and_orders():
     reg = _fresh_registry()
     reg.add('a', lambda s: None, key='demo:one', priority=200,
-            draggable=True, default_region='sidepanel')
+            draggable=True, default_region=REGION_PANEL)
     reg.add('b', lambda s: None, key='demo:two', priority=300,
-            draggable=True, default_region='free')
+            draggable=True, default_region=REGION_FREE)
     reg.add('c', lambda s: None, key='demo:three', priority=100,
             draggable=False)  # non-draggable, stays in sidepanel
 
     free = reg.free_sections()
     assert [s.key for s in free] == ['demo:two']
 
-    reg.set_section_region('demo:one', 'free')
+    reg.set_section_region('demo:one', REGION_FREE)
     reg.set_section_order('demo:one', 250.0)   # between two (300) and none
     reg.set_section_order('demo:two', 350.0)
     free = reg.free_sections()
@@ -83,7 +84,7 @@ def test_free_sections_filters_and_orders():
 def test_section_free_rect_uses_saved_then_default():
     reg = _fresh_registry()
     reg.add('a', lambda s: None, key='demo:one', priority=200,
-            draggable=True, default_region='free',
+            draggable=True, default_region=REGION_FREE,
             default_free_xy=(0.25, 0.5), default_size=(160, 120))
     sec = [s for s in reg.all_sections() if s.key == 'demo:one'][0]
 
@@ -196,17 +197,15 @@ def test_compute_drop_order_picks_midpoint_with_real_rects():
         hud=hud,
         H=500,
     )
-    # Bind the method off the real Player class.
-    from analysis.player.player import Player
+    from analysis.player.player import _compute_drop_order
+    targets = reg.reorder_targets(hud.drag_key, REGION_PANEL,
+                                  hud.frame_sidepanel_rects)
     # Cursor Y above both mids → insert before one.
-    order = Player._compute_drop_order(shim, 5)
-    assert order < 100.0
+    assert _compute_drop_order(5, targets, shim.H) < 100.0
     # Cursor between mids → midpoint of 100 and 200.
-    order = Player._compute_drop_order(shim, 50)
-    assert order == 150.0
+    assert _compute_drop_order(50, targets, shim.H) == 150.0
     # Cursor below both → insert after two.
-    order = Player._compute_drop_order(shim, 200)
-    assert order > 200.0
+    assert _compute_drop_order(200, targets, shim.H) > 200.0
     reg.close()
 
 
@@ -218,37 +217,35 @@ def test_finish_drag_routes_by_cursor_x():
 
     reg = _fresh_registry()
     reg.add('combo', lambda s: None, key='demo:one', priority=200,
-            draggable=True, default_region='sidepanel',
+            draggable=True, default_region=REGION_PANEL,
             default_size=(180, 100))
     hud = HudState()
     hud.edit_mode = True
     hud.drag_key = 'demo:one'
     hud.drag_offset = (20, 10)
-    hud.drag_origin_region = 'sidepanel'
+    hud.drag_origin_region = REGION_PANEL
     hud.frame_sidepanel_rects = {}
     W = 1200
     shim = SimpleNamespace(
         plugins=SimpleNamespace(sidebar=reg),
         hud=hud, W=W, H=800,
     )
-    # _finish_drag delegates to _compute_drop_order / _drop_in_sidepanel /
-    # _drop_in_free_region on the Player; bind them to the shim so the
-    # unbound-method call flow works.
-    shim._compute_drop_order = lambda y: Player._compute_drop_order(shim, y)
-    shim._drop_in_sidepanel = lambda k, y: Player._drop_in_sidepanel(shim, k, y)
-    shim._drop_in_free_region = lambda k, x, y: Player._drop_in_free_region(shim, k, x, y)
+    # _finish_drag delegates to _place_in_panel / _place_in_free_region.
+    # _compute_drop_order is a pure module-level function so needs no shim.
+    shim._place_in_panel = lambda k, y, r: Player._place_in_panel(shim, k, y, r)
+    shim._place_in_free_region = lambda k, x, y: Player._place_in_free_region(shim, k, x, y)
 
     # Drop at x in sidebar column — stays in sidepanel.
     sidebar_x = W - theme.SIDEBAR_WIDTH
     Player._finish_drag(shim, sidebar_x + 5, 200)
-    assert reg.section_region('demo:one') == 'sidepanel'
+    assert reg.section_region('demo:one') == REGION_PANEL
     assert shim.hud.drag_key is None
 
     # New drag, drop to the left of the sidebar — goes free.
     hud.drag_key = 'demo:one'
     hud.drag_offset = (20, 10)
     Player._finish_drag(shim, 100, 400)
-    assert reg.section_region('demo:one') == 'free'
+    assert reg.section_region('demo:one') == REGION_FREE
     # Rect top-left should be (cursor - offset) clamped on-screen.
     sec = [s for s in reg.all_sections() if s.key == 'demo:one'][0]
     x, y, w, h = reg.section_free_rect(sec, W, 800)

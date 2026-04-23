@@ -51,6 +51,10 @@ class Bundle:
 
 
 _SUBDIR_ROLES = ('sidebar', 'replay', 'viz', 'overlay')
+# Subdirectory aliases: additional folder names that populate the same
+# bundle attribute as an existing role. 'sidepanel' populates sidebar_modules
+# since it's the plugin folder name for the builtin sidepanel plugin.
+_SUBDIR_ALIASES = {'sidepanel': 'sidebar'}
 
 
 def _bundle_roots(extra_paths=None):
@@ -198,20 +202,22 @@ def discover_bundles(extra_paths=None) -> list[Bundle]:
             sandboxed = not trusted
             bundle = Bundle(key=key, name=name, path=entry,
                             manifest=manifest, trusted=trusted)
-            for role in _SUBDIR_ROLES:
+            all_roles = list(_SUBDIR_ROLES) + list(_SUBDIR_ALIASES)
+            for role in all_roles:
+                target_attr = _SUBDIR_ALIASES.get(role, role)
                 sub = entry / role
-                target = getattr(bundle, f'{role}_modules')
-                _preload_helpers(sub, key, role, sandboxed,
+                target = getattr(bundle, f'{target_attr}_modules')
+                _preload_helpers(sub, key, target_attr, sandboxed,
                                  bundle.load_errors)
                 for fp in _iter_py_files(sub):
                     if fp.name.startswith('_'):
                         continue
-                    mod, err = _load_module(fp, key, role,
+                    mod, err = _load_module(fp, key, target_attr,
                                             sandboxed=sandboxed)
                     if mod is not None:
                         target.append(mod)
                     elif err is not None:
-                        bundle.load_errors.append((role, fp.name, err))
+                        bundle.load_errors.append((target_attr, fp.name, err))
             bundle.theme_module = _load_theme(entry, key, sandboxed)
             for role, fname, exc in bundle.load_errors:
                 tag = 'sandboxed' if sandboxed else 'trusted'

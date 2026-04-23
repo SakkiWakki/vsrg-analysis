@@ -1,10 +1,10 @@
 """Unified plugin-component API.
 
-Plugins that want to run on multiple surfaces (sidebar, overlay, ...)
+Plugins that want to run on multiple surfaces (gui, overlay, ...)
 register a single ``(ComponentManifest, draw)`` pair. Each surface
 picks up the component through its backend:
 
-    SidebarBackend  — draws via QPainter, routes clicks via hitboxes
+    GuiBackend      — draws via QPainter, routes clicks via hitboxes
     OverlayBackend  — emits PAL records, rendered by the active platform
 
 The platform layer (``pal/``) isolates OS-specific overlay plumbing so
@@ -18,13 +18,14 @@ from analysis.components.api import (
     ComponentManifest,
     DataNotAvailable,
     DrawFn,
+    REGION_FREE,
+    SURFACE_GUI,
     SURFACE_OVERLAY,
-    SURFACE_SIDEBAR,
 )
 from analysis.components.registry import (
     ComponentRegistry,
+    bridge_into_gui_registry,
     bridge_into_overlay_registry,
-    bridge_into_sidebar_registry,
     discover_from_bundles,
 )
 
@@ -36,9 +37,10 @@ __all__ = [
     'ComponentRegistry',
     'DataNotAvailable',
     'DrawFn',
+    'REGION_FREE',
+    'SURFACE_GUI',
     'SURFACE_OVERLAY',
-    'SURFACE_SIDEBAR',
+    'bridge_into_gui_registry',
     'bridge_into_overlay_registry',
-    'bridge_into_sidebar_registry',
     'discover_from_bundles',
 ]

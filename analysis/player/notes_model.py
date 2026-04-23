@@ -84,74 +84,86 @@ class NotesModel:
 
 
 def build_notes_model(replay, times, hold_tails, game) -> NotesModel:
-    """Populate a NotesModel from a parsed replay. Ghost taps / miss
-    holds are osu-only; for Etterna we leave those arrays empty.
-    Miss→hold linking happens later (needs misses/offsets/miss_pressed,
-    which the Player computes after judging)."""
+    """Populate a NotesModel from a parsed replay. Ghost taps and miss
+    holds are osu-only; chart extras (mines/lifts/fakes/rolls) are
+    Etterna-only. Miss-to-hold linking happens later via link_miss_holds
+    once misses/offsets/miss_pressed are known."""
     m = NotesModel()
     m.noterows_list = [int(r) for r in replay['noterows']]
     m.columns_list = [int(c) for c in replay['columns']]
+    _build_ln_times(m, times, hold_tails)
+    if game == 'osu':
+        _build_ghost_taps(m, replay)
+        _build_miss_holds(m, replay)
+    else:
+        _build_chart_extras(m, replay)
+    return m
 
+
+def _build_ln_times(m, times, hold_tails):
+    """Fill m.ln_tail_times and m.ln_indices from the adapter's hold_tails
+    dict. Taps stay NaN; LN heads carry the tail time in seconds."""
     m.ln_tail_times = np.full(len(times), np.nan, dtype=np.float64)
-    for i, (row_val, col_val) in enumerate(zip(m.noterows_list,
-                                                m.columns_list)):
-        end_t = hold_tails.get((row_val, col_val))
+    for i, (row, col) in enumerate(zip(m.noterows_list, m.columns_list)):
+        end_t = hold_tails.get((row, col))
         if end_t is not None:
             m.ln_tail_times[i] = end_t
             m.ln_indices.append(i)
 
-    raw_ghosts = replay.get('ghost_taps') or []
-    if raw_ghosts and game == 'osu':
-        ghost_ts = np.array([t / 1000.0 for (t, _c) in raw_ghosts],
-                            dtype=np.float64)
-        ghost_cs = np.array([c for (_t, c) in raw_ghosts],
-                            dtype=np.int32)
-        order = np.argsort(ghost_ts, kind='stable')
-        m.ghost_times = ghost_ts[order]
-        m.ghost_cols = ghost_cs[order]
 
-    raw_holds = replay.get('miss_holds') or []
-    if raw_holds and game == 'osu':
-        mh_heads = np.array([lh for (lh, _c, _pt, _rt) in raw_holds],
-                            dtype=np.int64)
-        mh_press = np.array([pt / 1000.0 for (_lh, _c, pt, _rt) in raw_holds],
-                            dtype=np.float64)
-        mh_rel = np.array([rt / 1000.0 for (_lh, _c, _pt, rt) in raw_holds],
-                          dtype=np.float64)
-        mh_cols = np.array([c for (_lh, c, _pt, _rt) in raw_holds],
-                           dtype=np.int32)
-        order = np.argsort(mh_press, kind='stable')
-        m.miss_hold_ln_heads_ms = mh_heads[order]
-        m.miss_hold_press = mh_press[order]
-        m.miss_hold_release = mh_rel[order]
-        m.miss_hold_cols = mh_cols[order]
-        # Longest hold dur — conservative lookback when bisecting on
-        # press_t so spans whose press is off-screen but release is on
-        # still get picked up.
-        m.miss_hold_max_dur = float(
-            np.max(mh_rel - mh_press)) if mh_press.size else 0.0
+def _build_ghost_taps(m, replay):
+    """Populate ghost-tap arrays from replay['ghost_taps'] (osu only).
+    Ghost taps are raw key presses that missed every note window."""
+    raw = replay.get('ghost_taps') or []
+    if not raw:
+        return
+    ghost_ts = np.array([t / 1000.0 for t, _c in raw], dtype=np.float64)
+    ghost_cs = np.array([c for _t, c in raw], dtype=np.int32)
+    order = np.argsort(ghost_ts, kind='stable')
+    m.ghost_times = ghost_ts[order]
+    m.ghost_cols = ghost_cs[order]
 
-    # Etterna chart-only streams. The adapter populates replay['mine_times']
-    # etc. during prepare_replay_times when a chart match was found.
-    for t_key, c_key, dst_t, dst_c in (
-            ('mine_times', 'mine_cols', 'mine_times', 'mine_cols'),
-            ('lift_times', 'lift_cols', 'lift_times', 'lift_cols'),
-            ('fake_times', 'fake_cols', 'fake_times', 'fake_cols')):
-        ts = replay.get(t_key)
-        cs = replay.get(c_key)
+
+def _build_miss_holds(m, replay):
+    """Populate miss-hold span arrays from replay['miss_holds'] (osu only).
+    Each span is a key-hold that covered a missed LN from press to release.
+    Longest hold duration is cached for off-screen culling lookback."""
+    raw = replay.get('miss_holds') or []
+    if not raw:
+        return
+    heads, cols, presses, releases = zip(
+        *((lh, c, pt / 1000.0, rt / 1000.0) for lh, c, pt, rt in raw))
+    mh_press = np.array(presses, dtype=np.float64)
+    order = np.argsort(mh_press, kind='stable')
+    m.miss_hold_ln_heads_ms = np.array(heads, dtype=np.int64)[order]
+    m.miss_hold_press = mh_press[order]
+    m.miss_hold_release = np.array(releases, dtype=np.float64)[order]
+    m.miss_hold_cols = np.array(cols, dtype=np.int32)[order]
+    m.miss_hold_max_dur = float(np.max(m.miss_hold_release - m.miss_hold_press))
+
+
+def _build_chart_extras(m, replay):
+    """Copy Etterna chart-only streams (mines, lifts, fakes, rolls) from
+    the replay dict. The adapter populates these during prepare_replay_times
+    when a chart match was found; they're absent for osu."""
+    for key in ('mine', 'lift', 'fake'):
+        ts = replay.get(f'{key}_times')
+        cs = replay.get(f'{key}_cols')
         if ts is not None and cs is not None:
-            setattr(m, dst_t, np.asarray(ts, dtype=np.float64))
-            setattr(m, dst_c, np.asarray(cs, dtype=np.int32))
+            setattr(m, f'{key}_times', np.asarray(ts, dtype=np.float64))
+            setattr(m, f'{key}_cols', np.asarray(cs, dtype=np.int32))
     roll_heads = replay.get('roll_heads')
     if roll_heads:
         m.roll_head_keys = set(roll_heads)
-    return m
+
+
+_HOLD_MATCH_TOL_MS = 2  # press-time tolerance for matching a miss to a hold span
 
 
 def link_miss_holds(m: NotesModel, offsets, misses, miss_pressed):
     """Attach each missed LN to its corresponding miss-hold span, if
-    the player actually pressed the key within 2 ms of the recorded
-    miss offset. When one press-span straddles multiple consecutive
+    the player actually pressed the key within _HOLD_MATCH_TOL_MS of the
+    recorded miss offset. When one press-span straddles multiple consecutive
     missed LNs, only the first LN gets the link and the others are
     flagged `miss_head_suppressed` so the renderer doesn't draw a
     redundant head indicator. Idempotent; call after judging."""
@@ -160,6 +172,8 @@ def link_miss_holds(m: NotesModel, offsets, misses, miss_pressed):
     if not m.miss_hold_press.size:
         return
 
+    to_ms = lambda t: int(round(float(t) * 1000.0))
+
     by_head_col = {}
     for k, (head_ms, col) in enumerate(zip(m.miss_hold_ln_heads_ms,
                                             m.miss_hold_cols)):
@@ -167,27 +181,20 @@ def link_miss_holds(m: NotesModel, offsets, misses, miss_pressed):
 
     linked_ln_keys = set()
     used_holds = set()
-    tol_ms = 2
     for i, (head_ms, col) in enumerate(zip(m.noterows_list, m.columns_list)):
-        if not (misses[i] and miss_pressed[i]):
-            continue
-        if math.isnan(m.ln_tail_times[i]):
-            continue
+        is_candidate = (misses[i] and miss_pressed[i]
+                        and not math.isnan(m.ln_tail_times[i]))
         ln_key = (int(head_ms), int(col))
-        press_ms = int(head_ms + round(float(offsets[i]) * 1000.0))
-        matched = None
-        for k in by_head_col.get(ln_key, []):
-            if k in used_holds:
-                continue
-            hold_press_ms = int(round(float(m.miss_hold_press[k]) * 1000.0))
-            if abs(hold_press_ms - press_ms) <= tol_ms:
-                matched = k
-                break
-        if matched is None:
-            continue
-        used_holds.add(matched)
-        if ln_key in linked_ln_keys:
-            m.miss_head_suppressed[i] = True
-            continue
-        linked_ln_keys.add(ln_key)
-        m.miss_first_hold[i] = matched
+        press_ms = int(head_ms) + to_ms(offsets[i])
+        matched = next(
+            (k for k in (by_head_col.get(ln_key, []) if is_candidate else ())
+             if k not in used_holds
+             and abs(to_ms(m.miss_hold_press[k]) - press_ms) <= _HOLD_MATCH_TOL_MS),
+            None)
+
+        if matched is not None:
+            used_holds.add(matched)
+            already_linked = ln_key in linked_ln_keys
+            linked_ln_keys.add(ln_key)
+            m.miss_head_suppressed[i] = already_linked
+            m.miss_first_hold[i] = -1 if already_linked else matched

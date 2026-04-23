@@ -20,9 +20,12 @@ that care about this branch on ``ctx.supports_input``.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from analysis.components.api import (
     ComponentDataSource,
     DataNotAvailable,
+    REGION_FREE,
     SURFACE_OVERLAY,
 )
 from analysis.components.pal.base import OverlayFrame
@@ -33,6 +36,21 @@ from analysis.overlay.api import (
     rgba,
 )
 from analysis.player.render import theme
+
+
+# ── Layout hints ─────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class OverlayFields:
+    """Overlay-specific layout hints for a component manifest.
+
+    The overlay has no panel region — all components float freely.
+    ``default_xy`` and ``default_size`` are normalized to [0, 1] of the
+    framebuffer dimensions."""
+    hz: float = 30.0
+    default_xy: tuple = (0.02, 0.04)
+    default_size: tuple = (0.18, 0.18)
+    region: str = REGION_FREE
 
 
 # ── Data source ─────────────────────────────────────────────────────

@@ -37,7 +37,7 @@ on first frame.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 
 # ── Surfaces ────────────────────────────────────────────────────────
@@ -45,8 +45,15 @@ from typing import Callable, Protocol, runtime_checkable
 # Surface identifiers are strings, open-set on purpose: a future
 # "windows-directdraw overlay" backend registers its own name without
 # editing this file. The two surfaces we ship today:
-SURFACE_SIDEBAR = 'sidebar'
-SURFACE_OVERLAY = 'overlay'
+SURFACE_GUI = 'gui'        # in-app Qt surface (sidebar + any future GUI widgets)
+SURFACE_OVERLAY = 'overlay'  # in-game overlay surface (gamescope, gl_layer, etc.)
+
+# ── Regions ─────────────────────────────────────────────────────────
+
+# REGION_FREE is universal: a component not docked in any surface panel,
+# floating freely on the surface instead. Surface plugins define their
+# own panel region names (e.g. REGION_PANEL in plugins/builtin/sidepanel).
+REGION_FREE = 'free'
 
 
 # ── Data access ─────────────────────────────────────────────────────
@@ -116,6 +123,7 @@ class ComponentContext(Protocol):
     """
 
     surface: str                  # one of SURFACE_*
+    region: str                   # current region within the surface (surface-defined)
     w: int                        # component-local width, px
     h: int                        # component-local height, px (0 == grow)
     y: int                        # paint cursor, advances as rows emit
@@ -136,18 +144,14 @@ class ComponentContext(Protocol):
     def line(self, start: tuple, end: tuple, color: tuple,
              width: int = 1) -> None: ...
 
-    # ── Cursor-advancing rows (use these for standard sidebar-style
-    #    layouts; also render fine on the overlay, just less inputtable). ──
+    # ── Cursor-advancing rows ──
     def spacer(self, h: int = None) -> None: ...
     def draw_heading(self, text: str, color: tuple = None) -> None: ...
     def draw_text(self, text: str, color: tuple = None, indent: int = 0,
                   height: int = None) -> None: ...
     def draw_hint(self, text: str, color: tuple = None) -> None: ...
 
-    # ── Interactive primitives. On surfaces that can't route clicks
-    #    (overlay today) these render the chrome but register no-op
-    #    hitboxes. Components should not depend on clicks firing — check
-    #    ``ctx.supports_input`` if behavior must diverge. ──
+    # ── Interactive primitives. ──
     def draw_button(self, label: str, action: str, payload=None, *,
                     enabled: bool = True, height: int = None,
                     center: bool = False) -> tuple: ...
@@ -169,49 +173,25 @@ class ComponentContext(Protocol):
 @dataclass(frozen=True)
 class ComponentManifest:
     """Declarative spec for a component. One per plugin; lists every
-    surface the component is *allowed* on and what data it needs. The
+    surface the component is allowed on and what data it needs. The
     registry refuses to mount a component on a surface whose data source
-    doesn't cover ``requires_data`` — prevents subtle first-frame
-    crashes for "I said I work on overlay but I read a sidebar-only
-    field" bugs.
+    doesn't cover ``requires_data`` — prevents first-frame crashes from
+    mis-targeted components.
 
-    ``default_layouts`` is per-surface; absent surfaces fall back to
-    sensible backend defaults. Only ``sidebar`` layouts consult
-    ``draggable``/``default_region``/``default_size``; overlay layouts
-    use normalized xy + px size.
+    Surface-specific layout hints live in ``plugin_fields`` under the
+    surface's name. Each surface backend reads its own entry and ignores
+    the rest; absent entries fall back to the backend's defaults.
     """
 
     key: str
     name: str
     supported_surfaces: frozenset[str]
-    # Fields the component's draw function will call on
-    # ``ctx.data``. Checked at mount time.
     requires_data: frozenset[str] = field(default_factory=frozenset)
-    # Declared but not required — the component handles ``DataNotAvailable``
-    # gracefully. Allows components to show extra info when available
-    # (e.g. mine hit count) without gating the whole surface on it.
     optional_data: frozenset[str] = field(default_factory=frozenset)
-
-    # Sidebar-specific defaults. Kept here (rather than a nested
-    # ``SidebarDefaults``) because there are only a handful of fields and
-    # flat-with-a-prefix reads cleaner at the call site.
-    sidebar_priority: int = 1000
-    sidebar_pin_bottom: bool = False
-    sidebar_draggable: bool = False
-    sidebar_default_region: str = 'sidepanel'
-    sidebar_default_free_xy: tuple = (0.5, 0.5)
-    sidebar_default_size: tuple = (210, 120)
-
-    # Overlay-specific defaults.
-    overlay_hz: float = 30.0
-    overlay_default_xy: tuple = (0.02, 0.04)   # normalized
-    overlay_default_size: tuple = (0.18, 0.18)  # normalized
-
+    plugin_fields: dict[str, Any] = field(default_factory=dict)
     module: str = ''
 
     def __post_init__(self):
-        # Normalise supported_surfaces to frozenset regardless of what
-        # the caller passed (set, list, tuple).
         object.__setattr__(self, 'supported_surfaces',
                            frozenset(self.supported_surfaces))
         object.__setattr__(self, 'requires_data',

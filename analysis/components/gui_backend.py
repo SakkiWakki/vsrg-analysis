@@ -1,15 +1,15 @@
-"""Sidebar surface backend for the unified component API.
+"""GUI surface backend for the unified component API.
 
 Translates a plugin's calls against :class:`~analysis.components.api.ComponentContext`
 into the existing ``SidebarContext`` primitives (QPainter + ``hud.add_hitbox``).
-The component thinks in *local pixels* (``0..w`` × ``0..h``) from its own
+The component thinks in *local pixels* (``0..w`` x ``0..h``) from its own
 top-left; this backend shifts those coords into the sidebar column and
 advances the section's paint cursor to match.
 
-Data: the sidebar's source of truth is the live ``Player`` instance.
+Data: the GUI surface source of truth is the live ``Player`` instance.
 :class:`PlayerDataSource` wraps it and answers the subset of
 ``ComponentDataSource`` fields the player actually has. Methods not
-answerable (e.g. live ``accuracy`` — not meaningful mid-replay) raise
+answerable (e.g. live ``accuracy`` -- not meaningful mid-replay) raise
 :class:`DataNotAvailable`.
 """
 from __future__ import annotations
@@ -17,7 +17,7 @@ from __future__ import annotations
 from analysis.components.api import (
     ComponentDataSource,
     DataNotAvailable,
-    SURFACE_SIDEBAR,
+    SURFACE_GUI,
 )
 from analysis.player.render import theme
 
@@ -121,7 +121,7 @@ class SidebarComponentContext:
     identically to sidebar-native code.
     """
 
-    surface = SURFACE_SIDEBAR
+    surface = SURFACE_GUI
 
     def __init__(self, sctx, *, x0: int, y0: int, w: int, h: int,
                  data_source: ComponentDataSource):

@@ -23,7 +23,7 @@ from analysis.components import (
     ComponentRegistry,
     DataNotAvailable,
     SURFACE_OVERLAY,
-    SURFACE_SIDEBAR,
+    SURFACE_GUI,
 )
 from analysis.components.pal import detect
 from analysis.components.pal.base import (
@@ -39,7 +39,7 @@ from analysis.components.overlay_backend import (
     OverlayGameStateDataSource,
     draw_component_into_frame,
 )
-from analysis.components.sidebar_backend import (
+from analysis.components.gui_backend import (
     PlayerDataSource,
     SidebarComponentContext,
 )
@@ -52,13 +52,13 @@ from analysis.overlay.api import OverlayGameState
 def test_manifest_normalises_sets():
     m = ComponentManifest(
         key='k', name='n',
-        supported_surfaces=[SURFACE_SIDEBAR, SURFACE_OVERLAY],
+        supported_surfaces=[SURFACE_GUI, SURFACE_OVERLAY],
         requires_data=['judgment_counts'],
         optional_data=['game'])
     assert isinstance(m.supported_surfaces, frozenset)
     assert isinstance(m.requires_data, frozenset)
     assert isinstance(m.optional_data, frozenset)
-    assert SURFACE_SIDEBAR in m.supported_surfaces
+    assert SURFACE_GUI in m.supported_surfaces
 
 
 # ── ComponentRegistry gating ─────────────────────────────────────
@@ -67,14 +67,14 @@ def test_manifest_normalises_sets():
 def test_registry_gates_by_surface():
     reg = ComponentRegistry()
     m_sidebar = ComponentManifest(
-        key='a', name='A', supported_surfaces={SURFACE_SIDEBAR})
+        key='a', name='A', supported_surfaces={SURFACE_GUI})
     m_both = ComponentManifest(
         key='b', name='B',
-        supported_surfaces={SURFACE_SIDEBAR, SURFACE_OVERLAY})
+        supported_surfaces={SURFACE_GUI, SURFACE_OVERLAY})
     reg.add(m_sidebar, lambda ctx: None)
     reg.add(m_both, lambda ctx: None)
     side = reg.components_for(
-        SURFACE_SIDEBAR, data_source_fields=frozenset())
+        SURFACE_GUI, data_source_fields=frozenset())
     over = reg.components_for(
         SURFACE_OVERLAY, data_source_fields=frozenset())
     assert {c.manifest.key for c in side} == {'a', 'b'}

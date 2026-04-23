@@ -23,6 +23,7 @@ from analysis.player import scroll as scroll_registry
 from analysis.player.render import theme
 from analysis.core import game as game_mod
 from analysis.config import get_config
+from analysis.components.api import REGION_FREE
 
 
 from analysis.player.judgment import JCLR, judge
@@ -60,6 +61,61 @@ def _rect_contains(rect, x, y):
 _ORDER_GAP = 10.0
 
 
+def _compute_drop_order(y, targets, window_h):
+    """Return the order value for a drop at cursor Y among a list of
+    (y_mid_or_None, order) target pairs produced by
+    SidebarSectionRegistry.reorder_targets(). Returns None when targets
+    is empty. Pure function: no sidebar or HUD state."""
+    if not targets:
+        return None
+
+    mids = [m for m, _ in targets]
+    orders = [o for _, o in targets]
+
+    have_rects = all(m is not None for m in mids)
+    if have_rects:
+        slot = next((i for i, m in enumerate(mids) if y < m), len(mids))
+    else:
+        frac = max(0.0, min(1.0, y / max(1, window_h)))
+        slot = max(0, min(len(mids), int(round(frac * len(mids)))))
+
+    bounds = [orders[0] - _ORDER_GAP, *orders, orders[-1] + _ORDER_GAP]
+    return (bounds[slot] + bounds[slot + 1]) / 2.0
+
+
+def _osu_hold_release_offsets(replay, game):
+    """Per-LN release offsets (seconds, signed) for osu replays.
+    Etterna has no release timing in its .bin format so returns empty."""
+    if game != 'osu':
+        return {}
+    offsets = {}
+    for entry in replay.get('hold_releases') or []:
+        start_t, col, _end_t, off_ms = entry
+        if off_ms is not None:
+            offsets[(start_t, col)] = off_ms / 1000.0
+    return offsets
+
+
+def _normalize_miss_pressed(raw, n_misses):
+    """Normalize the optional miss_pressed array to a bool array of
+    length n_misses. Only osu populates this field; all other games
+    get an all-False array so downstream code has a uniform shape."""
+    if raw is not None and len(raw) == n_misses:
+        return np.asarray(raw, dtype=bool)
+    return np.zeros(n_misses, dtype=bool)
+
+
+def _first_bpm_or_default(bpms, *, default):
+    """Return the first BPM value from a chart's BPM list, or `default`
+    if bpms is empty or malformed. Used to seed XMOD's reference BPM."""
+    if not bpms:
+        return default
+    try:
+        return float(bpms[0][1])
+    except (IndexError, TypeError, ValueError):
+        return default
+
+
 class Player:
     # Scroll modes live in analysis.player.scroll; each game's adapter.py
     # registers its own (CMOD/XMOD for Etterna, osu! for osu!mania, etc.).
@@ -86,159 +142,147 @@ class Player:
                  sv_sections=None, scroll_ms=400.0, scroll_mode=None,
                  cmod_bpm=600.0, osu_speed=20, skin='bar', press_hide=False,
                  xml_judgments=None):
-        self.headless = headless
-        self.W, self.H = window_w, window_h
-
         # XML-sourced aggregate judgments from Etterna.xml's TapNoteScores:
         # includes HitMine / AvoidMine and per-window W1..W5 counts. The
         # .bin replay can't tell us which mines were hit, so this dict is
         # the only place the sidebar can surface mine-hit info from.
+        self.headless = headless
+        self.W, self.H = window_w, window_h
+        self.replay = replay
+        self.game = game
+        self.audio_path = audio_path
         self.xml_judgments = dict(xml_judgments or {})
 
-        self.replay = replay
+        self._load_replay_arrays(replay, game, bpms=bpms, sm_offset=sm_offset)
+        self._init_judge(od, ett_judge)
+        self.palette = [tuple(int(c[i:i + 2], 16) for i in (1, 3, 5))
+                        for c in col_colors(self.keycount)]
+
+        self._init_scroll_state(scroll_ms=scroll_ms, cmod_bpm=cmod_bpm,
+                                osu_speed=osu_speed, bpms=bpms,
+                                scroll_mode=scroll_mode)
+        self._init_playback_state(skin=skin, press_hide=press_hide)
+
+        from analysis.player.notes_model import (build_notes_model,
+                                                 link_miss_holds)
+        self.notes = build_notes_model(replay, self.times,
+                                       self.hold_tails, game)
+        link_miss_holds(self.notes, self.offsets, self.misses,
+                        self.miss_pressed)
+        self.max_draw_pad_sec = self._compute_max_draw_pad()
+
+        self._init_sv(sv_sections, replay)
+        self._build_cumulative_sv()
+        self._build_ghost_sv_caches()
+
+        self._init_side_systems()
+
+    def _load_replay_arrays(self, replay, game, *, bpms, sm_offset):
+        """Delegate to the adapter for noterow-to-time, bind the per-note
+        arrays, and normalize the osu-only hold-release and miss-pressed
+        streams so downstream code sees a uniform shape."""
         self._adapter = game_mod.get(game)
         self.times, self.hold_tails, self.keycount = (
             self._adapter.prepare_replay_times(
                 replay, bpms=bpms, sm_offset=sm_offset))
-        # Per-LN release offset (seconds, signed). osu!mania only — Etterna
-        # .bin has no release timing.
-        self.hold_release_offsets = {}
-        if game == 'osu':
-            for entry in replay.get('hold_releases') or []:
-                start_t, col, _end_t, off_ms = entry
-                if off_ms is not None:
-                    self.hold_release_offsets[(start_t, col)] = off_ms / 1000.0
         self.columns = replay['columns']
         self.offsets = replay['offsets']
         self.misses = replay['misses']
         self.notetypes = replay['notetypes']
-        # Parallel to self.misses — True when the miss had an actual press
-        # (head_off is the real offset, not the 1.0s sentinel). Lets the
-        # renderer draw a red hit-line at the press time so the user can
-        # see WHERE the player mispressed. Only osu populates this.
-        mp = replay.get('miss_pressed')
-        if mp is not None and len(mp) == len(self.misses):
-            self.miss_pressed = np.asarray(mp, dtype=bool)
-        else:
-            self.miss_pressed = np.zeros(len(self.misses), dtype=bool)
+        self.hold_release_offsets = _osu_hold_release_offsets(replay, game)
+        self.miss_pressed = _normalize_miss_pressed(
+            replay.get('miss_pressed'), len(self.misses))
 
-        # Adapters own the judge-system. The adapter declares which
-        # kwarg it expects ('od' for osu, 'judge' for Etterna); we stash
-        # the current value in self._active_judge so nudge_judge can
-        # round-trip it back to the adapter without branching here.
+    def _init_judge(self, od, ett_judge):
+        """Bind the initial judge value from whichever kwarg the adapter
+        expects (od for osu, judge-level for Etterna) and compute the
+        starting windows + per-note judgments."""
         judge_kw = self._adapter.judge_kwarg_name()
         self._active_judge = (od if judge_kw == 'od' else ett_judge)
         self._apply_judge()
         self.judge_colors = JCLR
-        self.game = game
-        self.palette = [tuple(int(c[i:i + 2], 16) for i in (1, 3, 5))
-                        for c in col_colors(self.keycount)]
 
-        # Scroll state: every mode the registry knows about gets its own
-        # sub-dict in `self._mode_state`, holding the native scalar, a copy
-        # of the mode's default options, plus whatever lifecycle hooks want
-        # to stash there (e.g. CMOD's SV-suspend bookkeeping). All scroll
-        # logic (speed lookup, nudge, mode switch) routes through the
-        # registry so adding a mode is a registry write, not a branch here.
+    def _init_scroll_state(self, *, scroll_ms, cmod_bpm, osu_speed,
+                           bpms, scroll_mode):
+        """Seed self._mode_state from the scroll registry, override the
+        defaults from legacy kwargs, pick the XMOD reference BPM, and
+        resolve an active mode that's compatible with the current game."""
         scroll_registry.ensure_loaded()
-        self._mode_state: dict[str, dict] = {}
-        for m in scroll_registry.all_modes():
-            self._mode_state[m.key] = {
-                'value': m.default_value,
-                'options': dict(m.options),
-            }
-        # Seed defaults from legacy kwargs so existing call-sites (library
-        # tab, tests) don't need to change: scroll_ms → ms, cmod_bpm →
-        # cmod, osu_speed → osu.
+        self._mode_state: dict[str, dict] = {
+            m.key: {'value': m.default_value, 'options': dict(m.options)}
+            for m in scroll_registry.all_modes()
+        }
         self._mode_state[self.SCROLL_MODE_MS]['value'] = float(scroll_ms)
         if self.SCROLL_MODE_CMOD in self._mode_state:
             self._mode_state[self.SCROLL_MODE_CMOD]['value'] = float(cmod_bpm)
         if self.SCROLL_MODE_OSU in self._mode_state:
             self._mode_state[self.SCROLL_MODE_OSU]['value'] = max(
                 0.1, min(60.0, float(osu_speed)))
-        # XMOD reference BPM: picked from the first bpm in the chart if any,
-        # else 120. XMOD's to_pxps reads this off the player.
-        if bpms:
-            try:
-                self._xmod_reference_bpm = float(bpms[0][1])
-            except (IndexError, TypeError, ValueError):
-                self._xmod_reference_bpm = 120.0
-        else:
-            self._xmod_reference_bpm = 120.0
 
-        # Back-compat: accept the old 'linear' spelling from saved settings.
+        self._xmod_reference_bpm = _first_bpm_or_default(bpms, default=120.0)
+
         if scroll_mode == 'linear':
             scroll_mode = self.SCROLL_MODE_MS
-        # Mode must be compatible with the current game. A saved 'cmod' from
-        # an Etterna session is not a valid choice when opening an osu replay,
-        # even though both modes are globally registered.
-        if not scroll_mode or not scroll_registry.is_compatible(scroll_mode,
-                                                                 game):
-            scroll_mode = scroll_registry.default_for_game(game)
+        if not scroll_mode or not scroll_registry.is_compatible(
+                scroll_mode, self.game):
+            scroll_mode = scroll_registry.default_for_game(self.game)
         self.scroll_mode = scroll_mode
+
+    def _init_playback_state(self, *, skin, press_hide):
+        """Bind timeline bounds, skin, press-hide toggle, and the
+        transient play-head state (rate, paused, t)."""
         self.play_rate = 1.0
         self.paused = True
-        self.t = 0.0                 # current playback time (s)
+        self.t = 0.0
         self._last_tick = None
-        self.audio_path = audio_path
-
-        self.t_max = float(self.times[-1]) + 5.0 if len(self.times) else 10.0
+        self.t_max = (float(self.times[-1]) + 5.0
+                      if len(self.times) else 10.0)
         self.t_min = -2.0
-        self.hit_line_y_frac = 0.80  # judgment line position
+        self.hit_line_y_frac = 0.80
         self.skin = skin if skin in self.SKINS else 'bar'
-        # Press-hide mode: once a note is actually pressed (t_now >= press_t)
-        # stop drawing it. For LNs, hide everything once past release_t.
-        # Missed notes stay visible so the red X is still informative.
+        # Press-hide: once t_now >= press_t stop drawing that note (and
+        # for LNs, everything past release_t). Missed notes stay visible
+        # so the red X is still informative.
         self.press_hide = bool(press_hide)
 
-        # All per-note streams (LN tails, ghost taps/holds) live on
-        # self.notes now. The renderer/culling code still reads them via
-        # the compatibility properties below so callers aren't scattered.
-        from analysis.player.notes_model import (build_notes_model,
-                                                  link_miss_holds)
-        self.notes = build_notes_model(replay, self.times,
-                                        self.hold_tails, game)
-        link_miss_holds(self.notes, self.offsets, self.misses,
-                        self.miss_pressed)
-
-        # Culling pad: how far beyond a note's head/tail its drawn strokes
-        # (press mark, release guide) can reach. Without this, a note
-        # scrolls off the window while the tail of its line is still
-        # on-screen, and the line pops out.
-        off_abs = float(np.max(np.abs(self.offsets))) if self.offsets.size else 0.0
+    def _compute_max_draw_pad(self):
+        """Culling pad: how far beyond a note's head/tail its drawn
+        strokes (press mark, release guide) can reach. Without this a
+        note scrolls off the window while the tail of its line is still
+        on-screen, and the line pops out."""
+        off_abs = (float(np.max(np.abs(self.offsets)))
+                   if self.offsets.size else 0.0)
         rel_abs = max((abs(v) for v in self.hold_release_offsets.values()),
                       default=0.0)
-        self.max_draw_pad_sec = max(off_abs, rel_abs)
+        return max(off_abs, rel_abs)
 
-        # SV (scroll velocity) — list of (time_sec, sv_multiplier). When enabled,
-        # note positions use the piecewise-constant integral of SV over time
-        # (see _cumulative_sv_at). Falls back to constant scroll if empty.
+    def _init_sv(self, sv_sections, replay):
+        """Configure SV (scroll velocity): a list of (time_sec,
+        multiplier) used to compute piecewise-constant integrals for
+        note positions. Also fire the active mode's on_enter so e.g.
+        CMOD's SV-suspend runs on the initial load too, not just on
+        later mode switches."""
         if sv_sections is None:
             sv_sections = replay.get('sv_sections') or []
         self.sv_sections = list(sv_sections)
         self.sv_enabled = bool(self.sv_sections)
-        # Fire the active mode's on_enter so e.g. CMOD's SV-suspend runs on
-        # the initial load too, not just on subsequent mode switches.
+
         mode_desc = scroll_registry.get(self.scroll_mode)
         if mode_desc and mode_desc.on_enter:
             mode_desc.on_enter(self, self._mode_state[self.scroll_mode])
-        self._build_cumulative_sv()
-        self._build_ghost_sv_caches()
-        self.plugins = PluginManager.discover()
-        # HUD-overlay state (sidebar scroll, panel toggles, hitboxes).
-        # Separated from replay state so the player core doesn't grow
-        # every time the HUD does; see analysis/player/hud_state.py.
+
+    def _init_side_systems(self):
+        """Bring up the plugin manager, HUD state, event bus, and the
+        ui-status flags the painted HUD reads."""
         from analysis.player.hud.hud_state import HudState
-        self.hud = HudState()
-        # Event bus for host/plugin notifications. Kinds documented in
-        # analysis/player/events.py; the Qt tab subscribes to
-        # ``scroll_changed`` and ``hud_action``.
         from analysis.player.events import EventBus
+        self.plugins = PluginManager.discover()
+        self.hud = HudState()
         self.events = EventBus()
         # Tab-owned runtime flags the painted HUD needs to render toggle
         # labels without holding a reference to the AudioEngine.
-        # Keys: 'audio_ready' (bool), 'pitch_correct' (bool). Populated by
-        # the Qt tab each time it syncs audio.
+        # Keys: 'audio_ready' (bool), 'pitch_correct' (bool). Populated
+        # by the Qt tab each time it syncs audio.
         self._ui_status: dict = {'audio_ready': False, 'pitch_correct': True}
 
     # --- Scroll abstraction ------------------------------------------------
@@ -691,28 +735,29 @@ class Player:
 
     def _finish_drag(self, x, y):
         key = self.hud.drag_key
-        sidebar_x = self.W - theme.SIDEBAR_WIDTH
-        dropped_in_sidepanel = x >= sidebar_x
+        target_region = self.plugins.sidebar.region_for_x(x, self.W)
 
-        if dropped_in_sidepanel:
-            self._drop_in_sidepanel(key, y)
+        if target_region != REGION_FREE:
+            self._place_in_panel(key, y, target_region)
         else:
-            self._drop_in_free_region(key, x, y)
+            self._place_in_free_region(key, x, y)
 
         self.hud.drag_key = None
         self.hud.drag_origin_region = None
 
-    def _drop_in_sidepanel(self, key, y):
-        """Dock the section to the sidepanel, inserting its order between
-        whichever two sidepanel sections bracket the cursor. When the
-        cursor has no neighbors above or below, the declared priority
-        order is preserved."""
-        self.plugins.sidebar.set_section_region(key, 'sidepanel')
-        new_order = self._compute_drop_order(y)
+    def _place_in_panel(self, key, y, region):
+        """Dock the section to `region`, inserting its order between
+        whichever neighbors bracket the cursor. When the cursor has no
+        neighbors above or below, the declared priority order is preserved."""
+        reg = self.plugins.sidebar
+        reg.set_section_region(key, region)
+        targets = reg.reorder_targets(key, region,
+                                      self.hud.frame_sidepanel_rects)
+        new_order = _compute_drop_order(y, targets, self.H)
         if new_order is not None:
-            self.plugins.sidebar.set_section_order(key, new_order)
+            reg.set_section_order(key, new_order)
 
-    def _drop_in_free_region(self, key, x, y):
+    def _place_in_free_region(self, key, x, y):
         """Move the section to the free region, positioning its rect's
         top-left where the drag ghost was (cursor minus grab offset),
         clamped to screen bounds. Size is preserved from the section's
@@ -728,51 +773,6 @@ class Player:
         new_y = max(0, min(self.H - h, y - dy))
         self.plugins.sidebar.set_section_free_rect(key, new_x, new_y, w, h)
 
-    def _compute_drop_order(self, y):
-        """Given a drop cursor Y, return the new ``order`` value for
-        the dragged section so it lands between the two sidepanel
-        neighbors nearest ``y``. Uses the midpoint between their
-        ``section_order`` values and the *previous frame's* painted
-        rects so the insertion point lines up with what the user saw.
-        Returns None when there are no other sidepanel sections."""
-        reg = self.plugins.sidebar
-
-        # Reorder targets: non-pinned sidepanel sections other than the
-        # one being dragged. Pinned-bottom sections live in a fixed band.
-        others = [s for s in reg.all_sections()
-                  if s.enabled
-                  and reg.section_region(s.key) == 'sidepanel'
-                  and s.key != self.hud.drag_key
-                  and not s.pin_bottom]
-        if not others:
-            return None
-
-        # Each target carries (y_mid, order). y_mid is last frame's
-        # painted midpoint, or None if the section hasn't been drawn yet
-        # (first frame after enabling edit mode).
-        rects = self.hud.frame_sidepanel_rects or {}
-        mids = [(rects[s.key][1] + rects[s.key][3] / 2) if s.key in rects
-                else None
-                for s in others]
-        orders = [reg.section_order(s) for s in others]
-        sorted_idx = sorted(range(len(others)), key=lambda i: orders[i])
-        mids = [mids[i] for i in sorted_idx]
-        orders = [orders[i] for i in sorted_idx]
-
-        # Decide where in the sorted list the drop belongs. `slot` is in
-        # [0, n] where 0 means "before all" and n means "after all".
-        have_rects = all(m is not None for m in mids)
-        if have_rects:
-            slot = next((i for i, m in enumerate(mids) if y < m), len(mids))
-        else:
-            frac = max(0.0, min(1.0, y / max(1, self.H)))
-            slot = max(0, min(len(mids), int(round(frac * len(mids)))))
-
-        # Map slot -> order value via the midpoint of its two bounds.
-        # Synthetic sentinels extend the range so the 0-th and n-th slot
-        # use the same formula as the interior ones.
-        bounds = [orders[0] - _ORDER_GAP, *orders, orders[-1] + _ORDER_GAP]
-        return (bounds[slot] + bounds[slot + 1]) / 2.0
 
     def toggle_edit_mode(self):
         """Flip layout-edit mode. While on, draggable sidebar

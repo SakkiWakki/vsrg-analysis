@@ -17,6 +17,8 @@ plugins/
     manifest.toml        # optional
     sidebar/             # HUD sections (register_sidebar(add))
       my_panel.py
+    sidepanel/           # alias for sidebar/ - use this for sidepanel-specific plugins
+      my_panel.py
     replay/              # lane-space draw plugins (register(add))
       my_overlay.py
     viz/                 # library-tab visualizations (register(add))
@@ -28,7 +30,8 @@ plugins/
 ```
 
 A directory is recognized as a bundle if it contains at least one of
-`sidebar/`, `replay/`, `viz/`, `overlay/`, or a manifest alongside those folders.
+`sidebar/`, `sidepanel/`, `replay/`, `viz/`, `overlay/`, or a manifest alongside those folders.
+Both `sidebar/` and `sidepanel/` populate the same `sidebar_modules` list — they are equivalent.
 Files whose names start with `_` are ignored (use them for shared helpers
 — see `builtin/viz/_common.py`).
 
@@ -53,13 +56,52 @@ author = "you@example.com"
 
 ## Role contracts
 
-### `sidebar/*.py`
+### `sidebar/*.py` / `sidepanel/*.py`
+
+Both folder names populate sidebar sections. `sidepanel/` is the preferred
+name for plugins that specifically target the sidepanel region of the GUI
+surface. `sidebar/` is kept for backwards compatibility.
+
 Each module exposes `register_sidebar(add)` and calls
 `add(name, draw_fn, priority=…, pin_bottom=…)`. The draw function receives
 a `SidebarContext`. Lower priority renders higher in the sidebar;
 pinned-bottom sections hug `p.H`.
 
-Two drawing styles are available:
+#### Unified component API (preferred for new plugins)
+
+New plugins should use the unified component API instead of `register_sidebar`.
+This targets the `SURFACE_GUI` surface and works across both the sidepanel
+and any future GUI surfaces:
+
+```python
+from analysis.components import ComponentManifest, SURFACE_GUI
+from plugins.builtin.sidepanel import SidebarFields, REGION_PANEL
+
+MANIFEST = ComponentManifest(
+    key='mybundle:my_panel',
+    name='My Panel',
+    supported_surfaces={SURFACE_GUI},
+    requires_data={'judgment_counts'},
+    plugin_fields={
+        'sidebar': SidebarFields(priority=500, draggable=True),
+    },
+)
+
+def draw(ctx):
+    ctx.draw_heading('My Panel')
+    # ctx.region == REGION_PANEL when docked, REGION_FREE when floating
+
+def register_components(add):
+    add(MANIFEST, draw)
+```
+
+The component API exposes `ctx.region` so the draw function knows whether
+it's docked in the sidepanel (`REGION_PANEL = 'sidepanel'`) or floating
+freely (`REGION_FREE = 'free'`).
+
+#### Legacy `register_sidebar` API
+
+Two drawing styles are available for the legacy API:
 
 - **Declarative (recommended for plugins):** build a `Component` tree
   from `analysis.ui` (`Column`, `Row`, `Heading`, `Text`, `Button`,
@@ -279,10 +321,10 @@ store directly, but shouldn't.
 ```
 plugins/sussy_baka/
   manifest.toml
-  sidebar/hello.py
+  sidepanel/hello.py
 ```
 
-`sidebar/hello.py` (declarative — works in sandboxed bundles):
+`sidepanel/hello.py` (declarative — works in sandboxed bundles):
 
 ```python
 from analysis.ui import Button, Column, Heading, Spacer

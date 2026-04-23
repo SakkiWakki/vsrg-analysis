@@ -2,15 +2,17 @@
 
 A plugin module exposes::
 
-    from analysis.components import ComponentManifest, SURFACE_SIDEBAR
+    from analysis.components import ComponentManifest, SURFACE_GUI
+    from plugins.builtin.sidepanel import SidebarFields
 
     MANIFEST = ComponentManifest(
         key='builtin:judgments',
         name='Judgments',
-        supported_surfaces={SURFACE_SIDEBAR, SURFACE_OVERLAY},
+        supported_surfaces={SURFACE_GUI},
         requires_data={'judgment_counts'},
-        sidebar_draggable=True,
-        sidebar_priority=200,
+        plugin_fields={
+            'sidebar': SidebarFields(priority=200, draggable=True),
+        },
     )
 
     def draw(ctx):
@@ -33,8 +35,8 @@ from dataclasses import dataclass
 from analysis.components.api import (
     Component,
     ComponentManifest,
+    SURFACE_GUI,
     SURFACE_OVERLAY,
-    SURFACE_SIDEBAR,
 )
 
 
@@ -157,14 +159,13 @@ def discover_from_bundles(bundles) -> ComponentRegistry:
     return registry
 
 
-# ── Bridge to existing sidebar + overlay runtimes ────────────────
+# ── Bridge to existing gui + overlay runtimes ────────────────
 
-
-def bridge_into_sidebar_registry(components: ComponentRegistry,
-                                 sidebar_registry) -> list[str]:
-    """For every component that lists ``sidebar`` as a surface, add a
+def bridge_into_gui_registry(components: ComponentRegistry,
+                              sidebar_registry) -> list[str]:
+    """For every component that lists ``gui`` as a surface, add a
     section to the existing :class:`SidebarSectionRegistry` whose draw
-    callable runs the component through the sidebar backend.
+    callable runs the component through the GUI backend.
 
     Returns the list of keys added. Components whose
     ``requires_data`` isn't satisfied by :class:`PlayerDataSource`
@@ -174,16 +175,19 @@ def bridge_into_sidebar_registry(components: ComponentRegistry,
     components without knowing anything about the new API — the section
     behaves like any other sidebar section.
     """
-    from analysis.components.sidebar_backend import (
+    from analysis.components.gui_backend import (
         PlayerDataSource,
         draw_component_in_sidebar,
     )
+    from plugins.builtin.sidepanel import SidebarFields
 
+    _sidebar_defaults = SidebarFields()
     fields = PlayerDataSource._FIELDS
     mounted: list[str] = []
-    for comp in components.components_for(SURFACE_SIDEBAR,
-                                           data_source_fields=fields):
+    for comp in components.components_for(SURFACE_GUI,
+                                          data_source_fields=fields):
         m = comp.manifest
+        sf = m.plugin_fields.get('sidebar', _sidebar_defaults)
 
         def _draw_section(sctx, _comp=comp):
             draw_component_in_sidebar(_comp, sctx, player=sctx.player)
@@ -191,17 +195,24 @@ def bridge_into_sidebar_registry(components: ComponentRegistry,
         sidebar_registry.add(
             m.name, _draw_section,
             key=m.key, module=m.module,
-            priority=m.sidebar_priority,
-            pin_bottom=m.sidebar_pin_bottom,
-            draggable=m.sidebar_draggable,
-            default_region=m.sidebar_default_region,
-            default_free_xy=m.sidebar_default_free_xy,
-            default_size=m.sidebar_default_size,
+            priority=sf.priority,
+            pin_bottom=sf.pin_bottom,
+            draggable=sf.draggable,
+            default_region=sf.region,
+            default_free_xy=sf.default_free_xy,
+            default_size=sf.default_size,
         )
         mounted.append(m.key)
     return mounted
 
 
+from analysis.components.overlay_backend import (
+        OverlayGameStateDataSource,
+        OverlayComponentContext,
+    )
+from analysis.components.pal.base import OverlayFrame
+
+from analysis import diag
 def bridge_into_overlay_registry(components: ComponentRegistry,
                                  overlay_registry) -> list[str]:
     """Same idea for the overlay: register each eligible component as
@@ -212,13 +223,6 @@ def bridge_into_overlay_registry(components: ComponentRegistry,
     so components that need e.g. ``judgment_windows`` (replay-only) are
     silently skipped.
     """
-    from analysis.components.overlay_backend import (
-        OverlayGameStateDataSource,
-        OverlayComponentContext,
-    )
-    from analysis.components.pal.base import OverlayFrame
-
-    from analysis import diag
 
     fields = OverlayGameStateDataSource._FIELDS
     eligible = components.components_for(SURFACE_OVERLAY,
@@ -270,10 +274,13 @@ def bridge_into_overlay_registry(components: ComponentRegistry,
                        if present else ''))
             if state is None:
                 return
-            ox = int(_m.overlay_default_xy[0] * neutral.width)
-            oy = int(_m.overlay_default_xy[1] * neutral.height)
-            sw = int(_m.overlay_default_size[0] * neutral.width)
-            sh = int(_m.overlay_default_size[1] * neutral.height)
+            from analysis.components.overlay_backend import OverlayFields
+            _of_defaults = OverlayFields()
+            _of = _m.plugin_fields.get('overlay', _of_defaults)
+            ox = int(_of.default_xy[0] * neutral.width)
+            oy = int(_of.default_xy[1] * neutral.height)
+            sw = int(_of.default_size[0] * neutral.width)
+            sh = int(_of.default_size[1] * neutral.height)
             cctx = OverlayComponentContext(
                 neutral, component_key=_m.key,
                 origin_px=(ox, oy), size_px=(sw, sh),
@@ -294,9 +301,11 @@ def bridge_into_overlay_registry(components: ComponentRegistry,
                     f'size_px={sw,sh} fb={neutral.width}x{neutral.height})')
             GamescopeOverlayPlatform._replay(neutral, frame)
 
+        from analysis.components.overlay_backend import OverlayFields
+        of = comp.manifest.plugin_fields.get('overlay', OverlayFields())
         overlay_registry.add(
             m.name, _draw, key=m.key, module=m.module,
-            hz=m.overlay_hz)
+            hz=of.hz)
         mounted.append(m.key)
     diag.log('bridge.overlay', f'mounted: {mounted}')
     return mounted

@@ -16,9 +16,11 @@ from analysis.components import (
     ComponentManifest,
     DataNotAvailable,
     SURFACE_OVERLAY,
-    SURFACE_SIDEBAR,
+    SURFACE_GUI,
 )
+from analysis.components.overlay_backend import OverlayFields
 from analysis.player.render import theme
+from plugins.builtin.sidepanel import SidebarFields
 
 
 _NUDGE_BTN_W = 28
@@ -87,16 +89,22 @@ def _draw(ctx):
 MANIFEST = ComponentManifest(
     key='builtin:judgments',
     name='Judgments',
-    supported_surfaces={SURFACE_SIDEBAR, SURFACE_OVERLAY},
+    supported_surfaces={SURFACE_GUI, SURFACE_OVERLAY},
     requires_data={'judgment_counts'},
     optional_data={'judgment_windows', 'judgment_colors', 'judge_label',
                    'game'},
-    sidebar_priority=200,
-    sidebar_draggable=True,
-    sidebar_default_free_xy=(0.02, 0.04),
-    sidebar_default_size=(210, 200),
-    overlay_default_xy=(0.02, 0.04),
-    overlay_default_size=(0.18, 0.22),
+    plugin_fields={
+        'sidebar': SidebarFields(
+            priority=200,
+            draggable=True,
+            default_free_xy=(0.02, 0.04),
+            default_size=(210, 200),
+        ),
+        'overlay': OverlayFields(
+            default_xy=(0.02, 0.04),
+            default_size=(0.18, 0.22),
+        ),
+    },
 )
 
 
