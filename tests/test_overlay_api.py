@@ -53,6 +53,7 @@ from analysis.overlay.publisher import (
     BLACK_DIM,
     KIND_RECT,
     KIND_TEXT,
+    KIND_WEB_TEXTURE,
     KIND_UNUSED,
     MAGIC,
     MAX_WIDGETS,
@@ -128,14 +129,15 @@ class _MemStore:
 
 
 def test_widget_struct_size_matches_header_contract():
-    # overlay_shm.h: 1(kind)+1(anchor)+2(pad)+4(wid)+4(gid)
-    # +4(x)+4(y)+4(w)+4(h)+4(color)+48(text)+4(px_scale) = 84 bytes.
+    # overlay_shm.h v3: 1(kind)+1(anchor)+2(pad)+4(wid)+4(gid)
+    # +4(x)+4(y)+4(w)+4(h)+4(color)+48(text)+4(px_scale)
+    # +4(channel_id)+4(generation) = 92 bytes.
     # If the Python format ever drifts from the C layout, commits
     # would write one offset low/high and corrupt the next slot.
     # The canonical value was captured by running a tiny C program
-    # against overlay_shm.h; it reports sizeof(VsrgOverlayWidget)==84.
-    assert _WIDGET_SIZE == 84, (
-        f'_WIDGET_SIZE is {_WIDGET_SIZE}, expected 84 to match '
+    # against overlay_shm.h; it reports sizeof(VsrgOverlayWidget)==92.
+    assert _WIDGET_SIZE == 92, (
+        f'_WIDGET_SIZE is {_WIDGET_SIZE}, expected 92 to match '
         f'VsrgOverlayWidget in overlay_shm.h')
 
     # Same check for the header. Mismatch here = first widget slot
@@ -297,7 +299,8 @@ def test_widget_roundtrip_matches_input(publisher):
     n = struct.unpack_from('<I', mm, 12)[0]
     assert n == 1
     (kind, anchor, _pad, w_id, g_id, x, y, w, h,
-     color, text, px_scale) = _WIDGET_STRUCT.unpack_from(mm, _HEADER_SIZE)
+     color, text, px_scale,
+     channel_id, generation) = _WIDGET_STRUCT.unpack_from(mm, _HEADER_SIZE)
     assert kind == KIND_RECT
     assert anchor == ANCHOR_TL
     assert w_id == rid
@@ -309,6 +312,9 @@ def test_widget_roundtrip_matches_input(publisher):
     assert color == rgba(10, 20, 30, 255)
     assert text.startswith(b'\x00')   # rect has no text
     assert px_scale == pytest.approx(1.0)
+    # Non-web-texture widgets leave the side-socket fields at 0.
+    assert channel_id == 0
+    assert generation == 0
 
 
 def test_group_id_flows_into_shm(publisher):
@@ -638,3 +644,119 @@ def test_disabling_overlay_skips_spec_but_keeps_publisher(tmp_path):
     finally:
         toggler.close()
         running.close()
+
+
+# ── v3: web-texture widgets + side-socket channel ──────────────────
+
+
+def test_web_texture_widget_stamps_channel_and_generation(publisher):
+    """``f.web_texture(...)`` emits a ``KIND_WEB_TEXTURE`` slot whose
+    channel_id + generation match what the producer stamped. Those are
+    the keys the overlay's EGLImage cache looks up to find the dmabuf
+    imported out-of-band via the side socket."""
+    with publisher.frame() as f:
+        f.web_texture('stream', 0.1, 0.2, 0.3, 0.4,
+                      channel_id=0xDEADBEEF, generation=42,
+                      anchor=ANCHOR_TL)
+
+    mm = publisher._mm
+    slot = _WIDGET_STRUCT.unpack_from(mm, _HEADER_SIZE)
+    (kind, _anchor, _pad, _wid, _gid, _x, _y, _w, _h,
+     _color, _text, _px, channel_id, generation) = slot
+    assert kind == KIND_WEB_TEXTURE
+    assert channel_id == 0xDEADBEEF
+    assert generation == 42
+
+
+def test_web_texture_uses_web_texture_kind_constant():
+    """Pin KIND_WEB_TEXTURE to the header's ``VSRG_OVERLAY_KIND_WEB_TEXTURE``
+    value. Python sees it as 3; drift here = the publisher writing a
+    kind byte that the C overlay interprets as unused / rect / text."""
+    assert KIND_WEB_TEXTURE == 3
+
+
+def test_rect_widget_leaves_web_texture_fields_zero(publisher):
+    """Non-web-texture widgets must zero out the new tail fields.
+    Otherwise a stale slot with garbage channel_id could accidentally
+    cause the overlay to sample a random cached texture."""
+    with publisher.frame() as f:
+        f.rect('r', 0.1, 0.1, 0.1, 0.1, color=BLACK_DIM)
+
+    mm = publisher._mm
+    slot = _WIDGET_STRUCT.unpack_from(mm, _HEADER_SIZE)
+    (kind, *_rest, channel_id, generation) = slot
+    assert kind == KIND_RECT
+    assert channel_id == 0
+    assert generation == 0
+
+
+def test_web_texture_ipc_header_struct_offsets_match_c():
+    """Compile a tiny C probe against ``web_texture_ipc.h`` and verify
+    ``sizeof(VsrgWebTexFrame)`` + the ``magic``/``version``/``kind``
+    field offsets agree with what the Rust/Python producer will pack.
+
+    Skipped if a C compiler isn't available (some CI shells); the Rust
+    crate exposes a constant layout check that catches drift too."""
+    import shutil
+    cc = shutil.which('cc') or shutil.which('gcc') or shutil.which('clang')
+    if cc is None:
+        pytest.skip('no C compiler available')
+
+    here = os.path.dirname(__file__)
+    src = textwrap.dedent(f"""
+        #include <stddef.h>
+        #include <stdio.h>
+        #include "{here}/../analysis/overlay/widgets/web_texture_ipc.h"
+        int main(void) {{
+            printf("size=%zu magic_off=%zu kind_off=%zu channel_off=%zu "
+                   "modifier_off=%zu n_planes_off=%zu "
+                   "offsets_off=%zu strides_off=%zu\\n",
+                   sizeof(VsrgWebTexFrame),
+                   offsetof(VsrgWebTexFrame, magic),
+                   offsetof(VsrgWebTexFrame, kind),
+                   offsetof(VsrgWebTexFrame, channel_id),
+                   offsetof(VsrgWebTexFrame, modifier),
+                   offsetof(VsrgWebTexFrame, n_planes),
+                   offsetof(VsrgWebTexFrame, offsets),
+                   offsetof(VsrgWebTexFrame, strides));
+            return 0;
+        }}
+    """)
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        csrc = os.path.join(d, 'probe.c')
+        exe  = os.path.join(d, 'probe')
+        with open(csrc, 'w') as fh:
+            fh.write(src)
+        subprocess.check_call([cc, '-O0', csrc, '-o', exe])
+        out = subprocess.check_output([exe], text=True).strip()
+
+    # Parse key=value pairs
+    fields = dict(tok.split('=') for tok in out.split())
+    fields = {k: int(v) for k, v in fields.items()}
+    # Canonical layout (verified once with a C probe, pinned as a
+    # contract so future edits to the header can't silently shift
+    # offsets and desync the Rust producer / overlay consumer).
+    #   magic      u32 @ 0
+    #   version    u32 @ 4
+    #   kind       u32 @ 8
+    #   channel_id u32 @ 12
+    #   generation u32 @ 16
+    #   width      u32 @ 20
+    #   height     u32 @ 24
+    #   format     u32 @ 28
+    #   modifier   u64 @ 32
+    #   n_planes   u32 @ 40
+    #   _pad0      u32 @ 44
+    #   offsets    u32[4] @ 48
+    #   strides    u32[4] @ 64
+    #   total size = 80
+    assert fields['magic_off']    == 0
+    assert fields['kind_off']     == 8
+    assert fields['channel_off']  == 12
+    assert fields['modifier_off'] == 32
+    assert fields['n_planes_off'] == 40
+    assert fields['offsets_off']  == 48
+    assert fields['strides_off']  == 64
+    assert fields['size']         == 80

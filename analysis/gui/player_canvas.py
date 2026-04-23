@@ -1,14 +1,23 @@
-"""Native Qt replay-player canvas."""
+"""Native Qt replay-player canvas.
+
+Backed by ``QOpenGLWidget``: QPainter draws still work unchanged
+(Qt routes them through ``QOpenGLPaintDevice`` internally) and the
+widget is now a usable compositor target for GPU-backed overlay
+textures produced by the web-texture PAL's GL backend. CPU-path
+components still render identically -- the rasterization happens
+through ``QOpenGLPaintDevice`` rather than a widget backing store,
+and the output is pixel-equivalent per ``tests/test_sidebar_output.py``.
+"""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPainter
-from PySide6.QtWidgets import QWidget
+from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 from analysis.player.render.qt_renderer import QtPlayerRenderer
 
 
-class PlayerCanvas(QWidget):
+class PlayerCanvas(QOpenGLWidget):
     def __init__(self, player, parent=None):
         super().__init__(parent)
         self.player = player

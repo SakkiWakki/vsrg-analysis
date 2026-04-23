@@ -77,17 +77,23 @@ from analysis.overlay.api import (
 # ── Constants mirrored from overlay_shm.h ────────────────────────────
 
 MAGIC        = 0x56524F56
-VERSION      = 2
+VERSION      = 3
 MAX_WIDGETS  = 128
 TEXT_LEN     = 48
 
-KIND_UNUSED = 0
-KIND_RECT   = 1
-KIND_TEXT   = 2
+KIND_UNUSED       = 0
+KIND_RECT         = 1
+KIND_TEXT         = 2
+KIND_WEB_TEXTURE  = 3
 
 # Widget struct: kind B, anchor B, _pad0 2s, widget_id I, group_id I,
-#                x f, y f, w f, h f, color I, text 48s, px_scale f
-_WIDGET_FMT = f'<B B 2s I I f f f f I {TEXT_LEN}s f'
+#                x f, y f, w f, h f, color I, text 48s, px_scale f,
+#                channel_id I, generation I
+#
+# channel_id / generation are 0 for rect + text widgets; a web-texture
+# widget stamps them to route to a dmabuf fd delivered over the side
+# socket (see analysis/overlay/widgets/web_texture_ipc.h).
+_WIDGET_FMT = f'<B B 2s I I f f f f I {TEXT_LEN}s f I I'
 _WIDGET_STRUCT = struct.Struct(_WIDGET_FMT)
 _WIDGET_SIZE = _WIDGET_STRUCT.size
 
@@ -131,7 +137,8 @@ class _FrameBuilder:
 
     def _record(self, kind: int, id_str: str, x: float, y: float,
                 w: float, h: float, color: int, text: str,
-                px_scale: float, anchor: int) -> None:
+                px_scale: float, anchor: int,
+                channel_id: int = 0, generation: int = 0) -> None:
         wid = widget_id(id_str)
         gid = self._group_stack[-1]
         # Remember the publisher's *baseline* (x, y) for this widget so
@@ -164,6 +171,8 @@ class _FrameBuilder:
             int(color) & 0xffffffff,
             text_bytes + b'\x00' * (TEXT_LEN - len(text_bytes)),
             float(px_scale),
+            int(channel_id) & 0xffffffff,
+            int(generation) & 0xffffffff,
         ))
 
     def rect(self, id_str: str, x: float, y: float, w: float, h: float,
@@ -179,6 +188,27 @@ class _FrameBuilder:
         # hit-testing on the C side has a meaningful bounding box.
         self._record(KIND_TEXT, id_str, x, y, 0.0, 0.0, color, s,
                      px_scale, anchor)
+
+    def web_texture(self, id_str: str, x: float, y: float,
+                    w: float, h: float, *,
+                    channel_id: int, generation: int,
+                    anchor: int = ANCHOR_TL) -> None:
+        """Emit a web-texture widget at (x, y, w, h) in normalized
+        canvas coords. The actual pixel data is supplied out of band by
+        whoever owns ``channel_id``: they push a dmabuf fd over the
+        side socket (``web_texture_ipc.h``) each time ``generation``
+        bumps. The overlay renders the latest imported texture whose
+        (channel, gen) matches the shm slot.
+
+        Publishers that never open the side socket (or fail to) emit
+        this widget anyway -- it's a no-op on the overlay side until a
+        matching fd arrives. That's the intended graceful-degradation
+        behavior: no crash, just an invisible placeholder.
+        """
+        self._record(KIND_WEB_TEXTURE, id_str, x, y, w, h,
+                     0, '', 1.0, anchor,
+                     channel_id=int(channel_id),
+                     generation=int(generation))
 
 
 OverlayFrame = _FrameBuilder
@@ -424,7 +454,7 @@ class OverlayPublisher:
             except struct.error:
                 continue
             (kind, _anchor, _pad, wid, gid, x, y, _w, _h,
-             _color, _text, _px) = slot
+             _color, _text, _px, _chan, _gen) = slot
             if kind == KIND_UNUSED or wid == 0:
                 continue
             baseline = self._baselines.get(wid)

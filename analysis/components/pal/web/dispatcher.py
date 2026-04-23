@@ -125,7 +125,20 @@ def _register_builtin(pal: WebTexturePAL) -> None:
     first so ``select`` picks them when their surface matches, falling
     through to the universal CPU path last.
     """
-    # Phase 1 -- CPU-only. Phase 2 will prepend a scene-graph backend;
-    # Phase 3 will prepend dmabuf / vk_image cross-process backends.
+    # Cross-process dmabuf: exclusively for SURFACE_CROSSPROC_GL (the
+    # injected gl_layer running inside another process). Doesn't
+    # compete for local surfaces. Skips itself on hosts without the
+    # native crate, EGL dmabuf-export support, or a listening overlay.
+    try:
+        from analysis.components.pal.web.dmabuf_backend import DmabufBackend
+        pal.register(DmabufBackend())
+    except ImportError:
+        # Crate not built (Windows, or developer hasn't run `make
+        # webtex`): skip silently. Local-surface consumers still get
+        # the qpixmap backend below.
+        pass
+
+    # Universal CPU fallback -- works everywhere the in-process Qt
+    # loop works. Covers SURFACE_LOCAL_CPU and SURFACE_LOCAL_GL.
     from analysis.components.pal.web.qpixmap_backend import QPixmapBackend
     pal.register(QPixmapBackend())

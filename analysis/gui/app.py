@@ -96,7 +96,38 @@ class MainWindow(QMainWindow):
         self.tabs.removeTab(idx)
 
 
+def _apply_default_gl_format():
+    """Set a process-wide default OpenGL surface format.
+
+    ``PlayerCanvas`` is a ``QOpenGLWidget``; setting the format before
+    ``QApplication`` constructs means every widget shares the same GL
+    profile. Keeping this explicit also gives us a single place to
+    later opt into shared contexts for the web-texture PAL's GL
+    backend (``QOpenGLContext::setShareContext`` on the Chromium
+    offscreen context).
+    """
+    from PySide6.QtGui import QSurfaceFormat
+    fmt = QSurfaceFormat()
+    fmt.setMajorVersion(3)
+    fmt.setMinorVersion(2)
+    fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
+    # Enable resource sharing between contexts so offscreen producers
+    # (Chromium compositor, any future GL-backed WebTexture) can hand
+    # textures to the player canvas without readback.
+    fmt.setOption(QSurfaceFormat.FormatOption.ResetNotification)
+    QSurfaceFormat.setDefaultFormat(fmt)
+
+
 def main():
+    _apply_default_gl_format()
+    # ``AA_ShareOpenGLContexts`` makes every QOpenGLWidget share its GL
+    # context with the global one. Needed so our future GL web-texture
+    # backend can upload into a context whose textures the canvas can
+    # sample. Must be set before ``QApplication`` is constructed.
+    from PySide6.QtCore import Qt as _Qt
+    from PySide6.QtWidgets import QApplication as _QA
+    _QA.setAttribute(_Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
+
     app = QApplication(sys.argv)
     apply_dark_palette(app)
     # First-run: prompt for install paths before building the main window so

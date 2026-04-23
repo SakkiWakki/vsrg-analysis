@@ -1,3 +1,13 @@
+////////////////////////////////////////////////////////////////////
+// This shit is now getting too fucked up and would need refactoring
+// in the future. Specifically, making making a better pipeline for 
+// shared memory agnostic across games and OS and graphical vendors.
+// I see to see how the program will continue developing before
+// consolidating and refactoring though
+// Note: Will probably have to replace all of this later with my roo 
+// project that I'm actually manually coding for the most part.
+////////////////////////////////////////////////////////////////////
+//
 // Generic widget-slot shared-memory contract between any Python
 // publisher and the gamescope overlay binary.
 //
@@ -29,7 +39,10 @@
 
 #define VSRG_OVERLAY_MAGIC        0x56524F56u   // 'VROV'
 // v2: added group_id so widgets in the same group drag together.
-#define VSRG_OVERLAY_VERSION      2
+// v3: added KIND_WEB_TEXTURE; web-texture slots carry a generation +
+//     channel_id referring to a dmabuf fd that arrives over a side
+//     socket. See analysis/overlay/widgets/web_texture_ipc.h.
+#define VSRG_OVERLAY_VERSION      3
 // Bumped from 32 → 128 when the overlay collapsed to one shared
 // segment. Multiple plugins now share each frame, so the cap is the
 // session-wide widget budget, not a per-plugin one.
@@ -37,9 +50,16 @@
 #define VSRG_OVERLAY_TEXT_LEN     48
 
 // Widget.kind
-#define VSRG_OVERLAY_KIND_UNUSED  0u
-#define VSRG_OVERLAY_KIND_RECT    1u
-#define VSRG_OVERLAY_KIND_TEXT    2u
+#define VSRG_OVERLAY_KIND_UNUSED       0u
+#define VSRG_OVERLAY_KIND_RECT         1u
+#define VSRG_OVERLAY_KIND_TEXT         2u
+// Web-texture widget: the slot carries the rect + a channel/generation
+// tag. The actual dmabuf fd is sent over a side socket (SCM_RIGHTS);
+// the overlay looks up the imported EGLImage by (channel_id, generation).
+// If no import has landed yet for that generation, the widget draws
+// nothing this frame -- the fd arrival is async relative to shm
+// republishes, and dropping frames is preferable to blocking.
+#define VSRG_OVERLAY_KIND_WEB_TEXTURE  3u
 
 // Widget.anchor — the corner of the canvas (x, y) is measured
 // from. Lets publishers pin widgets to an edge without knowing
@@ -79,6 +99,16 @@ typedef struct {
     // Font scale in pixels per font-unit for text widgets.
     // 1.0 = 8px tall; 2.0 = 16px tall.
     float px_scale;
+
+    // Web-texture metadata. Unused (zero) for rect / text widgets.
+    // - channel_id: stable tag the producer picks when it opens the
+    //   side socket; the overlay's cache keys on this.
+    // - generation: monotonic per-channel; bumps every time the
+    //   producer sends a new dmabuf fd. The overlay draws only when
+    //   its imported-texture cache has an entry for exactly this
+    //   generation, so in-flight publishes never show a stale frame.
+    uint32_t channel_id;
+    uint32_t generation;
 } VsrgOverlayWidget;
 
 typedef struct {

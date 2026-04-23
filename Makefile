@@ -26,6 +26,7 @@ VENV_MATURIN := $(VENV)/bin/maturin
 VENV_PYTEST  := $(VENV)/bin/pytest
 
 NATIVE_DIR    := analysis/games/osu/native
+WEBTEX_DIR    := analysis/overlay/web_texture_ipc
 OVERLAY_DIR   := analysis/games/osu/gamescope_overlay
 OVERLAY_BIN   := $(OVERLAY_DIR)/osu_overlay
 
@@ -90,6 +91,22 @@ $(NATIVE_STAMP): $(NATIVE_SRCS) | venv
 
 .PHONY: native
 native: $(NATIVE_STAMP)
+
+# ─── web-texture IPC Rust extension (Linux dmabuf side channel) ───────
+
+WEBTEX_SRCS := $(shell find $(WEBTEX_DIR)/src -type f -name '*.rs' 2>/dev/null) \
+               $(WEBTEX_DIR)/Cargo.toml
+WEBTEX_STAMP := $(WEBTEX_DIR)/.maturin-stamp
+
+$(WEBTEX_STAMP): $(WEBTEX_SRCS) | venv
+	$(Q)echo "[webtex] maturin develop --release"
+	$(Q)cd $(WEBTEX_DIR) && ../../../$(VENV_MATURIN) develop --release
+	$(Q)$(VENV_PY) -c "import web_texture_ipc" \
+	    || { echo "[webtex] post-build import failed — venv mismatch?"; exit 1; }
+	$(Q)touch $@
+
+.PHONY: webtex
+webtex: $(WEBTEX_STAMP)
 
 # ─── gamescope overlay ─────────────────────────────────────────────────
 

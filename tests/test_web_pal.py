@@ -254,3 +254,79 @@ class TestPixmapFromHelper:
         assert _pixmap_from(None) is None
         assert _pixmap_from('oops') is None
         assert _pixmap_from(42) is None
+
+
+# ---------------------------------------------------------------------------
+# DmabufBackend (Linux-only; may be absent on Windows CI)
+# ---------------------------------------------------------------------------
+
+class TestDmabufBackendCaps:
+    """The DmabufBackend targets the cross-process gl_layer path. It
+    must *only* advertise SURFACE_CROSSPROC_GL; claiming local surfaces
+    would pull every local PAL caller onto the dmabuf path and then
+    fail on is_available() because no overlay socket exists."""
+
+    def _backend(self):
+        pytest.importorskip('analysis.components.pal.web.dmabuf_backend')
+        from analysis.components.pal.web.dmabuf_backend import DmabufBackend
+        return DmabufBackend()
+
+    def test_name_is_dmabuf(self):
+        assert self._backend().name == 'dmabuf'
+
+    def test_capabilities_exclusive_to_crossproc_gl(self):
+        caps = self._backend().capabilities()
+        assert caps.surfaces == frozenset({SURFACE_CROSSPROC_GL})
+        assert SURFACE_LOCAL_CPU not in caps.surfaces
+        assert SURFACE_LOCAL_GL not in caps.surfaces
+
+    def test_capabilities_claim_zero_copy_and_crossprocess(self):
+        caps = self._backend().capabilities()
+        assert caps.zero_copy is True
+        assert caps.cross_process is True
+        assert KIND_DMABUF_FD in caps.produces
+
+    def test_is_available_false_without_overlay_socket(self, tmp_path,
+                                                       monkeypatch):
+        """The overlay socket's existence is the liveness probe. When
+        it's absent (normal case in CI / dev without running osu!), the
+        backend must decline so the PAL falls through to qpixmap."""
+        b = self._backend()
+        # Redirect to a path that definitely doesn't exist.
+        monkeypatch.setenv('VSRG_OVERLAY_WEB_SOCKET',
+                           str(tmp_path / 'no-such-sock'))
+        # Need a QApplication live for the other availability checks
+        # to pass the first gate; after that, the missing socket must
+        # flip is_available() to False.
+        from PySide6.QtWidgets import QApplication
+        if QApplication.instance() is None:
+            QApplication([])
+        assert b.is_available() is False
+
+
+class TestDmabufBackendRegisteredBeforeQPixmap:
+    """The default PAL factory must register the dmabuf backend before
+    qpixmap so that SURFACE_CROSSPROC_GL gets dmabuf (when available)
+    and never accidentally falls through to a local-only backend."""
+
+    def setup_method(self):
+        WebTexturePAL.reset_default_for_tests()
+
+    def teardown_method(self):
+        WebTexturePAL.reset_default_for_tests()
+
+    def test_dmabuf_registered_when_crate_present(self):
+        # The crate is expected to build on the dev box; if it's not
+        # present, the dispatcher silently skips it and this test is
+        # an xfail on that host.
+        try:
+            import web_texture_ipc  # noqa: F401
+        except ImportError:
+            pytest.skip('web_texture_ipc extension not built')
+
+        pal = WebTexturePAL.default()
+        names = [b.name for b in pal.backends()]
+        assert 'dmabuf' in names
+        # And: dmabuf comes first so it wins surface matches when
+        # available. qpixmap is the floor.
+        assert names.index('dmabuf') < names.index('qpixmap')
