@@ -463,6 +463,20 @@ class Context(Protocol):
              outline: tuple = None, outline_w: int = 1) -> None: ...
     def line(self, start: tuple, end: tuple, color: tuple,
              width: int = 1) -> None: ...
+    def image(self, rect: tuple, frame) -> None:
+        """Blit a :class:`~analysis.components.pal.web.WebTextureFrame`
+        (or a raw ``QPixmap`` on GUI surfaces that accept it) into the
+        component's local-coord rect.
+
+        Frame-kind dispatch:
+          - ``qpixmap``       -- direct blit on GUI backends.
+          - ``gl_texture_id`` / ``qsg_texture`` -- future backends that
+            composite zero-copy. A backend that doesn't recognise the
+            kind is expected to attempt a best-effort downgrade (e.g.
+            readback to QPixmap via the WebTexture's latest_frame) or
+            raise :class:`DataNotAvailable` if that isn't possible.
+        """
+        ...
 
     # ── Cursor-advancing rows ──
     def spacer(self, h: int = None) -> None: ...

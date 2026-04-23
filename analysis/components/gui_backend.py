@@ -545,6 +545,29 @@ def _hud_flags_from_player(player) -> HudFlags:
     )
 
 
+def _pixmap_from(frame_or_pixmap):
+    """Resolve a ctx.image() argument to a ``QPixmap``.
+
+    Accepts either a bare ``QPixmap`` or a ``WebTextureFrame``. Other
+    frame kinds return None so the caller skips. A future GL-backed
+    frame may stash a downgrade copy under ``meta['qpixmap_fallback']``
+    for hosts that can't sample GL; we honor that if present.
+    """
+    from PySide6.QtGui import QPixmap
+    if isinstance(frame_or_pixmap, QPixmap):
+        return frame_or_pixmap
+    kind = getattr(frame_or_pixmap, 'kind', None)
+    handle = getattr(frame_or_pixmap, 'handle', None)
+    if kind == 'qpixmap' and isinstance(handle, QPixmap):
+        return handle
+    meta = getattr(frame_or_pixmap, 'meta', None)
+    if isinstance(meta, dict):
+        fallback = meta.get('qpixmap_fallback')
+        if isinstance(fallback, QPixmap):
+            return fallback
+    return None
+
+
 # ── Context ─────────────────────────────────────────────────────────
 
 _CHAR_PX = 6  # matches SidebarContext._CHAR_PX for label centering
@@ -630,6 +653,26 @@ class SidebarContext:
         ex, ey = end
         self._sctx.line((self._ax(sx), self._ay(sy)),
                         (self._ax(ex), self._ay(ey)), color, width)
+
+    def image(self, rect, frame) -> None:
+        """Blit a WebTextureFrame (or raw QPixmap) into ``rect``.
+
+        Measure passes skip the actual draw. Frame kinds this backend
+        can handle directly: ``qpixmap``. Other kinds are downgraded
+        via their ``handle`` if it happens to be a QPixmap; otherwise
+        we silently skip so a missing frame never aborts the paint pass.
+        """
+        if self._sctx.measure_only:
+            return
+
+        pix = _pixmap_from(frame)
+        if pix is None or pix.isNull():
+            return
+
+        from PySide6.QtCore import QRect
+        rx, ry, rw, rh = rect
+        dest = QRect(self._ax(rx), self._ay(ry), int(rw), int(rh))
+        self._sctx.painter.drawPixmap(dest, pix)
 
     # ── Cursor-advancing rows ──
     def spacer(self, h=None) -> None:

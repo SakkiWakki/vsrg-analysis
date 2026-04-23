@@ -291,6 +291,14 @@ class OverlayContext:
             self.rect((x0, int(sy), x1 - x0, max(1, int(width))), color)
         # Diagonal: unsupported on this surface; drop.
 
+    def image(self, rect, frame) -> None:
+        # The in-game overlay renderer (gamescope / gl_layer) composites
+        # its own primitives and doesn't yet import external textures.
+        # Phase 3 teaches this path to consume dmabuf/win32_shared
+        # frames; until then a component that emits ``image()`` on this
+        # surface silently draws nothing rather than crashing.
+        _ = rect, frame
+
     # ── Cursor-advancing rows ──
     def spacer(self, h=None) -> None:
         self.y += int(h) if h is not None else int(theme.SECTION_SPACER)

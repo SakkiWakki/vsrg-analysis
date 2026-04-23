@@ -4,9 +4,11 @@ An overlay is any directory that contains an ``index.html`` file.
 Scanned locations (in order):
   1. ``<repo>/plugins/overlays/``
   2. ``~/.config/vsrg-analysis/overlays/``
+  3. any directory in ``$TOSU_OVERLAYS_DIRS`` (``:``-separated; dev hook)
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 
@@ -14,11 +16,19 @@ _BUILTIN_OVERLAYS = Path(__file__).parent.parent.parent / 'overlays'
 _USER_OVERLAYS = Path.home() / '.config' / 'vsrg-analysis' / 'overlays'
 
 
+def _extra_dirs() -> list[Path]:
+    raw = os.environ.get('TOSU_OVERLAYS_DIRS', '')
+    if not raw:
+        return []
+    return [Path(p) for p in raw.split(':') if p.strip()]
+
+
 def find_overlays() -> list[tuple[str, Path]]:
     """Return (display_name, index_html_path) pairs for all available overlays,
-    sorted by display name."""
+    sorted by display name. Earlier roots win on name collision."""
     found: dict[str, Path] = {}
-    for root in (_BUILTIN_OVERLAYS, _USER_OVERLAYS):
+    roots = [_BUILTIN_OVERLAYS, _USER_OVERLAYS, *_extra_dirs()]
+    for root in roots:
         if not root.is_dir():
             continue
         for entry in sorted(root.iterdir()):
@@ -26,5 +36,5 @@ def find_overlays() -> list[tuple[str, Path]]:
                 continue
             index = entry / 'index.html'
             if index.exists():
-                found[entry.name] = index
+                found.setdefault(entry.name, index)
     return sorted(found.items())
