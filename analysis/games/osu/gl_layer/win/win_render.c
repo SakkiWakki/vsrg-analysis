@@ -19,4 +19,4 @@
 // Override with VSRG_OVERLAY_FONT env var (same as Linux).
 #define DEFAULT_FONT_PATH "C:\\Windows\\Fonts\\consola.ttf"
 
-#include "../../../../overlay/renderer/render.c"
+#include "render.c"

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../../../overlay/widgets/overlay_shm.h"
+#include "overlay_shm.h"
 
 #ifdef __cplusplus
 extern "C" {

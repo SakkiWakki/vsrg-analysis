@@ -8,7 +8,7 @@
 #ifndef VSRG_GL_LAYER_SHM_CONSUMER_H
 #define VSRG_GL_LAYER_SHM_CONSUMER_H
 
-#include "../../../overlay/widgets/overlay_shm.h"
+#include "overlay_shm.h"
 
 #ifdef __cplusplus
 extern "C" {

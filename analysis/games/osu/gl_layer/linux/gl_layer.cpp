@@ -22,9 +22,9 @@
 // current Wine builds); the 32-bit .so stays a logging-only stub.
 #if defined(VSRG_GL_LAYER_HAS_RENDERER)
 extern "C" {
-#include "../../../overlay/renderer/render.h"
-#include "../../../overlay/widgets/widgets.h"
-#include "../../../overlay/input/input.h"
+#include "render.h"
+#include "widgets.h"
+#include "input.h"
 #include "shm_consumer.h"
 }
 #endif

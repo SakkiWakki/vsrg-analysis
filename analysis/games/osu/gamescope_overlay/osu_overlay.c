@@ -41,9 +41,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "../../../overlay/widgets/overlay_shm.h"
-#include "../../../overlay/widgets/widgets.h"
-#include "../../../overlay/renderer/render.h"
+#include "overlay_shm.h"
+#include "widgets.h"
+#include "render.h"
 
 // ─── Globals (small, C-program scale) ───────────────────────────────────
 
