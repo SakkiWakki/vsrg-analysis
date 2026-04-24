@@ -37,7 +37,7 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QTabWidget
 
 from analysis.gui.settings import get_settings
 from analysis.gui.theme import apply_dark_palette
-from analysis.gui.library_tab import LibraryTab
+from analysis.gui.library.library_tab import LibraryTab
 
 # Re-export for backward compatibility (note_viewer plugin imports NoteVizTab
 # from analysis.gui.app).

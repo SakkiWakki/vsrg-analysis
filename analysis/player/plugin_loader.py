@@ -14,6 +14,9 @@ from analysis.player.plugin_api import Stage, normalize_stage
 from analysis.player.hud.sidebar_api import SidebarSectionRegistry, _escape_key
 from analysis.player.render.layer_registry import LayerRegistry
 
+from analysis.gui.library.library_actions import get_registry
+
+
 
 @dataclass
 class DrawPlugin:
@@ -244,7 +247,6 @@ class PluginManager:
         library tab shows the same set."""
         if not hasattr(mod, 'register_library_actions'):
             return
-        from analysis.gui.library_actions import get_registry
         module_name = f'{bundle.key}/{getattr(mod, "__name__", "")}'
         registry = get_registry()
 
