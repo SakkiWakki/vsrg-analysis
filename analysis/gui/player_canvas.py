@@ -29,6 +29,13 @@ class PlayerCanvas(QOpenGLWidget):
         # on hover, and so drag-in-progress updates even if the user's
         # pointer briefly leaves the sidebar region.
         self.setMouseTracking(True)
+        # Force the native GL surface to be realized before we're added to
+        # a tab's layout: without this, QTabWidget's first reparent of a
+        # QOpenGLWidget triggers a top-level window recomposition on some
+        # compositors (X11/Wayland/XWayland), which looks like the main
+        # window briefly closing and reopening. Creating the surface up
+        # front keeps it tied to this widget's native handle.
+        self.setAttribute(Qt.WA_NativeWindow, True)
 
     def resizeEvent(self, ev):
         self.player.W = max(200, int(self.width()))

@@ -275,6 +275,14 @@ class AudioEngine:
                 self._playing = False
                 self._ended = True
                 return
+            if not self._playing:
+                # Transitioning paused->playing: initialize the interpolation
+                # anchor so current_chart_time doesn't extrapolate from a
+                # stale (or zero) wall timestamp before the first callback.
+                self._anchor_src_time = (
+                    float(self._pv.source_time) if self._pv is not None
+                    else t)
+                self._anchor_wall = time.monotonic()
             self._playing = True
             self._chart_time = t
             self._ended = False
