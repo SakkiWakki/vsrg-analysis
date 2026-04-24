@@ -23,7 +23,7 @@ class _RenderTimelineEngine(Protocol):
     def render_multiplier_at(self, t: float) -> float: ...
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RenderFrameState:
     raw_t: float
     target_cum: float

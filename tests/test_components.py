@@ -176,14 +176,16 @@ def _player_with_layer_registry(tmp_path, *, layers_panel_open=False):
         plugin_panel_open=False,
         open_flyout=None,
     )
+    from analysis.player.render.layers.notes import default_note_types
     registry = LayerRegistry(config=_store(tmp_path))
+    registry.register_note_types(default_note_types())
     return _fake_player(layer_registry=registry, hud=hud)
 
 
 def _invoke_supported_field(ds, field):
     match field:
         case 'layer_visible':
-            return ds.layer_visible('notes')
+            return ds.layer_visible('taps')
         case _:
             return getattr(ds, field)()
 
@@ -447,6 +449,6 @@ def test_layers_component_draws_builtin_layers(tmp_path):
 
         labels = [text for text, _x, _y in sctx.texts]
         assert 'Background' in labels
-        assert 'Notes' in labels
+        assert 'Taps' in labels
     finally:
         mgr.close()

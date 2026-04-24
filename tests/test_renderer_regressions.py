@@ -9,174 +9,217 @@ from types import SimpleNamespace
 import numpy as np
 
 from analysis.player.render import culling
+from analysis.player.render.layers import notes as _notes_layer
 from analysis.player.render.qt_renderer import QtPlayerRenderer, _NoteView
 
 
-def _make_note(*, miss, is_ln, miss_pressed_i=True, off=0.0, ln_state='tap'):
+def _make_note(*, miss, is_ln, miss_pressed_i=True, off=0.0, state='tap'):
     """`_NoteView` with just the fields `_draw_press_mark` touches."""
     return _NoteView(
         i=0, col=0, y=100, y_end=100, lx=0, off=off,
         press_t=0.0, release_t=None, rel_off=None, end_t=None,
-        is_ln=is_ln, is_roll=False, miss=miss, ln_state=ln_state,
+        is_ln=is_ln, is_roll=False, miss=miss, state=state,
         note_color=(255, 255, 255), jcolor=(255, 0, 0),
     )
 
 
 def _make_press_ctx(renderer, miss_pressed=(True,)):
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QPixmap
+    empty_pm = QPixmap(1, 1)
+    empty_pm.fill(Qt.transparent)
+
     player = SimpleNamespace(
         miss_pressed=np.array(miss_pressed, dtype=bool),
         press_hide=False,
         scroll_speed=1000.0,
         judge_colors={'miss': (255, 0, 0)},
     )
+    sprite_cache = SimpleNamespace(get=lambda *a, **k: empty_pm)
     return SimpleNamespace(player=player, lane_w=80,
-                            drawers=renderer._defaults,
+                            # drawers removed - sprite cache is the sole draw path
+                            sprite_cache=sprite_cache,
                             scroll_speed=player.scroll_speed,
                             time_to_y=lambda t: 100 + float(t) * 1000.0)
 
 
-def _patch_draw_recorders(renderer):
-    """Replace the lane-line and tick draws with recorders. Returns
-    `(lines, ticks)` lists that accumulate every call."""
-    lines, ticks = [], []
+def _patch_draw_recorders(monkeypatch):
+    """Replace the lane-line helper + track sprite-cache tick blits.
+
+    `_draw_stroke_with_tick` calls `chart_extras.draw_lane_line` for
+    the vertical stroke and `painter.drawPixmap` with a cached tick
+    pixmap at the tick position. We intercept the first and inject a
+    fake painter recorder for the second so tests can still assert
+    stroke + tick presence without a real QPainter.
+
+    Returns `(lines, ticks)` lists plus a fake painter ready to pass
+    through to the press-mark call site. Each tick entry is
+    `(y, pixmap)` — we don't know the color at blit time because the
+    cache collapses that into the pixmap identity, but count/position
+    are what these tests care about."""
+    lines = []
+    ticks = []
 
     def fake_line(painter, color, lx, lane_w, y0, y1, width=1):
         lines.append((color, lx, lane_w, y0, y1, width))
 
     def fake_tick(painter, color, lane_x, y, lane_w):
+        # Still kept for any caller that hits `_extras.draw_tick`
+        # directly (none after the sprite migration but cheap to keep).
         ticks.append((color, lane_x, y, lane_w))
 
-    renderer._draw_lane_line = fake_line
-    renderer._draw_tick = fake_tick
-    return lines, ticks
+    def fake_draw_pixmap(point, _pm):
+        ticks.append(('pixmap', float(point.x()), float(point.y())))
+
+    from analysis.player.render.layers import chart_extras as _ce
+    monkeypatch.setattr(_ce, 'draw_lane_line', fake_line)
+    monkeypatch.setattr(_ce, 'draw_tick', fake_tick)
+
+    fake_painter = SimpleNamespace(
+        drawPixmap=fake_draw_pixmap,
+        drawTiledPixmap=lambda *a, **k: None,
+    )
+    return lines, ticks, fake_painter
 
 
-def test_missed_ln_skips_press_mark_when_pressed():
+def test_missed_ln_skips_press_mark_when_pressed(monkeypatch):
     """Regression: a missed LN where the player DID press (miss_pressed=True)
     must not draw a press-mark — `_draw_miss_holds` owns that stroke, so
     drawing press-mark too would double up."""
     renderer = QtPlayerRenderer(plugin_manager=SimpleNamespace())
-    lines, ticks = _patch_draw_recorders(renderer)
+    lines, ticks, fake_painter = _patch_draw_recorders(monkeypatch)
 
     ctx = _make_press_ctx(renderer, miss_pressed=(True,))
-    note = _make_note(miss=True, is_ln=True, off=-0.150, ln_state='missed')
+    note = _make_note(miss=True, is_ln=True, off=-0.150, state='missed')
 
-    renderer._draw_press_mark(ctx, painter=None, n=note)
+    _notes_layer._draw_press_mark(ctx, painter=fake_painter, n=note)
 
     assert lines == []
     assert ticks == []
 
 
-def test_missed_ln_skips_press_mark_when_not_pressed():
+def test_missed_ln_skips_press_mark_when_not_pressed(monkeypatch):
     """Same rule for a missed LN with no recorded press — it's still the
     miss-hold drawer's domain (if any), never the press-mark's."""
     renderer = QtPlayerRenderer(plugin_manager=SimpleNamespace())
-    lines, ticks = _patch_draw_recorders(renderer)
+    lines, ticks, fake_painter = _patch_draw_recorders(monkeypatch)
 
     ctx = _make_press_ctx(renderer, miss_pressed=(False,))
-    note = _make_note(miss=True, is_ln=True, off=1.0, ln_state='missed')
+    note = _make_note(miss=True, is_ln=True, off=1.0, state='missed')
 
-    renderer._draw_press_mark(ctx, painter=None, n=note)
+    _notes_layer._draw_press_mark(ctx, painter=fake_painter, n=note)
 
     assert lines == []
     assert ticks == []
 
 
-def test_hit_tap_draws_press_mark():
+def test_hit_tap_draws_press_mark(monkeypatch):
     """Sanity: non-miss non-LN still draws both line and tick."""
     renderer = QtPlayerRenderer(plugin_manager=SimpleNamespace())
-    lines, ticks = _patch_draw_recorders(renderer)
+    lines, ticks, fake_painter = _patch_draw_recorders(monkeypatch)
 
     ctx = _make_press_ctx(renderer)
-    note = _make_note(miss=False, is_ln=False, off=0.020, ln_state='tap')
+    note = _make_note(miss=False, is_ln=False, off=0.020, state='tap')
 
-    renderer._draw_press_mark(ctx, painter=None, n=note)
+    _notes_layer._draw_press_mark(ctx, painter=fake_painter, n=note)
 
     assert len(lines) == 1
     assert len(ticks) == 1
 
 
-def test_missed_tap_still_draws_press_mark():
+def test_missed_tap_still_draws_press_mark(monkeypatch):
     """Missed non-LN draws a red press-mark — the rule only excludes LNs
     and never-pressed misses."""
     renderer = QtPlayerRenderer(plugin_manager=SimpleNamespace())
-    lines, ticks = _patch_draw_recorders(renderer)
+    lines, ticks, fake_painter = _patch_draw_recorders(monkeypatch)
 
     ctx = _make_press_ctx(renderer, miss_pressed=(True,))
-    note = _make_note(miss=True, is_ln=False, off=0.080, ln_state='missed_note')
+    note = _make_note(miss=True, is_ln=False, off=0.080, state='missed_note')
 
-    renderer._draw_press_mark(ctx, painter=None, n=note)
+    _notes_layer._draw_press_mark(ctx, painter=fake_painter, n=note)
 
     assert len(lines) == 1
     assert len(ticks) == 1
     assert lines[0][0] == (255, 0, 0)  # miss color
 
 
-def test_missed_tap_without_press_skips_press_mark():
+def test_missed_tap_without_press_skips_press_mark(monkeypatch):
     """Regression: osu replays write a 1.0s sentinel offset for misses
     the player never pressed. Drawing a press-mark for those produces a
     full-second line that crosses unrelated notes on the same column,
     visually connecting unrelated misses (TWO-TORIAL col=3, ~10.4s)."""
     renderer = QtPlayerRenderer(plugin_manager=SimpleNamespace())
-    lines, ticks = _patch_draw_recorders(renderer)
+    lines, ticks, fake_painter = _patch_draw_recorders(monkeypatch)
 
     ctx = _make_press_ctx(renderer, miss_pressed=(False,))
     note = _make_note(miss=True, is_ln=False, off=1.0,
-                      ln_state='missed_note')
+                      state='missed_note')
 
-    renderer._draw_press_mark(ctx, painter=None, n=note)
+    _notes_layer._draw_press_mark(ctx, painter=fake_painter, n=note)
 
     assert lines == []
     assert ticks == []
 
 
-def test_press_mark_uses_projected_time_to_y():
+def test_press_mark_uses_projected_time_to_y(monkeypatch):
     """Press marks must use the same projected time->Y mapping as notes,
-    not a raw `offset * scroll_speed` shortcut."""
+    not a raw `offset * scroll_speed` shortcut. Observable as the
+    `y1` endpoint passed to `chart_extras.draw_lane_line` — that's
+    whatever `ctx.time_to_y(press_t)` returned."""
     renderer = QtPlayerRenderer(plugin_manager=SimpleNamespace())
-    calls = []
-
-    def custom_press_mark(painter, lx, lane_w, y_head, y_press, color):
-        calls.append((y_head, y_press, color))
+    lines, _ticks, fake_painter = _patch_draw_recorders(monkeypatch)
 
     ctx = _make_press_ctx(renderer)
-    ctx.drawers = dict(renderer._defaults)
-    ctx.drawers['press_mark'] = custom_press_mark
     ctx.time_to_y = lambda t: 321.0 if abs(t - 0.125) < 1e-9 else -999.0
-    note = _make_note(miss=False, is_ln=False, off=0.125, ln_state='tap')
+    note = _make_note(miss=False, is_ln=False, off=0.125, state='tap')
     note = note.__class__(**{**note.__dict__, 'press_t': 0.125})
 
-    renderer._draw_press_mark(ctx, painter=None, n=note)
+    _notes_layer._draw_press_mark(ctx, painter=fake_painter, n=note)
 
-    assert calls == [(100, 321.0, (255, 0, 0))]
+    # (color, lx, lane_w, y_from, y_to, width)
+    assert len(lines) == 1
+    assert lines[0][0] == (255, 0, 0)   # jcolor (non-miss path)
+    assert lines[0][3] == 100            # y_head
+    assert lines[0][4] == 321.0          # projected y_press
 
 
-def test_ln_release_guide_uses_projected_time_to_y():
+def test_ln_release_guide_uses_projected_time_to_y(monkeypatch):
     """Release guides must also use the projected time mapping so they
-    stay attached in SV sections."""
+    stay attached in SV sections. The guide draws a vector line from
+    the tail's y to `ctx.time_to_y(release_t)` + a cached tick at the
+    release y; we observe the projected y via the line endpoints."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QPixmap
+    empty_pm = QPixmap(1, 1)
+    empty_pm.fill(Qt.transparent)
+
     renderer = QtPlayerRenderer(plugin_manager=SimpleNamespace())
-    calls = []
+    lines, _ticks, fake_painter = _patch_draw_recorders(monkeypatch)
 
-    def custom_release_guide(painter, lx, lane_w, y_tail, y_release):
-        calls.append((y_tail, y_release))
-
-    player = SimpleNamespace(press_hide=False)
+    player = SimpleNamespace(press_hide=False, skin='bar', H=600)
+    sprite_cache = SimpleNamespace(get=lambda *a, **k: empty_pm)
     ctx = SimpleNamespace(
         player=player,
-        lane_w=80,
-        drawers=dict(renderer._defaults, ln_release_guide=custom_release_guide),
+        lane_w=80, note_h=20, judge_y=500, screen_margin=100,
+        # drawers removed - sprite cache is the sole draw path
+        sprite_cache=sprite_cache,
         time_to_y=lambda t: 456.0 if abs(t - 0.75) < 1e-9 else -999.0,
     )
     note = _NoteView(
         i=0, col=0, y=100, y_end=200, lx=0, off=0.0,
         press_t=0.0, release_t=0.75, rel_off=0.1, end_t=0.65,
-        is_ln=True, is_roll=False, miss=False, ln_state='held',
+        is_ln=True, is_roll=False, miss=False, state='held',
         note_color=(255, 255, 255), jcolor=(255, 0, 0),
     )
 
-    renderer._draw_ln_release_guide(ctx, painter=None, n=note)
+    _notes_layer._draw_ln(ctx, painter=fake_painter, n=note)
 
-    assert calls == [(200, 456.0)]
+    # The body fill + tail blit go through drawPixmap/drawTiledPixmap;
+    # only the release guide hits draw_lane_line, so `lines` should
+    # contain exactly the guide stroke.
+    assert len(lines) == 1
+    assert lines[0][3] == 200              # y_tail
+    assert lines[0][4] == 456.0            # projected y_release
 
 
 # ---------------------------------------------------------------------------
@@ -264,37 +307,6 @@ def test_sv_culling_pad_converts_seconds_to_cumulative_units():
     # including all three notes. Treating "0.2" as cumulative units would
     # incorrectly exclude the first and third notes.
     assert culling.select_note_candidates(ctx) == [0, 1, 2]
-
-
-def test_adapter_drawer_override_takes_precedence():
-    """Regression: `GameAdapter.note_drawers()` entries must replace the
-    renderer's defaults for matching keys. A game can reskin any single
-    note-type without reimplementing the pipeline."""
-    renderer = QtPlayerRenderer(plugin_manager=SimpleNamespace())
-
-    calls = []
-
-    def custom_press_mark(painter, lx, lane_w, y_head, y_press, color):
-        calls.append(('press_mark', lx, y_head, y_press, color))
-
-    adapter = SimpleNamespace(note_drawers=lambda: {'press_mark': custom_press_mark})
-    player = SimpleNamespace(_adapter=adapter)
-
-    drawers = renderer._resolve_drawers(player)
-    assert drawers['press_mark'] is custom_press_mark
-    # Non-overridden keys still fall back to defaults.
-    assert drawers['tap_head'] is renderer._defaults['tap_head']
-
-
-def test_adapter_without_note_drawers_uses_all_defaults():
-    """Adapters that don't implement `note_drawers` still work — the
-    renderer falls back to every default without error."""
-    renderer = QtPlayerRenderer(plugin_manager=SimpleNamespace())
-    adapter = SimpleNamespace(note_drawers=lambda: {})
-    player = SimpleNamespace(_adapter=adapter)
-
-    drawers = renderer._resolve_drawers(player)
-    assert drawers == renderer._defaults
 
 
 def test_run_sections_always_draws_header_and_records_anchor_when_open():

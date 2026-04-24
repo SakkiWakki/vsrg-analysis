@@ -362,7 +362,22 @@ class Player:
         ui-status flags the painted HUD reads."""
         from analysis.player.hud.hud_state import HudState
         from analysis.player.events import EventBus
+        from analysis.player.render.layers.sprite_cache import NoteSpriteCache
         self.plugins = PluginManager.discover()
+        # Register this game's note types as replay-scoped layers so
+        # the HUD's visibility tree shows one toggle per kind the
+        # adapter actually produces. LN-only games don't get a dead
+        # 'taps' toggle this way.
+        self.plugins.layers.register_note_types(
+            self._adapter.note_types(self.replay)
+        )
+        # Sprite cache: one bucket per note-part this game declares.
+        # Allocations are lazy (first draw of each `(col, state, ...)`
+        # combo rasterizes), so games that never produce a type pay
+        # zero memory. Bound once per replay; the cache dies with
+        # the Player.
+        self._sprite_cache = NoteSpriteCache()
+        self._sprite_cache.bind(self._adapter.note_sprites(self.replay))
         self.hud = HudState()
         self.events = EventBus()
         # Tab-owned runtime flags the painted HUD needs to render toggle
@@ -680,6 +695,27 @@ class Player:
         return (judge_y
                 - self._visual_sv_distance_from_frame(frame, t)
                 * self.scroll_speed)
+
+    def batch_time_to_y(self, times, frame):
+        """Vectorized `_time_to_y` over an array of chart times, using the
+        already-built per-frame state. Returns a float64 numpy array of
+        pixel Y positions — same math as the scalar path, just one batched
+        `cumulative_at` call into the SV engine instead of N bisects.
+
+        Renderer use: precompute head / LN-tail Y for every candidate
+        once per frame, then read from the array instead of calling the
+        scalar `ctx.time_to_y` in the hot per-note loop."""
+        arr = np.asarray(times, dtype=np.float64)
+        if arr.size == 0:
+            return np.empty(0, dtype=np.float64)
+        judge_y = self.H * self.hit_line_y_frac
+        scroll_speed = float(self.scroll_speed)
+        if not getattr(frame, 'use_sv', False):
+            dist = arr - float(frame.raw_t)
+        else:
+            cum = self._sv_engine.project_times(arr)
+            dist = (cum - float(frame.visual_cum_now)) * float(frame.render_multiplier)
+        return judge_y - dist * scroll_speed
 
     def _reset_render_timeline(self):
         # Kept so transport/UI call sites do not care whether rendering is

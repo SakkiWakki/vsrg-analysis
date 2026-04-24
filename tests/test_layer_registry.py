@@ -40,22 +40,21 @@ def test_plugin_layer_inserts_between_builtin_layers(tmp_path):
     registry.register_manifest(_manifest(
         'bundle:plugin',
         LayerDeclaration(
-            key='bundle:after_notes',
-            name='After notes',
-            placement=LayerPlacement(LAYER_AFTER, 'notes'),
+            key='bundle:after_judgment',
+            name='After judgment',
+            placement=LayerPlacement(LAYER_AFTER, 'judgment'),
         ),
     ))
     plan = registry.render_plan({})
     names = [name for name, _, _ in plan]
-    notes_index = names.index('notes')
-    assert names[notes_index + 1] == 'bundle:after_notes'
-    assert names[notes_index + 2] == 'chart_extras'
+    judgment_index = names.index('judgment')
+    assert names[judgment_index + 1] == 'bundle:after_judgment'
 
 
 def test_parent_visibility_hides_children(tmp_path):
     registry = LayerRegistry(config=_store(tmp_path))
     assert registry.set_visible('playfield', False) is True
-    assert registry.layer_visible('notes') is False
+    assert registry.layer_visible('judgment') is False
     assert registry.layer_visible('hud') is True
 
 
@@ -73,7 +72,7 @@ def test_inside_requires_parent_handshake_for_plugin_groups(tmp_path):
         LayerDeclaration(
             key='bundle:group',
             name='Group',
-            placement=LayerPlacement(LAYER_AFTER, 'notes'),
+            placement=LayerPlacement(LAYER_AFTER, 'judgment'),
             kind=LAYER_GROUP,
         ),
     ))
@@ -98,7 +97,7 @@ def test_inside_mounts_when_parent_accepts_child(tmp_path):
         LayerDeclaration(
             key='bundle:group',
             name='Group',
-            placement=LayerPlacement(LAYER_AFTER, 'notes'),
+            placement=LayerPlacement(LAYER_AFTER, 'judgment'),
             kind=LAYER_GROUP,
             accepts_children={'bundle:child_layer'},
         ),

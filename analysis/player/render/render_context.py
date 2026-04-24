@@ -7,8 +7,6 @@ from dataclasses import dataclass, field
 @dataclass
 class RenderContext:
     player: object
-    screen: object
-    pygame: object
     colors: dict
     t_now: float
     x0: float

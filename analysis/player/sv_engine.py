@@ -155,10 +155,27 @@ class TimeSpaceSVEngine:
         return self.cumulative_at(t_to) - self.cumulative_at(t_from)
 
     def project_times(self, times: np.ndarray) -> np.ndarray:
-        if not times.size:
+        """Vectorized `cumulative_at` over an array — one np.searchsorted
+        + fused numpy arithmetic replaces the N-iteration Python loop."""
+        t = np.asarray(times, dtype=np.float64)
+        if not t.size:
             return np.empty(0, dtype=np.float64)
-        return np.array([self.cumulative_at(float(t)) for t in times],
-                        dtype=np.float64)
+        if not self._sections:
+            return t.copy()
+        # idx[j] = last i with self._times[i] <= t[j]
+        idx = np.searchsorted(self._times, t, side='right') - 1
+        # Entries before the first timing point extrapolate with _values[0];
+        # use clip so we can index _cum / _times / _values safely, then
+        # override those entries with the extrapolation formula.
+        safe_idx = np.clip(idx, 0, len(self._times) - 1)
+        cum = self._cum[safe_idx]
+        base_t = self._times[safe_idx]
+        vals = self._values[safe_idx]
+        out = cum + (t - base_t) * vals
+        pre_mask = idx < 0
+        if pre_mask.any():
+            out[pre_mask] = (t[pre_mask] - self._times[0]) * self._values[0]
+        return out
 
     def as_sections(self) -> list[tuple[float, float]]:
         return list(self._sections)
@@ -312,6 +329,59 @@ class _TimingMap:
         self._t_at_beat_zero = -sm_offset
         self._trailing_warp_end = warp_end
 
+        # Numpy mirrors for batched lookup paths (project_times). Kept
+        # in sync with the list fields; rebuild would require recomputing
+        # both if we ever mutated them, but _TimingMap is constructed once
+        # per engine and never edited.
+        self._beat_enter_np = np.asarray(self._beat_enter, dtype=np.float64)
+        self._time_enter_np = np.asarray(self._time_enter, dtype=np.float64)
+        self._beat_exit_np = np.asarray(self._beat_exit, dtype=np.float64)
+        self._time_exit_np = np.asarray(self._time_exit, dtype=np.float64)
+        self._bps_after_np = np.asarray(self._bps_after, dtype=np.float64)
+
+    def time_to_beat_array(self, times: np.ndarray) -> np.ndarray:
+        """Vectorized `time_to_beat`. Same rules as the scalar path
+        (frozen beats inside STOP/DELAY pauses, extrapolation before the
+        first event and past the last), applied over an entire array at
+        once."""
+        t = np.asarray(times, dtype=np.float64)
+        if not t.size:
+            return np.empty(0, dtype=np.float64)
+        if self._beat_enter_np.size == 0:
+            return (t - self._t_at_beat_zero) * self._bps_initial
+
+        out = np.empty_like(t)
+        # Pre-first-event branch: extrapolate from beat 0 at initial bps.
+        before = t < self._time_enter_np[0]
+        if before.any():
+            out[before] = (t[before] - self._t_at_beat_zero) * self._bps_initial
+        remaining = ~before
+        if not remaining.any():
+            return out
+
+        tr = t[remaining]
+        # Pause window test: t lies between time_enter[idx] and time_exit[idx]
+        # at the same idx — beat is frozen to beat_exit[idx].
+        pause_idx = np.searchsorted(self._time_enter_np, tr, side='right') - 1
+        pause_valid = pause_idx >= 0
+        pause_in = np.zeros_like(tr, dtype=bool)
+        if pause_valid.any():
+            safe_p = np.clip(pause_idx, 0, self._time_exit_np.size - 1)
+            pause_in = pause_valid & (tr < self._time_exit_np[safe_p])
+        out_r = np.empty_like(tr)
+        if pause_in.any():
+            out_r[pause_in] = self._beat_exit_np[pause_idx[pause_in]]
+        not_pause = ~pause_in
+        if not_pause.any():
+            tr2 = tr[not_pause]
+            idx = np.searchsorted(self._time_exit_np, tr2, side='right') - 1
+            idx = np.clip(idx, 0, self._time_exit_np.size - 1)
+            out_r[not_pause] = (self._beat_exit_np[idx]
+                                + (tr2 - self._time_exit_np[idx])
+                                * self._bps_after_np[idx])
+        out[remaining] = out_r
+        return out
+
     def beat_to_time(self, beat: float) -> float:
         """Time at `beat`. Bisect the event list, then advance at
         post-event bps from that event to `beat`."""
@@ -427,6 +497,11 @@ class BeatSpaceSVEngine:
                 last_beat = b
                 last_ratio = r
         self._cache_beats = [c[0] for c in self._cache]
+        # Numpy mirrors for vectorized displayed_beat over arrays — kept in
+        # sync with `_cache`; `_cache` stays Python-list for scalar hits.
+        self._cache_beats_np = np.asarray(self._cache_beats, dtype=np.float64)
+        self._cache_db_np = np.asarray([c[1] for c in self._cache], dtype=np.float64)
+        self._cache_ratio_np = np.asarray([c[2] for c in self._cache], dtype=np.float64)
         # Sorted-by-displayed-beat table for inverse_cumulative_at bisects.
         # SCROLLS with negative or zero ratios make displayed_beat
         # non-monotonic, so we skip those segments during inverse lookup.
@@ -560,10 +635,27 @@ class BeatSpaceSVEngine:
         return d * self._speed_percent_at(b_from, t_from)
 
     def project_times(self, times: np.ndarray) -> np.ndarray:
-        if not times.size:
+        """Vectorized `cumulative_at` over an array. Calls the _TimingMap
+        and displayed-beat lookups in batch (one np.searchsorted each)
+        instead of two Python bisects per entry — gives the renderer
+        O(log n) per note with a single numpy pass for the whole frame."""
+        t = np.asarray(times, dtype=np.float64)
+        if not t.size:
             return np.empty(0, dtype=np.float64)
-        return np.array([self.cumulative_at(float(t)) for t in times],
-                        dtype=np.float64)
+        # beat = time_to_beat_array(t) — STOPS/DELAYS/WARPS aware.
+        beats = self._timing.time_to_beat_array(t)
+        if self._cache_beats_np.size == 0:
+            return beats * self._sec_per_base_beat
+        # displayed_beat(beat) vectorized.
+        idx = np.searchsorted(self._cache_beats_np, beats, side='right') - 1
+        pre_mask = idx < 0
+        safe = np.clip(idx, 0, self._cache_beats_np.size - 1)
+        db_out = (self._cache_db_np[safe]
+                  + (beats - self._cache_beats_np[safe]) * self._cache_ratio_np[safe])
+        if pre_mask.any():
+            # Etterna GetDisplayedBeat fallthrough: `return beat`.
+            db_out[pre_mask] = beats[pre_mask]
+        return db_out * self._sec_per_base_beat
 
     def as_sections(self) -> list[tuple[float, float]]:
         """Back-compat projection for sidebar/components readers. Samples the

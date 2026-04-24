@@ -52,6 +52,10 @@ class LayerRegistry:
     def __init__(self, *, config):
         self._config = config
         self._declared: list[Layer] = []
+        # Replay-scoped layers (per-game `NoteType`s). Kept separate so
+        # loading a new replay swaps only these without rebuilding the
+        # plugin-declared ones.
+        self._replay_declared: list[Layer] = []
         self._layers: dict[str, Layer] = {}
         self._failures: dict[str, LayerFailure] = {}
         self._rebuild()
@@ -64,6 +68,32 @@ class LayerRegistry:
     def register_components(self, components) -> None:
         for comp in components:
             self.register_manifest(comp.manifest)
+
+    def register_note_types(self, note_types) -> None:
+        """Replace the replay-scoped note-type layers with a fresh set.
+        Each entry in `note_types` is a `NoteType` from `layers/notes.py`;
+        every one becomes a leaf layer under PLAYFIELD_LAYER so the HUD
+        can toggle it individually. Calling this again (e.g. on replay
+        swap) drops the previous set before attaching the new one."""
+        self._replay_declared = [
+            Layer(
+                key=nt.key,
+                name=nt.name,
+                owner='note_type',
+                kind=LAYER_LEAF,
+                draw=nt.draw,
+                stage=nt.stage,
+                placement=LayerPlacement(relation=LAYER_INSIDE,
+                                         target=PLAYFIELD_LAYER),
+                listed=True,
+            )
+            for nt in note_types
+        ]
+        self._rebuild()
+
+    def clear_note_types(self) -> None:
+        self._replay_declared = []
+        self._rebuild()
 
     def render_plan(self, draw_lookup: dict[str, object]) -> tuple[tuple[str, object | None, Stage | None], ...]:
         plan: list[tuple[str, object | None, Stage | None]] = []
@@ -178,7 +208,8 @@ class LayerRegistry:
 
     def _rebuild(self) -> None:
         layers = self._builtin_layers()
-        pending = [self._clone(layer) for layer in self._declared]
+        pending = [self._clone(layer) for layer in
+                   (self._declared + self._replay_declared)]
         while pending:
             next_round: list[Layer] = []
             progressed = False
@@ -264,48 +295,11 @@ class LayerRegistry:
             listed=True,
             builtin=True,
         ))
-        add(Layer(
-            key='notes',
-            name='Notes',
-            owner=_BUILTIN_OWNER,
-            kind=LAYER_LEAF,
-            parent=PLAYFIELD_LAYER,
-            draw='notes',
-            listed=True,
-            builtin=True,
-        ))
-        add(Layer(
-            key='chart_extras',
-            name='Chart extras',
-            owner=_BUILTIN_OWNER,
-            kind=LAYER_LEAF,
-            parent=PLAYFIELD_LAYER,
-            draw='chart_extras',
-            stage=Stage.AFTER_NOTES,
-            listed=True,
-            builtin=True,
-        ))
-        add(Layer(
-            key='miss_holds',
-            name='Miss holds',
-            owner=_BUILTIN_OWNER,
-            kind=LAYER_LEAF,
-            parent=PLAYFIELD_LAYER,
-            draw='miss_holds',
-            listed=True,
-            builtin=True,
-        ))
-        add(Layer(
-            key='ghost_taps',
-            name='Ghost taps',
-            owner=_BUILTIN_OWNER,
-            kind=LAYER_LEAF,
-            parent=PLAYFIELD_LAYER,
-            draw='ghost_taps',
-            stage=Stage.AFTER_GHOSTS,
-            listed=True,
-            builtin=True,
-        ))
+        # The actual note-type leaves (taps/lns/mines/.../ghost_taps)
+        # are registered per-replay via `register_note_types()` so an
+        # LN-only game never shows a dead 'taps' toggle. Plugin stages
+        # `AFTER_NOTES` / `AFTER_GHOSTS` fire via `_note_type_stage()`
+        # in qt_renderer, keyed off NoteType.key.
         add(Layer(
             key=HUD_GROUP_LAYER,
             name='HUD',

@@ -355,59 +355,25 @@ def test_death_time_set_when_gap_exceeds_threshold():
 
 
 # ---------------------------------------------------------------------------
-# _sweep_chart_notes SV-space culling
+# chart-extras cull-space indexing
 # ---------------------------------------------------------------------------
+# `_sweep_chart_notes` was replaced by `_cull_indices` + `_draw_chart_bucket`
+# in the chart_extras layer split. Testing the cull directly makes the
+# semantics easier to verify without constructing a full draw context.
 
-def test_sweep_chart_notes_uses_sv_array_when_active():
-    """When use_sv_space is True the sweep bisects sv_times, not real times."""
-    from types import SimpleNamespace
-    from analysis.player.render.qt_renderer import QtPlayerRenderer
+def test_cull_indices_sv_space():
+    """In SV-space the cull bisects the sv-time array (not the real-time
+    array), so notes are picked by their projected visual position."""
+    from analysis.player.render.layers.chart_extras import _cull_indices
 
-    times = np.array([1.0, 2.0, 3.0], dtype=np.float64)
-    cols  = np.array([0,   0,   0],   dtype=np.int32)
-    # sv_times compress the window: real time 3.0 maps to sv 0.5
     sv_times = np.array([0.1, 0.3, 0.5], dtype=np.float64)
-
-    drawn = []
-    ctx = SimpleNamespace(
-        use_sv_space=True,
-        target_lo=0.2,
-        target_hi=0.4,
-        player=SimpleNamespace(keycount=4),
-    )
-    ctx.time_to_y = lambda t: int(t * 100)
-
-    QtPlayerRenderer._sweep_chart_notes(
-        ctx, times, cols, sv_times,
-        lambda col, y: drawn.append((col, y)),
-    )
-
-    # Only sv index 1 (sv=0.3) is in [0.2, 0.4], corresponding to real time 2.0
-    assert len(drawn) == 1
-    assert drawn[0] == (0, 200)
+    indices = _cull_indices(sv_times, 0.2, 0.4)
+    assert list(indices) == [1]  # only sv=0.3 is in [0.2, 0.4]
 
 
-def test_sweep_chart_notes_falls_back_to_real_times_without_sv():
-    from types import SimpleNamespace
-    from analysis.player.render.qt_renderer import QtPlayerRenderer
+def test_cull_indices_real_time():
+    from analysis.player.render.layers.chart_extras import _cull_indices
 
     times = np.array([1.0, 2.0, 3.0], dtype=np.float64)
-    cols  = np.array([0,   0,   0],   dtype=np.int32)
-    sv_times = np.empty(0, dtype=np.float64)
-
-    drawn = []
-    ctx = SimpleNamespace(
-        use_sv_space=False,
-        target_lo=1.5,
-        target_hi=2.5,
-        player=SimpleNamespace(keycount=4),
-    )
-    ctx.time_to_y = lambda t: int(t * 100)
-
-    QtPlayerRenderer._sweep_chart_notes(
-        ctx, times, cols, sv_times,
-        lambda col, y: drawn.append((col, y)),
-    )
-
-    assert len(drawn) == 1
-    assert drawn[0] == (0, 200)
+    indices = _cull_indices(times, 1.5, 2.5)
+    assert list(indices) == [1]  # only t=2.0 is in [1.5, 2.5]

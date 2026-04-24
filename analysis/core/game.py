@@ -131,16 +131,30 @@ class GameAdapter:
         `resolve_chart_context` returned."""
         return {}
 
-    # --- per-note-type drawer overrides -----------------------------------
-    def note_drawers(self) -> dict:
-        """Optional per-note-type drawer overrides. Return a dict whose
-        keys match the renderer's registry (see
-        `analysis/player/render/qt_renderer.py::QtPlayerRenderer._default_drawers`)
-        and whose values are callables matching that key's signature.
-        Anything not in the dict falls through to the renderer default.
-        Use this to reskin a specific note type per game (e.g. Etterna
-        mines vs osu hit-circles) without touching shared layout logic."""
-        return {}
+    # --- per-note-sprite rasterize overrides ------------------------------
+    def note_sprites(self, replay) -> dict:
+        """Return `{sprite_name: SpriteSpec}` for this replay. Each spec
+        declares pixmap size + a rasterize callback + key fields. The
+        renderer allocates pixmaps lazily on first draw of each distinct
+        key combination, so games that never produce a note type (e.g.
+        osu has no mines) pay zero memory for it.
+
+        Default returns the baseline skin; override to replace any
+        entry, or omit keys to disable a sprite entirely."""
+        from analysis.player.render.layers.note_sprites import (
+            default_note_sprites)
+        return default_note_sprites()
+
+    # --- per-game note-type declarations ----------------------------------
+    def note_types(self, replay) -> list:
+        """Return the list of `NoteType` the renderer should draw for
+        this replay. Each entry becomes its own toggleable layer in the
+        HUD. Adapters can subset, reorder, or extend the default set —
+        a game without mines simply omits the `mines` entry so no dead
+        toggle appears. Default: every note type the shared renderer
+        layers know how to draw."""
+        from analysis.player.render.layers.notes import default_note_types
+        return default_note_types()
 
     # --- note visualizer windows ------------------------------------------
     def viz_windows(self, replay, judge=None, od=None):
