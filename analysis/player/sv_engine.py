@@ -156,13 +156,19 @@ class BeatSpaceSVEngine:
     speeds:  list[(beat, ratio)] in beat-space
     bpms:    list[(beat, bpm)] used to convert beat-space distance to the
              Player's time-space px/sec units
-    sm_offset: song OFFSET in seconds (positive = audio starts later)"""
+    sm_offset: song OFFSET in seconds (positive = audio starts later)
+    stops/delays/warps: optional timing events — passed to beat_to_time so
+             beat<->time conversion tracks Etterna's GetElapsedTimeInternal."""
 
-    def __init__(self, scrolls, speeds, bpms, sm_offset):
+    def __init__(self, scrolls, speeds, bpms, sm_offset,
+                 stops=None, delays=None, warps=None):
         self._scrolls = list(scrolls or [])
         self._speeds = list(speeds or [])
         self._bpms = list(bpms or [(0.0, 120.0)])
         self._sm_offset = float(sm_offset)
+        self._stops = list(stops or [])
+        self._delays = list(delays or [])
+        self._warps = list(warps or [])
         # Base BPM = first BPM segment, matching Etterna's m_fReadBPM seed.
         # ArrowEffects divides by m_fReadBPM under MaxScrollBPM; our conversion
         # from beat distance to seconds uses sec_per_beat at this rate so XMOD
@@ -194,25 +200,20 @@ class BeatSpaceSVEngine:
     # --- real-beat ↔ real-time helpers ----------------------------------
 
     def _beat_to_time(self, beat: float) -> float:
-        """Inline BPM-map integration (ported from sm_chart.beat_to_time but
-        avoids a module import per call). Returns seconds since audio start."""
-        bpms = sorted(self._bpms)
-        if not bpms:
-            return -self._sm_offset + beat * self._sec_per_base_beat
-        if beat <= bpms[0][0]:
-            return -self._sm_offset + (beat - bpms[0][0]) * (60.0 / bpms[0][1])
-        t = -self._sm_offset
-        for i in range(len(bpms)):
-            b0, bpm0 = bpms[i]
-            b1 = bpms[i + 1][0] if i + 1 < len(bpms) else float('inf')
-            if beat <= b1:
-                return t + (beat - b0) * (60.0 / bpm0)
-            t += (b1 - b0) * (60.0 / bpm0)
-        return t
+        """Delegate to sm_chart.beat_to_time so STOPS/DELAYS/WARPS apply
+        (Etterna's WhereUAtBro / GetElapsedTimeInternal)."""
+        from analysis.games.etterna.sm_chart import beat_to_time
+        return beat_to_time(beat, self._bpms, self._sm_offset,
+                            self._stops, self._delays, self._warps)
 
     def _time_to_beat(self, t: float) -> float:
         """Inverse of _beat_to_time. Needed to evaluate SCROLLS/SPEEDS at a
-        given chart time (the Player only tracks seconds)."""
+        given chart time (the Player only tracks seconds). No STOPS/DELAYS/
+        WARPS support yet — the inverse requires an event-walk with more
+        cases than BPM-only, so we fall back to BPM-only here. This only
+        affects the SV lookup for charts that combine SCROLLS+STOPS, which
+        is rare; notes themselves are positioned via beat_to_time which is
+        fully correct."""
         bpms = sorted(self._bpms)
         if not bpms:
             return (t + self._sm_offset) / self._sec_per_base_beat

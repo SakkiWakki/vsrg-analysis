@@ -45,6 +45,9 @@ def parse_sm(path):
 
     scrolls = _parse_scrolls(tags.get('SCROLLS', ''))
     speeds = _parse_speeds(tags.get('SPEEDS', ''))
+    stops = _parse_bpms(tags.get('STOPS', ''))
+    delays = _parse_bpms(tags.get('DELAYS', ''))
+    warps = _parse_bpms(tags.get('WARPS', ''))
 
     charts = []
     # SM block: #NOTES: type: desc: diff: meter: radar: notedata;
@@ -62,6 +65,9 @@ def parse_sm(path):
             'notedata': notedata,
             'scrolls': scrolls,
             'speeds': speeds,
+            'stops': stops,
+            'delays': delays,
+            'warps': warps,
         })
     return {
         'offset': offset,
@@ -93,6 +99,9 @@ def parse_ssc(path):
     bpms_h = _parse_bpms(h.get('BPMS', ''))
     scrolls_h = _parse_scrolls(h.get('SCROLLS', ''))
     speeds_h = _parse_speeds(h.get('SPEEDS', ''))
+    stops_h = _parse_bpms(h.get('STOPS', ''))
+    delays_h = _parse_bpms(h.get('DELAYS', ''))
+    warps_h = _parse_bpms(h.get('WARPS', ''))
 
     charts = []
     for sec in sections[1:]:
@@ -101,6 +110,9 @@ def parse_ssc(path):
         bpms = _parse_bpms(t.get('BPMS', '')) or bpms_h
         scrolls = _parse_scrolls(t.get('SCROLLS', '')) or scrolls_h
         speeds = _parse_speeds(t.get('SPEEDS', '')) or speeds_h
+        stops = _parse_bpms(t.get('STOPS', '')) or stops_h
+        delays = _parse_bpms(t.get('DELAYS', '')) or delays_h
+        warps = _parse_bpms(t.get('WARPS', '')) or warps_h
         charts.append({
             'stepstype': t.get('STEPSTYPE', ''),
             'description': t.get('DESCRIPTION', ''),
@@ -113,6 +125,9 @@ def parse_ssc(path):
             'notedata': notes,
             'scrolls': scrolls,
             'speeds': speeds,
+            'stops': stops,
+            'delays': delays,
+            'warps': warps,
         })
     return {
         'offset': offset,
@@ -203,36 +218,107 @@ def sv_sections_from_chart(chart, bpms, offset):
     return sections
 
 
-def beat_to_time(beat, bpms, offset):
-    """Convert beat position -> time in seconds using BPM change points."""
-    if not bpms:
-        return offset + beat * (60.0 / 120.0)
+def beat_to_time(beat, bpms, offset, stops=None, delays=None, warps=None):
+    """Convert beat position -> time in seconds.
+
+    Handles the four Etterna timing events (ports TimingData.cpp::
+    GetElapsedTimeInternal):
+
+      BPMS:   change bps going forward
+      STOPS:  beat=duration_sec; time advances while beat stays put, AFTER
+              the beat's events have triggered
+      DELAYS: beat=duration_sec; time advances while beat stays put, BEFORE
+              the beat's events trigger
+      WARPS:  beat=length_beats; at the given beat, jump forward in
+              beat-space by `length_beats` with no time advance. Notes and
+              events inside the warp range are skipped.
+
+    `offset` is OFFSET from the simfile: positive means audio starts LATER
+    than beat 0, so beat 0 maps to `-offset` seconds.
+    """
+    bpms = sorted(bpms or [(0.0, 120.0)])
+    stops = sorted(stops or [])
+    delays = sorted(delays or [])
+    warps = sorted(warps or [])
+
+    # Events sorted by beat, all in one stream. Each tuple is
+    # (beat, kind, value) — kind picks the handler below.
+    #
+    # Event ordering at the same beat matters for WARPS+STOPS+DELAYS
+    # interaction, matching Etterna's FindEvent precedence:
+    #   delay at beat -> pause before bpm/warp/stop trigger
+    #   bpm/warp at beat
+    #   stop at beat -> pause after
+    events = []
+    for b, v in delays:
+        events.append((b, 0, v))
+    for b, v in bpms:
+        events.append((b, 1, v))
+    for b, v in warps:
+        events.append((b, 2, v))
+    for b, v in stops:
+        events.append((b, 3, v))
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    # Walk from beat 0. Time starts at -offset (OFFSET shifts the chart).
     t = -offset
-    prev_beat, prev_bpm = bpms[0]
-    t = -offset  # OFFSET is positive=audio starts later, so t0 of beat0 = -offset
-    # Walk through segments
-    bpms_sorted = sorted(bpms)
-    if beat <= bpms_sorted[0][0]:
-        bpm = bpms_sorted[0][1]
-        return -offset + (beat - bpms_sorted[0][0]) * (60.0 / bpm)
+    cur_beat = 0.0
+    bps = bpms[0][1] / 60.0  # initial BPS at beat 0
+    warp_end = None  # if set, beats <= this are inside a warp region
 
-    for i in range(len(bpms_sorted)):
-        b0, bpm0 = bpms_sorted[i]
-        b1 = bpms_sorted[i + 1][0] if i + 1 < len(bpms_sorted) else float('inf')
-        if beat <= b1:
-            # time at b0:
-            t0 = -offset
-            for j in range(i):
-                jb, jbpm = bpms_sorted[j]
-                next_b = bpms_sorted[j + 1][0]
-                t0 += (next_b - jb) * (60.0 / jbpm)
-            return t0 + (beat - b0) * (60.0 / bpm0)
-    return 0.0
+    for (eb, kind, val) in events:
+        if eb < 0:
+            continue
+        # First advance from cur_beat up to eb, accounting for any active warp.
+        step_beat = eb
+        if warp_end is not None and step_beat < warp_end:
+            # still inside warp — skip forward to the event
+            cur_beat = step_beat
+        elif warp_end is not None and cur_beat < warp_end <= step_beat:
+            # exit warp at warp_end
+            cur_beat = warp_end
+            warp_end = None
+            t += (step_beat - cur_beat) / bps
+            cur_beat = step_beat
+        else:
+            t += (step_beat - cur_beat) / bps
+            cur_beat = step_beat
+
+        if cur_beat > beat:
+            # target beat passed within this segment — recompute partial
+            # without the event. Restore cur_beat/t to pre-event state.
+            overshoot = cur_beat - beat
+            t -= overshoot / bps
+            return t
+
+        # Apply the event at cur_beat == eb
+        if kind == 0:           # DELAY (pause before triggering)
+            t += float(val)
+        elif kind == 1:         # BPM
+            bps = float(val) / 60.0
+        elif kind == 2:         # WARP
+            warp_end = cur_beat + float(val)
+        elif kind == 3:         # STOP (pause after triggering)
+            t += float(val)
+
+    # Past last event: advance at current bps to the target beat
+    if warp_end is not None and beat <= warp_end:
+        # target is inside the trailing warp -> time doesn't advance
+        return t
+    if warp_end is not None:
+        # cross the warp boundary
+        beat_after_warp = max(cur_beat, warp_end)
+        if cur_beat < warp_end:
+            cur_beat = warp_end
+        t += (beat - cur_beat) / bps
+        return t
+    t += (beat - cur_beat) / bps
+    return t
 
 
-def row_to_time(noterow, bpms, offset):
+def row_to_time(noterow, bpms, offset, stops=None, delays=None, warps=None):
     """noterow / 48 = beat. Returns seconds since audio start of first beat."""
-    return beat_to_time(noterow / 48.0, bpms, offset)
+    return beat_to_time(noterow / 48.0, bpms, offset, stops, delays, warps)
 
 
 # parse_notes_block notetype codes. Values match Etterna's TapNoteType enum

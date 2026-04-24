@@ -266,16 +266,17 @@ class EtternaAdapter(GameAdapter):
         stepstype = chart.get('stepstype', '')
         if stepstype and 'keycount' not in replay:
             replay['keycount'] = stepstype_keycount(stepstype)
-        # Stash raw SCROLLS/SPEEDS/BPMs for `build_sv_engine` — beat-space
-        # positioning (required when BPM changes span SCROLLS segments) is
-        # done there, not collapsed to time-space here.
-        scrolls = chart.get('scrolls') or []
-        speeds = chart.get('speeds') or []
-        if scrolls or speeds:
-            replay['_etterna_scrolls'] = scrolls
-            replay['_etterna_speeds'] = speeds
-            replay['_etterna_bpms'] = chart.get('bpms') or data.get('bpms') or []
-            replay['_etterna_offset'] = chart.get('offset') or data.get('offset') or 0.0
+        # Stash raw timing data for beat-space positioning and STOPS/DELAYS/
+        # WARPS-aware row->time conversion in prepare_replay_times. SCROLLS
+        # and SPEEDS are consumed by build_sv_engine; STOPS/DELAYS/WARPS are
+        # consumed by row_to_time for the replay's own note timing.
+        replay['_etterna_scrolls'] = chart.get('scrolls') or []
+        replay['_etterna_speeds'] = chart.get('speeds') or []
+        replay['_etterna_stops'] = chart.get('stops') or []
+        replay['_etterna_delays'] = chart.get('delays') or []
+        replay['_etterna_warps'] = chart.get('warps') or []
+        replay['_etterna_bpms'] = chart.get('bpms') or data.get('bpms') or []
+        replay['_etterna_offset'] = chart.get('offset') or data.get('offset') or 0.0
         if not notedata:
             return
         if 'chart_mines' in replay:
@@ -323,9 +324,13 @@ class EtternaAdapter(GameAdapter):
 
         bpms = chart.get('bpms') or data.get('bpms') or []
         offset = chart.get('offset') or data.get('offset') or 0.0
+        stops = chart.get('stops') or []
+        delays = chart.get('delays') or []
+        warps = chart.get('warps') or []
 
         if chart_max_row - replay_max_row > 192:
-            replay['death_time'] = row_to_time(replay_max_row, bpms, offset)
+            replay['death_time'] = row_to_time(replay_max_row, bpms, offset,
+                                                stops, delays, warps)
 
         new_rows = np.array([r for r, _c, _h in missing], dtype=np.int64)
         new_cols = np.array([c for _r, c, _h in missing], dtype=np.int32)
@@ -364,6 +369,9 @@ class EtternaAdapter(GameAdapter):
             scrolls, speeds,
             replay.get('_etterna_bpms') or [],
             replay.get('_etterna_offset') or 0.0,
+            stops=replay.get('_etterna_stops') or [],
+            delays=replay.get('_etterna_delays') or [],
+            warps=replay.get('_etterna_warps') or [],
         )
 
     def judgement_windows(self, replay, judge=None, **_):
@@ -390,14 +398,24 @@ class EtternaAdapter(GameAdapter):
         import numpy as np
         from analysis.games.etterna.sm_chart import row_to_time
 
+        # Chart-resolved STOPS/DELAYS/WARPS — these affect real time via
+        # pauses and beat-space teleports, so row->time has to use them for
+        # anything better than constant-BPM charts. Absent when the chart
+        # didn't resolve; in that case row_to_time falls back to BPM-only.
+        stops = replay.get('_etterna_stops') or []
+        delays = replay.get('_etterna_delays') or []
+        warps = replay.get('_etterna_warps') or []
+
         def _r2t(row):
             if bpms is not None:
-                return row_to_time(int(row), bpms, sm_offset)
+                return row_to_time(int(row), bpms, sm_offset,
+                                    stops, delays, warps)
             # 120bpm, 48 rows/beat => 96 rows/sec
             return float(row) / 96.0
 
         if bpms is not None:
-            times = np.array([row_to_time(int(r), bpms, sm_offset)
+            times = np.array([row_to_time(int(r), bpms, sm_offset,
+                                           stops, delays, warps)
                               for r in replay['noterows']])
         else:
             times = replay['noterows'].astype(np.float64) / 96.0
