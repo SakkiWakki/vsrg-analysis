@@ -40,16 +40,23 @@ class LibraryContextMenu:
         def add(label, callback):
             action = menu.addAction(label)
             handlers[action] = callback
-            return action
 
-        add('▶ Watch replay', lambda: self.tab.openers.open_player_for(entry))
-        add('Analyze (open visualization)', lambda: self.tab.openers.open_viz(entry))
+        add('▶ Watch replay', lambda: self.tab.openers.run('play', entry))
+        add('Analyze (open visualization)',
+            lambda: self.tab.openers.run('visualize', entry))
+
         menu.addSeparator()
-        add('HTML report', self.tab.openers.html_selected)
+
+        add('HTML report',
+            lambda: self.tab.openers.run('html_report', entry))
+    
         menu.addSeparator()
         add('Copy replay path', lambda: self._copy_text(entry.get('replay_path')))
-        if entry.get('chart_path'): # TODO: Always have a chart path
+        if entry.get('chart_path'):
             add('Copy chart path', lambda: self._copy_text(entry.get('chart_path')))
+        add('Open containing folder', lambda: self._open_containing_folder(entry))
+
+        return menu, handlers
 
     def _open_containing_folder(self, entry):
         target = entry.get('chart_path') or entry.get('replay_path', '')

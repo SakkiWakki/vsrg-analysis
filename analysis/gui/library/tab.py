@@ -79,7 +79,7 @@ class LibraryTab(QWidget):
         self.tree.setRootIsDecorated(True)
         self.tree.setAlternatingRowColors(False)
         self.tree.itemDoubleClicked.connect(
-            lambda *_: self.openers.open_viz(self.selected_entry())
+            lambda *_: self._run_selected('visualize')
         )
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self.context_menu.open)
