@@ -519,6 +519,10 @@ class Player:
         else:
             m.miss_hold_max_sv_dur = 0.0
 
+        m.mine_sv = self._times_to_sv(m.mine_times)
+        m.lift_sv = self._times_to_sv(m.lift_times)
+        m.fake_sv = self._times_to_sv(m.fake_times)
+
     def _cumulative_sv_at(self, t):
         """Integral of SV(t') dt' from the first timing point to t.
         For t before the first section, extrapolate with the first SV value."""

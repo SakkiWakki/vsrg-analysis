@@ -564,17 +564,19 @@ class QtPlayerRenderer:
             d['fake'](painter, p.skin, ctx.lane_x(col), y,
                       ctx.lane_w, ctx.note_h, p.palette[col])
 
-        self._sweep_chart_notes(ctx, p._mine_times, p._mine_cols, draw_mine)
-        self._sweep_chart_notes(ctx, p._lift_times, p._lift_cols, draw_lift)
-        self._sweep_chart_notes(ctx, p._fake_times, p._fake_cols, draw_fake)
+        m = p.notes
+        self._sweep_chart_notes(ctx, p._mine_times, p._mine_cols, m.mine_sv, draw_mine)
+        self._sweep_chart_notes(ctx, p._lift_times, p._lift_cols, m.lift_sv, draw_lift)
+        self._sweep_chart_notes(ctx, p._fake_times, p._fake_cols, m.fake_sv, draw_fake)
 
     @staticmethod
-    def _sweep_chart_notes(ctx, times, cols, draw_fn):
+    def _sweep_chart_notes(ctx, times, cols, sv_times, draw_fn):
         if not times.size:
             return
         p = ctx.player
-        lo = bisect.bisect_left(times, ctx.target_lo)
-        hi = bisect.bisect_right(times, ctx.target_hi)
+        search = sv_times if (ctx.use_sv_space and sv_times.size) else times
+        lo = bisect.bisect_left(search, ctx.target_lo)
+        hi = bisect.bisect_right(search, ctx.target_hi)
         for k in range(lo, hi):
             col = int(cols[k])
             if col >= p.keycount:

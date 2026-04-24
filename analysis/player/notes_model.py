@@ -70,14 +70,20 @@ class NotesModel:
         default_factory=lambda: np.empty(0, dtype=np.float64))
     mine_cols: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.int32))
+    mine_sv: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float64))
     lift_times: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.float64))
     lift_cols: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.int32))
+    lift_sv: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float64))
     fake_times: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.float64))
     fake_cols: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.int32))
+    fake_sv: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float64))
     # (head_row, col) for rolls — same key shape as hold_tails. The
     # renderer uses this to tint LN tails green for rolls.
     roll_head_keys: set = field(default_factory=set)

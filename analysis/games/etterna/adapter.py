@@ -256,13 +256,22 @@ class EtternaAdapter(GameAdapter):
           ``keycount``     — track count from the chart's stepstype."""
         from analysis.games.etterna.sm_chart import (parse_notes_block,
                                                       stepstype_keycount,
+                                                      sv_sections_from_chart,
+                                                      row_to_time,
                                                       NT_MINE, NT_LIFT,
                                                       NT_FAKE, NT_ROLL_HEAD)
+        data = (found or {}).get('data') or {}
         chart = (found or {}).get('chart') or {}
         notedata = chart.get('notedata')
         stepstype = chart.get('stepstype', '')
         if stepstype and 'keycount' not in replay:
             replay['keycount'] = stepstype_keycount(stepstype)
+        if 'sv_sections' not in replay:
+            bpms = chart.get('bpms') or data.get('bpms') or []
+            offset = chart.get('offset') or data.get('offset') or 0.0
+            sv = sv_sections_from_chart(chart, bpms, offset)
+            if sv:
+                replay['sv_sections'] = sv
         if not notedata:
             return
         if 'chart_mines' in replay:
@@ -272,6 +281,7 @@ class EtternaAdapter(GameAdapter):
         except Exception:
             return
         mines, lifts, fakes, rolls = [], [], [], set()
+        chart_max_row = 0
         for (row, col, nt) in notes:
             if nt == NT_MINE:
                 mines.append((row, col))
@@ -281,10 +291,18 @@ class EtternaAdapter(GameAdapter):
                 fakes.append((row, col))
             elif nt == NT_ROLL_HEAD:
                 rolls.add((row, col))
+            if row > chart_max_row:
+                chart_max_row = row
         replay['chart_mines'] = mines
         replay['chart_lifts'] = lifts
         replay['chart_fakes'] = fakes
         replay['roll_heads'] = rolls
+
+        replay_max_row = int(replay['noterows'].max()) if len(replay['noterows']) else 0
+        if chart_max_row - replay_max_row > 192:
+            bpms = chart.get('bpms') or data.get('bpms') or []
+            offset = chart.get('offset') or data.get('offset') or 0.0
+            replay['death_time'] = row_to_time(replay_max_row, bpms, offset)
 
     def judgement_windows(self, replay, judge=None, **_):
         from analysis.games.etterna.judgment import windows_for

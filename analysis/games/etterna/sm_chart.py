@@ -43,6 +43,9 @@ def parse_sm(path):
     if not bpms:
         bpms = [(0.0, 120.0)]
 
+    scrolls = _parse_scrolls(tags.get('SCROLLS', ''))
+    speeds = _parse_speeds(tags.get('SPEEDS', ''))
+
     charts = []
     # SM block: #NOTES: type: desc: diff: meter: radar: notedata;
     for m in re.finditer(r'#NOTES:(.*?);', text, flags=re.DOTALL):
@@ -57,6 +60,8 @@ def parse_sm(path):
             'difficulty': parts[2].strip(),
             'meter': parts[3].strip(),
             'notedata': notedata,
+            'scrolls': scrolls,
+            'speeds': speeds,
         })
     return {
         'offset': offset,
@@ -86,12 +91,16 @@ def parse_ssc(path):
     h = parse_tags(header)
     offset = float(h.get('OFFSET', '0') or 0)
     bpms_h = _parse_bpms(h.get('BPMS', ''))
+    scrolls_h = _parse_scrolls(h.get('SCROLLS', ''))
+    speeds_h = _parse_speeds(h.get('SPEEDS', ''))
 
     charts = []
     for sec in sections[1:]:
         t = parse_tags(sec)
         notes = t.get('NOTES', '')
         bpms = _parse_bpms(t.get('BPMS', '')) or bpms_h
+        scrolls = _parse_scrolls(t.get('SCROLLS', '')) or scrolls_h
+        speeds = _parse_speeds(t.get('SPEEDS', '')) or speeds_h
         charts.append({
             'stepstype': t.get('STEPSTYPE', ''),
             'description': t.get('DESCRIPTION', ''),
@@ -102,6 +111,8 @@ def parse_ssc(path):
             'bpms': bpms,
             'offset': float(t.get('OFFSET', offset) or offset),
             'notedata': notes,
+            'scrolls': scrolls,
+            'speeds': speeds,
         })
     return {
         'offset': offset,
@@ -126,6 +137,70 @@ def _parse_bpms(s):
         except ValueError:
             pass
     return out
+
+
+def _parse_scrolls(s):
+    """Parse #SCROLLS: beat=factor, ... into [(beat, factor)]."""
+    return _parse_bpms(s)
+
+
+def _parse_speeds(s):
+    """Parse #SPEEDS: beat=ratio=duration=type, ... into [(beat, ratio)].
+    Duration and type (transition fields) are ignored; we treat each change
+    as instantaneous since we position notes, not animate the field."""
+    out = []
+    for entry in (s or '').split(','):
+        entry = entry.strip()
+        if not entry:
+            continue
+        parts = entry.split('=')
+        if len(parts) < 2:
+            continue
+        try:
+            out.append((float(parts[0]), float(parts[1])))
+        except ValueError:
+            pass
+    return out
+
+
+def sv_sections_from_chart(chart, bpms, offset):
+    """Build sv_sections list for the Player from a parsed chart dict.
+
+    Combines #SCROLLS (per-beat scroll factor) and #SPEEDS (per-beat speed
+    multiplier) into a single [(time_sec, combined_multiplier)] list sorted
+    by time. Either tag can be absent; the other still contributes.
+
+    The combined multiplier at any beat is scrolls(beat) * speeds(beat), where
+    both step-functions are piecewise-constant and sampled at every change point
+    from either source.
+    """
+    scrolls = chart.get('scrolls') or []
+    speeds = chart.get('speeds') or []
+    if not scrolls and not speeds:
+        return []
+
+    # Collect all change-point beats from both sources
+    beats = sorted({b for b, _ in scrolls} | {b for b, _ in speeds})
+
+    def last_value_at(pairs, beat):
+        val = 1.0
+        for b, v in pairs:
+            if b <= beat:
+                val = v
+            else:
+                break
+        return val
+
+    # pairs are already sorted (parsed in order from the file)
+    sections = []
+    for beat in beats:
+        t = beat_to_time(beat, bpms, offset)
+        s_val = last_value_at(scrolls, beat)
+        sp_val = last_value_at(speeds, beat)
+        sections.append((t, s_val * sp_val))
+
+    sections.sort(key=lambda x: x[0])
+    return sections
 
 
 def beat_to_time(beat, bpms, offset):
