@@ -220,6 +220,8 @@ PLAYER_SETTINGS: dict[str, PlayerSetting] = {
         PlayerSetting('player/skin', False, 'bar', _validate_skin),
         PlayerSetting('player/press_hide', False, False, _validate_bool(False)),
         PlayerSetting('player/pitch_correct', False, True, _validate_bool(True)),
+        PlayerSetting('player/render_uncapped', False, True,
+                  _validate_bool(True)),
         PlayerSetting('player/scroll_mode', True, None, _validate_scroll_mode),
     )
 }

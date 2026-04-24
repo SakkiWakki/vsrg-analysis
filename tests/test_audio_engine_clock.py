@@ -67,6 +67,27 @@ def test_current_chart_time_scales_with_play_rate():
     assert engine.current_chart_time() == pytest.approx(30.120, abs=1e-9)
 
 
+def test_current_chart_time_allows_tiny_backstep_jitter():
+    """Small timing jitter should not freeze the playhead and then jump.
+
+    A tiny regression from the hardware clock is accepted to keep motion
+    continuous, while larger regressions are still clamped elsewhere.
+    """
+    engine, stream = _engine_with_stream(50.000)
+    engine._hw_pos = 10.000
+    engine._hw_wall = 50.000
+    engine._dac_anchor_valid = True
+
+    stream.time = 50.010
+    forward = engine.current_chart_time()
+    assert forward == pytest.approx(10.010, abs=1e-9)
+
+    # 2ms backward jitter should be accepted (tolerance is 3ms).
+    stream.time = 50.008
+    back = engine.current_chart_time()
+    assert back == pytest.approx(10.008, abs=1e-9)
+
+
 def test_first_callback_does_not_backstep_before_audible_time_catches_up():
     """Before the first callback-backed anchor is valid, the engine returns
     the explicit transport time. Once the callback lands, the DAC-timed

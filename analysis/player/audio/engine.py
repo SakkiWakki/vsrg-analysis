@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 
 import numpy as np
 
@@ -43,6 +44,10 @@ except Exception:
 
 class AudioEngine:
     RESYNC_THRESHOLD_S = 0.15
+    # Allow tiny negative corrections from the hardware clock to avoid
+    # visible freeze-then-jump motion when callback/stream timing jitters.
+    # Larger negative jumps are still clamped so seeks/resume never backstep.
+    _SMALL_BACKSTEP_TOLERANCE_S = 0.003
 
     def __init__(self, audio_path: str | None, volume: float = 0.5,
                  pitch_correct: bool = True):
@@ -308,8 +313,17 @@ class AudioEngine:
         if now is None:
             return self._chart_time
         t = self._hw_pos + (now - self._hw_wall) * self._rate
-        if t > self._chart_time:
-            self._chart_time = float(t)
+        t = float(t)
+        if t >= self._chart_time:
+            self._chart_time = t
+            return self._chart_time
+
+        # Tiny regressions happen around callback-anchor handoff and host-time
+        # quantisation. Accepting a very small backstep avoids plateaus that
+        # render as jitter. Large backsteps remain clamped away.
+        backstep = self._chart_time - t
+        if backstep <= self._SMALL_BACKSTEP_TOLERANCE_S:
+            self._chart_time = t
         return self._chart_time
 
     def _safe_stream_time_locked(self) -> float | None:

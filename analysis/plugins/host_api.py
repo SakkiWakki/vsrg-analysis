@@ -16,11 +16,26 @@ requires user consent; the host shows a dialog on first access and
 persists the decision (always/never) per plugin+URL. Call only from a
 plugin's own thread -- this call blocks until the user responds or the
 request completes.
+
+Timing: sandboxed plugins can call :func:`monotonic_seconds` for
+frame-to-frame timing diagnostics without importing blocked stdlib time
+modules directly.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable
+import time
+
+
+
+def monotonic_seconds() -> float:
+    """Monotonic wall-clock seconds from the host process.
+
+    Sandboxed plugins should use this helper for elapsed-time measurements
+    instead of importing ``time`` directly.
+    """
+    return float(time.perf_counter())
 
 
 # ── Network permission dialog hook ────────────────────────────────────────

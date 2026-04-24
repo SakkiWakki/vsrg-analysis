@@ -1,4 +1,6 @@
 """Embedded replay player tab: native Qt canvas + transport controls."""
+import os
+
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QLineEdit)
@@ -93,7 +95,7 @@ class PlayerTab(QWidget):
         self.scroll_edit: QLineEdit | None = None
 
         self.timer = QTimer(self)
-        self.timer.setInterval(1000 // 120)
+        self._configure_render_timer(prefs)
         self.timer.timeout.connect(self._tick)
         self.timer.start()
 
@@ -122,6 +124,51 @@ class PlayerTab(QWidget):
         self.input_router = InputRouter()
         self.input_router.add(SidebarRegion(self.player))
         self.input_router.add(LanesRegion(self.player, self._seek))
+
+    @staticmethod
+    def _env_flag(name: str) -> bool | None:
+        raw = os.environ.get(name)
+        if raw is None:
+            return None
+        v = raw.strip().lower()
+        if v in ('1', 'true', 'yes', 'on'):
+            return True
+        if v in ('0', 'false', 'no', 'off'):
+            return False
+        return None
+
+    @staticmethod
+    def _env_int(name: str, default: int) -> int:
+        raw = os.environ.get(name)
+        if raw is None:
+            return int(default)
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            return int(default)
+        return max(1, n)
+
+    def _configure_render_timer(self, prefs: dict) -> None:
+        # Scheduler policy:
+        #   - uncapped: interval=0 (run every event-loop cycle)
+        #   - capped: fixed target Hz (default 120)
+        # Env vars override prefs for quick perf experiments:
+        #   VSRG_RENDER_UNCAPPED=0|1
+        #   VSRG_RENDER_HZ=<int>
+        pref_uncapped = bool(prefs.get('render_uncapped', False))
+        env_uncapped = self._env_flag('VSRG_RENDER_UNCAPPED')
+        uncapped = pref_uncapped if env_uncapped is None else env_uncapped
+        if uncapped:
+            self.timer.setInterval(0)
+        else:
+            hz = self._env_int('VSRG_RENDER_HZ', 120)
+            self.timer.setInterval(max(1, int(round(1000.0 / float(hz)))))
+
+        # PreciseTimer reduces scheduler jitter when the platform supports it.
+        try:
+            self.timer.setTimerType(Qt.TimerType.PreciseTimer)
+        except Exception:
+            pass
 
     def _sync_audio(self, *, force: bool = False):
         # Mirror audio-engine status onto the player so the painted HUD
