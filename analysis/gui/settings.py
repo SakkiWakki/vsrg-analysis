@@ -51,11 +51,6 @@ OSU_ROOT_KEY = 'paths/osu_root'
 OSU_PROFILE_KEY = 'paths/osu_profile'
 FIRST_RUN_KEY = 'paths/first_run_done'
 
-# Legacy keys — read once, migrated, then removed.
-_LEGACY_ETTERNA_KEY = 'paths/etterna_save'
-_LEGACY_OSU_KEY = 'paths/osu_songs'
-
-
 def _str_or_none(v):
     if v is None:
         return None
@@ -72,21 +67,7 @@ def _fold_to_install_root(path, subdir_names):
         return str(p.parent)
     return str(p)
 
-
-def _migrate_legacy(old_key, new_key, fold_names):
-    """One-shot read of the legacy key. If present and new key is empty, fold
-    to install root and write to new key. Legacy key is left in place — we
-    don't delete it so a downgrade can still read it."""
-    s = get_settings()
-    if s.value(new_key) is not None:
-        return
-    legacy = _str_or_none(s.value(old_key))
-    if legacy:
-        s.setValue(new_key, _fold_to_install_root(legacy, fold_names))
-
-
 def get_etterna_root_override():
-    _migrate_legacy(_LEGACY_ETTERNA_KEY, ETTERNA_ROOT_KEY, ['Save'])
     return _str_or_none(get_settings().value(ETTERNA_ROOT_KEY))
 
 
@@ -100,7 +81,6 @@ def set_etterna_root_override(path):
 
 
 def get_osu_root_override():
-    _migrate_legacy(_LEGACY_OSU_KEY, OSU_ROOT_KEY, ['Songs'])
     return _str_or_none(get_settings().value(OSU_ROOT_KEY))
 
 

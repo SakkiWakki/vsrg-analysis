@@ -79,24 +79,6 @@ def test_osu_profile_roundtrip():
     S.set_osu_profile_override(None)
     assert S.get_osu_profile_override() is None
 
-
-def test_legacy_etterna_save_migrates(tmp_path):
-    # Simulate an old install that stored the Save dir directly.
-    install = _make_etterna_install(tmp_path)
-    S.get_settings().setValue('paths/etterna_save', str(install / 'Save'))
-    S.get_settings().remove('paths/etterna_root')
-    got = S.get_etterna_root_override()
-    assert got == str(install)
-
-
-def test_legacy_osu_songs_migrates(tmp_path):
-    install = _make_osu_install(tmp_path)
-    S.get_settings().setValue('paths/osu_songs', str(install / 'Songs'))
-    S.get_settings().remove('paths/osu_root')
-    got = S.get_osu_root_override()
-    assert got == str(install)
-
-
 def test_back_compat_shims_work(tmp_path):
     # Old API names still function.
     S.set_etterna_save_override(str(tmp_path))

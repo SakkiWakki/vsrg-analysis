@@ -1,57 +1,153 @@
 """Embedded replay player tab: native Qt canvas + transport controls."""
+from __future__ import annotations
+
 import os
+from dataclasses import dataclass
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-                               QLabel, QLineEdit)
+from PySide6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QPushButton,
+    QLabel,
+    QLineEdit,
+)
 
 from analysis.gui.player_canvas import PlayerCanvas
-from analysis.gui.settings import (get_settings, load_player_settings,
-                                   save_player_setting)
+from analysis.gui.settings import load_player_settings, save_player_setting
 from analysis.gui.widgets import JumpSlider
+
+
+@dataclass
+class AudioState:
+    ready: bool = False
+    path: str | None = None
+    muted: bool = False
+    last_sync_state: tuple[float, float, bool] | None = None
+
+
+@dataclass
+class ScrubState:
+    active: bool = False
+    suppress_slider: bool = False
+    resume_after_release: bool = False
 
 
 class PlayerTab(QWidget):
     """Embedded replay player with a native QPainter chart canvas."""
-    def __init__(self, replay, game='etterna', od=None, judge=None, bpms=None,
-                 sm_offset=0.0, audio_path=None, scroll_ms=400.0,
-                 scroll_mode=None, play_rate=1.0, cmod_bpm=600.0,
-                 osu_speed=20, xml_judgments=None, keycount=None):
+
+    SLIDER_MAX = 1000
+
+    def __init__(
+        self,
+        replay,
+        game='etterna',
+        od=None,
+        judge=None,
+        bpms=None,
+        sm_offset=0.0,
+        audio_path=None,
+        scroll_ms=400.0,
+        scroll_mode=None,
+        play_rate=1.0,
+        cmod_bpm=600.0,
+        osu_speed=20,
+        xml_judgments=None,
+        keycount=None,
+    ):
         super().__init__()
+
+        self.player = self._create_player(
+            replay,
+            game=game,
+            od=od,
+            judge=judge,
+            bpms=bpms,
+            sm_offset=sm_offset,
+            audio_path=audio_path,
+            scroll_ms=scroll_ms,
+            scroll_mode=scroll_mode,
+            cmod_bpm=cmod_bpm,
+            osu_speed=osu_speed,
+            xml_judgments=xml_judgments,
+            keycount=keycount,
+        )
+
+        self._set_initial_play_rate(play_rate)
+
+        self.audio_state = AudioState(path=audio_path)
+        self.scrub = ScrubState()
+        self.scroll_edit: QLineEdit | None = None
+
+        self._build_ui()
+        self._build_timer()
+        self._build_audio(audio_path)
+        self._connect_player_events()
+        self._build_input_router()
+
+        self._start_playing()
+
+    # ------------------------------------------------------------------
+    # Construction
+    # ------------------------------------------------------------------
+
+    def _create_player(
+        self,
+        replay,
+        *,
+        game,
+        od,
+        judge,
+        bpms,
+        sm_offset,
+        audio_path,
+        scroll_ms,
+        scroll_mode,
+        cmod_bpm,
+        osu_speed,
+        xml_judgments,
+        keycount,
+    ):
         from analysis.player.player import Player
         from analysis.core import game as game_mod
+
         adapter = game_mod.get(game)
         player_kwargs = adapter.player_kwargs(replay, od=od, judge=judge)
         prefs = load_player_settings(game)
-        # Explicit scroll_mode from the caller (library tab) beats the saved
-        # pref — it's passed in only when the library tab already resolved it.
-        effective_mode = scroll_mode if scroll_mode is not None else prefs['scroll_mode']
-        self.player = Player(replay, game=game, bpms=bpms,
-                             sm_offset=sm_offset, audio_path=None,
-                             window_w=900, window_h=800,
-                             scroll_ms=scroll_ms, scroll_mode=effective_mode,
-                             cmod_bpm=cmod_bpm, osu_speed=osu_speed,
-                             skin=prefs['skin'],
-                             press_hide=prefs['press_hide'],
-                             xml_judgments=xml_judgments,
-                             keycount=keycount,
-                             **player_kwargs)
-        # Replay's original playback rate (Etterna "Rate" from XML, osu!
-        # "ModRate"). The chart + offsets are in chart-time, but the audio
-        # file is unrated — playing at 1.0 leaves the music slower/faster
-        # than the score was actually played. Set the rate up-front so the
-        # audio engine resamples on first sync.
-        try:
-            pr = float(play_rate or 1.0)
-        except (TypeError, ValueError):
-            pr = 1.0
-        self.player.play_rate = max(0.1, min(4.0, pr))
-        self._audio_ready = False
-        self._audio_path = audio_path
-        self._music_started_at = None
-        self._muted = False
-        self._last_audio_state = None
 
+        effective_mode = (
+            scroll_mode if scroll_mode is not None else prefs['scroll_mode']
+        )
+
+        return Player(
+            replay,
+            game=game,
+            bpms=bpms,
+            sm_offset=sm_offset,
+            audio_path=None,
+            window_w=900,
+            window_h=800,
+            scroll_ms=scroll_ms,
+            scroll_mode=effective_mode,
+            cmod_bpm=cmod_bpm,
+            osu_speed=osu_speed,
+            skin=prefs['skin'],
+            press_hide=prefs['press_hide'],
+            xml_judgments=xml_judgments,
+            keycount=keycount,
+            **player_kwargs,
+        )
+
+    def _set_initial_play_rate(self, play_rate) -> None:
+        try:
+            rate = float(play_rate or 1.0)
+        except (TypeError, ValueError):
+            rate = 1.0
+
+        self.player.play_rate = max(0.1, min(4.0, rate))
+
+    def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -59,7 +155,11 @@ class PlayerTab(QWidget):
         self.view.installEventFilter(self)
         layout.addWidget(self.view, 1)
 
+        layout.addLayout(self._build_transport_bar())
+
+    def _build_transport_bar(self) -> QHBoxLayout:
         bar = QHBoxLayout()
+
         self.play_btn = QPushButton('▶')
         self.play_btn.setMaximumWidth(36)
         self.play_btn.setFocusPolicy(Qt.NoFocus)
@@ -72,11 +172,8 @@ class PlayerTab(QWidget):
 
         self.playbar = JumpSlider(Qt.Horizontal)
         self.playbar.setFocusPolicy(Qt.NoFocus)
-        self.playbar.setRange(0, 1000)
+        self.playbar.setRange(0, self.SLIDER_MAX)
         self.playbar.setValue(0)
-        self._scrubbing = False
-        self._suppress_playbar = False
-        self._resume_after_scrub = False
         self.playbar.valueChanged.connect(self._on_playbar_changed)
         self.playbar.sliderPressed.connect(self._on_playbar_pressed)
         self.playbar.sliderReleased.connect(self._on_playbar_released)
@@ -85,55 +182,68 @@ class PlayerTab(QWidget):
         self.dur_lbl = QLabel('0:00')
         self.dur_lbl.setMinimumWidth(44)
         bar.addWidget(self.dur_lbl)
-        layout.addLayout(bar)
 
-        # Toggles (SV / Skin / Display hits / Pitch-correct) and the scroll
-        # value editor all live in the sidebar HUD now — clicking the painted
-        # rects dispatches through `_on_hud_action`. A transient QLineEdit
-        # overlay (created on-demand) handles click-to-edit for the scroll
-        # readout.
-        self.scroll_edit: QLineEdit | None = None
+        return bar
+
+    def _build_timer(self) -> None:
+        prefs = load_player_settings(self.player.game)
 
         self.timer = QTimer(self)
         self._configure_render_timer(prefs)
         self.timer.timeout.connect(self._tick)
         self.timer.start()
 
+    def _build_audio(self, audio_path) -> None:
         from analysis.player.audio import AudioEngine
-        self._audio = AudioEngine(audio_path,
-                                  pitch_correct=prefs['pitch_correct'])
-        self._audio_ready = self._audio.ready
-        if self._audio_ready:
+
+        prefs = load_player_settings(self.player.game)
+        self._audio = AudioEngine(
+            audio_path,
+            pitch_correct=prefs['pitch_correct'],
+        )
+
+        self.audio_state.ready = bool(self._audio.ready)
+
+        if self.audio_state.ready:
             self._audio.prewarm_rates([0.8, 0.9, 1.1, 1.2, 1.3, 1.5])
 
-        if self._audio_ready and self._audio._base_duration:
-            self.player.t_max = max(self.player.t_max,
-                                    float(self._audio._base_duration))
+        if self.audio_state.ready and self._audio._base_duration:
+            self.player.t_max = max(
+                self.player.t_max,
+                float(self._audio._base_duration),
+            )
             self.player.attach_audio_clock(self._audio.current_chart_time)
 
-        self.player.paused = False
-        self.play_btn.setText('⏸')
-        self._sync_audio()
+    def _connect_player_events(self) -> None:
         self.player.events.on('scroll_changed', self._on_scroll_change)
         self.player.events.on('hud_action', self._on_hud_action)
 
-        # Positional-input router: each region owns its own wheel/mouse
-        # handling. Registered first-to-last; the first region whose
-        # ``contains`` returns True gets the event.
+    def _build_input_router(self) -> None:
         from analysis.gui.region import InputRouter, SidebarRegion, LanesRegion
+
         self.input_router = InputRouter()
         self.input_router.add(SidebarRegion(self.player))
         self.input_router.add(LanesRegion(self.player, self._seek))
+
+    def _start_playing(self) -> None:
+        self.player.paused = False
+        self.play_btn.setText('⏸')
+        self._sync_audio(force=True)
+
+    # ------------------------------------------------------------------
+    # Render timer
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _env_flag(name: str) -> bool | None:
         raw = os.environ.get(name)
         if raw is None:
             return None
-        v = raw.strip().lower()
-        if v in ('1', 'true', 'yes', 'on'):
+
+        value = raw.strip().lower()
+        if value in ('1', 'true', 'yes', 'on'):
             return True
-        if v in ('0', 'false', 'no', 'off'):
+        if value in ('0', 'false', 'no', 'off'):
             return False
         return None
 
@@ -142,332 +252,467 @@ class PlayerTab(QWidget):
         raw = os.environ.get(name)
         if raw is None:
             return int(default)
+
         try:
-            n = int(raw)
+            value = int(raw)
         except (TypeError, ValueError):
             return int(default)
-        return max(1, n)
+
+        return max(1, value)
 
     def _configure_render_timer(self, prefs: dict) -> None:
-        # Scheduler policy:
-        #   - uncapped: interval=0 (run every event-loop cycle)
-        #   - capped: fixed target Hz (default 120)
-        # Env vars override prefs for quick perf experiments:
-        #   VSRG_RENDER_UNCAPPED=0|1
-        #   VSRG_RENDER_HZ=<int>
         pref_uncapped = bool(prefs.get('render_uncapped', False))
         env_uncapped = self._env_flag('VSRG_RENDER_UNCAPPED')
         uncapped = pref_uncapped if env_uncapped is None else env_uncapped
+
         if uncapped:
             self.timer.setInterval(0)
         else:
             hz = self._env_int('VSRG_RENDER_HZ', 120)
             self.timer.setInterval(max(1, int(round(1000.0 / float(hz)))))
 
-        # PreciseTimer reduces scheduler jitter when the platform supports it.
         try:
             self.timer.setTimerType(Qt.TimerType.PreciseTimer)
         except Exception:
             pass
 
-    def _sync_audio(self, *, force: bool = False):
-        # Mirror audio-engine status onto the player so the painted HUD
-        # (which has no handle to the audio engine) can render a correct
-        # Pitch-correct label and distinguish "unavailable" from "off".
-        self.player._ui_status = {
-            'audio_ready': bool(self._audio_ready),
-            'pitch_correct': bool(
-                getattr(self._audio, '_pitch_correct', True)),
-        }
-        if self._audio_ready:
-            state = (
-                float(self.player.t_intended),
-                float(self.player.play_rate),
-                bool(not self.player.paused),
-            )
-            if force or state != self._last_audio_state:
-                # Send the CLOCK's intended t, not the PV-observed t. Otherwise
-                # a seek (slider drag, step button) writes the new t into the
-                # clock's wall anchor, but `player.t` reads back the audio
-                # clock — so `set_state` would receive stale position data.
-                self._audio.set_state(*state)
-                self._last_audio_state = state
+    # ------------------------------------------------------------------
+    # Audio / transport
+    # ------------------------------------------------------------------
 
-    def _toggle(self):
-        # Unpausing after playback has finished loops back to the start.
-        # "Finished" means either the audio source signalled end-of-file OR
-        # the chart clock sits at t_max (no-audio / charts longer than the
-        # mp3 both hit this second case).
-        resuming = self.player.paused
-        audio_done = self._audio_ready and getattr(
-            self._audio, '_ended', False)
-        clock_done = self.player.t >= self.player.t_max - 1e-3
-        seeked = False
-        if resuming and (audio_done or clock_done):
-            self.player.restart()
-            seeked = True
+    def _audio_is_ready(self) -> bool:
+        return bool(self.audio_state.ready)
+
+    def _audio_playing_state(self) -> tuple[float, float, bool]:
+        return (
+            float(self.player.t_intended),
+            float(self.player.play_rate),
+            bool(not self.player.paused),
+        )
+
+    def _sync_audio(self, *, force: bool = False) -> None:
+        self.player._ui_status = {
+            'audio_ready': self._audio_is_ready(),
+            'pitch_correct': bool(getattr(self._audio, '_pitch_correct', True)),
+        }
+
+        if not self._audio_is_ready():
+            return
+
+        state = self._audio_playing_state()
+        if force or state != self.audio_state.last_sync_state:
+            self._audio.set_state(*state)
+            self.audio_state.last_sync_state = state
+
+    def _toggle(self) -> None:
+        seeked_to_start = self._restart_if_resuming_after_end()
+
         self.player.toggle_pause()
         self.play_btn.setText('▶' if self.player.paused else '⏸')
-        # On unpause after a restart, the PV needs to loop
-        if self._audio_ready and seeked:
+
+        if self._audio_is_ready() and seeked_to_start:
             self._audio.seek(self.player.t_intended)
+
         self._sync_audio(force=True)
 
-    def _seek(self, ds):
+    def _restart_if_resuming_after_end(self) -> bool:
+        if not self.player.paused:
+            return False
+
+        audio_done = self._audio_is_ready() and getattr(
+            self._audio, '_ended', False
+        )
+        clock_done = self.player.t >= self.player.t_max - 1e-3
+
+        if audio_done or clock_done:
+            self.player.restart()
+            return True
+
+        return False
+
+    def _seek(self, ds) -> None:
         self.player.seek_rel(ds)
-        if self._audio_ready:
+
+        if self._audio_is_ready():
             self._audio.seek(self.player.t_intended)
+
         self._sync_audio(force=True)
 
-    def _nudge_rate(self, d):
-        self.player.nudge_rate(d)
+    def _nudge_rate(self, delta) -> None:
+        self.player.nudge_rate(delta)
         self._sync_audio(force=True)
 
-    def _sync_settings_toggles(self):
-        """Pull per-tab-shared toggles from QSettings. Called each tick so
-        that toggling in another PlayerTab propagates here instead of the
-        two tabs showing contradictory states."""
+    def _toggle_mute(self) -> None:
+        if not self._audio_is_ready():
+            return
+
+        self.audio_state.muted = not self.audio_state.muted
+        self._audio.set_volume(0.0 if self.audio_state.muted else 0.5)
+
+    # ------------------------------------------------------------------
+    # Settings / HUD actions
+    # ------------------------------------------------------------------
+
+    def _sync_settings_toggles(self) -> None:
         prefs = load_player_settings(self.player.game)
+
         if prefs['press_hide'] != self.player.press_hide:
             self.player.set_press_hide(prefs['press_hide'])
+
         if prefs['skin'] != self.player.skin:
             self.player.set_skin(prefs['skin'])
 
-    def _toggle_mute(self):
-        if not self._audio_ready:
-            return
-        self._muted = not self._muted
-        self._audio.set_volume(0.0 if self._muted else 0.5)
-
-    def _on_scroll_change(self):
-        """Called by the player when the painted-HUD scroll controls cycle
-        the mode, nudge the speed, switch the game, or nudge play rate.
-        Re-syncs audio so rate nudges from the HUD actually retime the music,
-        and persists the mode."""
+    def _on_scroll_change(self) -> None:
         self._sync_audio(force=True)
         save_player_setting('scroll_mode', self.player.scroll_mode)
 
-    def _on_hud_action(self, action, payload):
-        """Dispatcher for sidebar-HUD hitbox clicks that need Qt-side work
-        (audio sync, QSettings persistence, transient overlays). The player's
-        built-in handler already processed the logical side of `action`."""
-        if action == 'toggle_sv':
-            self.player.toggle_sv()
-        elif action == 'cycle_skin':
-            self.player.toggle_skin()
-            save_player_setting('skin', self.player.skin)
-        elif action == 'toggle_press_hide':
-            self.player.toggle_press_hide()
-            save_player_setting('press_hide', self.player.press_hide)
-        elif action == 'toggle_pitch':
-            if self._audio_ready:
-                new = not self._audio._pitch_correct
-                self._audio.set_pitch_correct(new)
-                save_player_setting('pitch_correct', new)
-                self._sync_audio()
-        elif action == 'edit_scroll_value':
-            self._open_scroll_edit(payload)
+    def _on_hud_action(self, action, payload) -> None:
+        handlers = {
+            'toggle_sv': self._handle_toggle_sv,
+            'cycle_skin': self._handle_cycle_skin,
+            'toggle_press_hide': self._handle_toggle_press_hide,
+            'toggle_pitch': self._handle_toggle_pitch,
+            'edit_scroll_value': self._open_scroll_edit,
+        }
 
-    def _open_scroll_edit(self, rect):
-        """Drop a transient QLineEdit overlay on top of the scroll readout
-        so the user can type a new mode-native value. Enter applies, Escape
-        (or losing focus) cancels."""
+        handler = handlers.get(action)
+        if handler is not None:
+            handler(payload)
+
+    def _handle_toggle_sv(self, _payload=None) -> None:
+        self.player.toggle_sv()
+
+    def _handle_cycle_skin(self, _payload=None) -> None:
+        self.player.toggle_skin()
+        save_player_setting('skin', self.player.skin)
+
+    def _handle_toggle_press_hide(self, _payload=None) -> None:
+        self.player.toggle_press_hide()
+        save_player_setting('press_hide', self.player.press_hide)
+
+    def _handle_toggle_pitch(self, _payload=None) -> None:
+        if not self._audio_is_ready():
+            return
+
+        enabled = not self._audio._pitch_correct
+        self._audio.set_pitch_correct(enabled)
+        save_player_setting('pitch_correct', enabled)
+        self._sync_audio()
+
+    # ------------------------------------------------------------------
+    # Scroll-value editor overlay
+    # ------------------------------------------------------------------
+
+    def _open_scroll_edit(self, rect) -> None:
         from analysis.player import scroll as scroll_registry
-        if self.scroll_edit is not None:
-            self.scroll_edit.deleteLater()
-            self.scroll_edit = None
+
+        self._close_scroll_edit()
+
         rx, ry, rw, rh = rect
-        # Sidebar rect lives in canvas coords — translate to tab coords.
         origin = self.view.mapTo(self, self.view.rect().topLeft())
+
         edit = QLineEdit(self)
-        mode = scroll_registry.get(self.player.scroll_mode)
-        cur = self.player._current_mode_value()
-        if mode and mode.format_value:
-            edit.setText(mode.format_value(cur).split(' ', 1)[0])
-        else:
-            edit.setText(f'{cur:.2f}')
+        edit.setText(self._current_scroll_value_text(scroll_registry))
         edit.setGeometry(origin.x() + rx, origin.y() + ry, rw, rh)
         edit.selectAll()
         edit.returnPressed.connect(self._apply_scroll_edit)
         edit.editingFinished.connect(self._close_scroll_edit)
         edit.show()
         edit.setFocus(Qt.MouseFocusReason)
+
         self.scroll_edit = edit
 
-    def _apply_scroll_edit(self):
+    def _current_scroll_value_text(self, scroll_registry) -> str:
+        mode = scroll_registry.get(self.player.scroll_mode)
+        value = self.player._current_mode_value()
+
+        if mode and mode.format_value:
+            return mode.format_value(value).split(' ', 1)[0]
+
+        return f'{value:.2f}'
+
+    def _apply_scroll_edit(self) -> None:
         if self.scroll_edit is None:
             return
+
         raw = self.scroll_edit.text().strip()
         try:
-            val = float(raw)
+            value = float(raw)
         except ValueError:
             self._close_scroll_edit()
             return
-        self.player._set_current_mode_value(val)
+
+        self.player._set_current_mode_value(value)
         self._close_scroll_edit()
 
-    def _close_scroll_edit(self):
+    def _close_scroll_edit(self) -> None:
         if self.scroll_edit is None:
             return
-        w = self.scroll_edit
-        self.scroll_edit = None
-        w.deleteLater()
 
-    def _t_to_slider(self, t):
+        widget = self.scroll_edit
+        self.scroll_edit = None
+        widget.deleteLater()
+
+    # ------------------------------------------------------------------
+    # Playbar
+    # ------------------------------------------------------------------
+
+    def _t_to_slider(self, t) -> int:
         tmin, tmax = self.player.t_min, self.player.t_max
         if tmax <= tmin:
             return 0
-        return int(round((t - tmin) / (tmax - tmin) * 1000))
 
-    def _slider_to_t(self, v):
+        frac = (t - tmin) / (tmax - tmin)
+        return int(round(frac * self.SLIDER_MAX))
+
+    def _slider_to_t(self, value) -> float:
         tmin, tmax = self.player.t_min, self.player.t_max
-        return tmin + (v / 1000.0) * (tmax - tmin)
+        return tmin + (value / float(self.SLIDER_MAX)) * (tmax - tmin)
 
-    def _on_playbar_pressed(self):
-        # Pause audio + detach the clock's audio source so the slider's
-        # writes to `player.t` actually take effect (when audio is attached
-        # the clock reads from the PV's source_time, ignoring wall-anchor
-        # writes). Remember whether we were playing so we can resume cleanly
-        # on release without a user-visible pause flicker.
-        self._scrubbing = True
-        self._resume_after_scrub = not self.player.paused
-        if self._audio_ready:
-            # Detach so the clock reads the wall anchor (written by the
-            # slider's `player.t = ...`) instead of the frozen audio time.
-            self.player.attach_audio_clock(None)
-            self._audio.set_state(self.player.t_intended,
-                                  self.player.play_rate, False)
-            self._last_audio_state = (
-                float(self.player.t_intended),
-                float(self.player.play_rate),
-                False,
-            )
+    def _on_playbar_pressed(self) -> None:
+        self.scrub.active = True
+        self.scrub.resume_after_release = not self.player.paused
 
-    def _on_playbar_released(self):
-        self._scrubbing = False
-        self.player.t = self._slider_to_t(self.playbar.value())
-        if self._audio_ready:
-            # Explicit PV seek, then resume playing state + reattach so the
-            # clock once again tracks actual audio playback.
-            self._audio.seek(self.player.t_intended)
-            self._audio.set_state(self.player.t_intended,
-                                  self.player.play_rate,
-                                  self._resume_after_scrub)
-            self._last_audio_state = (
-                float(self.player.t_intended),
-                float(self.player.play_rate),
-                bool(self._resume_after_scrub),
-            )
-            self.player.attach_audio_clock(self._audio.current_chart_time)
-
-    def _on_playbar_changed(self, v):
-        if self._suppress_playbar:
+        if not self._audio_is_ready():
             return
-        self.player.t = self._slider_to_t(v)
+
+        self.player.attach_audio_clock(None)
+        self._audio.set_state(
+            self.player.t_intended,
+            self.player.play_rate,
+            False,
+        )
+        self.audio_state.last_sync_state = (
+            float(self.player.t_intended),
+            float(self.player.play_rate),
+            False,
+        )
+
+    def _on_playbar_released(self) -> None:
+        self.scrub.active = False
+        self.player.t = self._slider_to_t(self.playbar.value())
+
+        if not self._audio_is_ready():
+            return
+
+        self._audio.seek(self.player.t_intended)
+        self._audio.set_state(
+            self.player.t_intended,
+            self.player.play_rate,
+            self.scrub.resume_after_release,
+        )
+        self.audio_state.last_sync_state = (
+            float(self.player.t_intended),
+            float(self.player.play_rate),
+            bool(self.scrub.resume_after_release),
+        )
+        self.player.attach_audio_clock(self._audio.current_chart_time)
+
+    def _on_playbar_changed(self, value) -> None:
+        if self.scrub.suppress_slider:
+            return
+
+        self.player.t = self._slider_to_t(value)
+
         if not self.playbar.isSliderDown():
             self._sync_audio(force=True)
 
+    def _update_playbar(self) -> None:
+        if self.scrub.active:
+            return
+
+        self.scrub.suppress_slider = True
+        try:
+            self.playbar.setValue(self._t_to_slider(self.player.t))
+        finally:
+            self.scrub.suppress_slider = False
+
+    # ------------------------------------------------------------------
+    # Tick/update
+    # ------------------------------------------------------------------
+
     @staticmethod
-    def _fmt_time(t):
+    def _fmt_time(t) -> str:
         sign = '-' if t < 0 else ''
         t = abs(t)
         return f'{sign}{int(t // 60)}:{int(t % 60):02d}'
 
-    def resizeEvent(self, ev):
-        w, h = self.view.width(), self.view.height()
-        if w > 0 and h > 0:
-            self.player.resize(w, h)
-        super().resizeEvent(ev)
+    def _finish_playback_if_needed(self) -> None:
+        if self.player.paused:
+            return
 
-    def _tick(self):
-        self._sync_settings_toggles()
-        if not self.player.paused and (
-                (self._audio_ready
-                 and getattr(self._audio, '_ended', False))
-                or self.player.t >= self.player.t_max):
+        audio_done = self._audio_is_ready() and getattr(
+            self._audio, '_ended', False
+        )
+        clock_done = self.player.t >= self.player.t_max
+
+        if audio_done or clock_done:
             self.player.paused = True
             self.play_btn.setText('▶')
-        self.view.update()
 
-        if not self._scrubbing:
-            self._suppress_playbar = True
-            self.playbar.setValue(self._t_to_slider(self.player.t))
-            self._suppress_playbar = False
+    def _tick(self) -> None:
+        self._sync_settings_toggles()
+        self._finish_playback_if_needed()
+
+        self.view.update()
+        self._update_playbar()
 
         self.time_lbl.setText(self._fmt_time(self.player.t))
         self.dur_lbl.setText(self._fmt_time(self.player.t_max))
-        if not self._scrubbing:
+
+        if not self.scrub.active:
             self._sync_audio()
 
-    def eventFilter(self, obj, ev):
-        if obj is self.view:
-            t = ev.type()
-            if t == ev.Type.KeyPress:
-                k = ev.key()
-                if k in (Qt.Key_Space, Qt.Key_P):
-                    self._toggle(); return True
-                if k == Qt.Key_Left:
-                    self._seek(-10 if ev.modifiers() & Qt.ShiftModifier else -2)
-                    return True
-                if k == Qt.Key_Right:
-                    self._seek(10 if ev.modifiers() & Qt.ShiftModifier else 2)
-                    return True
-                if k == Qt.Key_Up:
-                    self.player.nudge_scroll(1.15); return True
-                if k == Qt.Key_Down:
-                    self.player.nudge_scroll(1 / 1.15); return True
-                if k in (Qt.Key_Plus, Qt.Key_Equal):
-                    self._nudge_rate(0.1); return True
-                if k == Qt.Key_Minus:
-                    self._nudge_rate(-0.1); return True
-                if k == Qt.Key_M:
-                    self._toggle_mute(); return True
-                if k == Qt.Key_R:
-                    self.player.restart(); self._sync_audio(); return True
-                if k in (Qt.Key_Q, Qt.Key_Escape):
-                    self.window().close(); return True
-                if k == Qt.Key_Tab and (ev.modifiers() & Qt.ShiftModifier):
-                    self.player.toggle_edit_mode()
-                    self.view.update()
-                    return True
-            elif t == ev.Type.Wheel:
-                pos = ev.position() if hasattr(ev, 'position') else ev.pos()
-                if self.input_router.dispatch_wheel(
-                        int(pos.x()), int(pos.y()),
-                        ev.angleDelta().y(), ev.modifiers()):
-                    return True
-            elif t == ev.Type.MouseButtonPress and ev.button() == Qt.LeftButton:
-                self.view.setFocus(Qt.MouseFocusReason)
-                pos = ev.position() if hasattr(ev, 'position') else ev.pos()
-                if self.input_router.dispatch_mouse_down(
-                        int(pos.x()), int(pos.y()),
-                        ev.button(), ev.modifiers()):
-                    self.view.update()
-                    return True
-            elif t == ev.Type.MouseMove:
-                pos = ev.position() if hasattr(ev, 'position') else ev.pos()
-                if self.input_router.dispatch_mouse_move(
-                        int(pos.x()), int(pos.y()),
-                        ev.buttons(), ev.modifiers()):
-                    self.view.update()
-                    return True
-            elif t == ev.Type.MouseButtonRelease and ev.button() == Qt.LeftButton:
-                pos = ev.position() if hasattr(ev, 'position') else ev.pos()
-                if self.input_router.dispatch_mouse_up(
-                        int(pos.x()), int(pos.y()),
-                        ev.button(), ev.modifiers()):
-                    self.view.update()
-                    return True
+    # ------------------------------------------------------------------
+    # Input events
+    # ------------------------------------------------------------------
+
+    def resizeEvent(self, ev) -> None:
+        width, height = self.view.width(), self.view.height()
+        if width > 0 and height > 0:
+            self.player.resize(width, height)
+        super().resizeEvent(ev)
+
+    def eventFilter(self, obj, ev) -> bool:
+        if obj is not self.view:
+            return super().eventFilter(obj, ev)
+
+        event_type = ev.type()
+
+        if event_type == ev.Type.KeyPress:
+            return self._handle_key_press(ev)
+
+        if event_type == ev.Type.Wheel:
+            return self._handle_wheel(ev)
+
+        if event_type == ev.Type.MouseButtonPress:
+            return self._handle_mouse_press(ev)
+
+        if event_type == ev.Type.MouseMove:
+            return self._handle_mouse_move(ev)
+
+        if event_type == ev.Type.MouseButtonRelease:
+            return self._handle_mouse_release(ev)
+
         return super().eventFilter(obj, ev)
 
-    def cleanup(self):
-        self.timer.stop()
-        if self._audio_ready:
-            try:
-                self._audio.stop()
-            except Exception:
-                pass
+    @staticmethod
+    def _event_xy(ev) -> tuple[int, int]:
+        pos = ev.position() if hasattr(ev, 'position') else ev.pos()
+        return int(pos.x()), int(pos.y())
 
-    def closeEvent(self, ev):
+    def _handle_key_press(self, ev) -> bool:
+        key = ev.key()
+        shift = bool(ev.modifiers() & Qt.ShiftModifier)
+
+        handlers = {
+            Qt.Key_Space: self._toggle,
+            Qt.Key_P: self._toggle,
+            Qt.Key_Left: lambda: self._seek(-10 if shift else -2),
+            Qt.Key_Right: lambda: self._seek(10 if shift else 2),
+            Qt.Key_Up: lambda: self.player.nudge_scroll(1.15),
+            Qt.Key_Down: lambda: self.player.nudge_scroll(1 / 1.15),
+            Qt.Key_Plus: lambda: self._nudge_rate(0.1),
+            Qt.Key_Equal: lambda: self._nudge_rate(0.1),
+            Qt.Key_Minus: lambda: self._nudge_rate(-0.1),
+            Qt.Key_M: self._toggle_mute,
+            Qt.Key_R: self._restart_from_keyboard,
+            Qt.Key_Q: self._close_window,
+            Qt.Key_Escape: self._close_window,
+        }
+
+        if key == Qt.Key_Tab and shift:
+            self.player.toggle_edit_mode()
+            self.view.update()
+            return True
+
+        handler = handlers.get(key)
+        if handler is None:
+            return False
+
+        handler()
+        return True
+
+    def _restart_from_keyboard(self) -> None:
+        self.player.restart()
+        self._sync_audio(force=True)
+
+    def _close_window(self) -> None:
+        self.window().close()
+
+    def _handle_wheel(self, ev) -> bool:
+        x, y = self._event_xy(ev)
+        return self.input_router.dispatch_wheel(
+            x,
+            y,
+            ev.angleDelta().y(),
+            ev.modifiers(),
+        )
+
+    def _handle_mouse_press(self, ev) -> bool:
+        if ev.button() != Qt.LeftButton:
+            return False
+
+        self.view.setFocus(Qt.MouseFocusReason)
+        x, y = self._event_xy(ev)
+
+        handled = self.input_router.dispatch_mouse_down(
+            x,
+            y,
+            ev.button(),
+            ev.modifiers(),
+        )
+        if handled:
+            self.view.update()
+
+        return handled
+
+    def _handle_mouse_move(self, ev) -> bool:
+        x, y = self._event_xy(ev)
+
+        handled = self.input_router.dispatch_mouse_move(
+            x,
+            y,
+            ev.buttons(),
+            ev.modifiers(),
+        )
+        if handled:
+            self.view.update()
+
+        return handled
+
+    def _handle_mouse_release(self, ev) -> bool:
+        if ev.button() != Qt.LeftButton:
+            return False
+
+        x, y = self._event_xy(ev)
+
+        handled = self.input_router.dispatch_mouse_up(
+            x,
+            y,
+            ev.button(),
+            ev.modifiers(),
+        )
+        if handled:
+            self.view.update()
+
+        return handled
+
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
+
+    def cleanup(self) -> None:
+        self.timer.stop()
+
+        if not self._audio_is_ready():
+            return
+
+        try:
+            self._audio.stop()
+        except Exception:
+            pass
+
+    def closeEvent(self, ev) -> None:
         self.cleanup()
         super().closeEvent(ev)
