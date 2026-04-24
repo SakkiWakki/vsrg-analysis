@@ -392,61 +392,6 @@ class Player:
     # new mode means adding a scroll.register(...) call in a game's
     # adapter.py — no branches here.
 
-    # --- NotesModel compat properties -------------------------------------
-    # The renderer and culling layer read per-note streams by these old
-    # names. Keep them as thin read-through properties so the refactor
-    # didn't have to touch every call site. Add new code against
-    # `self.notes.*` directly.
-    # TODO: Depreciate 
-    @property
-    def _noterows_list(self): return self.notes.noterows_list
-    @property
-    def _columns_list(self): return self.notes.columns_list
-    @property
-    def _ln_tail_times(self): return self.notes.ln_tail_times
-    @property
-    def _ln_indices(self): return self.notes.ln_indices
-    @property
-    def _ghost_times(self): return self.notes.ghost_times
-    @property
-    def _ghost_cols(self): return self.notes.ghost_cols
-    @property
-    def _miss_hold_ln_heads_ms(self): return self.notes.miss_hold_ln_heads_ms
-    @property
-    def _miss_hold_press(self): return self.notes.miss_hold_press
-    @property
-    def _miss_hold_release(self): return self.notes.miss_hold_release
-    @property
-    def _miss_hold_cols(self): return self.notes.miss_hold_cols
-    @property
-    def _miss_hold_max_dur(self): return self.notes.miss_hold_max_dur
-    @property
-    def _ghost_sv_times(self): return self.notes.ghost_sv_times
-    @property
-    def _miss_hold_press_sv(self): return self.notes.miss_hold_press_sv
-    @property
-    def _miss_hold_release_sv(self): return self.notes.miss_hold_release_sv
-    @property
-    def _miss_hold_max_sv_dur(self): return self.notes.miss_hold_max_sv_dur
-    @property
-    def _miss_first_hold(self): return self.notes.miss_first_hold
-    @property
-    def _miss_head_suppressed(self): return self.notes.miss_head_suppressed
-    @property
-    def _mine_times(self): return self.notes.mine_times
-    @property
-    def _mine_cols(self): return self.notes.mine_cols
-    @property
-    def _lift_times(self): return self.notes.lift_times
-    @property
-    def _lift_cols(self): return self.notes.lift_cols
-    @property
-    def _fake_times(self): return self.notes.fake_times
-    @property
-    def _fake_cols(self): return self.notes.fake_cols
-    @property
-    def _roll_head_keys(self): return self.notes.roll_head_keys
-
     def _mode(self, key=None):
         return scroll_registry.get(key or self.scroll_mode)
 
@@ -641,7 +586,7 @@ class Player:
             notes.append({
                 'i': int(i),
                 't': note_t,
-                'col': int(self._columns_list[i]),
+                'col': int(self.notes.columns_list[i]),
                 'cum_to': cum_to,
                 'visual_dist': visual_dist,
                 'y': self._time_to_y(note_t, ctx.t_now, frame),

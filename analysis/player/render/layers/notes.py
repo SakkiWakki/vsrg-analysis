@@ -67,15 +67,15 @@ def _classify(ctx, press_t, release_t, is_ln, miss) -> str:
 
 def _build(ctx, i, pos) -> _NoteView | None:
     p = ctx.player
-    col = p._columns_list[i]
+    col = p.notes.columns_list[i]
     if col >= p.keycount:
         return None
-    if p.misses[i] and i < len(p._miss_head_suppressed) \
-            and p._miss_head_suppressed[i]:
+    if p.misses[i] and i < len(p.notes.miss_head_suppressed) \
+            and p.notes.miss_head_suppressed[i]:
         return None
 
     note_t = p.times[i]
-    end_t = p._ln_tail_times[i]
+    end_t = p.notes.ln_tail_times[i]
     is_ln = not math.isnan(end_t)
     off = p.offsets[i]
     press_t = note_t + off
@@ -84,7 +84,7 @@ def _build(ctx, i, pos) -> _NoteView | None:
     release_t = None
     y_end = 0
     if is_ln:
-        rel_off = p.hold_release_offsets.get((p._noterows_list[i], col))
+        rel_off = p.hold_release_offsets.get((p.notes.noterows_list[i], col))
         release_t = end_t + (rel_off or 0.0)
         y_end = float(ctx.candidate_tail_y[pos])
     else:
@@ -97,8 +97,8 @@ def _build(ctx, i, pos) -> _NoteView | None:
         off=off, press_t=press_t,
         release_t=release_t, rel_off=rel_off, end_t=end_t,
         is_ln=is_ln,
-        is_roll=bool(is_ln and p._roll_head_keys
-                     and (p._noterows_list[i], col) in p._roll_head_keys),
+        is_roll=bool(is_ln and p.notes.roll_head_keys
+                     and (p.notes.noterows_list[i], col) in p.notes.roll_head_keys),
         miss=bool(p.misses[i]),
         state=_classify(ctx, press_t, release_t, is_ln, p.misses[i]),
         note_color=p.palette[col],

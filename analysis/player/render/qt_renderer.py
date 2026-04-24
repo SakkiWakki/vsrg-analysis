@@ -47,7 +47,7 @@ def _precompute_candidate_ys(ctx) -> None:
     # LN tails only — for non-LN candidates the cached tail array holds
     # NaN, which the batched path happily propagates; `_build_note_view`
     # only reads tail_y when is_ln is True so those entries are ignored.
-    tail_times = p._ln_tail_times[idx]
+    tail_times = p.notes.ln_tail_times[idx]
     ctx.candidate_tail_y = p.batch_time_to_y(tail_times, ctx.frame)
 
 

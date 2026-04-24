@@ -46,8 +46,8 @@ def select_note_candidates(ctx):
     candidates = list(range(lo, hi))
     seen = set(candidates)
 
-    if p._ln_indices:
-        ln_idx = p._ln_indices
+    if p.notes.ln_indices:
+        ln_idx = p.notes.ln_indices
         ln_lo = bisect.bisect_left(ln_idx, lo)
         ln_hi = bisect.bisect_right(ln_idx, hi)
         for k in range(ln_lo - 1, -1, -1):
@@ -88,7 +88,7 @@ def _window_pad(ctx):
 def _ln_intersects_screen(ctx, i):
     p = ctx.player
     y_head = p._time_to_y(p.times[i], ctx.t_now, ctx.frame)
-    y_tail = p._time_to_y(p._ln_tail_times[i], ctx.t_now, ctx.frame)
+    y_tail = p._time_to_y(p.notes.ln_tail_times[i], ctx.t_now, ctx.frame)
     top_y = min(y_head, y_tail)
     bot_y = max(y_head, y_tail)
     return (bot_y >= -ctx.screen_margin
