@@ -398,7 +398,7 @@ def test_detect_returns_a_platform():
 def test_judgments_registers_through_unified_path():
     """The ported judgments plugin should appear in both the unified
     registry and the legacy sidebar registry after discovery."""
-    from analysis.player.plugin_loader import PluginManager
+    from analysis.player.plugin.plugin_loader import PluginManager
 
     mgr = PluginManager.discover()
     unified_keys = {c.manifest.key for c in mgr.components.all_components()}
@@ -408,7 +408,7 @@ def test_judgments_registers_through_unified_path():
 
 
 def test_status_component_mounts_on_gui():
-    from analysis.player.plugin_loader import PluginManager
+    from analysis.player.plugin.plugin_loader import PluginManager
 
     mgr = PluginManager.discover()
     report = mgr.components.report('builtin:status')
@@ -416,7 +416,7 @@ def test_status_component_mounts_on_gui():
 
 
 def test_mounted_gui_component_requirements_are_callable(tmp_path):
-    from analysis.player.plugin_loader import PluginManager
+    from analysis.player.plugin.plugin_loader import PluginManager
 
     mgr = PluginManager.discover(config=_store(tmp_path))
     try:
@@ -433,7 +433,7 @@ def test_mounted_gui_component_requirements_are_callable(tmp_path):
 
 
 def test_layers_component_draws_builtin_layers(tmp_path):
-    from analysis.player.plugin_loader import PluginManager
+    from analysis.player.plugin.plugin_loader import PluginManager
 
     mgr = PluginManager.discover(config=_store(tmp_path))
     try:

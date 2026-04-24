@@ -12,7 +12,7 @@ from analysis.components.api import (
     LayerPlacement,
     LayerState,
 )
-from analysis.player.plugin_api import Stage
+from analysis.player.plugin.plugin_api import Stage
 
 
 ROOT_LAYER = 'root'

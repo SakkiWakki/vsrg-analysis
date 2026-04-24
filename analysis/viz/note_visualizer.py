@@ -24,7 +24,7 @@ from analysis.games.etterna.judgment import (
 from analysis.games.osu.judgment import windows_for as _osu_windows_for
 
 # Per-window color palette (viz only — the player uses JCLR from
-# analysis.player.judgment for its hit marks).
+# analysis.player.init.judgment for its hit marks).
 _ETT_WCOLOR = {'marv': '#ffffff', 'perf': '#ffd54f', 'great': '#81c784',
                'good': '#4fc3f7', 'bad': '#ba68c8'}
 MISS_CLR = '#e53935'

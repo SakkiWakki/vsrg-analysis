@@ -61,8 +61,8 @@ _THIRDPARTY_ALLOW = frozenset({
 _HOST_API_ALLOW = frozenset({
     'analysis.player.render.theme',
     'analysis.player.hud.sidebar_api',
-    'analysis.player.plugin_api',
-    'analysis.player.events',
+    'analysis.player.plugin.plugin_api',
+    'analysis.player.input.events',
     'analysis.plugins.host_api',
     # permissions is resolved lazily by host_api.http_get; plugins don't
     # import it directly but the import graph passes through it.

@@ -2,7 +2,7 @@
 
 import pytest
 
-from analysis.player.render_playhead import RenderPlayhead
+from analysis.player.playback.timeline import RenderPlayhead
 
 
 class _IdentityEngine:

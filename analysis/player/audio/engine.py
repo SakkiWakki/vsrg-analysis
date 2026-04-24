@@ -12,7 +12,7 @@ import time
 
 import numpy as np
 
-from analysis.player.sv_debug import LOGGER as _SV_DEBUG_LOGGER
+from analysis.player.sv.debug import LOGGER as _SV_DEBUG_LOGGER
 
 from .phase_vocoder import StreamingPhaseVocoder
 from .source import WaveSource

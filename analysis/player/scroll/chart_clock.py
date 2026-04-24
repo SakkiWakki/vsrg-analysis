@@ -36,7 +36,7 @@ import threading
 import time
 from typing import Callable, Protocol
 
-from analysis.player.sv_debug import LOGGER as _SV_DEBUG_LOGGER
+from analysis.player.sv.debug import LOGGER as _SV_DEBUG_LOGGER
 
 
 class _CullSpaceEngine(Protocol):

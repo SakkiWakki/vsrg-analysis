@@ -1,7 +1,7 @@
 """Publish the current replay-layer tree into ``ctx.plugin_data``."""
 from __future__ import annotations
 
-from analysis.player.plugin_api import Stage
+from analysis.player.plugin.plugin_api import Stage
 
 def _flatten(states, out):
     for state in states:

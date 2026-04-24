@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from analysis.player.layout_edit import rect_contains
+from analysis.player.input.layout_edit import rect_contains
 
 
 class HudActionController:

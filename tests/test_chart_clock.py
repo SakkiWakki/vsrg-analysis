@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from analysis.player.chart_clock import ChartClock
+from analysis.player.scroll.chart_clock import ChartClock
 
 
 def test_paused_clock_does_not_advance():

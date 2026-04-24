@@ -1,6 +1,6 @@
 import numpy as np
 
-from analysis.player.notes_model import NotesModel, link_miss_holds
+from analysis.player.init.notes_model import NotesModel, link_miss_holds
 
 
 def _model_for_holds(note_rows, note_cols, miss_holds):

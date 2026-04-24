@@ -6,7 +6,7 @@ class PlaybackController:
         self.p = player
 
     def init(self, *, skin, press_hide):
-        from analysis.player.chart_clock import ChartClock
+        from analysis.player.scroll.chart_clock import ChartClock
 
         p = self.p
         p._last_tick = None

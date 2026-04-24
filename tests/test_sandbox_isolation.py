@@ -53,7 +53,7 @@ def test_allowed_modules_are_allowed(module):
     'ast', 'code', 'codeop',
     'io',
     'osu_memory_native',
-    'analysis.player.player',   # internal, not on allow-list
+    'analysis.player.launch.player',   # internal, not on allow-list
     'analysis.core',            # internal, not on allow-list
     'analysis.games',           # internal, not on allow-list
 ])
@@ -105,7 +105,7 @@ def test_gated_import_blocks_osu_memory_native():
 
 def test_gated_import_blocks_internal_player():
     with pytest.raises(SandboxViolation):
-        _gated_import('analysis.player.player')
+        _gated_import('analysis.player.launch.player')
 
 
 def test_gated_import_blocks_internal_core():

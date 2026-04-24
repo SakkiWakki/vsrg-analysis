@@ -9,7 +9,7 @@ from PySide6.QtGui import QBrush, QColor, QFont, QPen
 
 from analysis.player.render import culling, theme
 from analysis.player.hud.sidebar_api import SidebarContext
-from analysis.player.plugin_api import Stage
+from analysis.player.plugin.plugin_api import Stage
 from analysis.player.render.render_context import RenderContext
 # Re-export primitives so sidebar plugins / tests can keep importing them
 # from this module. Implementations live in primitives.py; they're only

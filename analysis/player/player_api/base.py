@@ -72,12 +72,12 @@ class Player:
         self._init_side_systems()
 
     def _install_controllers(self) -> None:
-        from analysis.player.init_state import PlayerInitState
-        from analysis.player.playback import PlaybackController
-        from analysis.player.scroll_state import ScrollStateController
-        from analysis.player.sv_render import SvRenderController
-        from analysis.player.layout_edit import LayoutEditController
-        from analysis.player.hud_actions import HudActionController
+        from analysis.player.init.init_state import PlayerInitState
+        from analysis.player.playback.playback import PlaybackController
+        from analysis.player.scroll.scroll_state import ScrollStateController
+        from analysis.player.sv.render import SvRenderController
+        from analysis.player.input.layout_edit import LayoutEditController
+        from analysis.player.input.hud_actions import HudActionController
 
         self.init_state = PlayerInitState(self)
         self.playback = PlaybackController(self)

@@ -19,7 +19,7 @@ import time
 
 import pytest
 
-from analysis.player.chart_clock import ChartClock
+from analysis.player.scroll.chart_clock import ChartClock
 
 
 class _FakeAudio:

@@ -360,7 +360,7 @@ class EtternaAdapter(GameAdapter):
         error whenever a SCROLLS segment straddles a BPM change — noticeable
         on charts like Undiscovered Colors, where the scroll ratio ramps
         across the whole song."""
-        from analysis.player.sv_engine import BeatSpaceSVEngine
+        from analysis.player.sv.engine import BeatSpaceSVEngine
         scrolls = replay.get('_etterna_scrolls') or []
         speeds = replay.get('_etterna_speeds') or []
         if not (scrolls or speeds):

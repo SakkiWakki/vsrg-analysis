@@ -171,7 +171,7 @@ class TestLayersComponentRasterEquivalence:
         from analysis.components.gui_backend import (
             draw_component_in_sidebar)
         from analysis.config.store import ConfigStore
-        from analysis.player.plugin_loader import PluginManager
+        from analysis.player.plugin.plugin_loader import PluginManager
         from analysis.player.render.layer_registry import LayerRegistry
         from types import SimpleNamespace
 

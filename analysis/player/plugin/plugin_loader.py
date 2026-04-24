@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from analysis.player.plugin_api import Stage, normalize_stage
+from analysis.player.plugin.plugin_api import Stage, normalize_stage
 from analysis.player.hud.sidebar_api import SidebarSectionRegistry, _escape_key
 from analysis.player.render.layer_registry import LayerRegistry
 

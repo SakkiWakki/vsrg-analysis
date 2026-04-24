@@ -313,7 +313,7 @@ class NoteType(NamedTuple):
 # working. New keys ('taps', 'lns') replace the old combined 'notes'.
 def default_note_types() -> list[NoteType]:
     # Imported locally so core modules don't depend on the plugin API.
-    from analysis.player.plugin_api import Stage
+    from analysis.player.plugin.plugin_api import Stage
     return [
         NoteType('taps',       'Taps',        'player', draw_taps),
         NoteType('lns',        'Long notes',  'player', draw_lns),

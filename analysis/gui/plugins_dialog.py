@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QPushButton,
 )
 
-from analysis.player.plugin_loader import PluginManager
+from analysis.player.plugin.plugin_loader import PluginManager
 from analysis.overlay.publisher import discover_overlays
 
 

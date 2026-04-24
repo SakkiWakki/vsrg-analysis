@@ -5,7 +5,7 @@ import os
 import numpy as np
 
 from analysis.player import scroll as scroll_registry
-from analysis.player.sv_debug import LOGGER as _SV_DEBUG_LOGGER
+from analysis.player.sv.debug import LOGGER as _SV_DEBUG_LOGGER
 
 
 class SvRenderController:
@@ -13,8 +13,8 @@ class SvRenderController:
         self.p = player
 
     def init(self, sv_sections, replay):
-        from analysis.player.render_playhead import RenderTimeline
-        from analysis.player.sv_engine import IdentitySVEngine, TimeSpaceSVEngine
+        from analysis.player.playback.timeline import RenderTimeline
+        from analysis.player.sv.engine import IdentitySVEngine, TimeSpaceSVEngine
 
         p = self.p
 
@@ -73,7 +73,7 @@ class SvRenderController:
         timeline = getattr(p, '_render_timeline', None)
 
         if timeline is None:
-            from analysis.player.render_playhead import RenderTimeline
+            from analysis.player.playback.timeline import RenderTimeline
             timeline = p._render_timeline = RenderTimeline(p._sv_engine)
 
         return timeline.render_at(

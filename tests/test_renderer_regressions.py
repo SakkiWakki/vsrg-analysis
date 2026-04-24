@@ -398,7 +398,7 @@ def test_layer_visibility_gates_builtin_draws_but_not_plugin_stage():
         return fn
 
     # Monkeypatch _layers to a minimal set so we can assert precisely.
-    from analysis.player.plugin_api import Stage
+    from analysis.player.plugin.plugin_api import Stage
     fake_layers = (
         ('background', make_recorder('background'), None),
         ('lanes',      make_recorder('lanes'),      Stage.AFTER_LANES),

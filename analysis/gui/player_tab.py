@@ -109,7 +109,7 @@ class PlayerTab(QWidget):
         xml_judgments,
         keycount,
     ):
-        from analysis.player.player import Player
+        from analysis.player.player_api import Player
         from analysis.core import game as game_mod
 
         adapter = game_mod.get(game)

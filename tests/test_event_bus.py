@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from analysis.player.events import EventBus
+from analysis.player.input.events import EventBus
 
 
 def test_emit_with_no_handlers_is_noop():

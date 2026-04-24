@@ -23,7 +23,7 @@ import time
 
 import pytest
 
-from analysis.player.chart_clock import (CullSpaceSmoother,
+from analysis.player.scroll.chart_clock import (CullSpaceSmoother,
                                           VisualCullSpacePredictor)
 
 

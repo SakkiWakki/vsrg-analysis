@@ -11,8 +11,8 @@ from __future__ import annotations
 import pytest
 
 from analysis.config.store import ConfigStore
-from analysis.player.plugin_api import Stage
-from analysis.player.plugin_loader import PluginManager
+from analysis.player.plugin.plugin_api import Stage
+from analysis.player.plugin.plugin_loader import PluginManager
 
 
 @pytest.fixture

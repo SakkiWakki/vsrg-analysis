@@ -3,8 +3,8 @@ from __future__ import annotations
 import numpy as np
 
 from analysis.core import game as game_mod
-from analysis.player.judgment import JCLR, judge
-from analysis.player.plugin_loader import PluginManager
+from analysis.player.init.judgment import JCLR, judge
+from analysis.player.plugin.plugin_loader import PluginManager
 from analysis.viz.plots import col_colors
 
 
@@ -65,7 +65,7 @@ class PlayerInitState:
         ]
 
     def init_notes_model(self, replay, game):
-        from analysis.player.notes_model import build_notes_model, link_miss_holds
+        from analysis.player.init.notes_model import build_notes_model, link_miss_holds
 
         p = self.p
         p.notes = build_notes_model(replay, p.times, p.hold_tails, game)
@@ -81,7 +81,7 @@ class PlayerInitState:
         return max(off_abs, rel_abs)
 
     def init_side_systems(self):
-        from analysis.player.events import EventBus
+        from analysis.player.input.events import EventBus
         from analysis.player.hud.hud_state import HudState
         from analysis.player.render.layers.sprite_cache import NoteSpriteCache
 

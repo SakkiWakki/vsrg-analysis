@@ -1,4 +1,4 @@
-from analysis.player.compat import (
+from analysis.player.init.compat import (
     etterna_windows_for,
     osu_mania_windows,
     prepare_replay_times,

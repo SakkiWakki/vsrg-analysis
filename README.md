@@ -138,8 +138,8 @@ make                                                 # Linux (source: build + la
 python -m analysis.gui.app                           # direct (any OS, venv active)
 
 # Replay player standalone (Qt)
-python -m analysis.player.player /path/to/replay.osr                 # osu!mania
-python -m analysis.player.player /path/to/replay.bin --sm chart.sm   # Etterna
+python -m analysis.player.launch /path/to/replay.osr                 # osu!mania
+python -m analysis.player.launch /path/to/replay.bin --sm chart.sm   # Etterna
 ```
 
 App state (install paths, per-plugin settings, window geometry, scroll
@@ -256,7 +256,7 @@ expose `register(add)`:
 
 ```python
 # plugins/my_bundle/replay/receptor_flash.py
-from analysis.player.plugin_api import Stage
+from analysis.player.plugin.plugin_api import Stage
 
 
 def draw(ctx, stage):

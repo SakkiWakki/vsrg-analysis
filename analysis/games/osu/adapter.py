@@ -52,7 +52,7 @@ class OsuAdapter(GameAdapter):
         to `[(time_sec, multiplier)]` by `_compute_sv_sections` during chart
         parse. Time-space integration matches how osu! positions notes
         (uniform scroll speed scaled by the SV multiplier at each moment)."""
-        from analysis.player.sv_engine import TimeSpaceSVEngine
+        from analysis.player.sv.engine import TimeSpaceSVEngine
         sections = replay.get('sv_sections') or []
         if not sections:
             return None

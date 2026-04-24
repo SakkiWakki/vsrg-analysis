@@ -246,7 +246,7 @@ imported:
   `__future__`.
 - **Third-party:** `numpy`.
 - **Host API:** `analysis.player.render.theme`, `analysis.player.hud.sidebar_api`,
-  `analysis.player.plugin_api`, `analysis.player.events`,
+  `analysis.player.plugin.plugin_api`, `analysis.player.input.events`,
   `analysis.plugins.host_api` (includes `plugin_config` — see below),
   `analysis.ui` (+ `analysis.ui.components`, `analysis.ui.render_sidebar`),
   `analysis.overlay.api`.

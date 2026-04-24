@@ -16,7 +16,7 @@ The core invariants enforced here:
 import numpy as np
 import pytest
 
-from analysis.player.sv_engine import (BeatSpaceSVEngine, IdentitySVEngine,
+from analysis.player.sv.engine import (BeatSpaceSVEngine, IdentitySVEngine,
                                         TimeSpaceSVEngine)
 
 
@@ -276,7 +276,7 @@ def test_scroll_zero_region_collapses_to_same_cumulative():
 
 def test_identity_engine_max_visible_is_infinity():
     """Non-Etterna engines don't impose a beat-based cap."""
-    from analysis.player.sv_engine import IdentitySVEngine, TimeSpaceSVEngine
+    from analysis.player.sv.engine import IdentitySVEngine, TimeSpaceSVEngine
     assert IdentitySVEngine().max_visible_t_from(0.0) == float('inf')
     assert TimeSpaceSVEngine([(0.0, 1.0)]).max_visible_t_from(0.0) == float('inf')
 

@@ -30,7 +30,7 @@ from analysis.plugins.host_api import PluginConfig
 
 class PlayerDataSource:
     """Implements :class:`GameState` against a live
-    :class:`~analysis.player.player.Player`.
+    :class:`~analysis.player.player_api.Player`.
 
     Kept read-only on purpose. Components that want to *change* state
     (nudge a judge, toggle a setting) dispatch an action via the

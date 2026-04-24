@@ -38,7 +38,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable
 
-from analysis.player.events import EventBus, Subscription
+from analysis.player.input.events import EventBus, Subscription
 
 
 _SEP = '.'

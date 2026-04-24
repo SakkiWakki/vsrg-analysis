@@ -197,7 +197,7 @@ def test_compute_drop_order_picks_midpoint_with_real_rects():
         hud=hud,
         H=500,
     )
-    from analysis.player.layout_edit import compute_drop_order
+    from analysis.player.input.layout_edit import compute_drop_order
     targets = reg.reorder_targets(hud.drag_key, REGION_PANEL,
                                   hud.frame_sidepanel_rects)
     # Cursor Y above both mids → insert before one.
@@ -212,7 +212,7 @@ def test_compute_drop_order_picks_midpoint_with_real_rects():
 def test_finish_drag_routes_by_cursor_x():
     """Drop in the sidebar column = sidepanel region; drop left of the
     column = free region."""
-    from analysis.player.layout_edit import LayoutEditController
+    from analysis.player.input.layout_edit import LayoutEditController
     from analysis.player.render import theme
 
     reg = _fresh_registry()
