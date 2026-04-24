@@ -168,14 +168,6 @@ def parse_etterna_xml(filepath):
                 break
             except ET.ParseError:
                 continue
-        if root is None:
-            try:
-                from lxml import etree as LET
-                parser = LET.XMLParser(recover=True, huge_tree=True)
-                root = LET.fromstring(raw, parser=parser)
-            except Exception as e:
-                print(f"Etterna.xml unparseable: {e}")
-                return []
     ps = root.find('PlayerScores')
     if ps is None:
         return []
