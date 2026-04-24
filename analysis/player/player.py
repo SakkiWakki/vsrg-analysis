@@ -232,20 +232,77 @@ class Player:
 
     def _init_playback_state(self, *, skin, press_hide):
         """Bind timeline bounds, skin, press-hide toggle, and the
-        transient play-head state (rate, paused, t)."""
-        self.play_rate = 1.0
-        self.paused = True
-        self.t = 0.0
+        transient play-head state (rate, paused, t). Chart time lives in a
+        ChartClock singleton (self._clock) — self.t/self.paused/self.rate
+        are properties backed by it. When an audio engine is attached
+        later, the clock switches to audio-master so there's no
+        render-vs-audio drift to resync."""
+        from analysis.player.chart_clock import ChartClock
         self._last_tick = None
-        self.t_max = (float(self.times[-1]) + 5.0
-                      if len(self.times) else 10.0)
-        self.t_min = -2.0
+        t_max = (float(self.times[-1]) + 5.0
+                 if len(self.times) else 10.0)
+        t_min = -2.0
+        self._clock = ChartClock(initial=0.0, t_min=t_min, t_max=t_max)
         self.hit_line_y_frac = 0.80
         self.skin = skin if skin in self.SKINS else 'bar'
         # Press-hide: once t_now >= press_t stop drawing that note (and
         # for LNs, everything past release_t). Missed notes stay visible
         # so the red X is still informative.
         self.press_hide = bool(press_hide)
+
+    # -- playhead proxies over self._clock -----------------------------
+    # Kept as properties so existing callers (renderer, plugins, tests,
+    # components backend) keep reading/writing the same attribute names.
+
+    @property
+    def t(self) -> float:
+        return self._clock.now()
+
+    @t.setter
+    def t(self, value: float) -> None:
+        self._clock.seek(float(value))
+
+    @property
+    def paused(self) -> bool:
+        return self._clock.paused
+
+    @paused.setter
+    def paused(self, value: bool) -> None:
+        self._clock.set_paused(bool(value))
+
+    @property
+    def play_rate(self) -> float:
+        return self._clock.rate
+
+    @play_rate.setter
+    def play_rate(self, value: float) -> None:
+        self._clock.set_rate(float(value))
+
+    @property
+    def t_min(self) -> float:
+        return self._clock.t_min
+
+    @property
+    def t_max(self) -> float:
+        return self._clock.t_max
+
+    @t_max.setter
+    def t_max(self, value: float) -> None:
+        self._clock.set_bounds(self._clock.t_min, float(value))
+
+    def attach_audio_clock(self, getter) -> None:
+        """Register an audio-time getter with the chart clock so the
+        playhead follows the audio engine's actual source position. Pass
+        `None` to detach (stop, or fall back to wall-clock during scrubbing)."""
+        self._clock.set_audio_source(getter)
+
+    @property
+    def t_intended(self) -> float:
+        """Chart time the Player has asked for (wall-anchor), independent
+        of what the audio engine has actually reached. The GUI sends this
+        to `AudioEngine.set_state` so seeks written via `self.t = X` take
+        effect even though `self.t` reads the PV's actual position back."""
+        return self._clock.intended()
 
     def _compute_max_draw_pad(self):
         """Culling pad: how far beyond a note's head/tail its drawn
@@ -791,8 +848,11 @@ class Player:
         self.events.emit('hud_action', (action, payload))
 
     def advance(self, dt_s):
-        if not self.paused:
-            self.t = max(self.t_min, self.t + dt_s * self.play_rate)
+        """No-op: chart time is driven by `self._clock`. Kept as a method
+        because `_tick` and a few tests call it; the clock advances itself
+        (audio-master when audio attached, wall-clock fallback otherwise)
+        so explicit `dt`-based stepping is unnecessary."""
+        del dt_s
 
     def tick(self, dt_s):
         """Advance playback state. Rendering is owned by Qt widgets."""
@@ -844,13 +904,13 @@ class Player:
                             for off, mi in zip(self.offsets, self.misses)]
 
     def restart(self):
-        self.t = self.t_min
+        self._clock.seek(self.t_min)
 
     def _seek(self, dt):
-        self.t = max(self.t_min, min(self.t_max, self.t + dt))
+        self._clock.seek(self.t + float(dt))
 
     def _toggle_pause(self):
-        self.paused = not self.paused
+        self._clock.set_paused(not self._clock.paused)
 
     def run(self):
         raise RuntimeError('Player.run() was replaced by the Qt player UI.')

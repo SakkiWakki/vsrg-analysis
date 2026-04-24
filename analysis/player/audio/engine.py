@@ -62,6 +62,14 @@ class AudioEngine:
         self._stream = None
         self._chart_time = 0.0       # last known chart time at set_state
         self._rate = 1.0
+        # Audio-position smoothing: `_pv.source_time` advances in hop-sized
+        # jumps (the PV only updates it when the callback asks it to
+        # generate samples). Raw reads give the render thread a stepped,
+        # jittery t. We snapshot (pv_time, wall_time_at_snapshot) each time
+        # the callback runs, then extrapolate between snapshots for smooth
+        # chart-time output.
+        self._anchor_src_time = 0.0
+        self._anchor_wall = 0.0
 
         if not audio_path or not os.path.exists(audio_path):
             return
@@ -185,8 +193,13 @@ class AudioEngine:
                            dtype=np.float32)
             samples = np.concatenate([samples, pad], axis=0)
         np.multiply(samples, volume, out=outdata)
-        if not cont:
-            with self._lock:
+        # Snapshot the PV's fresh source position against wall-clock so the
+        # render thread's `current_chart_time()` can interpolate smoothly
+        # between callbacks instead of stepping in hop-sized jumps.
+        with self._lock:
+            self._anchor_src_time = float(pv.source_time)
+            self._anchor_wall = time.monotonic()
+            if not cont:
                 self._ended = True
 
     # --- public API (matches the old engine) ---
@@ -204,26 +217,56 @@ class AudioEngine:
     def _pitch_correct_public(self) -> bool:
         return self._pitch_correct
 
+    def current_chart_time(self) -> float:
+        """Audio-master chart time for the ChartClock to read. Safe to call
+        from the render thread; takes the engine lock briefly.
+
+        Returns an interpolated time: the PV's source_time (stepped in
+        hop-sized jumps) is anchored against wall-clock at each callback,
+        and we add the wall-clock delta since that anchor. This gives the
+        renderer a smoothly-advancing clock instead of a visibly stepped
+        one, while still matching the PV's actual position on average."""
+        with self._lock:
+            if self._pv is None:
+                if self._source is not None:
+                    return float(self._source.pos) / float(self._source.sr)
+                return self._chart_time
+            if not self._playing:
+                # When paused the callback isn't updating the anchor, so
+                # return the anchor directly (or the raw PV time if we
+                # never got a callback yet).
+                if self._anchor_wall == 0.0:
+                    return float(self._pv.source_time)
+                return self._anchor_src_time
+            rate = self._rate
+            elapsed = time.monotonic() - self._anchor_wall
+            extrapolated = self._anchor_src_time + elapsed * rate
+            # Clamp to the raw PV time on the upper side so we never get
+            # ahead of what's actually been produced — if the callback
+            # stalls longer than expected, we'd otherwise drift forward.
+            pv_now = float(self._pv.source_time)
+            if extrapolated > pv_now + rate * 0.05:
+                # More than one 50ms rate-step ahead of reality: cap.
+                return pv_now + rate * 0.05
+            return extrapolated
+
     def set_state(self, t: float, rate: float, playing: bool) -> None:
+        """Apply chart-clock intent to the audio engine.
+
+        Does NOT seek by itself: with audio as the chart clock master, the
+        per-tick `set_state` call only propagates pause/rate changes and
+        end-of-chart detection. The PV's source_time IS the playhead, so
+        re-seeking it every tick would just undo its own progress. Use
+        `seek()` for explicit jumps (unpause, scrub release, restart)."""
         if not self.ready:
             return
         rate = max(0.05, float(rate))
         with self._lock:
-            if self._pv is not None:
-                source_pos_s = self._pv.source_time
-            else:
-                source_pos_s = (self._source.pos / self._source.sr
-                                if self._source else 0.0)
-            # Rate change: update PV rate, no reseek needed.
             if abs(rate - self._rate) > 1e-3:
                 self._rate = rate
                 if self._pv is not None:
                     self._pv.set_rate(rate)
-            # Seek if chart time disagrees with where we think we are.
-            want_seek = False
             if not playing:
-                # Pause: stop producing but keep the current position so
-                # resume picks up cleanly.
                 self._playing = False
                 self._chart_time = t
                 self._ended = False
@@ -232,14 +275,25 @@ class AudioEngine:
                 self._playing = False
                 self._ended = True
                 return
-            # If we were paused OR drifted, seek to chart time.
-            if not self._playing or abs(source_pos_s - t) > self.RESYNC_THRESHOLD_S:
-                want_seek = True
-            if want_seek and self._pv is not None:
-                self._pv.seek(t)
             self._playing = True
             self._chart_time = t
             self._ended = False
+
+    def seek(self, t: float) -> None:
+        """Explicitly seek the PV to chart time `t`. Called on scrub
+        release, restart, or any user-visible jump — the OLA buffer flush
+        is the price of a non-contiguous seek."""
+        if not self.ready:
+            return
+        with self._lock:
+            if self._pv is not None:
+                self._pv.seek(float(t))
+            self._chart_time = float(t)
+            self._ended = False
+            # Rebase the interpolation anchor so current_chart_time() starts
+            # extrapolating from the new position instead of the pre-seek one.
+            self._anchor_src_time = float(t)
+            self._anchor_wall = time.monotonic()
 
     def stop(self) -> None:
         with self._lock:

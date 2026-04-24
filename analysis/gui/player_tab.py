@@ -1,6 +1,4 @@
 """Embedded replay player tab: native Qt canvas + transport controls."""
-import time
-
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                                QLabel, QLineEdit)
@@ -93,7 +91,6 @@ class PlayerTab(QWidget):
         # readout.
         self.scroll_edit: QLineEdit | None = None
 
-        self._last_ms = None
         self.timer = QTimer(self)
         self.timer.setInterval(1000 // 120)
         self.timer.timeout.connect(self._tick)
@@ -109,6 +106,7 @@ class PlayerTab(QWidget):
         if self._audio_ready and self._audio._base_duration:
             self.player.t_max = max(self.player.t_max,
                                     float(self._audio._base_duration))
+            self.player.attach_audio_clock(self._audio.current_chart_time)
 
         self.player.paused = False
         self.play_btn.setText('⏸')
@@ -134,7 +132,13 @@ class PlayerTab(QWidget):
                 getattr(self._audio, '_pitch_correct', True)),
         }
         if self._audio_ready:
-            self._audio.set_state(self.player.t, self.player.play_rate,
+            # Send the CLOCK's intended t, not the PV-observed t. Otherwise
+            # a seek (slider drag, step button) writes the new t into the
+            # clock's wall anchor, but `player.t` reads back the PV's stale
+            # source_time — so `set_state` would receive the old position
+            # and fail to seek the PV.
+            self._audio.set_state(self.player.t_intended,
+                                  self.player.play_rate,
                                   not self.player.paused)
 
     def _toggle(self):
@@ -146,14 +150,21 @@ class PlayerTab(QWidget):
         audio_done = self._audio_ready and getattr(
             self._audio, '_ended', False)
         clock_done = self.player.t >= self.player.t_max - 1e-3
+        seeked = False
         if resuming and (audio_done or clock_done):
             self.player.restart()
+            seeked = True
         self.player.toggle_pause()
         self.play_btn.setText('▶' if self.player.paused else '⏸')
+        # On unpause after a restart, the PV needs to loop
+        if self._audio_ready and seeked:
+            self._audio.seek(self.player.t_intended)
         self._sync_audio()
 
     def _seek(self, ds):
         self.player.seek_rel(ds)
+        if self._audio_ready:
+            self._audio.seek(self.player.t_intended)
         self._sync_audio()
 
     def _nudge_rate(self, d):
@@ -261,21 +272,31 @@ class PlayerTab(QWidget):
         return tmin + (v / 1000.0) * (tmax - tmin)
 
     def _on_playbar_pressed(self):
-        # Pause audio + stop chart advancement while the user scrubs. Remember
-        # whether we need to resume on release; don't flip the paused UI state
-        # since this is a transient drag, not a user-visible pause.
+        # Pause audio + detach the clock's audio source so the slider's
+        # writes to `player.t` actually take effect (when audio is attached
+        # the clock reads from the PV's source_time, ignoring wall-anchor
+        # writes). Remember whether we were playing so we can resume cleanly
+        # on release without a user-visible pause flicker.
         self._scrubbing = True
         self._resume_after_scrub = not self.player.paused
         if self._audio_ready:
-            self._audio.set_state(self.player.t, self.player.play_rate, False)
+            # Detach so the clock reads the wall anchor (written by the
+            # slider's `player.t = ...`) instead of the frozen audio time.
+            self.player.attach_audio_clock(None)
+            self._audio.set_state(self.player.t_intended,
+                                  self.player.play_rate, False)
 
     def _on_playbar_released(self):
         self._scrubbing = False
         self.player.t = self._slider_to_t(self.playbar.value())
-        # Resume only if we were playing before the drag started.
         if self._audio_ready:
-            self._audio.set_state(self.player.t, self.player.play_rate,
+            # Explicit PV seek, then resume playing state + reattach so the
+            # clock once again tracks actual audio playback.
+            self._audio.seek(self.player.t_intended)
+            self._audio.set_state(self.player.t_intended,
+                                  self.player.play_rate,
                                   self._resume_after_scrub)
+            self.player.attach_audio_clock(self._audio.current_chart_time)
 
     def _on_playbar_changed(self, v):
         if self._suppress_playbar:
@@ -297,22 +318,7 @@ class PlayerTab(QWidget):
         super().resizeEvent(ev)
 
     def _tick(self):
-        now = time.monotonic()
-        if self._last_ms is None:
-            self._last_ms = now
-        dt = now - self._last_ms
-        self._last_ms = now
-        # Keep per-tab view of globally-stored toggles in sync. Each
-        # PlayerTab has its own Player instance, but QSettings are app-wide;
-        # if the user toggles display-hits (or other player toggles) in a
-        # different tab, mirror it here so the label and rendering don't
-        # drift. Cheap: just a dict lookup + attr compare per frame.
         self._sync_settings_toggles()
-        if self._scrubbing:
-            # Freeze chart clock while scrubbing; the playbar drives t directly
-            # via _on_playbar_changed.
-            dt = 0
-        self.player.advance(dt)
         if not self.player.paused and (
                 (self._audio_ready
                  and getattr(self._audio, '_ended', False))
