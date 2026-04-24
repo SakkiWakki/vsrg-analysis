@@ -231,11 +231,26 @@ def _rasterize_fake(painter, key, ctx):
         _rect_outline(painter, (90, 90, 90), rect)
 
 
+GHOST_TAP_PAD = 4
+
+
+def _ghost_tap_radius(ctx):
+    return max(4, int(ctx.lane_w * 0.25))
+
+
+def _ghost_tap_size(ctx):
+    r = _ghost_tap_radius(ctx)
+    d = 2 * r + 2 * GHOST_TAP_PAD
+    return d, d
+
+
 def _rasterize_ghost_tap(painter, key, ctx):
-    lane_w, note_h = ctx.lane_w, ctx.note_h
-    cx = lane_w / 2
-    cy = _head_cy(note_h)
-    r = max(4, int(lane_w * 0.25))
+    r = _ghost_tap_radius(ctx)
+    w, h = _ghost_tap_size(ctx)
+
+    cx = w / 2
+    cy = h / 2
+
     _ellipse_outline(painter, (255, 255, 255), cx, cy, r, r)
     _ellipse(painter, (255, 255, 255), cx, cy, 2, 2)
 
@@ -313,7 +328,7 @@ def default_note_sprites() -> dict[str, SpriteSpec]:
                                  key_fields=('col',)),
         'fake':       SpriteSpec(size=_head_size, rasterize=_rasterize_fake,
                                  key_fields=('col',)),
-        'ghost_tap':  SpriteSpec(size=_head_size, rasterize=_rasterize_ghost_tap,
+        'ghost_tap':  SpriteSpec(size=_ghost_tap_size, rasterize=_rasterize_ghost_tap,
                                  key_fields=()),
         'miss_x':     SpriteSpec(size=_miss_x_size, rasterize=_rasterize_miss_x,
                                  key_fields=('jcolor',)),

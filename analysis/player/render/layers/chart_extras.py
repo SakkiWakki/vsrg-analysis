@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from PySide6.QtCore import QPointF
 from analysis.player.render.primitives import _line, _rect
 
 if TYPE_CHECKING:
@@ -63,21 +64,25 @@ def draw_ghost_taps(ctx: RenderContext, painter) -> None:
     indices = _cull_indices(search, ctx.target_lo, ctx.target_hi)
     indices = indices[p._ghost_cols[indices] < p.keycount]
 
-    from PySide6.QtCore import QPointF
-    from analysis.player.render.layers.note_sprites import HEAD_PAD
     pm = ctx.sprite_cache.get('ghost_tap', ctx)
+
     lane_x = ctx.lane_x
-    note_h = ctx.note_h
+    lane_w = ctx.lane_w
     time_to_y = ctx.time_to_y
 
     visible = []
     for k in indices:
         col = int(p._ghost_cols[k])
         y = time_to_y(float(ghost_times[k]))
+
+        cx = lane_x(col) + lane_w / 2
         painter.drawPixmap(
-            QPointF(float(lane_x(col)),
-                    float(y - note_h / 2 - HEAD_PAD)), pm)
+            QPointF(float(cx - pm.width() / 2),
+                    float(y - pm.height() / 2)),
+            pm,
+        )
         visible.append(k)
+
     ctx.visible_ghost_taps = visible
 
 
