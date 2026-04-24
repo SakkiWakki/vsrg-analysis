@@ -522,10 +522,9 @@ class Player:
         m.fake_sv = self._times_to_sv(m.fake_times)
 
     def _cumulative_sv_at(self, t):
-        """SV-space position at chart time `t`. Kept for culling.py's
-        `cum_now = p._cumulative_sv_at(t_now)` call."""
-        # Distance from t=0 matches cumulative, since engines integrate from 0.
-        return self._sv_engine.distance(0.0, float(t))
+        """Cull-space cumulative at chart time `t`. Consumed by culling.py
+        to anchor the visible-note window. Matches project_times exactly."""
+        return self._sv_engine.cumulative_at(float(t))
 
     def _sv_distance(self, t_from, t_to):
         """SV-weighted chart-time delta. Returns the plain delta when SV is

@@ -28,9 +28,22 @@ import numpy as np
 class SVEngine(Protocol):
     """What the Player needs from any SV implementation.
 
-    Implementations MUST satisfy:
-        distance(a, b) == project_times([b])[0] - project_times([a])[0]
-    up to floating-point error (used for culling consistency).
+    Two spaces are exposed:
+
+    * **Render-space** (`distance`): used by `_time_to_y`. May depend on the
+      current song position — e.g. Etterna #SPEEDS zooms the whole field
+      based on where the playhead sits. Called per visible note per frame.
+
+    * **Cull-space** (`project_times` / `cumulative_at`): monotonic, purely
+      position-independent integrator. Used to pre-cache note positions for
+      off-screen bisect culling. Invariant the Player relies on:
+
+          cumulative_at(b) - cumulative_at(a) == distance(a, b)
+          WHEN no position-dependent effect applies (e.g. SPEEDS = 1 flat).
+
+      During brief position-dependent transitions (Etterna SPEEDS change),
+      the culling window is approximate — typically one SPEEDS segment's
+      multiplier off, which the Player pads for.
     """
 
     # True when the chart has non-trivial SV. The Player mirrors this into
@@ -38,13 +51,14 @@ class SVEngine(Protocol):
     enabled: bool
 
     def distance(self, t_from: float, t_to: float) -> float:
-        """SV-weighted distance between two chart times, in the engine's
-        native space (time-space for osu, effective-seconds for Etterna).
-        Called per-frame for every visible note — keep it cheap."""
+        """Render-space distance between two chart times. May apply
+        position-dependent zoom (e.g. Etterna SPEEDS at t_from)."""
+
+    def cumulative_at(self, t: float) -> float:
+        """Cull-space cumulative at chart time t. Monotonic in t."""
 
     def project_times(self, times: np.ndarray) -> np.ndarray:
-        """Batch cumulative-SV for a chart-time array. The renderer bisects
-        the result for off-screen culling."""
+        """Batch `cumulative_at` — the renderer bisects the result."""
 
     def as_sections(self) -> list[tuple[float, float]]:
         """Legacy `[(time_sec, multiplier)]` projection for components and
@@ -81,7 +95,7 @@ class TimeSpaceSVEngine:
             dt = self._times[i] - self._times[i - 1]
             self._cum[i] = self._cum[i - 1] + dt * self._values[i - 1]
 
-    def _cumulative_at(self, t: float) -> float:
+    def cumulative_at(self, t: float) -> float:
         if not self._sections:
             return float(t)
         idx = int(np.searchsorted(self._times, t, side='right')) - 1
@@ -90,12 +104,12 @@ class TimeSpaceSVEngine:
         return float(self._cum[idx]) + (t - float(self._times[idx])) * float(self._values[idx])
 
     def distance(self, t_from: float, t_to: float) -> float:
-        return self._cumulative_at(t_to) - self._cumulative_at(t_from)
+        return self.cumulative_at(t_to) - self.cumulative_at(t_from)
 
     def project_times(self, times: np.ndarray) -> np.ndarray:
         if not times.size:
             return np.empty(0, dtype=np.float64)
-        return np.array([self._cumulative_at(float(t)) for t in times],
+        return np.array([self.cumulative_at(float(t)) for t in times],
                         dtype=np.float64)
 
     def as_sections(self) -> list[tuple[float, float]]:
@@ -125,6 +139,14 @@ class TimeSpaceSVEngine:
 # SPEEDS is static (the common case) and off by one segment's worth during
 # SPEEDS transitions. The per-frame `distance(song_t, note_t)` uses SPEEDS at
 # song_t (matches Etterna exactly).
+#
+# Not modeled: Lua modscripts (.lua next to the .ssc). Some packs ship a
+# "Speedist"-style script that rewrites the player's XMOD at runtime based on
+# their CMOD preference (e.g. "Undiscovered Colors"'s script sets XMOD =
+# CMOD / (140 * rate)). We don't embed a Lua VM, so charts with these scripts
+# render at whatever XMOD the UI supplies. To match Etterna visually on such
+# charts, set XMOD manually to whatever the Lua would compute; for the common
+# `CMod / (bpm_goal * rate)` pattern that's `your_cmod / (bpm_goal * rate)`.
 
 
 class BeatSpaceSVEngine:
@@ -242,30 +264,27 @@ class BeatSpaceSVEngine:
 
     # --- SVEngine interface ---------------------------------------------
 
+    def cumulative_at(self, t: float) -> float:
+        """Cull-space cumulative = displayed-beat integral (SCROLLS only),
+        converted to base-BPM seconds. Excludes SPEEDS so the cache stays
+        consistent as the playhead moves."""
+        b = self._time_to_beat(t)
+        return self._displayed_beat(b) * self._sec_per_base_beat
+
     def distance(self, t_from: float, t_to: float) -> float:
+        """Render-space distance. SCROLLS cumulative difference, zoomed
+        uniformly by SPEEDS at the playhead (Etterna's ArrowEffects.cpp
+        XMOD branch: GetDisplayedSpeedPercent evaluated at the current
+        song position, applied to the whole YOffset)."""
+        d = self.cumulative_at(t_to) - self.cumulative_at(t_from)
         b_from = self._time_to_beat(t_from)
-        b_to = self._time_to_beat(t_to)
-        d_beats = self._displayed_beat(b_to) - self._displayed_beat(b_from)
-        # SpeedPercent is a zoom factor sampled at the current song position
-        # (t_from in the _sv_distance caller). Applied uniformly to the whole
-        # visible delta, matching ArrowEffects.cpp XMOD branch.
-        d_beats *= self._speed_percent_at_beat(b_from)
-        # Convert beat distance to "effective seconds" at the base BPM so the
-        # Player's scroll_speed (px/sec) gives a stable px/beat under XMOD.
-        return d_beats * self._sec_per_base_beat
+        return d * self._speed_percent_at_beat(b_from)
 
     def project_times(self, times: np.ndarray) -> np.ndarray:
-        """Static cumulative-SV for culling. Evaluates SPEEDS at each target
-        time (approximation — exact when SPEEDS is static, which is 99% of
-        charts). The per-frame distance() still uses song-position speed."""
         if not times.size:
             return np.empty(0, dtype=np.float64)
-        out = np.empty(len(times), dtype=np.float64)
-        for i, t in enumerate(times):
-            b = self._time_to_beat(float(t))
-            out[i] = self._displayed_beat(b) * self._speed_percent_at_beat(b) \
-                * self._sec_per_base_beat
-        return out
+        return np.array([self.cumulative_at(float(t)) for t in times],
+                        dtype=np.float64)
 
     def as_sections(self) -> list[tuple[float, float]]:
         """Back-compat projection for sidebar/components readers. Samples the
@@ -305,6 +324,9 @@ class IdentitySVEngine:
 
     def distance(self, t_from: float, t_to: float) -> float:
         return t_to - t_from
+
+    def cumulative_at(self, t: float) -> float:
+        return float(t)
 
     def project_times(self, times: np.ndarray) -> np.ndarray:
         return np.asarray(times, dtype=np.float64).copy()
