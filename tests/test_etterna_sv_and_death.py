@@ -4,8 +4,103 @@ import pytest
 
 from analysis.games.etterna.sm_chart import (
     parse_ssc, parse_sm, sv_sections_from_chart,
-    _parse_scrolls, _parse_speeds,
+    _parse_scrolls, _parse_speeds, beat_to_time,
 )
+
+
+# ---------------------------------------------------------------------------
+# STOPS / DELAYS / WARPS in beat_to_time
+# ---------------------------------------------------------------------------
+
+def test_beat_to_time_no_events_matches_bpm_only():
+    # 120 BPM: 1 beat = 0.5s
+    assert beat_to_time(2.0, [(0.0, 120.0)], 0.0) == pytest.approx(1.0)
+
+
+def test_stop_adds_its_duration_after_beat():
+    # 120 BPM, 1 beat normally = 0.5s. Stop of 1s at beat 0.5 means time
+    # advances by 1 extra second AFTER beat 0.5 is reached.
+    t = beat_to_time(1.0, [(0.0, 120.0)], 0.0, stops=[(0.5, 1.0)])
+    assert t == pytest.approx(1.5)
+
+
+def test_stop_only_applies_if_passed():
+    # Target beat before the stop — stop doesn't contribute
+    t = beat_to_time(0.4, [(0.0, 120.0)], 0.0, stops=[(0.5, 1.0)])
+    assert t == pytest.approx(0.2)
+
+
+def test_warp_teleports_forward_with_no_time():
+    # At beat 0.5, warp forward by 0.5 beats. Target beat 1.0 is reached
+    # at time 0.25s (first 0.5 beats) with no extra time for the warp.
+    t = beat_to_time(1.0, [(0.0, 120.0)], 0.0, warps=[(0.5, 0.5)])
+    assert t == pytest.approx(0.25)
+
+
+def test_warp_target_inside_warp_collapses_to_warp_entry():
+    # Target beat is inside the warp range — time should be the warp entry
+    t = beat_to_time(0.7, [(0.0, 120.0)], 0.0, warps=[(0.5, 0.5)])
+    assert t == pytest.approx(0.25)
+
+
+def test_delay_adds_duration_before_beat():
+    # Delay behaves like a pause before the beat's events
+    t = beat_to_time(1.0, [(0.0, 120.0)], 0.0, delays=[(0.5, 1.0)])
+    assert t == pytest.approx(1.5)
+
+
+def test_ssc_parser_captures_stops_delays_warps(tmp_path):
+    ssc = tmp_path / 'test.ssc'
+    ssc.write_text(
+        """#TITLE:Test;
+#BPMS:0.000=120.000;
+#OFFSET:0.0;
+#STOPS:1.000=0.500;
+#DELAYS:2.000=0.250;
+#WARPS:3.000=1.000;
+#NOTEDATA:;
+#STEPSTYPE:dance-single;
+#DIFFICULTY:Challenge;
+#METER:10;
+#NOTES:
+1000
+0000
+0000
+0000
+;
+""",
+        encoding='utf-8',
+    )
+    data = parse_ssc(ssc)
+    chart = data['charts'][0]
+    assert chart['stops'] == [(1.0, 0.5)]
+    assert chart['delays'] == [(2.0, 0.25)]
+    assert chart['warps'] == [(3.0, 1.0)]
+
+
+def test_sm_parser_captures_stops_delays_warps(tmp_path):
+    sm = tmp_path / 'test.sm'
+    sm.write_text(
+        """#TITLE:Test;
+#BPMS:0.000=120.000;
+#OFFSET:0.0;
+#STOPS:1.000=0.500;
+#DELAYS:2.000=0.250;
+#WARPS:3.000=1.000;
+#NOTES:dance-single:desc:Challenge:10:0:
+1000
+0000
+0000
+0000
+;
+""",
+        encoding='utf-8',
+    )
+    data = parse_sm(sm)
+    chart = data['charts'][0]
+    assert chart['stops'] == [(1.0, 0.5)]
+    assert chart['delays'] == [(2.0, 0.25)]
+    assert chart['warps'] == [(3.0, 1.0)]
 
 
 # ---------------------------------------------------------------------------
