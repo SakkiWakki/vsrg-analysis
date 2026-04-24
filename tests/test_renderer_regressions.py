@@ -251,7 +251,7 @@ def test_culling_pad_keeps_note_whose_press_mark_extends_into_window():
         _note_sv_cum=times,
         sv_enabled=False,
         sv_sections=[],
-        _ln_indices=[],
+        notes=SimpleNamespace(ln_indices=[]),
         max_draw_pad_sec=0.5,
     )
     # Window is [1.2, 2.8]. Without padding, only index 2 (time=2.0) is in.
@@ -273,7 +273,7 @@ def test_culling_pad_zero_matches_legacy_window():
         _note_sv_cum=times,
         sv_enabled=False,
         sv_sections=[],
-        _ln_indices=[],
+        notes=SimpleNamespace(ln_indices=[]),
         max_draw_pad_sec=0.0,
     )
     ctx = _cull_ctx(player, target_lo=1.2, target_hi=2.8)
@@ -288,7 +288,7 @@ def test_sv_culling_pad_converts_seconds_to_cumulative_units():
     player = SimpleNamespace(
         times=times,
         _note_sv_cum=np.array([9.5, 11.0, 13.0], dtype=np.float64),
-        _ln_indices=[],
+        notes=SimpleNamespace(ln_indices=[]),
         max_draw_pad_sec=0.2,
         _cumulative_sv_at=lambda t: float(t) * 10.0,
     )
@@ -435,7 +435,7 @@ def test_culling_pad_missing_attr_defaults_to_zero():
         _note_sv_cum=times,
         sv_enabled=False,
         sv_sections=[],
-        _ln_indices=[],
+        notes=SimpleNamespace(ln_indices=[]),
     )
     ctx = _cull_ctx(player, target_lo=0.5, target_hi=1.5)
 

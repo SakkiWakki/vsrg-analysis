@@ -597,6 +597,7 @@ def _build_chartkey_index(songs_dir, progress=None):
         progress('scanning Songs directory…')
     paths = list(root.rglob('*.ssc')) + list(root.rglob('*.sm'))
     total = len(paths)
+    # TODO: Stop this from happening every new replay
     if progress:
         progress(f'indexing charts 0/{total} (0%)')
     max_workers = max(2, (os.cpu_count() or 4))

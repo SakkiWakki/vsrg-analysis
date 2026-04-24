@@ -197,22 +197,22 @@ def test_compute_drop_order_picks_midpoint_with_real_rects():
         hud=hud,
         H=500,
     )
-    from analysis.player.player import _compute_drop_order
+    from analysis.player.layout_edit import compute_drop_order
     targets = reg.reorder_targets(hud.drag_key, REGION_PANEL,
                                   hud.frame_sidepanel_rects)
     # Cursor Y above both mids → insert before one.
-    assert _compute_drop_order(5, targets, shim.H) < 100.0
+    assert compute_drop_order(5, targets, shim.H) < 100.0
     # Cursor between mids → midpoint of 100 and 200.
-    assert _compute_drop_order(50, targets, shim.H) == 150.0
+    assert compute_drop_order(50, targets, shim.H) == 150.0
     # Cursor below both → insert after two.
-    assert _compute_drop_order(200, targets, shim.H) > 200.0
+    assert compute_drop_order(200, targets, shim.H) > 200.0
     reg.close()
 
 
 def test_finish_drag_routes_by_cursor_x():
     """Drop in the sidebar column = sidepanel region; drop left of the
     column = free region."""
-    from analysis.player.player import Player
+    from analysis.player.layout_edit import LayoutEditController
     from analysis.player.render import theme
 
     reg = _fresh_registry()
@@ -230,21 +230,18 @@ def test_finish_drag_routes_by_cursor_x():
         plugins=SimpleNamespace(sidebar=reg),
         hud=hud, W=W, H=800,
     )
-    # _finish_drag delegates to _place_in_panel / _place_in_free_region.
-    # _compute_drop_order is a pure module-level function so needs no shim.
-    shim._place_in_panel = lambda k, y, r: Player._place_in_panel(shim, k, y, r)
-    shim._place_in_free_region = lambda k, x, y: Player._place_in_free_region(shim, k, x, y)
+    controller = LayoutEditController(shim)
 
     # Drop at x in sidebar column — stays in sidepanel.
     sidebar_x = W - theme.SIDEBAR_WIDTH
-    Player._finish_drag(shim, sidebar_x + 5, 200)
+    controller.finish_drag(sidebar_x + 5, 200)
     assert reg.section_region('demo:one') == REGION_PANEL
     assert shim.hud.drag_key is None
 
     # New drag, drop to the left of the sidebar — goes free.
     hud.drag_key = 'demo:one'
     hud.drag_offset = (20, 10)
-    Player._finish_drag(shim, 100, 400)
+    controller.finish_drag(100, 400)
     assert reg.section_region('demo:one') == REGION_FREE
     # Rect top-left should be (cursor - offset) clamped on-screen.
     sec = [s for s in reg.all_sections() if s.key == 'demo:one'][0]

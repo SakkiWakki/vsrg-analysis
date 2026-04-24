@@ -177,6 +177,7 @@ def _draw_chart_sprites(ctx, painter, times, cols, sv_times, *,
         return
 
     from PySide6.QtCore import QPointF
+    from analysis.player.render.layers.note_sprites import HEAD_PAD
     cache = ctx.sprite_cache
     lane_x = ctx.lane_x
     note_h = ctx.note_h
@@ -184,9 +185,11 @@ def _draw_chart_sprites(ctx, painter, times, cols, sv_times, *,
     time_to_y = ctx.time_to_y
 
     # Mines' sprite is a square with side == lane_w, centered on y.
-    # Other chart sprites use the head shape (lane_w, note_h), blitted
-    # top-left at (lx, y - note_h / 2).
-    y_offset = lane_w / 2 if y_center else note_h / 2
+    # Head-shaped sprites use a `(lane_w, note_h + 2*HEAD_PAD)` pixmap
+    # (pad keeps antialiased outlines + oversized glyphs inside the
+    # allocated space); blit shifts up by `HEAD_PAD` so the note-head
+    # area inside the pixmap aligns with the underlying y.
+    y_offset = lane_w / 2 if y_center else (note_h / 2 + HEAD_PAD)
 
     if keyed:
         for k in indices:
