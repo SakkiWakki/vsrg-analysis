@@ -50,6 +50,15 @@ class GameAdapter:
         stores SM noterows that need the chart's BPM map to time out."""
         raise NotImplementedError
 
+    def build_sv_engine(self, replay):
+        """Build an SVEngine for this replay, or return None for identity SV.
+
+        Returning None is NOT the same as raising NotImplementedError: it
+        means "this chart has no scroll-velocity data", and the Player runs
+        with distance(a, b) = b - a. Override for games that model scroll
+        velocity (osu!mania timing points, Etterna #SCROLLS/#SPEEDS, etc.)."""
+        return None
+
     def judge_kwarg_name(self) -> str:
         """Name of the keyword the game's judge system takes in
         `judgement_windows`/`judge_label`/`player_kwargs` ('judge' for

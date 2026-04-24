@@ -259,19 +259,33 @@ class Player:
         return max(off_abs, rel_abs)
 
     def _init_sv(self, sv_sections, replay):
-        """Configure SV (scroll velocity): a list of (time_sec,
-        multiplier) used to compute piecewise-constant integrals for
-        note positions. Also fire the active mode's on_enter so e.g.
-        CMOD's SV-suspend runs on the initial load too, not just on
-        later mode switches."""
-        if sv_sections is None:
-            sv_sections = replay.get('sv_sections') or []
-        self.sv_sections = list(sv_sections)
-        self.sv_enabled = bool(self.sv_sections)
+        """Ask the adapter for an SVEngine; fall back to IdentitySVEngine when
+        the chart has no SV. `sv_sections` is retained as a constructor
+        override for callers (mostly tests) that still supply explicit
+        time-space sections — they get a TimeSpaceSVEngine directly. The
+        active scroll mode's on_enter fires here too so CMOD's SV-suspend
+        applies on initial load, not just on later mode switches."""
+        from analysis.player.sv_engine import (IdentitySVEngine,
+                                                TimeSpaceSVEngine)
+        if sv_sections is not None:
+            self._sv_engine = (TimeSpaceSVEngine(list(sv_sections))
+                               if sv_sections else IdentitySVEngine())
+        else:
+            engine = self._adapter.build_sv_engine(replay)
+            self._sv_engine = engine or IdentitySVEngine()
+        self.sv_enabled = bool(getattr(self._sv_engine, 'enabled', False))
 
         mode_desc = scroll_registry.get(self.scroll_mode)
         if mode_desc and mode_desc.on_enter:
             mode_desc.on_enter(self, self._mode_state[self.scroll_mode])
+
+    @property
+    def sv_sections(self):
+        """Back-compat view: `[(time_sec, multiplier)]` projection of the
+        active SV engine. Consumed by sidebar/components/plugin APIs that
+        only need to display or count SV — not for positioning, which
+        goes through `_sv_distance`/`_time_to_y` and hits the engine."""
+        return self._sv_engine.as_sections()
 
     def _init_side_systems(self):
         """Bring up the plugin manager, HUD state, event bus, and the
@@ -480,29 +494,13 @@ class Player:
         return x0, lane_w
 
     def _build_cumulative_sv(self):
-        """Precompute cumulative SV integral at each section boundary for O(log n) lookup."""
-        self._sv_times = [s[0] for s in self.sv_sections]
-        self._sv_values = [s[1] for s in self.sv_sections]
-        n = len(self.sv_sections)
-        self._sv_cumulative = [0.0] * n
-        for i in range(1, n):
-            dt = self._sv_times[i] - self._sv_times[i - 1]
-            self._sv_cumulative[i] = self._sv_cumulative[i - 1] + dt * self._sv_values[i - 1]
-        # Cache sv-distance for each note time — lets us bisect directly by
-        # on-screen position regardless of how wildly SV stretches the chart.
-        self._note_sv_cum = np.array(
-            [self._cumulative_sv_at(float(t)) for t in self.times],
-            dtype=np.float64)
+        """Build the per-note SV-space cache the culling bisects against."""
+        self._note_sv_cum = self._sv_engine.project_times(self.times)
 
     def _times_to_sv(self, times):
-        """Project an array of note times into the cumulative-SV space
-        used for note culling. Returns an empty float64 array when
-        `times` is empty."""
-        if not times.size:
-            return np.empty(0, dtype=np.float64)
-        return np.array(
-            [self._cumulative_sv_at(float(t)) for t in times],
-            dtype=np.float64)
+        """Project an array of chart times through the active SV engine into
+        the cumulative-SV space used for note culling."""
+        return self._sv_engine.project_times(np.asarray(times))
 
     def _build_ghost_sv_caches(self):
         """Cache ghost overlay times in the same SV-space used for note
@@ -524,24 +522,20 @@ class Player:
         m.fake_sv = self._times_to_sv(m.fake_times)
 
     def _cumulative_sv_at(self, t):
-        """Integral of SV(t') dt' from the first timing point to t.
-        For t before the first section, extrapolate with the first SV value."""
-        if not self._sv_times:
-            return t
-        idx = bisect.bisect_right(self._sv_times, t) - 1
-        if idx < 0:
-            return (t - self._sv_times[0]) * self._sv_values[0]
-        return self._sv_cumulative[idx] + (t - self._sv_times[idx]) * self._sv_values[idx]
+        """SV-space position at chart time `t`. Kept for culling.py's
+        `cum_now = p._cumulative_sv_at(t_now)` call."""
+        # Distance from t=0 matches cumulative, since engines integrate from 0.
+        return self._sv_engine.distance(0.0, float(t))
 
     def _sv_distance(self, t_from, t_to):
-        """SV-weighted time delta (returns plain delta if SV is off/empty).
-        `sv_enabled` is the single source of truth; CMOD's on_enter forces
-        it off (matching Etterna's ArrowEffects.cpp CMOD branch, which
-        never calls GetDisplayedSpeedPercent). ms/xmod/osu modes layer SV
-        on top when enabled."""
-        if not self.sv_enabled or not self.sv_sections:
+        """SV-weighted chart-time delta. Returns the plain delta when SV is
+        off for any reason: engine is identity, chart has no SV, or the
+        active scroll mode suspended SV (CMOD's on_enter). Single source of
+        truth is `sv_enabled`, matching Etterna's ArrowEffects.cpp CMOD
+        branch (which never calls GetDisplayedSpeedPercent)."""
+        if not self.sv_enabled:
             return t_to - t_from
-        return self._cumulative_sv_at(t_to) - self._cumulative_sv_at(t_from)
+        return self._sv_engine.distance(t_from, t_to)
 
     def _time_to_y(self, t, t_now):
         judge_y = self.H * self.hit_line_y_frac
@@ -552,7 +546,7 @@ class Player:
         state dict has a sv_enabled_saved slot), flip that saved value so
         the user's intent survives leaving the mode — but don't actually
         enable SV while still in a mode that ignores it."""
-        if not self.sv_sections:
+        if not self._sv_engine.enabled:
             return False
         st = self._state()
         if 'sv_enabled_saved' in st:

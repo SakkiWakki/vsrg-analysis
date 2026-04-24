@@ -256,7 +256,6 @@ class EtternaAdapter(GameAdapter):
           ``keycount``     — track count from the chart's stepstype."""
         from analysis.games.etterna.sm_chart import (parse_notes_block,
                                                       stepstype_keycount,
-                                                      sv_sections_from_chart,
                                                       row_to_time,
                                                       NT_TAP, NT_HOLD_HEAD,
                                                       NT_MINE, NT_LIFT,
@@ -267,12 +266,16 @@ class EtternaAdapter(GameAdapter):
         stepstype = chart.get('stepstype', '')
         if stepstype and 'keycount' not in replay:
             replay['keycount'] = stepstype_keycount(stepstype)
-        if 'sv_sections' not in replay:
-            bpms = chart.get('bpms') or data.get('bpms') or []
-            offset = chart.get('offset') or data.get('offset') or 0.0
-            sv = sv_sections_from_chart(chart, bpms, offset)
-            if sv:
-                replay['sv_sections'] = sv
+        # Stash raw SCROLLS/SPEEDS/BPMs for `build_sv_engine` — beat-space
+        # positioning (required when BPM changes span SCROLLS segments) is
+        # done there, not collapsed to time-space here.
+        scrolls = chart.get('scrolls') or []
+        speeds = chart.get('speeds') or []
+        if scrolls or speeds:
+            replay['_etterna_scrolls'] = scrolls
+            replay['_etterna_speeds'] = speeds
+            replay['_etterna_bpms'] = chart.get('bpms') or data.get('bpms') or []
+            replay['_etterna_offset'] = chart.get('offset') or data.get('offset') or 0.0
         if not notedata:
             return
         if 'chart_mines' in replay:
@@ -343,6 +346,25 @@ class EtternaAdapter(GameAdapter):
                      for r, c, is_hold in missing
                      if is_hold and (r, c) in hold_ends]
         replay['holds'] = existing_holds + new_holds
+
+    def build_sv_engine(self, replay):
+        """Etterna positions notes in beat-space (see ArrowEffects.cpp::
+        GetYOffset, XMOD branch). #SCROLLS is a velocity on beats, not time,
+        and #SPEEDS is a uniform field zoom sampled at the current song
+        position. Integrating the combined curve in time-space accumulates
+        error whenever a SCROLLS segment straddles a BPM change — noticeable
+        on charts like Undiscovered Colors, where the scroll ratio ramps
+        across the whole song."""
+        from analysis.player.sv_engine import BeatSpaceSVEngine
+        scrolls = replay.get('_etterna_scrolls') or []
+        speeds = replay.get('_etterna_speeds') or []
+        if not (scrolls or speeds):
+            return None
+        return BeatSpaceSVEngine(
+            scrolls, speeds,
+            replay.get('_etterna_bpms') or [],
+            replay.get('_etterna_offset') or 0.0,
+        )
 
     def judgement_windows(self, replay, judge=None, **_):
         from analysis.games.etterna.judgment import windows_for

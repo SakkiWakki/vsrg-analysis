@@ -11,7 +11,7 @@ def prepare_time_window(ctx):
     sps = max(1e-3, ctx.scroll_speed)
     sv_hi = (ctx.judge_y + ctx.screen_margin) / sps
     sv_lo = (ctx.judge_y - (p.H + ctx.screen_margin)) / sps
-    ctx.use_sv_space = bool(p.sv_enabled and p.sv_sections)
+    ctx.use_sv_space = bool(p.sv_enabled and p._sv_engine.enabled)
     if ctx.use_sv_space:
         cum_now = p._cumulative_sv_at(float(ctx.t_now))
         ctx.target_lo = cum_now + sv_lo
