@@ -252,12 +252,17 @@ class EtternaAdapter(GameAdapter):
           ``chart_lifts``  — list of (row, col)
           ``chart_fakes``  — list of (row, col)
           ``roll_heads``   — set of (row, col); lets the LN renderer
-                             flip holds to roll-colored tails."""
+                             flip holds to roll-colored tails.
+          ``keycount``     — track count from the chart's stepstype."""
         from analysis.games.etterna.sm_chart import (parse_notes_block,
+                                                      stepstype_keycount,
                                                       NT_MINE, NT_LIFT,
                                                       NT_FAKE, NT_ROLL_HEAD)
         chart = (found or {}).get('chart') or {}
         notedata = chart.get('notedata')
+        stepstype = chart.get('stepstype', '')
+        if stepstype and 'keycount' not in replay:
+            replay['keycount'] = stepstype_keycount(stepstype)
         if not notedata:
             return
         if 'chart_mines' in replay:
@@ -300,7 +305,8 @@ class EtternaAdapter(GameAdapter):
         n = max(1, min(9, n + step))
         return f'J{n}'
 
-    def prepare_replay_times(self, replay, bpms=None, sm_offset=0.0, **_):
+    def prepare_replay_times(self, replay, bpms=None, sm_offset=0.0,
+                             keycount=None, **_):
         import numpy as np
         from analysis.games.etterna.sm_chart import row_to_time
 
@@ -338,7 +344,8 @@ class EtternaAdapter(GameAdapter):
             replay[t_key] = ts[order]
             replay[c_key] = cs[order]
 
-        return times, hold_tails, int(replay['keycount'])
+        kc = keycount or replay.get('keycount') or 4
+        return times, hold_tails, int(kc)
 
     def judge_label(self, replay, judge=None, **_):
         return str(judge or 'J4')
@@ -606,6 +613,7 @@ class EtternaAdapter(GameAdapter):
             'bpms': bpms,
             'sm_offset': sm_off,
             'xml_judgments': entry.get('judgments'),
+            'keycount': entry.get('keycount'),
         }
 
     # --- note visualizer --------------------------------------------------

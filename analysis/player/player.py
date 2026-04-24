@@ -141,7 +141,7 @@ class Player:
                  window_w=900, window_h=900, headless=False,
                  sv_sections=None, scroll_ms=400.0, scroll_mode=None,
                  cmod_bpm=600.0, osu_speed=20, skin='bar', press_hide=False,
-                 xml_judgments=None):
+                 xml_judgments=None, keycount=None):
         # XML-sourced aggregate judgments from Etterna.xml's TapNoteScores:
         # includes HitMine / AvoidMine and per-window W1..W5 counts. The
         # .bin replay can't tell us which mines were hit, so this dict is
@@ -153,7 +153,8 @@ class Player:
         self.audio_path = audio_path
         self.xml_judgments = dict(xml_judgments or {})
 
-        self._load_replay_arrays(replay, game, bpms=bpms, sm_offset=sm_offset)
+        self._load_replay_arrays(replay, game, bpms=bpms, sm_offset=sm_offset,
+                                 keycount=keycount)
         self._init_judge(od, ett_judge)
         self.palette = [tuple(int(c[i:i + 2], 16) for i in (1, 3, 5))
                         for c in col_colors(self.keycount)]
@@ -177,14 +178,15 @@ class Player:
 
         self._init_side_systems()
 
-    def _load_replay_arrays(self, replay, game, *, bpms, sm_offset):
+    def _load_replay_arrays(self, replay, game, *, bpms, sm_offset,
+                            keycount=None):
         """Delegate to the adapter for noterow-to-time, bind the per-note
         arrays, and normalize the osu-only hold-release and miss-pressed
         streams so downstream code sees a uniform shape."""
         self._adapter = game_mod.get(game)
         self.times, self.hold_tails, self.keycount = (
             self._adapter.prepare_replay_times(
-                replay, bpms=bpms, sm_offset=sm_offset))
+                replay, bpms=bpms, sm_offset=sm_offset, keycount=keycount))
         self.columns = replay['columns']
         self.offsets = replay['offsets']
         self.misses = replay['misses']
