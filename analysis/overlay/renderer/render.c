@@ -159,3 +159,54 @@ float render_text_height(float px_height) {
     // Return it unchanged so resolve_box stays consistent.
     return px_height;
 }
+
+// ── External GL texture draw ──────────────────────────────────────
+//
+// The web-texture IPC path delivers a dmabuf fd; the caller imports
+// it into a GL texture (via EGL) and passes the GL name here each
+// frame. We wrap the raw GL id in a NanoVG image handle so NanoVG's
+// rasterizer can draw a textured quad with the same transform stack
+// as our other primitives.
+//
+// Per-frame overhead we pay: one nvglCreateImageFromHandleGL2 +
+// nvgDeleteImage. ``NVG_IMAGE_NODELETE`` tells NanoVG not to glDelete
+// our texture when we drop its image -- the caller owns that
+// lifecycle (they created the texture via EGLImage and will delete
+// it when the producer releases the channel).
+//
+// Caching by gl_texture_id would cut the create/delete churn, but
+// NanoVG treats image handles as short-lived and doesn't expose a
+// "same underlying texture, new frame" path. The per-call cost is a
+// handful of struct mallocs; negligible at ~30 Hz widget refresh.
+
+void render_gl_texture(uint32_t gl_texture_id,
+                       int tex_w, int tex_h,
+                       float x, float y, float w, float h,
+                       int flip_y) {
+    if (!g_vg || gl_texture_id == 0) return;
+    if (tex_w <= 0 || tex_h <= 0 || w <= 0.0f || h <= 0.0f) return;
+
+    int image = nvglCreateImageFromHandleGL2(
+        g_vg, (GLuint)gl_texture_id, tex_w, tex_h, NVG_IMAGE_NODELETE);
+    if (image <= 0) return;
+
+    // nvgImagePattern takes (ox, oy, ex, ey, angle, image, alpha).
+    //   (ox, oy): top-left corner of the image's rect in world coords.
+    //   (ex, ey): pattern repeat extent (we set to draw rect size so
+    //             it tiles exactly once).
+    // For flip_y, shift the origin down by h and negate the extent.
+    NVGpaint paint;
+    if (flip_y) {
+        paint = nvgImagePattern(g_vg, x, y + h, w, -h, 0.0f, image, 1.0f);
+    } else {
+        paint = nvgImagePattern(g_vg, x, y,     w,  h, 0.0f, image, 1.0f);
+    }
+    nvgBeginPath(g_vg);
+    nvgRect(g_vg, x, y, w, h);
+    nvgFillPaint(g_vg, paint);
+    nvgFill(g_vg);
+
+    // Drop the NVG image handle; NVG_IMAGE_NODELETE means the
+    // underlying GL texture survives (the caller owns it).
+    nvgDeleteImage(g_vg, image);
+}

@@ -400,6 +400,9 @@ class TestDiscovery:
         ), patch(
             'plugins.unsafe.tosu_overlay.discovery._USER_OVERLAYS',
             tmp_path / 'nonexistent',
+        ), patch(
+            'plugins.unsafe.tosu_overlay.discovery._DEFAULT_DEV_OVERLAYS',
+            tmp_path / 'nonexistent-default',
         ):
             results = find_overlays()
 
@@ -418,6 +421,9 @@ class TestDiscovery:
         ), patch(
             'plugins.unsafe.tosu_overlay.discovery._USER_OVERLAYS',
             tmp_path / 'nonexistent',
+        ), patch(
+            'plugins.unsafe.tosu_overlay.discovery._DEFAULT_DEV_OVERLAYS',
+            tmp_path / 'nonexistent-default',
         ):
             results = find_overlays()
 
@@ -436,10 +442,96 @@ class TestDiscovery:
         ), patch(
             'plugins.unsafe.tosu_overlay.discovery._USER_OVERLAYS',
             tmp_path / 'nonexistent',
+        ), patch(
+            'plugins.unsafe.tosu_overlay.discovery._DEFAULT_DEV_OVERLAYS',
+            tmp_path / 'nonexistent-default',
         ):
             names = [n for n, _ in find_overlays()]
 
         assert names == sorted(names)
+
+    def test_discovers_from_tosu_overlays_dirs_env(self, tmp_path, monkeypatch):
+        from plugins.unsafe.tosu_overlay.discovery import find_overlays
+
+        extra_root = tmp_path / 'extra-root'
+        extra_overlay = extra_root / 'community-overlay'
+        extra_overlay.mkdir(parents=True)
+        (extra_overlay / 'index.html').write_text('<html></html>')
+
+        # Extra directories may be entered with surrounding whitespace.
+        monkeypatch.setenv('TOSU_OVERLAYS_DIRS', f'  {extra_root}  ')
+
+        with patch(
+            'plugins.unsafe.tosu_overlay.discovery._BUILTIN_OVERLAYS',
+            tmp_path / 'nonexistent-builtin',
+        ), patch(
+            'plugins.unsafe.tosu_overlay.discovery._USER_OVERLAYS',
+            tmp_path / 'nonexistent-user',
+        ), patch(
+            'plugins.unsafe.tosu_overlay.discovery._DEFAULT_DEV_OVERLAYS',
+            tmp_path / 'nonexistent-default',
+        ):
+            results = find_overlays()
+
+        assert results == [('community-overlay', extra_overlay / 'index.html')]
+
+    def test_discovers_expanduser_and_expandvars(self, tmp_path, monkeypatch):
+        from plugins.unsafe.tosu_overlay.discovery import find_overlays
+
+        fake_home = tmp_path / 'fake-home'
+        env_root = tmp_path / 'env-root'
+        home_overlay = fake_home / 'from-home' / 'home-overlay'
+        env_overlay = env_root / 'env-overlay'
+        home_overlay.mkdir(parents=True)
+        env_overlay.mkdir(parents=True)
+        (home_overlay / 'index.html').write_text('<html></html>')
+        (env_overlay / 'index.html').write_text('<html></html>')
+
+        monkeypatch.setenv('HOME', str(fake_home))
+        monkeypatch.setenv('OVERLAY_ENV_ROOT', str(env_root))
+        monkeypatch.setenv(
+            'TOSU_OVERLAYS_DIRS',
+            '~/from-home:$OVERLAY_ENV_ROOT',
+        )
+
+        with patch(
+            'plugins.unsafe.tosu_overlay.discovery._BUILTIN_OVERLAYS',
+            tmp_path / 'nonexistent-builtin',
+        ), patch(
+            'plugins.unsafe.tosu_overlay.discovery._USER_OVERLAYS',
+            tmp_path / 'nonexistent-user',
+        ), patch(
+            'plugins.unsafe.tosu_overlay.discovery._DEFAULT_DEV_OVERLAYS',
+            tmp_path / 'nonexistent-default',
+        ):
+            names = [name for name, _ in find_overlays()]
+
+        assert names == ['env-overlay', 'home-overlay']
+
+    def test_fallback_to_tmp_tosu_counters_when_env_unset(
+        self, tmp_path, monkeypatch
+    ):
+        from plugins.unsafe.tosu_overlay.discovery import find_overlays
+
+        fallback_root = tmp_path / 'tmp-counters'
+        overlay_dir = fallback_root / 'fallback-overlay'
+        overlay_dir.mkdir(parents=True)
+        (overlay_dir / 'index.html').write_text('<html></html>')
+
+        monkeypatch.delenv('TOSU_OVERLAYS_DIRS', raising=False)
+        with patch(
+            'plugins.unsafe.tosu_overlay.discovery._DEFAULT_DEV_OVERLAYS',
+            fallback_root,
+        ), patch(
+            'plugins.unsafe.tosu_overlay.discovery._BUILTIN_OVERLAYS',
+            tmp_path / 'nonexistent-builtin',
+        ), patch(
+            'plugins.unsafe.tosu_overlay.discovery._USER_OVERLAYS',
+            tmp_path / 'nonexistent-user',
+        ):
+            results = find_overlays()
+
+        assert results == [('fallback-overlay', overlay_dir / 'index.html')]
 
 
 # ---------------------------------------------------------------------------

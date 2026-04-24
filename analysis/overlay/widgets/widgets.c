@@ -5,6 +5,7 @@
 #include "widgets.h"
 
 #include <math.h>
+#include <stddef.h>
 
 #include "../renderer/render.h"
 
@@ -21,6 +22,25 @@
 
 float vsrg_px_height_for_scale(float px_scale) {
     return px_scale * VSRG_TEXT_HEIGHT_PER_PX_SCALE;
+}
+
+// ── Web-texture resolver ─────────────────────────────────────────
+//
+// The resolver pointer is written by the host (once at startup) and
+// read by the render thread (once per frame per web-texture slot).
+// A plain pointer plus __atomic_load/store is sufficient -- we never
+// call through a half-written pointer because the atomic store is a
+// release and the load is an acquire, so everything the host did to
+// prepare its texture cache before installing the resolver happens-
+// before any render-thread call.
+static VsrgWebTextureResolver g_web_tex_resolver = NULL;
+
+void vsrg_set_web_texture_resolver(VsrgWebTextureResolver fn) {
+    __atomic_store_n(&g_web_tex_resolver, fn, __ATOMIC_RELEASE);
+}
+
+static VsrgWebTextureResolver web_tex_resolver(void) {
+    return __atomic_load_n(&g_web_tex_resolver, __ATOMIC_ACQUIRE);
 }
 
 float vsrg_measure_text(const char *s, float px_scale) {
@@ -108,6 +128,27 @@ void vsrg_draw_widgets(const VsrgOverlayShm *s,
         } else if (w->kind == VSRG_OVERLAY_KIND_TEXT) {
             render_text(w->text, rb.px, rb.py,
                         vsrg_px_height_for_scale(w->px_scale), w->color);
+        } else if (w->kind == VSRG_OVERLAY_KIND_WEB_TEXTURE) {
+            // Lookup the live GL texture for this (channel, gen). The
+            // resolver returns 0 when the dmabuf fd hasn't landed yet
+            // (publisher pushed the shm widget before the fd went
+            // over the socket, or the fd hasn't been imported on the
+            // render thread). In that case skip -- next frame likely
+            // has it.
+            VsrgWebTextureResolver resolve = web_tex_resolver();
+            if (resolve == NULL) continue;
+            uint32_t gl_tex = 0;
+            int tex_w = 0, tex_h = 0;
+            if (!resolve(w->channel_id, w->generation,
+                         &gl_tex, &tex_w, &tex_h)) {
+                continue;
+            }
+            // dmabuf-imported textures land y-flipped relative to the
+            // producer's Chromium top-left origin. flip_y=1 corrects
+            // that in the NanoVG UV mapping.
+            render_gl_texture(gl_tex, tex_w, tex_h,
+                              rb.px, rb.py, rb.pw, rb.ph,
+                              /*flip_y=*/1);
         }
     }
 }

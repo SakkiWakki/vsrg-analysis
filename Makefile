@@ -176,7 +176,8 @@ GL_LAYER_RENDER_SRCS_C := $(RENDERER_DIR)/render.c \
                           $(INPUT_DIR)/input.c \
                           $(INPUT_DIR)/input_x11_poll.c \
                           $(INPUT_DIR)/input_x11_xi2.c \
-                          $(GL_LAYER_DIR)/shm_consumer.c
+                          $(GL_LAYER_DIR)/shm_consumer.c \
+                          $(GL_LAYER_DIR)/web_texture_host.c
 
 GL_LAYER_CXXFLAGS := -std=c++20 -O2 -fPIC -fvisibility=hidden \
                      -Wall -Wextra -Wno-unused-parameter \
@@ -190,7 +191,8 @@ GL_LAYER_CFLAGS_C := -std=c11 -O2 -fPIC -fvisibility=hidden \
                      -I$(RENDERER_DIR) -I$(WIDGETS_DIR) -I$(INPUT_DIR) \
                      $(shell pkg-config --cflags x11 gl 2>/dev/null)
 GL_LAYER_LDFLAGS  := -shared -fvisibility=hidden
-GL_LAYER_LIBS     := -ldl -lm $(shell pkg-config --libs x11 xi egl gl 2>/dev/null)
+GL_LAYER_LIBS     := -ldl -lm -lpthread \
+                     $(shell pkg-config --libs x11 xi egl gl 2>/dev/null)
 
 GL_LAYER_BUILD_DIR := $(GL_LAYER_DIR)/.build
 GL_LAYER_C_OBJS := $(patsubst %.c,$(GL_LAYER_BUILD_DIR)/%.o, \
@@ -226,7 +228,9 @@ $(GL_LAYER_BUILD_DIR)/%.o: $(INPUT_DIR)/%.c \
 	$(Q)gcc $(GL_LAYER_CFLAGS_C) -DVSRG_GL_LAYER_HAS_RENDERER -c -o $@ $<
 
 $(GL_LAYER_BUILD_DIR)/%.o: $(GL_LAYER_DIR)/%.c \
-                           $(GL_LAYER_DIR)/shm_consumer.h
+                           $(GL_LAYER_DIR)/shm_consumer.h \
+                           $(GL_LAYER_DIR)/web_texture_host.h \
+                           $(WIDGETS_DIR)/web_texture_ipc.h
 	$(Q)mkdir -p $(@D)
 	$(Q)gcc $(GL_LAYER_CFLAGS_C) -DVSRG_GL_LAYER_HAS_RENDERER -c -o $@ $<
 
@@ -235,7 +239,8 @@ $(GL_LAYER_BUILD_DIR)/%.o: $(GL_LAYER_DIR)/%.cpp \
                            $(RENDERER_DIR)/render.h \
                            $(WIDGETS_DIR)/widgets.h \
                            $(INPUT_DIR)/input.h \
-                           $(GL_LAYER_DIR)/shm_consumer.h
+                           $(GL_LAYER_DIR)/shm_consumer.h \
+                           $(GL_LAYER_DIR)/web_texture_host.h
 	$(Q)mkdir -p $(@D)
 	$(Q)g++ $(GL_LAYER_CXXFLAGS) -DVSRG_GL_LAYER_HAS_RENDERER -c -o $@ $<
 

@@ -70,6 +70,31 @@ int  vsrg_hit_test(const VsrgOverlayShm *s,
 void vsrg_draw_widgets(const VsrgOverlayShm *s,
                        int canvas_w, int canvas_h);
 
+// Callback the host registers to resolve a (channel_id, generation)
+// pair from a KIND_WEB_TEXTURE widget into a live GL texture.
+//
+// Returns 1 and fills ``*out_gl_tex``, ``*out_tex_w``, ``*out_tex_h``
+// if a valid imported texture is available right now; returns 0 if
+// no matching texture has landed yet (the producer's fd arrived
+// out-of-order, or the overlay hasn't imported this generation).
+//
+// The hook is called from ``vsrg_draw_widgets`` on the render thread.
+// The host (gl_layer today, gamescope_overlay tomorrow) owns the
+// actual texture cache and the socket listener that populates it;
+// widgets.c stays backend-agnostic.
+typedef int (*VsrgWebTextureResolver)(uint32_t channel_id,
+                                      uint32_t generation,
+                                      uint32_t *out_gl_tex,
+                                      int *out_tex_w,
+                                      int *out_tex_h);
+
+// Install the resolver hook. Passing NULL disables web-texture
+// rendering; slots of ``KIND_WEB_TEXTURE`` draw nothing in that
+// case. Thread-safe via ``__atomic_*`` on the internal pointer --
+// the host may swap resolvers at runtime (e.g. to tear down the
+// socket thread cleanly on shutdown).
+void vsrg_set_web_texture_resolver(VsrgWebTextureResolver fn);
+
 // Overlay edit-mode decorations (screen dim + per-widget outlines +
 // help strip). ``hover_idx`` < 0 means no widget is hovered.
 void vsrg_draw_edit_decorations(const VsrgOverlayShm *s,

@@ -26,6 +26,7 @@ extern "C" {
 #include "widgets.h"
 #include "input.h"
 #include "shm_consumer.h"
+#include "web_texture_host.h"
 }
 #endif
 
@@ -171,6 +172,12 @@ void draw_overlay_frame(int w, int h, uintptr_t surface_handle) {
         std::fprintf(stderr,
                      "[vsrg-gl] render_init %s\n",
                      ok ? "succeeded" : "FAILED");
+        if (ok) {
+            // Bring up the web-texture IPC host once we know GL works.
+            // Failure to bind the socket is logged inside; we continue
+            // regardless so rect/text widgets still render.
+            web_texture_host_start();
+        }
     }
     if (!g_render_ready.load()) return;
     if (w <= 0 || h <= 0) return;
@@ -218,6 +225,12 @@ void draw_overlay_frame(int w, int h, uintptr_t surface_handle) {
     }
 
     GlStateGuard guard;
+    // Drain any pending dmabuf imports into GL textures before
+    // drawing. MUST run under the game's live GL context (we're
+    // inside the swap hook, so we are). If no producer has
+    // published since the last tick this is essentially a noop.
+    web_texture_host_tick();
+
     render_begin_frame(w, h);
     if (have_snap) {
         vsrg_draw_widgets(&snap, w, h);

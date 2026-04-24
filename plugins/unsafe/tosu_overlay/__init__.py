@@ -3,6 +3,6 @@ QWebEngineView with a FakeWebSocket shim so they receive data directly
 from the player without a running tosu server.
 
 Public API:
-    from plugins.builtin.tosu_overlay.view import TosuOverlayView
-    from plugins.builtin.tosu_overlay.discovery import find_overlays
+    from plugins.unsafe.tosu_overlay.view import TosuOverlayView
+    from plugins.unsafe.tosu_overlay.discovery import find_overlays
 """

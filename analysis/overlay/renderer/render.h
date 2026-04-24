@@ -53,6 +53,25 @@ float render_text_width(const char *s, float px_height);
 // layout math produces a bounding rect the hit-test can trust.
 float render_text_height(float px_height);
 
+// Draw an externally-owned GL texture at (x, y) with size (w, h).
+// ``gl_texture_id`` must refer to a GL_TEXTURE_2D valid in the
+// caller's current GL context -- typically a dmabuf imported via
+// EGLImage + glEGLImageTargetTexture2DOES, living in the context
+// the game is rendering into.
+//
+// ``tex_w`` / ``tex_h`` describe the source texture in pixels and
+// drive NanoVG's UV mapping. ``flip_y=1`` flips vertically, needed
+// for dmabuf-imported textures whose GL memory order ends up
+// upside-down relative to Chromium's top-left origin.
+//
+// Backed by ``nvglCreateImageFromHandleGL``. NanoVG caches the
+// image handle for ~60 frames internally; calling this repeatedly
+// with the same ``gl_texture_id`` is cheap (no per-frame alloc).
+void render_gl_texture(uint32_t gl_texture_id,
+                       int tex_w, int tex_h,
+                       float x, float y, float w, float h,
+                       int flip_y);
+
 #ifdef __cplusplus
 }
 #endif

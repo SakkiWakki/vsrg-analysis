@@ -8,6 +8,10 @@ Lemme know if the clanker somehow made a buffer overflow in python code lol
 
 Btw I added plugins but the plugins themselves are only cheaply sandboxed. This means you should not run arbitrary unsafe plugins from randos
 
+Long term goals:
+Finish roo, then port the GUI and overlay rendering over to it. 
+Currently just working on low-level graphics stuff to gauge roo's future better. 
+(So far it's just that I want access to both high and low level APIs at the same time)
 ---
 
 # Clanker README
