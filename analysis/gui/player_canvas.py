@@ -68,10 +68,9 @@ class PlayerCanvas(QOpenGLWidget):
         self._update_cursor(ev)
         super().mouseMoveEvent(ev)
 
-    @staticmethod
-    def _event_xy(ev) -> tuple[int, int]:
-        pos = ev.position() if hasattr(ev, 'position') else ev.pos()
-        return int(pos.x()), int(pos.y())
+    def _rect_contains(rect, x, y):
+        rx, ry, rw, rh = rect
+        return rx <= x <= rx + rw and ry <= y <= ry + rh
 
     def _cursor_shape_for_event(self, ev):
         hud = getattr(self.player, 'hud', None)
@@ -86,7 +85,7 @@ class PlayerCanvas(QOpenGLWidget):
         x, y = self._event_xy(ev)
 
         for rect, action, _payload in reversed(hud.hitboxes):
-            if not self._event_xy(rect, x, y):
+            if not self._rect_contains(rect, x, y):
                 continue
             if action == 'begin_resize_section':
                 return Qt.SizeFDiagCursor
