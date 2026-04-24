@@ -48,6 +48,7 @@ class PlayerTab(QWidget):
         self._audio_path = audio_path
         self._music_started_at = None
         self._muted = False
+        self._last_audio_state = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -122,7 +123,7 @@ class PlayerTab(QWidget):
         self.input_router.add(SidebarRegion(self.player))
         self.input_router.add(LanesRegion(self.player, self._seek))
 
-    def _sync_audio(self):
+    def _sync_audio(self, *, force: bool = False):
         # Mirror audio-engine status onto the player so the painted HUD
         # (which has no handle to the audio engine) can render a correct
         # Pitch-correct label and distinguish "unavailable" from "off".
@@ -132,14 +133,18 @@ class PlayerTab(QWidget):
                 getattr(self._audio, '_pitch_correct', True)),
         }
         if self._audio_ready:
-            # Send the CLOCK's intended t, not the PV-observed t. Otherwise
-            # a seek (slider drag, step button) writes the new t into the
-            # clock's wall anchor, but `player.t` reads back the PV's stale
-            # source_time — so `set_state` would receive the old position
-            # and fail to seek the PV.
-            self._audio.set_state(self.player.t_intended,
-                                  self.player.play_rate,
-                                  not self.player.paused)
+            state = (
+                float(self.player.t_intended),
+                float(self.player.play_rate),
+                bool(not self.player.paused),
+            )
+            if force or state != self._last_audio_state:
+                # Send the CLOCK's intended t, not the PV-observed t. Otherwise
+                # a seek (slider drag, step button) writes the new t into the
+                # clock's wall anchor, but `player.t` reads back the audio
+                # clock — so `set_state` would receive stale position data.
+                self._audio.set_state(*state)
+                self._last_audio_state = state
 
     def _toggle(self):
         # Unpausing after playback has finished loops back to the start.
@@ -159,17 +164,17 @@ class PlayerTab(QWidget):
         # On unpause after a restart, the PV needs to loop
         if self._audio_ready and seeked:
             self._audio.seek(self.player.t_intended)
-        self._sync_audio()
+        self._sync_audio(force=True)
 
     def _seek(self, ds):
         self.player.seek_rel(ds)
         if self._audio_ready:
             self._audio.seek(self.player.t_intended)
-        self._sync_audio()
+        self._sync_audio(force=True)
 
     def _nudge_rate(self, d):
         self.player.nudge_rate(d)
-        self._sync_audio()
+        self._sync_audio(force=True)
 
     def _sync_settings_toggles(self):
         """Pull per-tab-shared toggles from QSettings. Called each tick so
@@ -192,7 +197,7 @@ class PlayerTab(QWidget):
         the mode, nudge the speed, switch the game, or nudge play rate.
         Re-syncs audio so rate nudges from the HUD actually retime the music,
         and persists the mode."""
-        self._sync_audio()
+        self._sync_audio(force=True)
         save_player_setting('scroll_mode', self.player.scroll_mode)
 
     def _on_hud_action(self, action, payload):
@@ -285,6 +290,11 @@ class PlayerTab(QWidget):
             self.player.attach_audio_clock(None)
             self._audio.set_state(self.player.t_intended,
                                   self.player.play_rate, False)
+            self._last_audio_state = (
+                float(self.player.t_intended),
+                float(self.player.play_rate),
+                False,
+            )
 
     def _on_playbar_released(self):
         self._scrubbing = False
@@ -296,6 +306,11 @@ class PlayerTab(QWidget):
             self._audio.set_state(self.player.t_intended,
                                   self.player.play_rate,
                                   self._resume_after_scrub)
+            self._last_audio_state = (
+                float(self.player.t_intended),
+                float(self.player.play_rate),
+                bool(self._resume_after_scrub),
+            )
             self.player.attach_audio_clock(self._audio.current_chart_time)
 
     def _on_playbar_changed(self, v):
@@ -303,7 +318,7 @@ class PlayerTab(QWidget):
             return
         self.player.t = self._slider_to_t(v)
         if not self.playbar.isSliderDown():
-            self._sync_audio()
+            self._sync_audio(force=True)
 
     @staticmethod
     def _fmt_time(t):

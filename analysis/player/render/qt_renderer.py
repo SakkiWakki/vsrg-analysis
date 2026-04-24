@@ -246,6 +246,7 @@ class QtPlayerRenderer:
         ctx.drawers = self._resolve_drawers(player)
         culling.prepare_time_window(ctx)
         ctx.candidates = culling.select_note_candidates(ctx)
+        player.debug_log_sv_frame(ctx)
         return ctx
 
     @property
@@ -451,7 +452,7 @@ class QtPlayerRenderer:
         eligible_state = n.ln_state != 'released' and not n.miss
         if not (has_release_offset and eligible_state and not p.press_hide):
             return
-        rel_y = n.y_end + n.rel_off * ctx.scroll_speed
+        rel_y = ctx.time_to_y(float(n.release_t))
         ctx.drawers['ln_release_guide'](painter, n.lx, ctx.lane_w,
                                          n.y_end, rel_y)
 
@@ -528,7 +529,7 @@ class QtPlayerRenderer:
         if n.is_ln and n.ln_state == 'held' and p.press_hide:
             return
 
-        press_y = n.y + n.off * ctx.scroll_speed
+        press_y = ctx.time_to_y(float(n.press_t))
         color = p.judge_colors['miss'] if n.miss else n.jcolor
         ctx.drawers['press_mark'](painter, n.lx, ctx.lane_w, n.y, press_y,
                                    color)

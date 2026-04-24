@@ -112,16 +112,20 @@ def test_parse_scrolls_basic():
     assert result == [(0.0, 0.0), (26.0, 0.015), (27.0, 0.030)]
 
 
-def test_parse_speeds_ignores_duration_and_type():
-    # beat=ratio=duration=type — only beat and ratio matter
+def test_parse_speeds_preserves_duration_and_type():
     result = _parse_speeds('0.000=1.000=1.000=0,484.000=0.000=0.000=1')
-    assert result == [(0.0, 1.0), (484.0, 0.0)]
+    assert result == [(0.0, 1.0, 1.0, 0), (484.0, 0.0, 0.0, 1)]
 
 
 def test_parse_speeds_two_fields_ok():
     # Some editors omit duration/type entirely
     result = _parse_speeds('0=1.0,10=2.0')
     assert result == [(0.0, 1.0), (10.0, 2.0)]
+
+
+def test_parse_speeds_preserves_transition_fields():
+    result = _parse_speeds('0=2.0=4=0,8=0.5=1.5=1')
+    assert result == [(0.0, 2.0, 4.0, 0), (8.0, 0.5, 1.5, 1)]
 
 
 def test_sv_sections_from_chart_empty_gives_empty():
@@ -196,7 +200,7 @@ def test_parse_ssc_stores_scrolls_and_speeds(tmp_path):
     )
     data = parse_ssc(ssc)
     chart = data['charts'][0]
-    assert chart['speeds'] == [(0.0, 1.0), (8.0, 2.0)]
+    assert chart['speeds'] == [(0.0, 1.0, 0.0, 0), (8.0, 2.0, 0.0, 0)]
     assert chart['scrolls'] == [(0.0, 1.0), (4.0, 0.5)]
 
 
@@ -219,7 +223,7 @@ def test_parse_sm_stores_scrolls_and_speeds(tmp_path):
     )
     data = parse_sm(sm)
     chart = data['charts'][0]
-    assert chart['speeds'] == [(0.0, 1.5)]
+    assert chart['speeds'] == [(0.0, 1.5, 0.0, 0)]
     assert chart['scrolls'] == [(0.0, 0.75)]
 
 

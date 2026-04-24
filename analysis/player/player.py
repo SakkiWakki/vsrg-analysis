@@ -14,6 +14,7 @@ Controls:
 import sys
 import math
 import bisect
+import os
 import numpy as np
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from analysis.viz.plots import col_colors
 from analysis.player.plugin_loader import PluginManager
 from analysis.player import scroll as scroll_registry
 from analysis.player.render import theme
+from analysis.player.sv_debug import LOGGER as _SV_DEBUG_LOGGER
 from analysis.core import game as game_mod
 from analysis.config import get_config
 from analysis.components.api import REGION_FREE
@@ -243,6 +245,7 @@ class Player:
                  if len(self.times) else 10.0)
         t_min = -2.0
         self._clock = ChartClock(initial=0.0, t_min=t_min, t_max=t_max)
+        self._render_timeline = None
         self.hit_line_y_frac = 0.80
         self.skin = skin if skin in self.SKINS else 'bar'
         # Press-hide: once t_now >= press_t stop drawing that note (and
@@ -260,7 +263,9 @@ class Player:
 
     @t.setter
     def t(self, value: float) -> None:
-        self._clock.seek(float(value))
+        t = float(value)
+        self._clock.seek(t)
+        self._reset_render_timeline()
 
     @property
     def paused(self) -> bool:
@@ -269,6 +274,7 @@ class Player:
     @paused.setter
     def paused(self, value: bool) -> None:
         self._clock.set_paused(bool(value))
+        self._reset_render_timeline()
 
     @property
     def play_rate(self) -> float:
@@ -277,6 +283,7 @@ class Player:
     @play_rate.setter
     def play_rate(self, value: float) -> None:
         self._clock.set_rate(float(value))
+        self._reset_render_timeline()
 
     @property
     def t_min(self) -> float:
@@ -295,6 +302,7 @@ class Player:
         playhead follows the audio engine's actual source position. Pass
         `None` to detach (stop, or fall back to wall-clock during scrubbing)."""
         self._clock.set_audio_source(getter)
+        self._reset_render_timeline()
 
     @property
     def t_intended(self) -> float:
@@ -324,6 +332,7 @@ class Player:
         applies on initial load, not just on later mode switches."""
         from analysis.player.sv_engine import (IdentitySVEngine,
                                                 TimeSpaceSVEngine)
+        from analysis.player.render_playhead import RenderTimeline
         if sv_sections is not None:
             self._sv_engine = (TimeSpaceSVEngine(list(sv_sections))
                                if sv_sections else IdentitySVEngine())
@@ -331,6 +340,10 @@ class Player:
             engine = self._adapter.build_sv_engine(replay)
             self._sv_engine = engine or IdentitySVEngine()
         self.sv_enabled = bool(getattr(self._sv_engine, 'enabled', False))
+        # ChartClock stays a raw chart-time source. Rendering is a pure sample
+        # of chart time through the SV engine's projection.
+        self._clock.set_sv_engine(self._sv_engine)
+        self._render_timeline = RenderTimeline(self._sv_engine)
 
         mode_desc = scroll_registry.get(self.scroll_mode)
         if mode_desc and mode_desc.on_enter:
@@ -540,6 +553,7 @@ class Player:
         new_mode = self._mode(mode)
         if new_mode and new_mode.on_enter:
             new_mode.on_enter(self, self._mode_state[mode])
+        self._reset_render_timeline()
 
     def _lane_geom(self):
         margin_l = 60
@@ -583,6 +597,65 @@ class Player:
         to anchor the visible-note window. Matches project_times exactly."""
         return self._sv_engine.cumulative_at(float(t))
 
+    def render_frame_state(self, raw_t):
+        timeline = getattr(self, '_render_timeline', None)
+        if timeline is None:
+            from analysis.player.render_playhead import RenderTimeline
+            timeline = self._render_timeline = RenderTimeline(self._sv_engine)
+        return timeline.render_at(
+            raw_t=float(raw_t),
+            scroll_speed=float(self.scroll_speed),
+            use_sv=bool(self.sv_enabled and self._sv_engine.enabled),
+        )
+
+    def render_at(self, raw_t):
+        """Pure sampled render projection for chart time `raw_t`."""
+        return self.render_frame_state(raw_t)
+
+    def debug_log_sv_frame(self, ctx) -> None:
+        if not _SV_DEBUG_LOGGER.enabled:
+            return
+        note_limit = max(1, int(os.environ.get('VSRG_SV_DEBUG_NOTES', '6')))
+        note_idxs = list(ctx.candidates[:note_limit])
+        frame = ctx.frame
+        notes = []
+        for i in note_idxs:
+            note_t = float(self.times[i])
+            cum_to = self._cumulative_sv_at(note_t)
+            visual_dist = self._visual_sv_distance_from_frame(frame, note_t)
+            notes.append({
+                'i': int(i),
+                't': note_t,
+                'col': int(self._columns_list[i]),
+                'cum_to': cum_to,
+                'visual_dist': visual_dist,
+                'y': self._time_to_y(note_t, ctx.t_now, frame),
+                'sv': self._sv_engine.debug_snapshot_at(note_t),
+            })
+        _SV_DEBUG_LOGGER.log({
+            'type': 'frame',
+            'game': self.game,
+            'scroll_mode': self.scroll_mode,
+            'sv_enabled': bool(self.sv_enabled),
+            't_now': float(ctx.t_now),
+            'scroll_speed': float(self.scroll_speed),
+            'frame': {
+                'raw_t': float(frame.raw_t),
+                'target_cum': float(frame.target_cum),
+                'visual_cum_now': float(frame.visual_cum_now),
+                'render_multiplier': float(frame.render_multiplier),
+                'px_per_cum': float(frame.px_per_cum),
+                'use_sv': bool(frame.use_sv),
+            },
+            'window': {
+                'target_lo': float(ctx.target_lo),
+                'target_hi': float(ctx.target_hi),
+                'candidate_count': int(len(ctx.candidates)),
+            },
+            'now_sv': self._sv_engine.debug_snapshot_at(float(ctx.t_now)),
+            'notes': notes,
+        })
+
     def _sv_distance(self, t_from, t_to):
         """SV-weighted chart-time delta. Returns the plain delta when SV is
         off for any reason: engine is identity, chart has no SV, or the
@@ -593,9 +666,29 @@ class Player:
             return t_to - t_from
         return self._sv_engine.distance(t_from, t_to)
 
-    def _time_to_y(self, t, t_now):
+    def _visual_sv_distance_from_frame(self, frame, t_to):
+        if not getattr(frame, 'use_sv', False):
+            return t_to - frame.raw_t
+        cum_to = self._cumulative_sv_at(t_to)
+        return ((cum_to - frame.visual_cum_now)
+                * frame.render_multiplier)
+
+    def _time_to_y(self, t, t_now, frame=None):
         judge_y = self.H * self.hit_line_y_frac
-        return judge_y - self._sv_distance(t_now, t) * self.scroll_speed
+        if frame is None:
+            frame = self.render_frame_state(t_now)
+        return (judge_y
+                - self._visual_sv_distance_from_frame(frame, t)
+                * self.scroll_speed)
+
+    def _reset_render_timeline(self):
+        # Kept so transport/UI call sites do not care whether rendering is
+        # stateful. The current timeline is pure and needs no reset.
+        return
+
+    def _reset_render_playhead(self, raw_t=None):
+        del raw_t
+        self._reset_render_timeline()
 
     def toggle_sv(self):
         """Toggle SV. If the current mode has suspended SV via on_enter (its
@@ -607,8 +700,10 @@ class Player:
         st = self._state()
         if 'sv_enabled_saved' in st:
             st['sv_enabled_saved'] = not st['sv_enabled_saved']
+            self._reset_render_timeline()
             return False
         self.sv_enabled = not self.sv_enabled
+        self._reset_render_timeline()
         return self.sv_enabled
 
     def sv_suspended(self) -> bool:
@@ -905,12 +1000,16 @@ class Player:
 
     def restart(self):
         self._clock.seek(self.t_min)
+        self._reset_render_timeline()
 
     def _seek(self, dt):
-        self._clock.seek(self.t + float(dt))
+        t = self.t + float(dt)
+        self._clock.seek(t)
+        self._reset_render_timeline()
 
     def _toggle_pause(self):
         self._clock.set_paused(not self._clock.paused)
+        self._reset_render_timeline()
 
     def run(self):
         raise RuntimeError('Player.run() was replaced by the Qt player UI.')

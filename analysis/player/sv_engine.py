@@ -57,6 +57,17 @@ class SVEngine(Protocol):
     def cumulative_at(self, t: float) -> float:
         """Cull-space cumulative at chart time t. Monotonic in t."""
 
+    def cumulative_velocity_at(self, t: float) -> float:
+        """Local d(cumulative_at)/dt at chart time t. Used by the visual
+        playhead predictor to advance in the same space the renderer uses
+        without inverting through scroll=0 plateaus."""
+
+    def inverse_cumulative_at(self, sv: float) -> float:
+        """Inverse of cumulative_at: chart-time t such that
+        cumulative_at(t) == sv. Well-defined wherever cumulative_at is
+        strictly increasing; in flat regions (SV=0) we return an arbitrary
+        chart-time within the plateau."""
+
     def project_times(self, times: np.ndarray) -> np.ndarray:
         """Batch `cumulative_at` — the renderer bisects the result."""
 
@@ -65,6 +76,22 @@ class SVEngine(Protocol):
         sidebar readers. Engines whose SV can't be faithfully expressed as
         time-space sections return an approximation (good enough for
         sidebar display, not for positioning)."""
+
+    def render_multiplier_at(self, t: float) -> float:
+        """Position-dependent multiplier applied to cull-space deltas for
+        on-screen drawing. Most engines return 1; Etterna's beat-space
+        engine returns the active #SPEEDS zoom at the playhead."""
+
+    def debug_snapshot_at(self, t: float) -> dict:
+        """Optional structured snapshot for temporary debugging."""
+
+    def max_visible_t_from(self, song_t: float) -> float:
+        """Upper bound on chart-time for the visible window. Defaults to
+        infinity (culling is purely SV-space driven). Etterna's engine
+        returns a beat-based cap matching ArrowEffects::FindDisplayedBeats'
+        binary-search convergence — without it, scroll=0 regions produce
+        huge SV-equal runs that all pass cull-space bisection."""
+        return float('inf')
 
 
 def _empty_engine_sections(_engine) -> list[tuple[float, float]]:
@@ -103,6 +130,27 @@ class TimeSpaceSVEngine:
             return (t - float(self._times[0])) * float(self._values[0])
         return float(self._cum[idx]) + (t - float(self._times[idx])) * float(self._values[idx])
 
+    def inverse_cumulative_at(self, sv: float) -> float:
+        """Chart-time t such that cumulative_at(t) == sv. Used by the
+        cull-space clock smoother to project back from a smoothed SV
+        value to a chart-time the player can render."""
+        if not self._sections:
+            return float(sv)
+        idx = int(np.searchsorted(self._cum, sv, side='right')) - 1
+        if idx < 0:
+            v = float(self._values[0])
+            return float(self._times[0]) + (sv / v if v else 0.0)
+        v = float(self._values[idx])
+        return float(self._times[idx]) + (sv - float(self._cum[idx])) / v if v else float(self._times[idx])
+
+    def cumulative_velocity_at(self, t: float) -> float:
+        if not self._sections:
+            return 1.0
+        idx = int(np.searchsorted(self._times, t, side='right')) - 1
+        if idx < 0:
+            return float(self._values[0])
+        return float(self._values[idx])
+
     def distance(self, t_from: float, t_to: float) -> float:
         return self.cumulative_at(t_to) - self.cumulative_at(t_from)
 
@@ -114,6 +162,23 @@ class TimeSpaceSVEngine:
 
     def as_sections(self) -> list[tuple[float, float]]:
         return list(self._sections)
+
+    def render_multiplier_at(self, t: float) -> float:
+        del t
+        return 1.0
+
+    def debug_snapshot_at(self, t: float) -> dict:
+        t = float(t)
+        return {
+            'engine': 'time',
+            't': t,
+            'cumulative': self.cumulative_at(t),
+            'render_multiplier': 1.0,
+            'cumulative_velocity': self.cumulative_velocity_at(t),
+        }
+
+    def max_visible_t_from(self, song_t: float) -> float:
+        return float('inf')
 
 
 # ----------------------------------------------------------------------
@@ -149,11 +214,172 @@ class TimeSpaceSVEngine:
 # `CMod / (bpm_goal * rate)` pattern that's `your_cmod / (bpm_goal * rate)`.
 
 
+class _TimingMap:
+    """Pre-walked BPMs + STOPS + DELAYS + WARPS event stream, with monotonic
+    bisect-indexable checkpoints for O(log n) beat<->time conversion.
+
+    Walking the event stream on every `_beat_to_time` / `_time_to_beat` call
+    was the render-hot-path bottleneck on Etterna charts with many BPM/stop
+    segments (Undiscovered Colors has 310 BPMs + 591 stops — a linear walk
+    costs ~34us per call, and `distance()` does two of those per visible
+    note per frame). Walking once into checkpoint arrays drops the per-call
+    cost to a bisect + constant-time arithmetic."""
+
+    def __init__(self, bpms, sm_offset, stops, delays, warps):
+        bpms = sorted(bpms or [(0.0, 120.0)])
+        stops = sorted(stops or [])
+        delays = sorted(delays or [])
+        warps = sorted(warps or [])
+        sm_offset = float(sm_offset)
+
+        # Single unified event stream. Same kind-precedence as
+        # sm_chart.beat_to_time so results are bit-identical.
+        events = []
+        for b, v in delays: events.append((b, 0, v))
+        for b, v in bpms:   events.append((b, 1, v))
+        for b, v in warps:  events.append((b, 2, v))
+        for b, v in stops:  events.append((b, 3, v))
+        events.sort(key=lambda e: (e[0], e[1]))
+
+        # Checkpoints: after processing each event, record
+        #   beat_enter:   cur_beat at moment this event starts (pre-event)
+        #   time_enter:   time at that moment
+        #   beat_exit:    cur_beat after applying the event (==beat_enter for
+        #                 BPM/DELAY/STOP; beat_enter+warp_len for WARP)
+        #   time_exit:    time after event (adds delay/stop duration)
+        #   bps_after:    sec-per-beat-inverse that applies from this event
+        #                 to the next
+        # The segment between events[i] and events[i+1] advances at bps_after
+        # from beat_exit to events[i+1]'s beat.
+        self._beat_enter: list[float] = []
+        self._time_enter: list[float] = []
+        self._beat_exit: list[float] = []
+        self._time_exit: list[float] = []
+        self._bps_after: list[float] = []
+
+        t = -sm_offset
+        cur_beat = 0.0
+        bps = bpms[0][1] / 60.0
+        warp_end = None
+
+        # TODO: Generalize this to non-Etterna
+        for (eb, kind, val) in events:
+            if eb < 0:
+                continue
+            # Advance from cur_beat to eb along current bps.
+            if warp_end is not None and eb <= warp_end:
+                cur_beat = eb
+            elif warp_end is not None and cur_beat < warp_end <= eb:
+                cur_beat = warp_end
+                warp_end = None
+                t += (eb - cur_beat) / bps
+                cur_beat = eb
+            else:
+                t += (eb - cur_beat) / bps
+                cur_beat = eb
+
+            beat_enter = cur_beat
+            time_enter = t
+
+            if kind == 0:       # DELAY: pause before
+                t += float(val)
+            elif kind == 1:     # BPM change
+                bps = float(val) / 60.0
+            elif kind == 2:     # WARP — beat teleports forward, time doesn't
+                warp_end = cur_beat + float(val)
+            elif kind == 3:     # STOP: pause after
+                t += float(val)
+
+            # beat_exit reflects the post-event beat cursor for bisect
+            # lookups — for WARP, that's the warp landing; for others,
+            # unchanged from beat_enter. The event loop's own cur_beat
+            # stays at beat_enter for warps so subsequent in-warp events
+            # still get skipped correctly by the warp_end state check.
+            if kind == 2:
+                beat_exit = warp_end
+            else:
+                beat_exit = cur_beat
+            time_exit = t
+
+            self._beat_enter.append(beat_enter)
+            self._time_enter.append(time_enter)
+            self._beat_exit.append(beat_exit)
+            self._time_exit.append(time_exit)
+            self._bps_after.append(bps)
+
+        # Initial bps for beat lookups at time < first event.
+        self._bps_initial = bpms[0][1] / 60.0
+        self._t_at_beat_zero = -sm_offset
+        self._trailing_warp_end = warp_end
+
+    def beat_to_time(self, beat: float) -> float:
+        """Time at `beat`. Bisect the event list, then advance at
+        post-event bps from that event to `beat`."""
+        import bisect as _b
+        if not self._beat_enter:
+            return self._t_at_beat_zero + beat / self._bps_initial
+        # Find last event whose beat_enter <= target beat. (If target beat
+        # lies in the event's own span [beat_enter, beat_exit], time is
+        # mid-transition — return time_enter for beats before event
+        # completion, time_exit for after. Effectively: if target_beat ==
+        # beat_enter, the PRE-event time is correct.)
+        idx = _b.bisect_right(self._beat_enter, beat) - 1
+        if idx < 0:
+            # Before the first event: advance from beat 0 at initial bps.
+            return self._t_at_beat_zero + beat / self._bps_initial
+        # Is the target beat inside a WARP span that this event opened?
+        # A WARP event has beat_exit > beat_enter; beats strictly between
+        # land at time_exit (no time passes).
+        bx = self._beat_exit[idx]
+        if beat < bx:
+            return self._time_exit[idx]
+        # Past this event — advance at bps_after to `beat`.
+        return self._time_exit[idx] + (beat - bx) / self._bps_after[idx]
+
+    def time_to_beat(self, t: float) -> float:
+        """Inverse of beat_to_time. Bisect on time_exit (the post-event
+        times are monotonically non-decreasing)."""
+        import bisect as _b
+        if not self._time_exit:
+            return (t - self._t_at_beat_zero) * self._bps_initial
+        if t < self._time_enter[0]:
+            # Before the first event: walk back at initial bps.
+            return (t - self._t_at_beat_zero) * self._bps_initial
+        # If we're inside a STOP/DELAY window, chart beat is frozen at that
+        # event's beat until the pause finishes.
+        pause_idx = _b.bisect_right(self._time_enter, t) - 1
+        if pause_idx >= 0 and t < self._time_exit[pause_idx]:
+            return self._beat_exit[pause_idx]
+        # Find last event whose time_exit <= t, then advance from its
+        # post-event state.
+        idx = _b.bisect_right(self._time_exit, t) - 1
+        if idx < 0:
+            return self._beat_exit[0]
+        # Past all events — use the last event's post-event state.
+        return self._beat_exit[idx] + (t - self._time_exit[idx]) * self._bps_after[idx]
+
+    def bps_at_time(self, t: float) -> float:
+        """Instantaneous beats-per-second at time t.
+
+        Returns 0 inside STOP/DELAY windows where chart beat is frozen."""
+        import bisect as _b
+        if not self._time_enter:
+            return self._bps_initial
+        pause_idx = _b.bisect_right(self._time_enter, t) - 1
+        if pause_idx >= 0 and t < self._time_exit[pause_idx]:
+            return 0.0
+        idx = _b.bisect_right(self._time_exit, t) - 1
+        if idx < 0:
+            return self._bps_initial
+        return self._bps_after[idx]
+
+
 class BeatSpaceSVEngine:
     """Etterna #SCROLLS + #SPEEDS positioning.
 
     scrolls: list[(beat, ratio)] in beat-space
-    speeds:  list[(beat, ratio)] in beat-space
+    speeds:  list[(beat, ratio)] or list[(beat, ratio, delay, unit)] in
+             beat-space, where unit is 0=beats or 1=seconds
     bpms:    list[(beat, bpm)] used to convert beat-space distance to the
              Player's time-space px/sec units
     sm_offset: song OFFSET in seconds (positive = audio starts later)
@@ -163,11 +389,13 @@ class BeatSpaceSVEngine:
     def __init__(self, scrolls, speeds, bpms, sm_offset,
                  stops=None, delays=None, warps=None):
         self._scrolls = list(scrolls or [])
-        self._speeds = list(speeds or [])
+        self._speeds = [self._normalize_speed_segment(s) for s in (speeds or [])]
+        self._speed_beats = [s[0] for s in self._speeds]
         self._bpms = list(bpms or [(0.0, 120.0)])
         self._sm_offset = float(sm_offset)
         self._stops = list(stops or [])
         self._delays = list(delays or [])
+        self._delay_at_beats = {float(b): float(v) for b, v in self._delays}
         self._warps = list(warps or [])
         # Base BPM = first BPM segment, matching Etterna's m_fReadBPM seed.
         # ArrowEffects divides by m_fReadBPM under MaxScrollBPM; our conversion
@@ -175,6 +403,11 @@ class BeatSpaceSVEngine:
         # 1.0 keeps a constant px/beat regardless of BPM changes elsewhere.
         self._base_bpm = float(self._bpms[0][1]) if self._bpms else 120.0
         self._sec_per_base_beat = 60.0 / self._base_bpm
+        # Pre-walked timing map so _beat_to_time / _time_to_beat are O(log n)
+        # instead of O(segments) per call — critical on charts with 100s of
+        # BPM changes and stops (e.g. Undiscovered Colors).
+        self._timing = _TimingMap(self._bpms, self._sm_offset,
+                                   self._stops, self._delays, self._warps)
 
         # DisplayedBeat cache: (beat, displayed_beat, ratio). At any real beat
         # b in [segment_i.beat, segment_{i+1}.beat], displayed_beat =
@@ -194,46 +427,39 @@ class BeatSpaceSVEngine:
                 last_beat = b
                 last_ratio = r
         self._cache_beats = [c[0] for c in self._cache]
+        # Sorted-by-displayed-beat table for inverse_cumulative_at bisects.
+        # SCROLLS with negative or zero ratios make displayed_beat
+        # non-monotonic, so we skip those segments during inverse lookup.
+        self._cache_dbs_monotonic: list[tuple[float, int]] = []
+        last_db = -float('inf')
+        for i, c in enumerate(self._cache):
+            db = c[1]
+            if db >= last_db:
+                self._cache_dbs_monotonic.append((db, i))
+                last_db = db
+        self._cache_dbs_only = [x[0] for x in self._cache_dbs_monotonic]
 
         self.enabled = bool(self._scrolls or self._speeds)
 
     # --- real-beat ↔ real-time helpers ----------------------------------
 
     def _beat_to_time(self, beat: float) -> float:
-        """Delegate to sm_chart.beat_to_time so STOPS/DELAYS/WARPS apply
-        (Etterna's WhereUAtBro / GetElapsedTimeInternal)."""
-        from analysis.games.etterna.sm_chart import beat_to_time
-        return beat_to_time(beat, self._bpms, self._sm_offset,
-                            self._stops, self._delays, self._warps)
+        return self._timing.beat_to_time(beat)
 
     def _time_to_beat(self, t: float) -> float:
-        """Inverse of _beat_to_time. Needed to evaluate SCROLLS/SPEEDS at a
-        given chart time (the Player only tracks seconds). No STOPS/DELAYS/
-        WARPS support yet — the inverse requires an event-walk with more
-        cases than BPM-only, so we fall back to BPM-only here. This only
-        affects the SV lookup for charts that combine SCROLLS+STOPS, which
-        is rare; notes themselves are positioned via beat_to_time which is
-        fully correct."""
-        bpms = sorted(self._bpms)
-        if not bpms:
-            return (t + self._sm_offset) / self._sec_per_base_beat
-        # Walk until cumulative time reaches t
-        t_target = t + self._sm_offset
-        cum_t = 0.0
-        for i in range(len(bpms)):
-            b0, bpm0 = bpms[i]
-            b1 = bpms[i + 1][0] if i + 1 < len(bpms) else float('inf')
-            sec_per_beat = 60.0 / bpm0
-            if i == 0 and t_target < 0:
-                # Before beat 0: extrapolate backward with first BPM
-                return b0 + t_target / sec_per_beat
-            segment_sec = (b1 - b0) * sec_per_beat if b1 != float('inf') else float('inf')
-            if cum_t + segment_sec >= t_target:
-                return b0 + (t_target - cum_t) / sec_per_beat
-            cum_t += segment_sec
-        # Past last segment: extrapolate with last BPM
-        last_b, last_bpm = bpms[-1]
-        return last_b + (t_target - cum_t) / (60.0 / last_bpm)
+        return self._timing.time_to_beat(t)
+
+    @staticmethod
+    def _normalize_speed_segment(seg) -> tuple[float, float, float, int]:
+        if len(seg) >= 4:
+            beat, ratio, delay, unit = seg[:4]
+            return (float(beat), float(ratio), float(delay),
+                    0 if int(unit) == 0 else 1)
+        if len(seg) == 3:
+            beat, ratio, delay = seg
+            return float(beat), float(ratio), float(delay), 0
+        beat, ratio = seg[:2]
+        return float(beat), float(ratio), 0.0, 0
 
     # --- SCROLLS integral ----------------------------------------------
 
@@ -248,20 +474,43 @@ class BeatSpaceSVEngine:
         b, db, r = self._cache[idx]
         return db + (beat - b) * r
 
-    # --- SPEEDS evaluator (position-dependent!) -------------------------
-
-    def _speed_percent_at_beat(self, beat: float) -> float:
-        """Evaluate #SPEEDS at a real beat. Ignores transition duration —
-        treats each SPEEDS change as instantaneous at its declared beat.
-        Full transition interpolation would require wall-clock time plus
-        UNIT_BEATS / UNIT_SECONDS dispatch; we position notes instead of
-        animating so the step function is adequate."""
-        if not self._speeds:
+    def _scroll_ratio_at_beat(self, beat: float) -> float:
+        if not self._cache:
             return 1.0
-        idx = bisect.bisect_right([s[0] for s in self._speeds], beat) - 1
+        idx = bisect.bisect_right(self._cache_beats, beat) - 1
         if idx < 0:
             return 1.0
-        return float(self._speeds[idx][1])
+        return float(self._cache[idx][2])
+
+    # --- SPEEDS evaluator (position-dependent!) -------------------------
+
+    def _delay_at_beat(self, beat: float) -> float:
+        return self._delay_at_beats.get(float(beat), 0.0)
+
+    def _speed_percent_at(self, beat: float, music_seconds: float) -> float:
+        """Evaluate Etterna's GetDisplayedSpeedPercent(songBeat, songSec)."""
+        if not self._speeds:
+            return 1.0
+        idx = bisect.bisect_right(self._speed_beats, beat) - 1
+        if idx < 0:
+            return 1.0
+        seg_beat, seg_ratio, seg_delay, seg_unit = self._speeds[idx]
+        start_time = self._beat_to_time(seg_beat) - self._delay_at_beat(seg_beat)
+        if seg_unit == 1:
+            end_time = start_time + seg_delay
+        else:
+            end_beat = seg_beat + seg_delay
+            end_time = self._beat_to_time(end_beat) - self._delay_at_beat(end_beat)
+
+        first = self._speeds[0]
+        if idx == 0 and first[2] > 0.0 and music_seconds < start_time:
+            return 1.0
+        if end_time >= music_seconds and (idx > 0 or first[2] > 0.0):
+            prior_ratio = 1.0 if idx == 0 else self._speeds[idx - 1][1]
+            duration = end_time - start_time
+            ratio_used = 1.0 if duration == 0.0 else (music_seconds - start_time) / duration
+            return prior_ratio + (seg_ratio - prior_ratio) * ratio_used
+        return seg_ratio
 
     # --- SVEngine interface ---------------------------------------------
 
@@ -272,6 +521,35 @@ class BeatSpaceSVEngine:
         b = self._time_to_beat(t)
         return self._displayed_beat(b) * self._sec_per_base_beat
 
+    def cumulative_velocity_at(self, t: float) -> float:
+        beat = self._time_to_beat(t)
+        scroll = self._scroll_ratio_at_beat(beat)
+        return scroll * self._timing.bps_at_time(t) * self._sec_per_base_beat
+
+    def inverse_cumulative_at(self, sv: float) -> float:
+        """Chart-time t such that cumulative_at(t) == sv. Used by the
+        cull-space clock smoother. The inverse is only well-defined where
+        displayed_beat is strictly increasing (SCROLLS ratio > 0); regions
+        of ratio <= 0 collapse many beats to the same sv-value, so we
+        return the earliest matching chart-time there."""
+        if not self._cache:
+            return float(sv)
+        db_target = sv / self._sec_per_base_beat
+        arr = self._cache_dbs_only
+        if not arr:
+            return float(sv)
+        idx = bisect.bisect_right(arr, db_target) - 1
+        if idx < 0:
+            # Before first cache entry: ratio=1 extrapolation from beat 0
+            return self._timing.beat_to_time(db_target)
+        cache_idx = self._cache_dbs_monotonic[idx][1]
+        b, db, r = self._cache[cache_idx]
+        if r > 0:
+            beat = b + (db_target - db) / r
+        else:
+            beat = b  # zero/negative ratio segment: collapse to its start
+        return self._timing.beat_to_time(beat)
+
     def distance(self, t_from: float, t_to: float) -> float:
         """Render-space distance. SCROLLS cumulative difference, zoomed
         uniformly by SPEEDS at the playhead (Etterna's ArrowEffects.cpp
@@ -279,7 +557,7 @@ class BeatSpaceSVEngine:
         song position, applied to the whole YOffset)."""
         d = self.cumulative_at(t_to) - self.cumulative_at(t_from)
         b_from = self._time_to_beat(t_from)
-        return d * self._speed_percent_at_beat(b_from)
+        return d * self._speed_percent_at(b_from, t_from)
 
     def project_times(self, times: np.ndarray) -> np.ndarray:
         if not times.size:
@@ -294,11 +572,12 @@ class BeatSpaceSVEngine:
         across BPM changes, but fine for display."""
         if not (self._scrolls or self._speeds):
             return []
-        beats = sorted({b for b, _ in self._scrolls} | {b for b, _ in self._speeds})
+        beats = sorted({s[0] for s in self._scrolls} | {s[0] for s in self._speeds})
 
         def last_value(pairs, target):
             val = 1.0
-            for b, v in pairs:
+            for item in pairs:
+                b, v = item[0], item[1]
                 if b <= target:
                     val = v
                 else:
@@ -312,6 +591,37 @@ class BeatSpaceSVEngine:
             out.append((t, mult))
         out.sort(key=lambda x: x[0])
         return out
+
+    def render_multiplier_at(self, t: float) -> float:
+        t = float(t)
+        return self._speed_percent_at(self._time_to_beat(t), t)
+
+    def debug_snapshot_at(self, t: float) -> dict:
+        t = float(t)
+        beat = self._time_to_beat(t)
+        displayed_beat = self._displayed_beat(beat)
+        return {
+            'engine': 'beat',
+            't': t,
+            'beat': beat,
+            'displayed_beat': displayed_beat,
+            'scroll_ratio': self._scroll_ratio_at_beat(beat),
+            'speed_percent': self._speed_percent_at(beat, t),
+            'cumulative': displayed_beat * self._sec_per_base_beat,
+            'cumulative_velocity': self.cumulative_velocity_at(t),
+        }
+
+    # ArrowEffects::FindDisplayedBeats does a binary search for the first
+    # off-screen beat. When scroll=0 the search collapses because YOffset
+    # stays 0 regardless of how far ahead you look — the 10/2/... halving
+    # sum caps out around songBeat + ~20. Without matching that cap, our
+    # SV-space bisect keeps every note with the same SV-cum value, so a
+    # scroll=0 region lets the entire pile pass culling.
+    _MAX_LOOKAHEAD_BEATS = 20.0
+
+    def max_visible_t_from(self, song_t: float) -> float:
+        song_beat = self._time_to_beat(song_t)
+        return self._beat_to_time(song_beat + self._MAX_LOOKAHEAD_BEATS)
 
 
 # ----------------------------------------------------------------------
@@ -329,8 +639,32 @@ class IdentitySVEngine:
     def cumulative_at(self, t: float) -> float:
         return float(t)
 
+    def inverse_cumulative_at(self, sv: float) -> float:
+        return float(sv)
+
+    def cumulative_velocity_at(self, t: float) -> float:
+        del t
+        return 1.0
+
     def project_times(self, times: np.ndarray) -> np.ndarray:
         return np.asarray(times, dtype=np.float64).copy()
 
     def as_sections(self) -> list[tuple[float, float]]:
         return []
+
+    def render_multiplier_at(self, t: float) -> float:
+        del t
+        return 1.0
+
+    def debug_snapshot_at(self, t: float) -> dict:
+        t = float(t)
+        return {
+            'engine': 'identity',
+            't': t,
+            'cumulative': t,
+            'render_multiplier': 1.0,
+            'cumulative_velocity': 1.0,
+        }
+
+    def max_visible_t_from(self, song_t: float) -> float:
+        return float('inf')

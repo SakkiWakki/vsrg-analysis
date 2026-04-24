@@ -160,9 +160,16 @@ def _parse_scrolls(s):
 
 
 def _parse_speeds(s):
-    """Parse #SPEEDS: beat=ratio=duration=type, ... into [(beat, ratio)].
-    Duration and type (transition fields) are ignored; we treat each change
-    as instantaneous since we position notes, not animate the field."""
+    """Parse #SPEEDS entries.
+
+    Returns either:
+    - `(beat, ratio)` when only those fields are present, or
+    - `(beat, ratio, delay, unit)` when transition metadata is present.
+
+    `unit` matches Etterna's `SpeedSegment::BaseUnit` encoding:
+    - `0` = beats
+    - `1` = seconds
+    """
     out = []
     for entry in (s or '').split(','):
         entry = entry.strip()
@@ -172,9 +179,33 @@ def _parse_speeds(s):
         if len(parts) < 2:
             continue
         try:
-            out.append((float(parts[0]), float(parts[1])))
+            beat = float(parts[0])
+            ratio = float(parts[1])
         except ValueError:
             pass
+            continue
+        if len(parts) < 3:
+            out.append((beat, ratio))
+            continue
+
+        delay_txt = parts[2].strip()
+        unit = 0
+        if delay_txt.lower().endswith('s'):
+            unit = 1
+            delay_txt = delay_txt[:-1]
+        try:
+            delay = float(delay_txt or '0')
+        except ValueError:
+            out.append((beat, ratio))
+            continue
+
+        if len(parts) >= 4 and parts[3].strip():
+            try:
+                unit = 0 if int(float(parts[3])) == 0 else 1
+            except ValueError:
+                pass
+
+        out.append((beat, ratio, delay, unit))
     return out
 
 
@@ -195,11 +226,12 @@ def sv_sections_from_chart(chart, bpms, offset):
         return []
 
     # Collect all change-point beats from both sources
-    beats = sorted({b for b, _ in scrolls} | {b for b, _ in speeds})
+    beats = sorted({s[0] for s in scrolls} | {s[0] for s in speeds})
 
     def last_value_at(pairs, beat):
         val = 1.0
-        for b, v in pairs:
+        for item in pairs:
+            b, v = item[0], item[1]
             if b <= beat:
                 val = v
             else:

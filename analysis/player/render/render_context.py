@@ -19,6 +19,8 @@ class RenderContext:
     screen_margin: int = 80
     target_lo: float = 0.0
     target_hi: float = 0.0
+    visual_cum_now: float = 0.0
+    frame: object | None = None
     use_sv_space: bool = False
     candidates: list[int] = field(default_factory=list)
     visible_miss_holds: list[int] = field(default_factory=list)
@@ -44,8 +46,9 @@ class RenderContext:
 
     def time_to_y(self, t):
         judge_y = self.player.H * self.player.hit_line_y_frac
-        return judge_y - self.player._sv_distance(
-            self.t_now,
+        frame = self.frame if self.frame is not None else self.player.render_frame_state(self.t_now)
+        return judge_y - self.player._visual_sv_distance_from_frame(
+            frame,
             float(t),
         ) * self._scroll_speed
 

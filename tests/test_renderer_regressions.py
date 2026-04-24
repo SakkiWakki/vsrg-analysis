@@ -31,7 +31,8 @@ def _make_press_ctx(renderer, miss_pressed=(True,)):
     )
     return SimpleNamespace(player=player, lane_w=80,
                             drawers=renderer._defaults,
-                            scroll_speed=player.scroll_speed)
+                            scroll_speed=player.scroll_speed,
+                            time_to_y=lambda t: 100 + float(t) * 1000.0)
 
 
 def _patch_draw_recorders(renderer):
@@ -129,6 +130,55 @@ def test_missed_tap_without_press_skips_press_mark():
     assert ticks == []
 
 
+def test_press_mark_uses_projected_time_to_y():
+    """Press marks must use the same projected time->Y mapping as notes,
+    not a raw `offset * scroll_speed` shortcut."""
+    renderer = QtPlayerRenderer(plugin_manager=SimpleNamespace())
+    calls = []
+
+    def custom_press_mark(painter, lx, lane_w, y_head, y_press, color):
+        calls.append((y_head, y_press, color))
+
+    ctx = _make_press_ctx(renderer)
+    ctx.drawers = dict(renderer._defaults)
+    ctx.drawers['press_mark'] = custom_press_mark
+    ctx.time_to_y = lambda t: 321.0 if abs(t - 0.125) < 1e-9 else -999.0
+    note = _make_note(miss=False, is_ln=False, off=0.125, ln_state='tap')
+    note = note.__class__(**{**note.__dict__, 'press_t': 0.125})
+
+    renderer._draw_press_mark(ctx, painter=None, n=note)
+
+    assert calls == [(100, 321.0, (255, 0, 0))]
+
+
+def test_ln_release_guide_uses_projected_time_to_y():
+    """Release guides must also use the projected time mapping so they
+    stay attached in SV sections."""
+    renderer = QtPlayerRenderer(plugin_manager=SimpleNamespace())
+    calls = []
+
+    def custom_release_guide(painter, lx, lane_w, y_tail, y_release):
+        calls.append((y_tail, y_release))
+
+    player = SimpleNamespace(press_hide=False)
+    ctx = SimpleNamespace(
+        player=player,
+        lane_w=80,
+        drawers=dict(renderer._defaults, ln_release_guide=custom_release_guide),
+        time_to_y=lambda t: 456.0 if abs(t - 0.75) < 1e-9 else -999.0,
+    )
+    note = _NoteView(
+        i=0, col=0, y=100, y_end=200, lx=0, off=0.0,
+        press_t=0.0, release_t=0.75, rel_off=0.1, end_t=0.65,
+        is_ln=True, is_roll=False, miss=False, ln_state='held',
+        note_color=(255, 255, 255), jcolor=(255, 0, 0),
+    )
+
+    renderer._draw_ln_release_guide(ctx, painter=None, n=note)
+
+    assert calls == [(200, 456.0)]
+
+
 # ---------------------------------------------------------------------------
 # Culling pad: notes stay in the candidate set while their drawn strokes
 # (press mark, release guide) could still be on-screen, even after the
@@ -186,6 +236,34 @@ def test_culling_pad_zero_matches_legacy_window():
     ctx = _cull_ctx(player, target_lo=1.2, target_hi=2.8)
 
     assert culling.select_note_candidates(ctx) == [2]
+
+
+def test_sv_culling_pad_converts_seconds_to_cumulative_units():
+    """SV-space candidate expansion must convert the pad into cumulative
+    units instead of adding raw seconds to a cumulative window."""
+    times = np.array([0.8, 1.0, 1.3], dtype=np.float64)
+    player = SimpleNamespace(
+        times=times,
+        _note_sv_cum=np.array([9.5, 11.0, 13.0], dtype=np.float64),
+        _ln_indices=[],
+        max_draw_pad_sec=0.2,
+        _cumulative_sv_at=lambda t: float(t) * 10.0,
+    )
+    ctx = SimpleNamespace(
+        player=player,
+        target_lo=11.0,
+        target_hi=12.0,
+        use_sv_space=True,
+        t_now=1.0,
+        visual_cum_now=10.0,
+        screen_margin=100,
+        frame=None,
+    )
+
+    # Pad is 0.2s -> 2 cumulative units, so [11, 12] expands to [9, 14],
+    # including all three notes. Treating "0.2" as cumulative units would
+    # incorrectly exclude the first and third notes.
+    assert culling.select_note_candidates(ctx) == [0, 1, 2]
 
 
 def test_adapter_drawer_override_takes_precedence():

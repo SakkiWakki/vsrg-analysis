@@ -4,14 +4,14 @@ callback thread via a mutex. The heavy DSP lives in StreamingPhaseVocoder."""
 from __future__ import annotations
 
 import json
-import math
 import os
 import shutil
 import subprocess
 import threading
-import time
 
 import numpy as np
+
+from analysis.player.sv_debug import LOGGER as _SV_DEBUG_LOGGER
 
 from .phase_vocoder import StreamingPhaseVocoder
 from .source import WaveSource
@@ -57,19 +57,27 @@ class AudioEngine:
         # PortAudio thread) and set_state/seek (on the GUI thread) both
         # touch it.
         self._lock = threading.Lock()
+        # Serialize all access to the phase vocoder/source state. The audio
+        # callback calls `generate()` while the GUI thread may concurrently call
+        # `seek()` / `set_rate()` / `set_pitch_correct()`. Those mutate the same
+        # internal buffers and cursors and must never race.
+        self._pv_lock = threading.Lock()
         self._source: WaveSource | None = None
         self._pv: StreamingPhaseVocoder | None = None
         self._stream = None
-        self._chart_time = 0.0       # last known chart time at set_state
+        # Single authoritative chart-time value. While paused, seeking, or
+        # waiting for the first callback after a discontinuity, reads return
+        # this value directly. Once a callback-backed DAC anchor exists, reads
+        # advance this value from the hardware clock but never step backward.
+        self._chart_time = 0.0
         self._rate = 1.0
-        # Audio-position smoothing: `_pv.source_time` advances in hop-sized
-        # jumps (the PV only updates it when the callback asks it to
-        # generate samples). Raw reads give the render thread a stepped,
-        # jittery t. We snapshot (pv_time, wall_time_at_snapshot) each time
-        # the callback runs, then extrapolate between snapshots for smooth
-        # chart-time output.
-        self._anchor_src_time = 0.0
-        self._anchor_wall = 0.0
+        # PortAudio-backed anchor: `hw_pos` chart-time is audible at DAC clock
+        # time `hw_wall`. This anchor is only valid after a callback has
+        # provided real DAC timestamps for queued audio.
+        self._hw_pos = 0.0
+        self._hw_wall = 0.0
+        self._scheduled_chart_pos = 0.0
+        self._dac_anchor_valid = False
 
         if not audio_path or not os.path.exists(audio_path):
             return
@@ -172,35 +180,85 @@ class AudioEngine:
     def _callback(self, outdata, frames, time_info, status):
         # Runs on the audio thread. Must be real-time-safe-ish: no I/O, no
         # allocations beyond what the PV does internally.
-        with self._lock:
-            pv = self._pv
-            playing = self._playing
-            volume = self._volume
-        if pv is None or not playing:
-            outdata.fill(0.0)
+        with self._pv_lock:
+            with self._lock:
+                pv = self._pv
+                playing = self._playing
+                volume = self._volume
+                rate = self._rate
+                block_chart_start = self._scheduled_chart_pos
+                prev_hw_pos = self._hw_pos
+                prev_hw_wall = self._hw_wall
+                prev_anchor_valid = self._dac_anchor_valid
             if pv is None or not playing:
-                # report ended when we're past the end of the source
+                outdata.fill(0.0)
+                if pv is None or not playing:
+                    # report ended when we're past the end of the source
+                    return
                 return
-            return
-        try:
-            samples, cont = pv.generate(frames)
-        except Exception as e:
-            outdata.fill(0.0)
-            print(f'audio callback: {e}')
-            return
+            try:
+                samples, cont = pv.generate(frames)
+            except Exception as e:
+                outdata.fill(0.0)
+                print(f'audio callback: {e}')
+                return
         if samples.shape[0] < frames:
             pad = np.zeros((frames - samples.shape[0], samples.shape[1]),
                            dtype=np.float32)
             samples = np.concatenate([samples, pad], axis=0)
         np.multiply(samples, volume, out=outdata)
-        # Snapshot the PV's fresh source position against wall-clock so the
-        # render thread's `current_chart_time()` can interpolate smoothly
-        # between callbacks instead of stepping in hop-sized jumps.
+        # Anchor the render clock to the PortAudio stream clock, not to
+        # callback-invocation wall time. `outputBufferDacTime` is when the
+        # FIRST sample of this block reaches the DAC; the end-of-block DAC
+        # time is one output-block duration later. Pairing that with the chart
+        # time represented by the end of this block yields a continuous clock
+        # even though callbacks arrive only once per block.
+        callback_now = float(getattr(time_info, 'currentTime',
+                                     time_info.outputBufferDacTime))
+        stream_time_now = self._safe_stream_time_locked()
+        block_chart_end = block_chart_start + (frames / self._sr) * rate
+        dac_end = float(time_info.outputBufferDacTime) + (frames / self._sr)
+        jump_at_callback_now = None
+        if prev_anchor_valid:
+            prev_now_t = prev_hw_pos + (callback_now - prev_hw_wall) * rate
+            next_now_t = block_chart_end + (callback_now - dac_end) * rate
+            jump_at_callback_now = next_now_t - prev_now_t
         with self._lock:
-            self._anchor_src_time = float(pv.source_time)
-            self._anchor_wall = time.monotonic()
+            self._scheduled_chart_pos = block_chart_end
+            self._hw_pos = block_chart_end
+            self._hw_wall = dac_end
+            self._dac_anchor_valid = True
+            self._chart_time = max(self._chart_time, block_chart_start)
             if not cont:
                 self._ended = True
+                self._chart_time = max(self._chart_time, block_chart_end)
+            self._debug_log_locked('audio_callback', {
+                'frames': int(frames),
+                'block_chart_start': float(block_chart_start),
+                'block_chart_end': float(block_chart_end),
+                'callback_current_time': float(callback_now),
+                'output_dac_time': float(time_info.outputBufferDacTime),
+                'dac_end': float(dac_end),
+                'stream_time': stream_time_now,
+                'callback_to_dac_start': (
+                    float(time_info.outputBufferDacTime) - float(callback_now)
+                ),
+                'callback_to_dac_end': float(dac_end - callback_now),
+                'anchor_jump_at_callback_now': (
+                    None if jump_at_callback_now is None
+                    else float(jump_at_callback_now)
+                ),
+                'prev_hw_pos': float(prev_hw_pos),
+                'prev_hw_wall': float(prev_hw_wall),
+                'prev_anchor_valid': bool(prev_anchor_valid),
+                'rate': float(rate),
+                'playing': bool(self._playing),
+                'cont': bool(cont),
+                'hw_pos': float(self._hw_pos),
+                'hw_wall': float(self._hw_wall),
+                'anchor_valid': bool(self._dac_anchor_valid),
+                'chart_time': float(self._chart_time),
+            })
 
     # --- public API (matches the old engine) ---
     def set_volume(self, v: float) -> None:
@@ -208,84 +266,135 @@ class AudioEngine:
             self._volume = float(v)
 
     def set_pitch_correct(self, on: bool) -> None:
-        with self._lock:
-            self._pitch_correct = bool(on)
-            if self._pv is not None:
-                self._pv.set_pitch_correct(on)
+        with self._pv_lock:
+            with self._lock:
+                self._pitch_correct = bool(on)
+                pv = self._pv
+            if pv is not None:
+                pv.set_pitch_correct(on)
 
     @property
     def _pitch_correct_public(self) -> bool:
         return self._pitch_correct
 
     def current_chart_time(self) -> float:
-        """Audio-master chart time for the ChartClock to read. Safe to call
-        from the render thread; takes the engine lock briefly.
+        """Audio-master chart time for the ChartClock to read.
 
-        Returns an interpolated time: the PV's source_time (stepped in
-        hop-sized jumps) is anchored against wall-clock at each callback,
-        and we add the wall-clock delta since that anchor. This gives the
-        renderer a smoothly-advancing clock instead of a visibly stepped
-        one, while still matching the PV's actual position on average."""
+        The only live clock is the callback-backed DAC anchor. Until a callback
+        has provided that anchor (startup, immediately after seek, pause->play),
+        reads return the last explicit chart-time written by the transport.
+        """
         with self._lock:
-            if self._pv is None:
-                if self._source is not None:
-                    return float(self._source.pos) / float(self._source.sr)
-                return self._chart_time
-            if not self._playing:
-                # When paused the callback isn't updating the anchor, so
-                # return the anchor directly (or the raw PV time if we
-                # never got a callback yet).
-                if self._anchor_wall == 0.0:
-                    return float(self._pv.source_time)
-                return self._anchor_src_time
-            rate = self._rate
-            elapsed = time.monotonic() - self._anchor_wall
-            extrapolated = self._anchor_src_time + elapsed * rate
-            # Clamp to the raw PV time on the upper side so we never get
-            # ahead of what's actually been produced — if the callback
-            # stalls longer than expected, we'd otherwise drift forward.
-            pv_now = float(self._pv.source_time)
-            if extrapolated > pv_now + rate * 0.05:
-                # More than one 50ms rate-step ahead of reality: cap.
-                return pv_now + rate * 0.05
-            return extrapolated
+            t = self._current_chart_time_locked()
+            self._debug_log_locked('audio_current_chart_time', {
+                'result': float(t),
+                'playing': bool(self._playing),
+                'rate': float(self._rate),
+                'chart_time': float(self._chart_time),
+                'scheduled_chart_pos': float(self._scheduled_chart_pos),
+                'hw_pos': float(self._hw_pos),
+                'hw_wall': float(self._hw_wall),
+                'anchor_valid': bool(self._dac_anchor_valid),
+                'stream_time': self._safe_stream_time_locked(),
+            })
+            return t
+
+    def _current_chart_time_locked(self) -> float:
+        if not self._playing:
+            return self._chart_time
+        if not self._dac_anchor_valid:
+            return self._chart_time
+        now = self._safe_stream_time_locked()
+        if now is None:
+            return self._chart_time
+        t = self._hw_pos + (now - self._hw_wall) * self._rate
+        if t > self._chart_time:
+            self._chart_time = float(t)
+        return self._chart_time
+
+    def _safe_stream_time_locked(self) -> float | None:
+        stream = self._stream
+        if stream is None:
+            return None
+        try:
+            return float(stream.time)
+        except Exception:
+            return None
+
+    def _debug_log_locked(self, subtype: str, payload: dict) -> None:
+        if not _SV_DEBUG_LOGGER.enabled:
+            return
+        rec = {'type': 'audio', 'subtype': subtype}
+        rec.update(payload)
+        _SV_DEBUG_LOGGER.log(rec)
 
     def set_state(self, t: float, rate: float, playing: bool) -> None:
         """Apply chart-clock intent to the audio engine.
 
         Does NOT seek by itself: with audio as the chart clock master, the
         per-tick `set_state` call only propagates pause/rate changes and
-        end-of-chart detection. The PV's source_time IS the playhead, so
-        re-seeking it every tick would just undo its own progress. Use
-        `seek()` for explicit jumps (unpause, scrub release, restart)."""
+        end-of-chart detection. The render clock comes from the stream's DAC
+        timeline, so re-seeking the PV every tick would just flush its OLA
+        buffer and chop the audio. Use `seek()` for explicit jumps (unpause,
+        scrub release, restart)."""
         if not self.ready:
             return
         rate = max(0.05, float(rate))
-        with self._lock:
-            if abs(rate - self._rate) > 1e-3:
-                self._rate = rate
-                if self._pv is not None:
-                    self._pv.set_rate(rate)
-            if not playing:
-                self._playing = False
-                self._chart_time = t
-                self._ended = False
-                return
-            if t >= self._base_duration:
-                self._playing = False
-                self._ended = True
-                return
-            if not self._playing:
-                # Transitioning paused->playing: initialize the interpolation
-                # anchor so current_chart_time doesn't extrapolate from a
-                # stale (or zero) wall timestamp before the first callback.
-                self._anchor_src_time = (
-                    float(self._pv.source_time) if self._pv is not None
-                    else t)
-                self._anchor_wall = time.monotonic()
-            self._playing = True
-            self._chart_time = t
-            self._ended = False
+        with self._pv_lock:
+            with self._lock:
+                cur = self._current_chart_time_locked()
+                self._debug_log_locked('audio_set_state_enter', {
+                    'requested_t': float(t),
+                    'requested_rate': float(rate),
+                    'requested_playing': bool(playing),
+                    'current': float(cur),
+                    'playing': bool(self._playing),
+                    'rate': float(self._rate),
+                    'chart_time': float(self._chart_time),
+                    'scheduled_chart_pos': float(self._scheduled_chart_pos),
+                    'hw_pos': float(self._hw_pos),
+                    'hw_wall': float(self._hw_wall),
+                    'anchor_valid': bool(self._dac_anchor_valid),
+                    'stream_time': self._safe_stream_time_locked(),
+                })
+                pv = self._pv
+                rate_changed = abs(rate - self._rate) > 1e-3
+                was_playing = self._playing
+            if rate_changed and pv is not None:
+                pv.set_rate(rate)
+            with self._lock:
+                if rate_changed:
+                    self._rate = rate
+                if not playing:
+                    self._playing = False
+                    self._chart_time = cur
+                    self._scheduled_chart_pos = cur
+                    self._dac_anchor_valid = False
+                    self._ended = False
+                elif t >= self._base_duration:
+                    self._playing = False
+                    self._chart_time = float(t)
+                    self._scheduled_chart_pos = float(t)
+                    self._dac_anchor_valid = False
+                    self._ended = True
+                else:
+                    if not was_playing:
+                        self._chart_time = float(t)
+                        self._scheduled_chart_pos = float(t)
+                        self._dac_anchor_valid = False
+                    self._playing = True
+                    self._ended = False
+                self._debug_log_locked('audio_set_state_exit', {
+                    'chart_time': float(self._chart_time),
+                    'playing': bool(self._playing),
+                    'rate': float(self._rate),
+                    'ended': bool(self._ended),
+                    'scheduled_chart_pos': float(self._scheduled_chart_pos),
+                    'hw_pos': float(self._hw_pos),
+                    'hw_wall': float(self._hw_wall),
+                    'anchor_valid': bool(self._dac_anchor_valid),
+                    'stream_time': self._safe_stream_time_locked(),
+                })
 
     def seek(self, t: float) -> None:
         """Explicitly seek the PV to chart time `t`. Called on scrub
@@ -293,15 +402,35 @@ class AudioEngine:
         is the price of a non-contiguous seek."""
         if not self.ready:
             return
-        with self._lock:
-            if self._pv is not None:
-                self._pv.seek(float(t))
-            self._chart_time = float(t)
-            self._ended = False
-            # Rebase the interpolation anchor so current_chart_time() starts
-            # extrapolating from the new position instead of the pre-seek one.
-            self._anchor_src_time = float(t)
-            self._anchor_wall = time.monotonic()
+        with self._pv_lock:
+            with self._lock:
+                self._debug_log_locked('audio_seek_enter', {
+                    'requested_t': float(t),
+                    'playing': bool(self._playing),
+                    'rate': float(self._rate),
+                    'chart_time': float(self._chart_time),
+                    'scheduled_chart_pos': float(self._scheduled_chart_pos),
+                    'hw_pos': float(self._hw_pos),
+                    'hw_wall': float(self._hw_wall),
+                    'anchor_valid': bool(self._dac_anchor_valid),
+                    'stream_time': self._safe_stream_time_locked(),
+                })
+                pv = self._pv
+            if pv is not None:
+                pv.seek(float(t))
+            with self._lock:
+                self._chart_time = float(t)
+                self._ended = False
+                self._scheduled_chart_pos = float(t)
+                self._dac_anchor_valid = False
+                self._debug_log_locked('audio_seek_exit', {
+                    'chart_time': float(self._chart_time),
+                    'scheduled_chart_pos': float(self._scheduled_chart_pos),
+                    'hw_pos': float(self._hw_pos),
+                    'hw_wall': float(self._hw_wall),
+                    'anchor_valid': bool(self._dac_anchor_valid),
+                    'stream_time': self._safe_stream_time_locked(),
+                })
 
     def stop(self) -> None:
         with self._lock:

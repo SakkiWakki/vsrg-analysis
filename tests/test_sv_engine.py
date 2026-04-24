@@ -120,7 +120,7 @@ def test_beat_space_distance_matches_etterna_formula():
     exactly (up to FP noise). Reimplemented here as the spec."""
     bpms = [(0.0, 140.0), (10.0, 70.0)]  # BPM change mid-chart
     scrolls = [(0.0, 1.0), (5.0, 0.5), (15.0, 2.0)]
-    speeds = [(0.0, 1.0), (20.0, 0.0), (20.1, 1.5)]
+    speeds = [(0.0, 1.0), (20.0, 0.0, 0.0, 0), (20.1, 1.5, 0.0, 0)]
     e = BeatSpaceSVEngine(scrolls, speeds, bpms, sm_offset=0.0)
     sec_per_base = 60.0 / 140.0
 
@@ -146,18 +146,39 @@ def test_beat_space_distance_matches_etterna_formula():
         cb, cdb, cr = cache[idx]
         return cdb + (beat - cb) * cr
 
-    def etterna_speed_percent(beat):
-        v = 1.0
-        for b, r in speeds:
-            if b <= beat:
-                v = r
+    def etterna_speed_percent(beat, music_seconds):
+        idx = -1
+        for i, seg in enumerate(speeds):
+            if seg[0] <= beat:
+                idx = i
             else:
                 break
-        return v
+        if idx < 0:
+            return 1.0
+        seg_beat, seg_ratio, seg_delay, seg_unit = (
+            (speeds[idx][0], speeds[idx][1], speeds[idx][2], speeds[idx][3])
+            if len(speeds[idx]) >= 4 else
+            (speeds[idx][0], speeds[idx][1], 0.0, 0)
+        )
+        start_time = e._beat_to_time(seg_beat)
+        if seg_unit == 1:
+            end_time = start_time + seg_delay
+        else:
+            end_time = e._beat_to_time(seg_beat + seg_delay)
+        first_delay = speeds[0][2] if len(speeds[0]) >= 4 else 0.0
+        if idx == 0 and first_delay > 0.0 and music_seconds < start_time:
+            return 1.0
+        if end_time >= music_seconds and (idx > 0 or first_delay > 0.0):
+            prior = 1.0 if idx == 0 else speeds[idx - 1][1]
+            duration = end_time - start_time
+            ratio_used = 1.0 if duration == 0.0 else (music_seconds - start_time) / duration
+            return prior + (seg_ratio - prior) * ratio_used
+        return seg_ratio
 
     def etterna_y_beats(song_beat, note_beat):
         d = etterna_displayed_beat(note_beat) - etterna_displayed_beat(song_beat)
-        return d * etterna_speed_percent(song_beat)
+        song_t = e._beat_to_time(song_beat)
+        return d * etterna_speed_percent(song_beat, song_t)
 
     # Test a grid covering: normal region, across scroll change, across BPM
     # change, negative offset, SPEEDS=0 region, SPEEDS non-trivial.
@@ -196,9 +217,138 @@ def test_beat_space_speed_zero_freezes_field():
     assert e.distance(t_from, t_to) == pytest.approx(0.0)
 
 
+def test_beat_space_speed_transition_beats_interpolates():
+    e = BeatSpaceSVEngine(
+        [(0.0, 1.0)],
+        [(0.0, 2.0, 4.0, 0)],
+        _CONSTANT_BPMS, 0.0,
+    )
+    assert e.render_multiplier_at(0.0) == pytest.approx(1.0)
+    assert e.render_multiplier_at(1.0) == pytest.approx(1.5)
+    assert e.render_multiplier_at(2.0) == pytest.approx(2.0)
+
+
+def test_beat_space_speed_transition_seconds_interpolates():
+    e = BeatSpaceSVEngine(
+        [(0.0, 1.0)],
+        [(4.0, 2.0, 2.0, 1)],
+        _CONSTANT_BPMS, 0.0,
+    )
+    assert e.render_multiplier_at(2.0) == pytest.approx(1.0)
+    assert e.render_multiplier_at(3.0) == pytest.approx(1.5)
+    assert e.render_multiplier_at(4.0) == pytest.approx(2.0)
+
+
 def test_beat_space_negative_distance_symmetric():
     """distance(a, b) == -distance(b, a) when no SPEEDS asymmetry applies.
     (With SPEEDS this doesn't generally hold because speed_percent is
     sampled at t_from.)"""
     e = BeatSpaceSVEngine([(0.0, 1.0)], [], _CONSTANT_BPMS, 0.0)
     assert e.distance(2.0, 5.0) == pytest.approx(-e.distance(5.0, 2.0))
+
+
+def test_beat_space_max_visible_caps_lookahead_in_beats():
+    """Etterna's engine caps visible lookahead at ~20 beats, matching
+    ArrowEffects::FindDisplayedBeats' binary-search convergence. Without
+    the cap, a scroll=0 region lets the entire pile through because every
+    note in the region has the same SV-cum value."""
+    e = BeatSpaceSVEngine([(0.0, 1.0)], [], _CONSTANT_BPMS, 0.0)
+    # 120 BPM -> 2 beats per second. 20 beats lookahead = 10s.
+    cap_t = e.max_visible_t_from(0.0)
+    assert cap_t == pytest.approx(10.0, abs=0.01)
+    # Farther into the song: cap scales.
+    cap_t = e.max_visible_t_from(5.0)  # beat 10
+    assert cap_t == pytest.approx(15.0, abs=0.01)  # 10s + 20-beat lookahead
+
+
+def test_scroll_zero_region_collapses_to_same_cumulative():
+    """All notes inside a scroll=0 region map to the same cull-space
+    cumulative — the whole point of the scroll-stack gimmick. Without
+    this check, accidentally applying scroll to beats inside the region
+    would spread the pile out."""
+    e = BeatSpaceSVEngine([(0.0, 0.0), (26.0, 1.0)], [], [(0.0, 140.0)], 0.0)
+    # Beats 0..26 all at displayed_beat=0 -> same cumulative
+    ts = [e._beat_to_time(b) for b in [1, 5, 10, 15, 20, 25]]
+    cums = [e.cumulative_at(t) for t in ts]
+    for c in cums[1:]:
+        assert c == pytest.approx(cums[0])
+
+
+def test_identity_engine_max_visible_is_infinity():
+    """Non-Etterna engines don't impose a beat-based cap."""
+    from analysis.player.sv_engine import IdentitySVEngine, TimeSpaceSVEngine
+    assert IdentitySVEngine().max_visible_t_from(0.0) == float('inf')
+    assert TimeSpaceSVEngine([(0.0, 1.0)]).max_visible_t_from(0.0) == float('inf')
+
+
+def test_beat_space_matches_sm_chart_walker():
+    """Pre-walked TimingMap must return bit-identical values to the
+    reference beat_to_time walker — regression against a perf refactor
+    that could silently introduce rounding drift on large charts.
+
+    Restricted to BPM + STOP + DELAY cases; WARPS are excluded because
+    the reference walker's "target beat == event beat" handling is
+    inconsistent at warp boundaries (the continuation loop's overshoot
+    correction ignores the warp-skip). The TimingMap is correct there
+    and round-trips cleanly; just don't use the buggy reference as the
+    oracle for warp edges."""
+    from analysis.games.etterna.sm_chart import beat_to_time
+
+    bpms = [(0.0, 140.0), (10.0, 70.0), (20.0, 200.0)]
+    stops = [(5.0, 0.25), (15.0, 0.1)]
+    delays = [(12.0, 0.05)]
+    e = BeatSpaceSVEngine([], [], bpms, 0.1,
+                           stops=stops, delays=delays)
+    for beat in [0.0, 0.5, 4.9, 5.0, 5.1, 10.0, 12.0, 15.0,
+                  25.0, 100.0]:
+        ref = beat_to_time(beat, bpms, 0.1, stops, delays)
+        got = e._beat_to_time(beat)
+        assert got == pytest.approx(ref, abs=1e-9), (
+            f'beat={beat}: ref={ref}, got={got}'
+        )
+
+
+def test_beat_space_warp_inside_range_collapses_time():
+    """Beats inside a WARP region share the time of the warp entry —
+    they're teleported-over in beat space with no time elapsing. Tested
+    directly rather than against the reference walker, whose warp edge
+    handling has a known overshoot-correction bug."""
+    bpms = [(0.0, 120.0)]  # 0.5s per beat
+    warps = [(10.0, 2.0)]  # warp 2 beats forward at beat 10
+    e = BeatSpaceSVEngine([], [], bpms, 0.0, warps=warps)
+    # Beat 10 entry: 10 * 0.5 = 5.0s
+    t_enter = e._beat_to_time(10.0)
+    assert t_enter == pytest.approx(5.0, abs=1e-9)
+    # Beats 10..12 all collapse to the same time
+    assert e._beat_to_time(11.0) == pytest.approx(5.0, abs=1e-9)
+    assert e._beat_to_time(12.0) == pytest.approx(5.0, abs=1e-9)
+    # Beat just past warp end: normal advance from beat 12
+    assert e._beat_to_time(13.0) == pytest.approx(5.5, abs=1e-9)
+
+
+def test_beat_space_time_to_beat_round_trips():
+    """Round-trip beat -> time -> beat must return the original beat
+    within float precision (for beats not inside a WARP range)."""
+    bpms = [(0.0, 140.0), (10.0, 70.0), (20.0, 200.0)]
+    stops = [(5.0, 0.25)]
+    e = BeatSpaceSVEngine([], [], bpms, 0.0, stops=stops)
+    for beat in [0.5, 3.0, 5.5, 10.0, 12.0, 18.0, 25.0, 50.0]:
+        t = e._beat_to_time(beat)
+        assert e._time_to_beat(t) == pytest.approx(beat, abs=1e-6)
+
+
+def test_beat_space_time_to_beat_freezes_inside_stop():
+    """Inside a STOP window, chart beat must remain pinned at the stop beat.
+    Advancing through the pause then snapping back produces visible stutter
+    artifacts in Etterna stop sections."""
+    e = BeatSpaceSVEngine([], [], [(0.0, 120.0)], 0.0, stops=[(4.0, 0.5)])
+    # Beat 4 occurs at t=2.0s, then freezes until t=2.5s.
+    for t in [2.0, 2.1, 2.25, 2.49]:
+        assert e._time_to_beat(t) == pytest.approx(4.0, abs=1e-9)
+
+
+def test_beat_space_time_to_beat_freezes_inside_delay():
+    """DELAYS also freeze chart beat at the event beat until the delay ends."""
+    e = BeatSpaceSVEngine([], [], [(0.0, 120.0)], 0.0, delays=[(4.0, 0.5)])
+    for t in [2.0, 2.1, 2.25, 2.49]:
+        assert e._time_to_beat(t) == pytest.approx(4.0, abs=1e-9)
