@@ -89,6 +89,7 @@ class NotesModel:
     roll_head_keys: set = field(default_factory=set)
 
 
+
 def build_notes_model(replay, times, hold_tails, game) -> NotesModel:
     """Populate a NotesModel from a parsed replay. Ghost taps and miss
     holds are osu-only; chart extras (mines/lifts/fakes/rolls) are
@@ -161,6 +162,7 @@ def _build_chart_extras(m, replay):
     roll_heads = replay.get('roll_heads')
     if roll_heads:
         m.roll_head_keys = set(roll_heads)
+
 
 
 _HOLD_MATCH_TOL_MS = 2  # press-time tolerance for matching a miss to a hold span

@@ -258,6 +258,7 @@ class EtternaAdapter(GameAdapter):
                                                       stepstype_keycount,
                                                       sv_sections_from_chart,
                                                       row_to_time,
+                                                      NT_TAP, NT_HOLD_HEAD,
                                                       NT_MINE, NT_LIFT,
                                                       NT_FAKE, NT_ROLL_HEAD)
         data = (found or {}).get('data') or {}
@@ -298,11 +299,50 @@ class EtternaAdapter(GameAdapter):
         replay['chart_fakes'] = fakes
         replay['roll_heads'] = rolls
 
+        # Inject post-death chart notes as misses so prepare_replay_times,
+        # note culling, t_max, and the standard miss renderer handle them
+        # without a separate code path.
+        import numpy as np
         replay_max_row = int(replay['noterows'].max()) if len(replay['noterows']) else 0
+        _, chart_holds = parse_notes_block(notedata)
+        hold_ends = {(hr, hc): er for (hr, hc, er) in chart_holds}
+
+        missing = []  # (row, col, is_hold)
+        for (row, col, nt) in notes:
+            if row <= replay_max_row:
+                continue
+            if nt not in (NT_TAP, NT_HOLD_HEAD, NT_ROLL_HEAD):
+                continue
+            missing.append((row, col, nt in (NT_HOLD_HEAD, NT_ROLL_HEAD)))
+
+        if not missing:
+            return
+
+        bpms = chart.get('bpms') or data.get('bpms') or []
+        offset = chart.get('offset') or data.get('offset') or 0.0
+
         if chart_max_row - replay_max_row > 192:
-            bpms = chart.get('bpms') or data.get('bpms') or []
-            offset = chart.get('offset') or data.get('offset') or 0.0
             replay['death_time'] = row_to_time(replay_max_row, bpms, offset)
+
+        new_rows = np.array([r for r, _c, _h in missing], dtype=np.int64)
+        new_cols = np.array([c for _r, c, _h in missing], dtype=np.int32)
+        new_offs = np.full(len(missing), 1.0, dtype=np.float64)  # MISS_SENTINEL
+        new_nts  = np.zeros(len(missing), dtype=np.int32)
+
+        rows = np.concatenate([replay['noterows'], new_rows])
+        order = np.argsort(rows, kind='stable')
+        replay['noterows']  = rows[order]
+        replay['columns']   = np.concatenate([replay['columns'],  new_cols])[order]
+        replay['offsets']   = np.concatenate([replay['offsets'],  new_offs])[order]
+        replay['notetypes'] = np.concatenate([replay['notetypes'],new_nts])[order]
+        replay['misses']    = np.concatenate([replay['misses'],
+                                              np.ones(len(missing), dtype=bool)])[order]
+
+        existing_holds = replay.get('holds') or []
+        new_holds = [(r, c, hold_ends[(r, c)])
+                     for r, c, is_hold in missing
+                     if is_hold and (r, c) in hold_ends]
+        replay['holds'] = existing_holds + new_holds
 
     def judgement_windows(self, replay, judge=None, **_):
         from analysis.games.etterna.judgment import windows_for

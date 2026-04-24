@@ -340,6 +340,12 @@ class QtPlayerRenderer:
                              QColor(color[0], color[1], color[2], 24))
         _line(painter, (255, 255, 255), (ctx.x0, ctx.judge_y),
               (ctx.x0 + p.keycount * ctx.lane_w, ctx.judge_y), 2)
+        death_t = p.replay.get('death_time')
+        if death_t is not None:
+            y = int(ctx.time_to_y(float(death_t)))
+            field_w = p.keycount * ctx.lane_w
+            _line(painter, (220, 50, 50), (ctx.x0, y),
+                  (ctx.x0 + field_w, y), 2)
 
     def _draw_notes(self, ctx, painter):
         for i in ctx.candidates:
@@ -568,6 +574,7 @@ class QtPlayerRenderer:
         self._sweep_chart_notes(ctx, p._mine_times, p._mine_cols, m.mine_sv, draw_mine)
         self._sweep_chart_notes(ctx, p._lift_times, p._lift_cols, m.lift_sv, draw_lift)
         self._sweep_chart_notes(ctx, p._fake_times, p._fake_cols, m.fake_sv, draw_fake)
+
 
     @staticmethod
     def _sweep_chart_notes(ctx, times, cols, sv_times, draw_fn):
