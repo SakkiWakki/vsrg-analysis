@@ -1,30 +1,14 @@
-"""Registry for plugin-contributed actions on the library tab.
-
-Plugins expose actions by adding a top-level ``register_library_actions``
-to any bundle module::
-
-    def register_library_actions(add):
-        add('Live stats', open_live_stats)
-
-``add(label, callback)`` takes a plain callable; clicking the button
-calls it with no arguments. The registry is intentionally minimal — it's
-a toolbar, not a full menu system. If a plugin needs richer UX
-(submenus, icons, keyboard shortcuts), that lives in a future API.
-
-The registry is process-wide: a single instance holds every plugin's
-actions and fires a listener whenever a plugin adds or removes one.
-``library_tab`` subscribes so that actions registered *after* the tab
-builds (e.g. by a plugin enabled via the Plugins dialog) show up without
-restart.
-"""
 from __future__ import annotations
 
+import logging
 import threading
 from dataclasses import dataclass
 from typing import Callable
 
+_LOG = logging.getLogger(__name__)
 
-@dataclass
+
+@dataclass(frozen=True)
 class LibraryAction:
     key: str
     label: str
@@ -33,57 +17,45 @@ class LibraryAction:
 
 
 class LibraryActionRegistry:
-    """Process-wide list of plugin-contributed toolbar actions.
-
-    Thread-safe for the add/clear path; listeners are called
-    synchronously inside ``add`` so UI updates happen on the calling
-    thread (plugin registration happens on the Qt thread during
-    discovery).
-    """
-
     def __init__(self):
         self._actions: list[LibraryAction] = []
         self._listeners: list[Callable[[], None]] = []
         self._lock = threading.Lock()
 
-    def add(self, label: str, callback: Callable[[], None], *,
-            key: str | None = None, module: str = '') -> LibraryAction:
-        if not callable(callback):
-            raise TypeError('callback must be callable')
-        label = str(label).strip()
-        if not label:
-            raise ValueError('label is required')
-        key = str(key or f'{module}:{label}')
-        action = LibraryAction(
-            key=key, label=label, callback=callback, module=str(module))
+    def add(
+        self,
+        label: str,
+        callback: Callable[[], None],
+        *,
+        key: str | None = None,
+        module: str = '',
+    ) -> LibraryAction:
+        action = self._make_action(label, callback, key=key, module=module)
+
         with self._lock:
-            # Replace any existing action with the same key — supports
-            # re-registration after a plugin reload.
-            self._actions = [a for a in self._actions if a.key != key]
+            self._actions = [
+                existing for existing in self._actions
+                if existing.key != action.key
+            ]
             self._actions.append(action)
-            listeners = list(self._listeners)
-        for fn in listeners:
-            try:
-                fn()
-            except Exception as exc:
-                print(f'library action listener failed: {exc}')
+            listeners_snapshot = tuple(self._listeners)
+
+        self._notify(listeners_snapshot)
         return action
 
     def clear_module(self, module: str) -> int:
-        """Drop every action owned by ``module``. Called by the plugin
-        manager on rediscovery so a disabled bundle's buttons vanish.
-        Returns the number of actions removed."""
         module = str(module)
+
         with self._lock:
             before = len(self._actions)
-            self._actions = [a for a in self._actions if a.module != module]
+            self._actions = [
+                action for action in self._actions
+                if action.module != module
+            ]
             removed = before - len(self._actions)
-            listeners = list(self._listeners) if removed else []
-        for fn in listeners:
-            try:
-                fn()
-            except Exception as exc:
-                print(f'library action listener failed: {exc}')
+            listeners = tuple(self._listeners) if removed else ()
+
+        self._notify(listeners)
         return removed
 
     def actions(self) -> list[LibraryAction]:
@@ -91,18 +63,51 @@ class LibraryActionRegistry:
             return list(self._actions)
 
     def subscribe(self, fn: Callable[[], None]) -> Callable[[], None]:
-        """Register ``fn`` to be called after any add/clear. Returns a
-        handle that is itself the unsubscribe callable."""
+        if not callable(fn):
+            raise TypeError('listener must be callable')
+
         with self._lock:
             self._listeners.append(fn)
 
-        def _unsub():
+        def unsubscribe() -> None:
             with self._lock:
                 try:
                     self._listeners.remove(fn)
                 except ValueError:
                     pass
-        return _unsub
+
+        return unsubscribe
+
+    @staticmethod
+    def _make_action(
+        label: str,
+        callback: Callable[[], None],
+        *,
+        key: str | None,
+        module: str,
+    ) -> LibraryAction:
+        if not callable(callback):
+            raise TypeError('callback must be callable')
+
+        label = str(label).strip()
+        if not label:
+            raise ValueError('label is required')
+
+        module = str(module)
+        return LibraryAction(
+            key=str(key or f'{module}:{label}'),
+            label=label,
+            callback=callback,
+            module=module,
+        )
+
+    @staticmethod
+    def _notify(listeners: tuple[Callable[[], None], ...]) -> None:
+        for listener in listeners:
+            try:
+                listener()
+            except Exception:
+                _LOG.exception('library action listener failed')
 
 
 _singleton: LibraryActionRegistry | None = None
@@ -111,6 +116,7 @@ _singleton_lock = threading.Lock()
 
 def get_registry() -> LibraryActionRegistry:
     global _singleton
+
     with _singleton_lock:
         if _singleton is None:
             _singleton = LibraryActionRegistry()
@@ -119,5 +125,6 @@ def get_registry() -> LibraryActionRegistry:
 
 def reset_for_tests() -> None:
     global _singleton
+
     with _singleton_lock:
         _singleton = None

@@ -72,11 +72,10 @@ class LibraryQuery:
             return 0.0
 
     def _key_filter(self) -> int | None:
-        text = self.tab.keys_cb.currentText()
-        if text == 'any':
-            return None
+        text = self.tab.keys_cb.currentText().strip()
         try:
-            return int(text)
+            value = int(text)
+            return value if value > 0 else None
         except ValueError:
             return None
 

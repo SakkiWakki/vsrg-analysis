@@ -13,40 +13,43 @@ class LibraryContextMenu:
         self.tab = tab
 
     def open(self, pos):
-        item = self.tab.tree.itemAt(pos)
-        if item is None:
-            return
-
-        entry = item.data(0, Qt.UserRole)
+        entry = self._entry_at(pos)
         if not entry:
             return
 
-        menu = QMenu(self.tab.tree)
-        a_play = menu.addAction('▶ Watch replay')
-        a_viz = menu.addAction('Analyze (open visualization)')
-        menu.addSeparator()
-        a_html = menu.addAction('HTML report')
-        menu.addSeparator()
-        a_copy = menu.addAction('Copy replay path')
-        a_copy_chart = (
-            menu.addAction('Copy chart path') if entry.get('chart_path') else None
-        )
-        a_open_folder = menu.addAction('Open containing folder')
-
+        menu, handlers = self._build_menu(entry)
         chosen = menu.exec(self.tab.tree.viewport().mapToGlobal(pos))
 
-        if chosen is a_play:
-            self.tab.openers.open_player_for(entry)
-        elif chosen is a_viz:
-            self.tab.openers.open_viz(entry)
-        elif chosen is a_html:
-            self.tab.openers.html_selected()
-        elif chosen is a_copy:
-            QApplication.clipboard().setText(entry.get('replay_path', ''))
-        elif a_copy_chart is not None and chosen is a_copy_chart:
-            QApplication.clipboard().setText(entry.get('chart_path', ''))
-        elif chosen is a_open_folder:
-            self._open_containing_folder(entry)
+        handler = handlers.get(chosen)
+        assert handler is not None, f"No handler avaliable!"
+        handler()
+
+
+    def _entry_at(self, pos):
+        item = self.tab.tree.itemAt(pos)
+        assert item is not None, f"Wtf"
+        return item.data(0, Qt.UserRole)
+
+    def _copy_text(self, text):
+        QApplication.clipboard().setText(text or '')
+
+    def _build_menu(self, entry):
+        menu = QMenu(self.tab.tree)
+        handlers = {}
+
+        def add(label, callback):
+            action = menu.addAction(label)
+            handlers[action] = callback
+            return action
+
+        add('▶ Watch replay', lambda: self.tab.openers.open_player_for(entry))
+        add('Analyze (open visualization)', lambda: self.tab.openers.open_viz(entry))
+        menu.addSeparator()
+        add('HTML report', self.tab.openers.html_selected)
+        menu.addSeparator()
+        add('Copy replay path', lambda: self._copy_text(entry.get('replay_path')))
+        if entry.get('chart_path'): # TODO: Always have a chart path
+            add('Copy chart path', lambda: self._copy_text(entry.get('chart_path')))
 
     def _open_containing_folder(self, entry):
         target = entry.get('chart_path') or entry.get('replay_path', '')

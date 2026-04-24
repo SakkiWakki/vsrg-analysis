@@ -12,8 +12,12 @@ from analysis.gui.library.model import LibraryQuery
 from analysis.gui.library.tree import LibraryTreeController
 from analysis.gui.library.jobs import LibraryJobRunner
 from analysis.gui.library.openers import LibraryOpeners
-from analysis.gui.library.plugins_actions import PluginActionsController
+from analysis.gui.library.plugin_actions import PluginActionsController
 from analysis.gui.library.context_menu import LibraryContextMenu
+from analysis.gui.plugins_dialog import PluginsDialog
+from analysis.gui.game_settings_dialog import GameSettingsDialog
+from analysis.gui.paths_dialog import PathsDialog
+
 
 
 class LibraryTab(QWidget):
@@ -126,7 +130,6 @@ class LibraryTab(QWidget):
         row.addWidget(QLabel('Game:'))
         self.game_cb = QComboBox()
         self.game_cb.addItems(['all', 'etterna', 'osu'])
-        self.game_cb.currentTextChanged.connect(self.refresh_tree)
         row.addWidget(self.game_cb)
 
         row.addWidget(QLabel('Sort:'))
@@ -135,23 +138,20 @@ class LibraryTab(QWidget):
             'recent', 'date', 'wife', 'song', 'pack', 'rate',
             'keys', 'game', 'grade', 'maxcombo', 'overall_ssr',
         ])
-        self.sort_cb.currentTextChanged.connect(self.refresh_tree)
         row.addWidget(self.sort_cb)
 
         self.desc_cbx = QCheckBox('desc')
         self.desc_cbx.setChecked(True)
-        self.desc_cbx.stateChanged.connect(self.refresh_tree)
         row.addWidget(self.desc_cbx)
 
         self.group_cbx = QCheckBox('group by song')
         self.group_cbx.setChecked(True)
-        self.group_cbx.stateChanged.connect(self.refresh_tree)
         row.addWidget(self.group_cbx)
 
         row.addWidget(QLabel('K:'))
         self.keys_cb = QComboBox()
-        self.keys_cb.addItems(['any', '4', '5', '6', '7', '8', '9', '10'])
-        self.keys_cb.currentTextChanged.connect(self.refresh_tree)
+        self.keys_cb.setEditable(True)
+        self.keys_cb.addItems(['any', *(str(k) for k in range(4, 11))])
         row.addWidget(self.keys_cb)
 
         row.addWidget(QLabel('min acc%:'))
@@ -162,6 +162,11 @@ class LibraryTab(QWidget):
 
         row.addStretch(1)
         return row
+    
+    def _run_selected(self, action: str) -> None:
+        entry = self.selected_entry()
+        if entry:
+            self.openers.run(action, entry)
 
     def _build_action_bar(self):
         import analysis.viz.plugins as viz_pkg
@@ -176,13 +181,15 @@ class LibraryTab(QWidget):
             self.viz_cb.setCurrentText('Full report (all plots)')
         row.addWidget(self.viz_cb, 1)
 
-        for label, cb in [
-            ('Open', lambda: self.openers.open_viz(self.selected_entry())),
-            ('HTML report', self.openers.html_selected),
-            ('▶ Play replay', self.openers.play_selected),
+        for label, action in [
+            ('Open', 'visualize'),
+            ('HTML report', 'html_report'),
+            ('▶ Play replay', 'play'),
         ]:
             btn = QPushButton(label)
-            btn.clicked.connect(cb)
+            btn.clicked.connect(
+                lambda _checked=False, action=action: self._run_selected(action)
+            )
             row.addWidget(btn)
 
         row.addWidget(QLabel('Default scroll (ms):'))
@@ -227,17 +234,14 @@ class LibraryTab(QWidget):
         return self.tree_ctl.selected_entry(parent=self)
 
     def open_plugins_dialog(self):
-        from analysis.gui.plugins_dialog import PluginsDialog
         PluginsDialog(self).exec()
 
     def open_paths_dialog(self):
-        from analysis.gui.paths_dialog import PathsDialog
         dlg = PathsDialog(self)
         if dlg.exec():
             self.load_library(refresh=True)
 
     def open_game_settings_dialog(self):
-        from analysis.gui.game_settings_dialog import GameSettingsDialog
         dlg = GameSettingsDialog(self, on_rebuild=self.jobs.rebuild_game)
         dlg.exec()
         self.load_library()

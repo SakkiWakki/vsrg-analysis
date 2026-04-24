@@ -3,6 +3,8 @@ from __future__ import annotations
 from PySide6.QtWidgets import QMessageBox
 
 from analysis.gui.library.actions import get_registry
+from analysis.player.plugin_loader import PluginManager
+
 
 class PluginActionsController:
     def __init__(self, tab):
@@ -11,7 +13,6 @@ class PluginActionsController:
         self._discover_and_subscribe()
 
     def _discover_and_subscribe(self):
-        from analysis.player.plugin_loader import PluginManager
 
         PluginManager.discover()
         self._unsubscribe = get_registry().subscribe(self.rebuild)
