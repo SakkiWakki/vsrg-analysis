@@ -14,7 +14,7 @@ from analysis.player.plugin_api import Stage, normalize_stage
 from analysis.player.hud.sidebar_api import SidebarSectionRegistry, _escape_key
 from analysis.player.render.layer_registry import LayerRegistry
 
-from analysis.gui.library.library_actions import get_registry
+from analysis.gui.library.actions import get_registry
 
 
 

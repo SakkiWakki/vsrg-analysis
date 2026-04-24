@@ -8,7 +8,7 @@ without the UI going stale or a badly-written listener taking the
 registry down."""
 from __future__ import annotations
 
-from analysis.gui.library_actions import (LibraryActionRegistry,
+from analysis.gui.library.actions import (LibraryActionRegistry,
                                           reset_for_tests, get_registry)
 
 
