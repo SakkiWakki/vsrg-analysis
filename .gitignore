@@ -163,6 +163,7 @@ Thumbs.db
 # Clankers (lemme know if there's more models that creates these type of files)
 .claude
 .codex
+CLAUDE.md
 
 # For personal use
 tools
