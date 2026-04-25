@@ -237,10 +237,13 @@ def beat_space_engine(scrolls, speeds, bpms, sm_offset,
     # Beat-space inverse threads back through the displayed-beat cache and
     # the timing map. ScrollsCache.inverse_displayed_beat handles the
     # scroll<=0 plateau case (collapse to segment start) the integrator
-    # can't.
+    # can't. With no #SCROLLS, displayed_beat is the identity, so the
+    # inverse is just beat_to_time on the target -- NOT
+    # float(displayed_target), which would leak a beat as if it were
+    # chart-time.
     def inverse_override(displayed_target):
         if not scrolls_cache:
-            return float(displayed_target)
+            return timing.beat_to_time(float(displayed_target))
         return scrolls_cache.inverse_displayed_beat(displayed_target, timing)
 
     return MeasureSVEngine(doc,

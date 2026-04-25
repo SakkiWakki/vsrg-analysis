@@ -334,9 +334,14 @@ class BeatSpaceSVEngine:
         cull-space clock smoother. In scroll<=0 plateaus the inverse is
         not well-defined; ScrollsCache.inverse_displayed_beat returns the
         earliest matching chart-time there."""
-        if not self._scrolls_cache:
-            return float(sv)
+        # cumulative_at = displayed_beat(beat(t)) * sec_per_base_beat,
+        # so the inverse is beat_to_time(displayed_beat^-1(sv / spb)).
+        # With no #SCROLLS, displayed_beat is the identity so the inverse
+        # collapses to beat_to_time(sv / spb) -- NOT float(sv), which
+        # used to leak the cumulative value back as if it were chart-time.
         db_target = sv / self._sec_per_base_beat
+        if not self._scrolls_cache:
+            return self._timing.beat_to_time(db_target)
         return self._scrolls_cache.inverse_displayed_beat(db_target, self._timing)
 
     def distance(self, t_from: float, t_to: float) -> float:

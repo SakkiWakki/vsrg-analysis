@@ -208,6 +208,20 @@ def test_inverse_with_zero_scroll_segment():
             f"inverse mismatch at sv={sv}"
 
 
+def test_inverse_round_trip_with_no_scrolls():
+    # Regression: when a chart has no #SCROLLS at all, both engines used
+    # to short-circuit `inverse_cumulative_at(sv)` to `float(sv)` (ref) /
+    # `float(sv) / sec_per_base_beat` (measure), leaking the cumulative
+    # value back as if it were chart-time. With no #SCROLLS, displayed
+    # beat is the identity so the inverse must be beat_to_time(sv / spb).
+    ref, new = _pair(scrolls=[], speeds=[], bpms=_CONST_BPM, sm_offset=0.0)
+    for t in np.linspace(0.5, 30.0, 60):
+        cn_ref = ref.cumulative_at(float(t))
+        cn_new = new.cumulative_at(float(t))
+        assert ref.inverse_cumulative_at(cn_ref) == pytest.approx(t, abs=1e-9)
+        assert new.inverse_cumulative_at(cn_new) == pytest.approx(t, abs=1e-9)
+
+
 def test_inverse_strictly_increasing_chart():
     # Sanity: on a chart with monotone-increasing cumulative, the inverse
     # is exact and should match.
