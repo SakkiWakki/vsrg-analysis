@@ -81,14 +81,29 @@ def _body_state_color(state, color, is_roll):
 
 # Vertical pad for head-shaped sprites so outlines, antialiased strokes,
 # and oversized glyphs (the ghost-tap ring at 25% of lane_w) don't clip
-# at the pixmap edges. Head sprites are rasterized with their note-head
-# area centered vertically at `y = note_h/2 + HEAD_PAD`, and the blit
-# site shifts by `-HEAD_PAD` so the note head still lines up with the
-# underlying note's `y`.
+# at the pixmap edges. The bar skin's note-head area is centered at
+# `(lane_w/2, note_h/2 + HEAD_PAD)` inside a `(lane_w, note_h + 2*HEAD_PAD)`
+# pixmap. Blit sites use `pm.height() / 2` as the y-offset so the visual
+# center lines up with the note's `y` regardless of the actual pixmap
+# height -- this lets the circle skin allocate a square pixmap sized to
+# its diameter without breaking the bar skin's geometry.
 HEAD_PAD = 6
 
 
 def _head_size(ctx):
+    """Pixmap size for head-shaped sprites.
+
+    Bar: `(lane_w, note_h + 2*HEAD_PAD)` -- a flat rect tall enough to
+    show the bar plus its outline pad.
+
+    Circle: `(lane_w, lane_w)` -- a square sized to the lane so the
+    full disc (~0.92 * lane_w diameter) renders without clipping
+    regardless of `note_h`. Decoupling the head pixmap from `note_h`
+    means the circle's apparent size tracks the lane geometry, not
+    the bar-skin's scroll-speed-driven thickness.
+    """
+    if ctx.player.skin == 'circle':
+        return ctx.lane_w, ctx.lane_w
     return ctx.lane_w, ctx.note_h + 2 * HEAD_PAD
 
 
@@ -103,9 +118,14 @@ def _body_size(ctx):
 
 # ── rasterize callbacks ──────────────────────────────────────────
 
-def _head_cy(note_h):
-    """Vertical center of the head area inside a padded head pixmap."""
-    return note_h / 2 + HEAD_PAD
+def _head_cy(ctx):
+    """Vertical center of the head area inside the head pixmap. The
+    rasterize site paints into pixmap-local coords; this is the y to
+    aim at so the visual center lands at `pm.height() / 2`, which is
+    where every blit site anchors the note's `y`."""
+    if ctx.player.skin == 'circle':
+        return ctx.lane_w / 2
+    return ctx.note_h / 2 + HEAD_PAD
 
 
 def _rect_head_rect(lane_w, note_h):
@@ -125,7 +145,7 @@ def _rasterize_tap_head(painter, key, ctx):
     color = _head_state_color(state, palette_color)
 
     cx = lane_w / 2
-    cy = _head_cy(note_h)
+    cy = _head_cy(ctx)
 
     if skin == 'circle':
         r = _circle_r(lane_w)
@@ -147,7 +167,7 @@ def _rasterize_ln_tail(painter, key, ctx):
     color = _tail_state_color(state, ctx.player.palette[col])
 
     cx = lane_w / 2
-    cy = _head_cy(note_h)
+    cy = _head_cy(ctx)
 
     if skin == 'circle':
         r = _circle_r(lane_w)
@@ -196,7 +216,7 @@ def _rasterize_lift(painter, key, ctx):
     color = ctx.player.palette[col]
 
     cx = lane_w / 2
-    cy = _head_cy(note_h)
+    cy = _head_cy(ctx)
 
     if skin == 'circle':
         r = _circle_r(lane_w)
@@ -219,7 +239,7 @@ def _rasterize_fake(painter, key, ctx):
     color = _dim(ctx.player.palette[col], factor=4)
 
     cx = lane_w / 2
-    cy = _head_cy(note_h)
+    cy = _head_cy(ctx)
 
     if skin == 'circle':
         r = _circle_r(lane_w)
@@ -276,33 +296,52 @@ _MISS_X_PAD = MISS_X_PAD
 
 
 def _miss_x_size(ctx):
-    """Miss-X pixmap is taller than a note head ; the red outline box
-    extends `pad` above and below to wrap the note, and the outline
-    pen itself is 3 px wide so we pad another half-pen + 1 for safety.
-    Blit offset (computed by the caller) shifts it by `-pad` in y so
-    the note-head area still lines up with the underlying note."""
+    """Miss-X pixmap dimensions.
+
+    Bar: `(lane_w, note_h + 2*pad)` -- the red outline rect extends
+    `pad` above and below the head rect so the 3-px outline stroke
+    stays fully inside the pixmap.
+
+    Circle: `(lane_w, lane_w)` -- a square sized to the lane, mirroring
+    the head pixmap. The red outline becomes a ring around the disc
+    rather than a rectangle around a (now nonexistent) bar.
+    """
+    if ctx.player.skin == 'circle':
+        return ctx.lane_w, ctx.lane_w
     return ctx.lane_w, ctx.note_h + 2 * _MISS_X_PAD
 
 
 def _rasterize_miss_x(painter, key, ctx):
-    """Red outline rect wrapping the note head + an X through the
-    center. Pixmap origin (0, 0) is at `y_head - pad`, so the note
-    head area sits at `y = pad` inside the pixmap."""
+    """Skin-aware miss overlay: red outline wrapping the head shape +
+    an X through the center, painted in the per-judgment color. Pixmap
+    origin is set so the head's visual center lands at `pm.height()/2`
+    -- the blit site centers the pixmap on the note's `y`."""
     from analysis.player.render.primitives import _line  # local - one call
-    lane_w, note_h = ctx.lane_w, ctx.note_h
     jcolor = key['jcolor']
-    pad = _MISS_X_PAD
+    miss_outline = (255, 60, 60, 110)
 
-    # Head rect expressed in pixmap coords: shifted down by `pad` so
-    # the outline's extended box fits. Inset by 2 so the 3-px outline
-    # stroke stays fully inside the pixmap bounds.
-    hx, hy, hw, hh = (4, pad, lane_w - 8, note_h)
-    _rect_outline(painter, (255, 60, 60, 110),
-                  (hx - pad + 2, hy - pad + 2,
-                   hw + pad * 2 - 4, hh + pad * 2 - 4), 3)
-
+    lane_w = ctx.lane_w
     cx = lane_w / 2
-    cy = pad + note_h / 2
+
+    if ctx.player.skin == 'circle':
+        # Pixmap is `(lane_w, lane_w)`; head center sits at `(lane_w/2,
+        # lane_w/2)`. Outline ring sits just outside the disc.
+        cy = lane_w / 2
+        head_r = _circle_r(lane_w)
+        ring_r = head_r + _MISS_X_PAD - 1
+        _ellipse_outline(painter, miss_outline, cx, cy, ring_r, ring_r, 3)
+    else:
+        # Pixmap is `(lane_w, note_h + 2*pad)`; head rect lives at
+        # `(4, pad, lane_w-8, note_h)` so the visual center is
+        # `(lane_w/2, pad + note_h/2) == (lane_w/2, pm.height()/2)`.
+        note_h = ctx.note_h
+        pad = _MISS_X_PAD
+        cy = pad + note_h / 2
+        hx, hy, hw, hh = (4, pad, lane_w - 8, note_h)
+        _rect_outline(painter, miss_outline,
+                      (hx - pad + 2, hy - pad + 2,
+                       hw + pad * 2 - 4, hh + pad * 2 - 4), 3)
+
     _line(painter, jcolor, (cx - 10, cy - 10), (cx + 10, cy + 10), 2)
     _line(painter, jcolor, (cx - 10, cy + 10), (cx + 10, cy - 10), 2)
 

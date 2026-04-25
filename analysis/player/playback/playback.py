@@ -66,7 +66,16 @@ class PlaybackController:
         return self.p._clock.intended()
 
     def set_skin(self, skin):
-        self.p.skin = skin if skin in self.p.SKINS else 'bar'
+        new_skin = skin if skin in self.p.SKINS else 'bar'
+        if new_skin == getattr(self.p, 'skin', None):
+            return
+        self.p.skin = new_skin
+        # Sprite cache pixmaps were rasterized for the previous skin's
+        # shapes; drop them so the next frame re-rasterizes against the
+        # new skin's `_circle_r` / `_rect_head_rect` paths.
+        cache = getattr(self.p, '_sprite_cache', None)
+        if cache is not None:
+            cache.invalidate()
 
     def toggle_skin(self):
         names = list(self.p.SKINS)

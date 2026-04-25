@@ -197,11 +197,10 @@ def _draw_ln_body_tile(ctx, painter, n, top, bot, state):
 
 def _draw_ln_tail_sprite(ctx, painter, n):
     from PySide6.QtCore import QPointF
-    from analysis.player.render.layers.note_sprites import HEAD_PAD
     state = _tail_state(n)
     pm = ctx.sprite_cache.get('ln_tail', ctx, col=n.col, state=state)
     painter.drawPixmap(
-        QPointF(float(n.lx), float(n.y_end - ctx.note_h / 2 - HEAD_PAD)), pm)
+        QPointF(float(n.lx), float(n.y_end - pm.height() / 2)), pm)
 
 
 def _tail_state(n) -> str:
@@ -220,14 +219,13 @@ def _draw_head(ctx, painter, n) -> bool:
     """Blit the head sprite from the cache if visible. Returns whether
     it was drawn (press-mark and miss-X both key off this)."""
     from PySide6.QtCore import QPointF
-    from analysis.player.render.layers.note_sprites import HEAD_PAD
     visible, state, y = _head_vis(ctx, n)
     if not visible:
         return False
     sprite_name = 'ln_head' if n.is_ln else 'tap_head'
     pm = ctx.sprite_cache.get(sprite_name, ctx, col=n.col, state=state)
     painter.drawPixmap(
-        QPointF(float(n.lx), float(y - ctx.note_h / 2 - HEAD_PAD)), pm)
+        QPointF(float(n.lx), float(y - pm.height() / 2)), pm)
     return True
 
 
@@ -276,13 +274,9 @@ def _draw_stroke_with_tick(ctx, painter, color, lx, y_from, y_to):
 
 def _draw_miss_x(ctx, painter, n):
     from PySide6.QtCore import QPointF
-    from analysis.player.render.layers.note_sprites import MISS_X_PAD
     pm = ctx.sprite_cache.get('miss_x', ctx, jcolor=n.jcolor)
-    # miss_x pixmap is `note_h + 2*pad` tall ; shift the blit up by
-    # `pad` so the note-head area inside the sprite lines up with the
-    # actual note head beneath.
     painter.drawPixmap(
-        QPointF(float(n.lx), float(n.y - ctx.note_h / 2 - MISS_X_PAD)), pm)
+        QPointF(float(n.lx), float(n.y - pm.height() / 2)), pm)
 
 
 

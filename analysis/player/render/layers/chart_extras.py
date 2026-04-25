@@ -28,7 +28,7 @@ def draw_mines(ctx: RenderContext, painter) -> None:
     _draw_chart_sprites(ctx, painter,
                         p.notes.mine_times, p.notes.mine_cols, p.notes.mine_sv,
                         p.notes.mine_until,
-                        sprite='mine', keyed=False, y_center=True)
+                        sprite='mine', keyed=False)
 
 
 def draw_lifts(ctx: RenderContext, painter) -> None:
@@ -36,7 +36,7 @@ def draw_lifts(ctx: RenderContext, painter) -> None:
     _draw_chart_sprites(ctx, painter,
                         p.notes.lift_times, p.notes.lift_cols, p.notes.lift_sv,
                         p.notes.lift_until,
-                        sprite='lift', keyed=True, y_center=False)
+                        sprite='lift', keyed=True)
 
 
 def draw_fakes(ctx: RenderContext, painter) -> None:
@@ -44,7 +44,7 @@ def draw_fakes(ctx: RenderContext, painter) -> None:
     _draw_chart_sprites(ctx, painter,
                         p.notes.fake_times, p.notes.fake_cols, p.notes.fake_sv,
                         p.notes.fake_until,
-                        sprite='fake', keyed=True, y_center=False)
+                        sprite='fake', keyed=True)
 
 
 def draw(ctx: RenderContext, painter) -> None:
@@ -161,15 +161,16 @@ def _cull_indices(sorted_keys: np.ndarray,
 
 
 def _draw_chart_sprites(ctx, painter, times, cols, sv_times, active_until, *,
-                        sprite, keyed, y_center):
+                        sprite, keyed):
     """Cull + blit a chart-stream sprite bucket (mines/lifts/fakes).
 
-    - `sprite`   ; sprite cache key
-    - `keyed`    ; True when the sprite keys on `col` (lifts, fakes).
+    - `sprite` ; sprite cache key
+    - `keyed`  ; True when the sprite keys on `col` (lifts, fakes).
       False for palette-independent glyphs like mines.
-    - `y_center` ; True when the sprite's pixmap is `(lane_w, lane_w)`
-      and should blit centered on `y` (mines). False for head-shaped
-      pixmaps `(lane_w, note_h)` that blit at `y - note_h / 2`.
+
+    Every chart-stream pixmap blits centered on its anchor y (square
+    mines, head-shaped lifts/fakes), so the y-offset is `pm.height() / 2`
+    in both cases.
     """
     if not times.size:
         return
@@ -182,28 +183,23 @@ def _draw_chart_sprites(ctx, painter, times, cols, sv_times, active_until, *,
         return
 
     from PySide6.QtCore import QPointF
-    from analysis.player.render.layers.note_sprites import HEAD_PAD
     cache = ctx.sprite_cache
     lane_x = ctx.lane_x
-    note_h = ctx.note_h
-    lane_w = ctx.lane_w
 
-    # Mines' sprite is a square with side == lane_w, centered on y.
-    # Head-shaped sprites use a `(lane_w, note_h + 2*HEAD_PAD)` pixmap
-    # (pad keeps antialiased outlines + oversized glyphs inside the
-    # allocated space); blit shifts up by `HEAD_PAD` so the note-head
-    # area inside the pixmap aligns with the underlying y.
-    y_offset = lane_w / 2 if y_center else (note_h / 2 + HEAD_PAD)
-
+    # Both pixmap shapes anchor `y` at the pixmap's vertical center
+    # (mines' `(lane_w, lane_w)` square -> `lane_w/2`; head-shaped
+    # pixmaps -> `pm.height() / 2`, which adapts to whichever skin is
+    # active without the blit site needing to know).
     if keyed:
         for k in indices:
             c = int(cols[k])
             pm = cache.get(sprite, ctx, col=c)
             y = _chart_sprite_y(ctx, float(times[k]), sv_times, k)
             painter.drawPixmap(QPointF(float(lane_x(c)),
-                                        float(y - y_offset)), pm)
+                                        float(y - pm.height() / 2)), pm)
     else:
         pm = cache.get(sprite, ctx)
+        y_offset = pm.height() / 2
         for k in indices:
             c = int(cols[k])
             y = _chart_sprite_y(ctx, float(times[k]), sv_times, k)

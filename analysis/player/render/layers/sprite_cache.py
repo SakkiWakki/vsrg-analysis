@@ -86,9 +86,15 @@ class NoteSpriteCache:
         geom = (int(w), int(h))
         if geom == self._geom:
             return
+        self.invalidate()
+        self._geom = geom
+
+    def invalidate(self) -> None:
+        """Drop every cached pixmap. Used by changes that affect
+        rasterization but not geometry -- e.g. a skin toggle, where the
+        same `(lane_w, note_h)` rasterizes to a different shape."""
         for bucket in self._buffers.values():
             bucket.clear()
-        self._geom = geom
 
     def get(self, name: str, ctx, **key_kwargs) -> QPixmap:
         """Return a rasterized pixmap for `name` at the given key.
