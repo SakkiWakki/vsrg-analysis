@@ -39,6 +39,7 @@ class _NoteView:
     col: int
     y: int
     y_end: int
+    press_y: float    # cached y at press_t; precomputed batched per frame
     lx: int
     off: float
     press_t: float
@@ -93,6 +94,7 @@ def _build(ctx, i, pos) -> _NoteView | None:
     return _NoteView(
         i=i, col=col,
         y=float(ctx.candidate_head_y[pos]), y_end=y_end,
+        press_y=float(ctx.candidate_press_y[pos]),
         lx=int(ctx.lane_x(col)),
         off=off, press_t=press_t,
         release_t=release_t, rel_off=rel_off, end_t=end_t,
@@ -257,9 +259,25 @@ def _draw_press_mark(ctx, painter, n):
     if n.is_ln and n.state == 'held' and p.press_hide:
         return
 
-    press_y = ctx.time_to_y(float(n.press_t))
+    # On-screen test: skip when both line endpoints lie off-screen on
+    # the same side. The vast majority of upcoming notes (most of every
+    # frame on dense charts) have press_y so close to n.y that both
+    # endpoints sit far above the receptor; drawing them is invisible
+    # GPU work. At the dense start of Hall of Kings this elides ~half
+    # the visible-note draws.
+    margin = ctx.screen_margin
+    h = p.H
+    lo = -margin
+    hi = h + margin
+    if (n.y < lo and n.press_y < lo) or (n.y > hi and n.press_y > hi):
+        return
+    # A press mark whose tick lands within this many pixels of the note
+    # head is visually indistinguishable from the head itself; the
+    # press error was sub-pixel so the visualization conveys nothing.
+    if abs(n.press_y - n.y) < 2.0:
+        return
     color = p.judge_colors['miss'] if n.miss else n.jcolor
-    _draw_stroke_with_tick(ctx, painter, color, n.lx, n.y, press_y)
+    _draw_stroke_with_tick(ctx, painter, color, n.lx, n.y, n.press_y)
 
 
 def _draw_stroke_with_tick(ctx, painter, color, lx, y_from, y_to):

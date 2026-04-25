@@ -6,14 +6,41 @@ import bisect
 import numpy as np
 
 
+# When `px_per_cum` falls below this threshold the chart is effectively
+# frozen on screen (a stop, a scrolls=0 region, or both). In that
+# regime the SV-space window blows up to cover most of the chart,
+# producing thousand-fold candidate explosions and frame-time spikes.
+# Fall back to a time-domain window: clamp candidate selection to
+# notes within +/- 5 s of the playhead. The visual result is identical
+# (nothing's moving, so the window's exact extent past the screen
+# doesn't matter) but the candidate count stays bounded.
+_FROZEN_PX_PER_CUM = 1e-3
+_FROZEN_TIME_LOOKBEHIND = 1.0
+_FROZEN_TIME_LOOKAHEAD = 5.0
+
+
 def prepare_time_window(ctx):
     p = ctx.player
     ctx.frame = p.render_frame_state(float(ctx.t_now))
-    px_per_cum = max(1e-6, abs(ctx.frame.px_per_cum))
+    raw_px_per_cum = abs(ctx.frame.px_per_cum)
+    # Detect "frozen" regime: stop / scrolls=0 / extreme zoom-out where
+    # the cumulative-space window would otherwise expand past the
+    # entire chart and force us to consider every note.
+    frozen = raw_px_per_cum < _FROZEN_PX_PER_CUM
+    px_per_cum = max(_FROZEN_PX_PER_CUM, raw_px_per_cum)
     sv_hi = (ctx.judge_y + ctx.screen_margin) / px_per_cum
     sv_lo = (ctx.judge_y - (p.H + ctx.screen_margin)) / px_per_cum
-    ctx.use_sv_space = bool(ctx.frame.use_sv)
-    if ctx.use_sv_space:
+    use_sv_engine = bool(ctx.frame.use_sv)
+    # `use_sv_space` toggles the candidate-selection bisect's index
+    # (SV-cumulative array vs note-time array). When the engine is
+    # frozen we override it to time so the bisect is bounded.
+    ctx.use_sv_space = use_sv_engine and not frozen
+    if frozen:
+        # Time-domain clamp around the playhead.
+        ctx.visual_cum_now = ctx.frame.visual_cum_now
+        ctx.target_lo = ctx.t_now - _FROZEN_TIME_LOOKBEHIND
+        ctx.target_hi = ctx.t_now + _FROZEN_TIME_LOOKAHEAD
+    elif use_sv_engine:
         ctx.visual_cum_now = ctx.frame.visual_cum_now
         ctx.target_lo = ctx.visual_cum_now + sv_lo
         ctx.target_hi = ctx.visual_cum_now + sv_hi

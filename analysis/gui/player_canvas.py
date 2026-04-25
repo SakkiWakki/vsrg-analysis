@@ -14,6 +14,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QPainter
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
+from analysis.gui import paint_profiler
 from analysis.player.render.qt_renderer import QtPlayerRenderer
 
 
@@ -46,12 +47,14 @@ class PlayerCanvas(QOpenGLWidget):
     def paintEvent(self, _ev):
         self.player.W = max(200, int(self.width()))
         self.player.H = max(200, int(self.height()))
+        paint_profiler.begin_frame()
         painter = QPainter(self)
         try:
             painter.setRenderHint(QPainter.Antialiasing, False)
             self.renderer.draw(self.player, painter, self.player.t)
         finally:
             painter.end()
+            paint_profiler.end_frame()
 
     def mousePressEvent(self, ev):
         self.setFocus(Qt.MouseFocusReason)

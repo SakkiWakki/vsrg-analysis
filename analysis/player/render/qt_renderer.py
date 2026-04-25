@@ -27,18 +27,20 @@ from analysis.player.render.layers.notes import _NoteView  # noqa: F401
 
 
 def _precompute_candidate_ys(ctx) -> None:
-    """Batch head + LN-tail Y for every candidate into two parallel arrays
-    aligned to `ctx.candidates`. `_build_note_view` reads from these by
-    position, so the per-note loop no longer calls into the SV engine.
+    """Batch head + LN-tail + press-y for every candidate into parallel
+    arrays aligned to `ctx.candidates`. `_build_note_view` and the
+    press-mark drawer read from these by position, so the per-note loop
+    never calls into the SV engine.
 
     On a dense Etterna chart with 60 visible notes and ~40% LN density
-    that replaces ~84 Python→SV-engine bisects per frame with two
-    numpy+searchsorted passes."""
+    that replaces ~3 * 60 = 180 Python->SV-engine bisects per frame
+    with three numpy+searchsorted passes."""
     p = ctx.player
     cand = ctx.candidates
     if not cand:
         ctx.candidate_head_y = np.empty(0, dtype=np.float64)
         ctx.candidate_tail_y = np.empty(0, dtype=np.float64)
+        ctx.candidate_press_y = np.empty(0, dtype=np.float64)
         return
     idx = np.asarray(cand, dtype=np.int64)
     head_times = p.times[idx]
@@ -49,6 +51,15 @@ def _precompute_candidate_ys(ctx) -> None:
     # only reads tail_y when is_ln is True so those entries are ignored.
     tail_times = p.notes.ln_tail_times[idx]
     ctx.candidate_tail_y = p.batch_time_to_y(tail_times, ctx.frame)
+
+    # Press-time y for the press-mark drawer. press_t = note_t + offset;
+    # offsets is parallel to p.times so we can index it the same way.
+    # Missed-and-not-pressed notes still go through this batch -- their
+    # press_y is unused by the drawer (the early-out at the top of
+    # `_draw_press_mark` skips them) but keeping the batch dense is much
+    # faster than building a sub-array.
+    press_times = head_times + p.offsets[idx]
+    ctx.candidate_press_y = p.batch_time_to_y(press_times, ctx.frame)
 
 
 class QtPlayerRenderer:
@@ -128,6 +139,13 @@ class QtPlayerRenderer:
         if hud is not None and hud.edit_mode and hud.drag_key is not None:
             self._draw_drag_overlay(ctx, painter)
         self.plugins.draw(Stage.POST_FRAME, ctx)
+        # Record per-frame metrics if profiling is enabled. Cheap when
+        # disabled (single attribute check + early return).
+        try:
+            from analysis.gui import paint_profiler
+            paint_profiler.record_frame(ctx)
+        except ImportError:
+            pass
 
     def _layer_draw_fns(self):
         # Only layers whose `draw` is a string lookup (plugin manifest

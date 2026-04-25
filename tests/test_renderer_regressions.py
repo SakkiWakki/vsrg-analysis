@@ -13,10 +13,11 @@ from analysis.player.render.layers import notes as _notes_layer
 from analysis.player.render.qt_renderer import QtPlayerRenderer, _NoteView
 
 
-def _make_note(*, miss, is_ln, miss_pressed_i=True, off=0.0, state='tap'):
+def _make_note(*, miss, is_ln, miss_pressed_i=True, off=0.0, state='tap',
+               press_y=200):
     """`_NoteView` with just the fields `_draw_press_mark` touches."""
     return _NoteView(
-        i=0, col=0, y=100, y_end=100, lx=0, off=off,
+        i=0, col=0, y=100, y_end=100, press_y=press_y, lx=0, off=off,
         press_t=0.0, release_t=None, rel_off=None, end_t=None,
         is_ln=is_ln, is_roll=False, miss=miss, state=state,
         note_color=(255, 255, 255), jcolor=(255, 0, 0),
@@ -34,12 +35,14 @@ def _make_press_ctx(renderer, miss_pressed=(True,)):
         press_hide=False,
         scroll_speed=1000.0,
         judge_colors={'miss': (255, 0, 0)},
+        H=600,
     )
     sprite_cache = SimpleNamespace(get=lambda *a, **k: empty_pm)
     return SimpleNamespace(player=player, lane_w=80,
                             # drawers removed - sprite cache is the sole draw path
                             sprite_cache=sprite_cache,
                             scroll_speed=player.scroll_speed,
+                            screen_margin=100,
                             time_to_y=lambda t: 100 + float(t) * 1000.0)
 
 
@@ -161,17 +164,18 @@ def test_missed_tap_without_press_skips_press_mark(monkeypatch):
     assert ticks == []
 
 
-def test_press_mark_uses_projected_time_to_y(monkeypatch):
+def test_press_mark_uses_precomputed_press_y(monkeypatch):
     """Press marks must use the same projected time->Y mapping as notes,
     not a raw `offset * scroll_speed` shortcut. Observable as the
     `y1` endpoint passed to `chart_extras.draw_lane_line` ; that's
-    whatever `ctx.time_to_y(press_t)` returned."""
+    whatever the precomputed `_NoteView.press_y` carried from the
+    batched per-frame y projection."""
     renderer = QtPlayerRenderer(plugin_manager=SimpleNamespace())
     lines, _ticks, fake_painter = _patch_draw_recorders(monkeypatch)
 
     ctx = _make_press_ctx(renderer)
-    ctx.time_to_y = lambda t: 321.0 if abs(t - 0.125) < 1e-9 else -999.0
-    note = _make_note(miss=False, is_ln=False, off=0.125, state='tap')
+    note = _make_note(miss=False, is_ln=False, off=0.125, state='tap',
+                      press_y=321.0)
     note = note.__class__(**{**note.__dict__, 'press_t': 0.125})
 
     _notes_layer._draw_press_mark(ctx, painter=fake_painter, n=note)
@@ -180,7 +184,7 @@ def test_press_mark_uses_projected_time_to_y(monkeypatch):
     assert len(lines) == 1
     assert lines[0][0] == (255, 0, 0)   # jcolor (non-miss path)
     assert lines[0][3] == 100            # y_head
-    assert lines[0][4] == 321.0          # projected y_press
+    assert lines[0][4] == 321.0          # cached y_press
 
 
 def test_ln_release_guide_uses_projected_time_to_y(monkeypatch):
@@ -206,7 +210,7 @@ def test_ln_release_guide_uses_projected_time_to_y(monkeypatch):
         time_to_y=lambda t: 456.0 if abs(t - 0.75) < 1e-9 else -999.0,
     )
     note = _NoteView(
-        i=0, col=0, y=100, y_end=200, lx=0, off=0.0,
+        i=0, col=0, y=100, y_end=200, press_y=100, lx=0, off=0.0,
         press_t=0.0, release_t=0.75, rel_off=0.1, end_t=0.65,
         is_ln=True, is_roll=False, miss=False, state='held',
         note_color=(255, 255, 255), jcolor=(255, 0, 0),
