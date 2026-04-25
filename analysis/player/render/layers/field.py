@@ -75,17 +75,28 @@ def draw_lanes(ctx, painter):
 
 def draw_judgment(ctx, painter):
     p = ctx.player
+    t_now = ctx.t_now
     sps = ctx.scroll_speed
     x0 = ctx.x0
     judge_y = ctx.judge_y
     field_w = p.keycount * ctx.lane_w
 
-    # Window shading
+    # Window shading. Anchor both edges at judge_y and ask the SV engine
+    # for the render-space distance across each half independently --
+    # going through ctx.time_to_y instead would route through the
+    # smoothed cull-space predictor (visual_cum_now), which drifts
+    # relative to t_now frame-to-frame and makes the band jitter.
+    sv = p.sv_render if (p.sv_enabled and p._sv_engine.enabled) else None
     painter.setPen(_NO_PEN)
     for name, w in reversed(p.windows):
-        half = w * sps
+        if sv is not None:
+            half_top = sv.sv_distance(t_now - w, t_now) * sps
+            half_bot = sv.sv_distance(t_now, t_now + w) * sps
+        else:
+            half_top = half_bot = w * sps
         painter.setBrush(_judge_brush(p.judge_colors[name]))
-        painter.drawRect(QRectF(x0, judge_y - half, field_w, half * 2.0))
+        painter.drawRect(QRectF(x0, judge_y - half_top, field_w,
+                                half_top + half_bot))
 
     # Judgment line
     painter.setPen(_JUDGE_LINE_PEN)

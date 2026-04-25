@@ -300,6 +300,53 @@ class SvRenderController:
             return t_to - t_from
         return self.p._sv_engine.distance(t_from, t_to)
 
+    def time_for_screen_height(self, t_now: float) -> float:
+        """Chart-time delta from `t_now` to the chart-time currently at
+        the top of the field, using the engine directly (no predictor
+        smoothing). This is the "ms to judge line" that a perfect note
+        spawning at the top of the screen would take to reach the
+        judgement line under the current SV.
+
+        Computed by bisecting `cumulative_at` (which is monotonic and
+        well-tested) instead of routing through `inverse_cumulative_at`
+        -- the latter returns chart-time in some engines and a beat in
+        others, and on charts with no `#SCROLLS` it degenerates to the
+        identity. Falls back to the flat scroll-speed time when SV is
+        off / no engine is loaded."""
+        p = self.p
+        sps = max(0.001, float(p.scroll_speed))
+        flat_dt = (p.H * p.hit_line_y_frac) / sps
+        engine = p._sv_engine
+        if not p.sv_enabled or engine is None or not engine.enabled:
+            return flat_dt
+        t_now = float(t_now)
+        mult = float(engine.render_multiplier_at(t_now))
+        if mult <= 0.0:
+            return flat_dt
+        target_delta_cum = flat_dt / mult
+        cum_now = float(engine.cumulative_at(t_now))
+
+        # Expand the upper bound until cumulative_at exceeds the target.
+        # Most charts hit it on the first or second doubling.
+        hi = max(flat_dt, 1e-3)
+        for _ in range(40):
+            if float(engine.cumulative_at(t_now + hi)) - cum_now >= target_delta_cum:
+                break
+            hi *= 2.0
+        else:
+            return flat_dt
+
+        lo = 0.0
+        # 30 iters resolves dt to ~1e-9 s for any reasonable hi -- well
+        # below the ms display rounding.
+        for _ in range(30):
+            mid = (lo + hi) * 0.5
+            if float(engine.cumulative_at(t_now + mid)) - cum_now >= target_delta_cum:
+                hi = mid
+            else:
+                lo = mid
+        return hi
+
     def visual_sv_distance_from_frame(self, frame, t_to):
         if not getattr(frame, 'use_sv', False):
             return t_to - frame.raw_t

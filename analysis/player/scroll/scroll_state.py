@@ -113,8 +113,18 @@ class ScrollStateController:
 
     @property
     def effective_scroll_ms(self):
+        # Chart-time it takes a note spawning at the top of the field
+        # to reach the judge line under the current SV. Routes through
+        # the engine (no predictor smoothing) so the readout is stable
+        # frame-to-frame; falls back to flat H/scroll_speed when SV is
+        # off / no engine.
+        p = self.p
+        sv = getattr(p, 'sv_render', None)
+        if sv is not None:
+            dt = sv.time_for_screen_height(float(getattr(p, '_render_t_now', 0.0)))
+            return dt * 1000.0
         sps = max(0.001, self.scroll_speed)
-        return (self.p.H * self.p.hit_line_y_frac) / sps * 1000.0
+        return (p.H * p.hit_line_y_frac) / sps * 1000.0
 
     def set_scroll_ms(self, ms):
         p = self.p
