@@ -286,12 +286,8 @@ def test_beat_space_matches_sm_chart_walker():
     reference beat_to_time walker — regression against a perf refactor
     that could silently introduce rounding drift on large charts.
 
-    Restricted to BPM + STOP + DELAY cases; WARPS are excluded because
-    the reference walker's "target beat == event beat" handling is
-    inconsistent at warp boundaries (the continuation loop's overshoot
-    correction ignores the warp-skip). The TimingMap is correct there
-    and round-trips cleanly; just don't use the buggy reference as the
-    oracle for warp edges."""
+    Restricted to BPM + STOP + DELAY cases so the basic timing-boundary
+    comparison stays separate from the explicit warp cases below."""
     from analysis.games.etterna.sm_chart import beat_to_time
 
     bpms = [(0.0, 140.0), (10.0, 70.0), (20.0, 200.0)]
@@ -310,9 +306,7 @@ def test_beat_space_matches_sm_chart_walker():
 
 def test_beat_space_warp_inside_range_collapses_time():
     """Beats inside a WARP region share the time of the warp entry —
-    they're teleported-over in beat space with no time elapsing. Tested
-    directly rather than against the reference walker, whose warp edge
-    handling has a known overshoot-correction bug."""
+    they're teleported-over in beat space with no time elapsing."""
     bpms = [(0.0, 120.0)]  # 0.5s per beat
     warps = [(10.0, 2.0)]  # warp 2 beats forward at beat 10
     e = BeatSpaceSVEngine([], [], bpms, 0.0, warps=warps)
@@ -324,6 +318,25 @@ def test_beat_space_warp_inside_range_collapses_time():
     assert e._beat_to_time(12.0) == pytest.approx(5.0, abs=1e-9)
     # Beat just past warp end: normal advance from beat 12
     assert e._beat_to_time(13.0) == pytest.approx(5.5, abs=1e-9)
+
+
+def test_beat_space_stop_then_warp_same_row_collapses_after_pause():
+    """Etterna processes STOP before WARP at the same row. The precomputed
+    timing map used by rendering must preserve that order or notes inside the
+    warp render spread out after the stop."""
+    e = BeatSpaceSVEngine(
+        [], [], [(0.0, 120.0)], 0.0,
+        stops=[(10.0, 1.0)], warps=[(10.0, 2.0)],
+    )
+    assert e._beat_to_time(10.0) == pytest.approx(5.0, abs=1e-9)
+    assert e._beat_to_time(11.0) == pytest.approx(6.0, abs=1e-9)
+    assert e._beat_to_time(12.0) == pytest.approx(6.0, abs=1e-9)
+    assert e._beat_to_time(13.0) == pytest.approx(6.5, abs=1e-9)
+
+    # While the stop is active, chart beat is still pinned to the warp row.
+    assert e._time_to_beat(5.5) == pytest.approx(10.0, abs=1e-9)
+    # Once the stop ends, the warp has landed at beat 12.
+    assert e._time_to_beat(6.0) == pytest.approx(12.0, abs=1e-9)
 
 
 def test_beat_space_time_to_beat_round_trips():

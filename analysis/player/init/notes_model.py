@@ -68,20 +68,32 @@ class NotesModel:
     # dict. Empty for osu!mania.
     mine_times: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.float64))
+    mine_rows: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.int64))
     mine_cols: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.int32))
+    mine_until: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float64))
     mine_sv: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.float64))
     lift_times: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.float64))
+    lift_rows: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.int64))
     lift_cols: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.int32))
+    lift_until: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float64))
     lift_sv: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.float64))
     fake_times: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.float64))
+    fake_rows: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.int64))
     fake_cols: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.int32))
+    fake_until: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float64))
     fake_sv: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.float64))
     # (head_row, col) for rolls — same key shape as hold_tails. The
@@ -159,6 +171,12 @@ def _build_chart_extras(m, replay):
         if ts is not None and cs is not None:
             setattr(m, f'{key}_times', np.asarray(ts, dtype=np.float64))
             setattr(m, f'{key}_cols', np.asarray(cs, dtype=np.int32))
+        rs = replay.get(f'{key}_rows')
+        if rs is not None:
+            setattr(m, f'{key}_rows', np.asarray(rs, dtype=np.int64))
+        until = replay.get(f'{key}_until')
+        if until is not None:
+            setattr(m, f'{key}_until', np.asarray(until, dtype=np.float64))
     roll_heads = replay.get('roll_heads')
     if roll_heads:
         m.roll_head_keys = set(roll_heads)

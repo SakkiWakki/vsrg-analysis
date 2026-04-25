@@ -8,6 +8,8 @@ from pathlib import Path
 
 
 MISS_SENTINEL = 1.000000
+TAP_NOTE_TYPE_HOLD_HEAD = 2
+TAP_NOTE_TYPE_MINE = 4
 
 
 def _sanitize_nonascii(raw: bytes) -> bytes:
@@ -48,12 +50,12 @@ def parse_replay(filepath):
 
     Format (per Replay.cpp in etternagame/etterna):
 
-    V2 — one line per judged tap:
+    V2 — one line per replay event:
         <noterow> <offset> <track> [<TapNoteType>]
-            The 4th field is only written when it's not TapNoteType_Tap
-            (=1); in particular HoldHead=2 flags the row as the head of
-            a hold/roll. HoldTail=3 shows up for the tails that produce
-            a judgment too.
+            The 4th field is only written when it's not TapNoteType_Tap.
+            Etterna's enum uses HoldHead=2 and Mine=4. Mine-hit events
+            are useful input data, but they are not tap notes and should
+            not be fed into the main note renderer/timing stats.
 
         H <noterow> <track> [<HoldNoteScore>]
             One line per *dropped* hold (HoldReplayResult). These are
@@ -114,11 +116,21 @@ def parse_replay(filepath):
     offsets = np.array(offsets, dtype=np.float64)
     columns = np.array(columns, dtype=np.int32)
     notetypes = np.array(notetypes, dtype=np.int32)
+    mine_mask = notetypes == TAP_NOTE_TYPE_MINE
+    mine_hits = [(int(noterows[i]), int(columns[i]), float(offsets[i]))
+                 for i in np.flatnonzero(mine_mask)]
+    if np.any(mine_mask):
+        keep = ~mine_mask
+        noterows = noterows[keep]
+        offsets = offsets[keep]
+        columns = columns[keep]
+        notetypes = notetypes[keep]
+
     misses = np.isclose(offsets, MISS_SENTINEL)
 
     # TapNoteType_HoldHead == 2 — one entry per hold head actually judged.
     holds = [(int(noterows[i]), int(columns[i]))
-             for i in np.flatnonzero(notetypes == 2)]
+             for i in np.flatnonzero(notetypes == TAP_NOTE_TYPE_HOLD_HEAD)]
 
     return {
         'noterows': noterows,
@@ -128,6 +140,7 @@ def parse_replay(filepath):
         'misses': misses,
         'holds': holds,
         'dropped_holds': dropped_holds,
+        'mine_hits': mine_hits,
         'replay_version': 1 if is_v1 else 2,
         'filepath': str(filepath),
     }

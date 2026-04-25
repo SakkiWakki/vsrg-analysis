@@ -59,6 +59,7 @@ class PlayReplayAction(EntryActionBase):
             entry,
             (bpms, sm_off, audio),
         )
+        scroll_mode = extra.pop('scroll_mode', scroll_mode)
 
         tab = PlayerTab(
             replay,

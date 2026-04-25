@@ -15,10 +15,141 @@ ROWS_PER_BEAT = 48  # SM stores 192 subdivisions per measure (4 beats) = 48 rows
 # is N rows and each measure = 4 beats. So rows_per_beat depends on note density.
 # But for Etterna replays specifically, noterow = 48 * beat_position (standard).
 # We'll go with 48 rows/beat which matches Etterna's internal NoteData.
+_SSC_VERSION_SPLIT_TIMING = 0.7
+
+
+def _beat_to_row(beat):
+    """Match Etterna's BeatToNoteRow for timing segment placement."""
+    import math
+    x = float(beat) * ROWS_PER_BEAT
+    return int(math.floor(x + 0.5) if x >= 0 else math.ceil(x - 0.5))
+
+
+def _row_to_beat(row):
+    return int(row) / float(ROWS_PER_BEAT)
+
+
+def _quantize_beat(beat):
+    return _row_to_beat(_beat_to_row(beat))
+
+
+def _quantize_pairs(pairs):
+    return [(_quantize_beat(b), v) for b, v in (pairs or [])]
+
+
+def _quantize_warps(warps):
+    out = []
+    for b, length in (warps or []):
+        length_rows = _beat_to_row(length)
+        if length_rows > 0:
+            out.append((_quantize_beat(b), _row_to_beat(length_rows)))
+    return out
 
 
 def _strip_comments(text):
     return re.sub(r'//[^\n]*', '', text)
+
+
+# SMLoader::ProcessBPMsAndStops (NotesLoaderSM.cpp:511) preprocesses raw
+# BPMS+STOPS so that BPM<0, BPM>FAST_BPM_WARP, and negative stops become
+# explicit WarpSegments. The note loader runs this BEFORE TidyUpData
+# (NotesLoaderSM.cpp:1219-1221, comment: "Turn negative time changes into
+# warps"). All downstream timing/render code (IsWarpAtRow,
+# GetBeatAndBPSFromElapsedTime) only knows about clean BPMs + warps - it
+# never sees the raw negatives. We mirror that contract here.
+_FAST_BPM_WARP = 9999999.0
+
+
+def process_bpms_and_stops(bpms, stops):
+    """Port of SMLoader::ProcessBPMsAndStops. Returns
+    (out_bpms, out_stops, out_warps)."""
+    bpms = sorted(bpms or [])
+    stops = sorted(stops or [])
+    out_bpms: list[tuple[float, float]] = []
+    out_stops: list[tuple[float, float]] = []
+    out_warps: list[tuple[float, float]] = []
+
+    bpm = 0.0
+    prev_beat = 0.0
+    warp_start = -1.0
+    prewarp_bpm = 0.0
+    timeofs = 0.0
+
+    i_bpm = 0
+    while i_bpm < len(bpms) and bpms[i_bpm][0] <= 0:
+        bpm = bpms[i_bpm][1]
+        i_bpm += 1
+    i_stop = 0
+    while i_stop < len(stops) and stops[i_stop][0] < 0:
+        i_stop += 1
+
+    if bpm == 0:
+        bpm = bpms[i_bpm][1] if i_bpm < len(bpms) else 60.0
+        if i_bpm < len(bpms):
+            i_bpm += 1
+    if 0 < bpm <= _FAST_BPM_WARP:
+        out_bpms.append((0.0, bpm))
+
+    while i_bpm < len(bpms) or i_stop < len(stops):
+        change_is_bpm = (
+            i_stop >= len(stops)
+            or (i_bpm < len(bpms) and bpms[i_bpm][0] <= stops[i_stop][0])
+        )
+        change = bpms[i_bpm] if change_is_bpm else stops[i_stop]
+
+        if bpm <= _FAST_BPM_WARP:
+            timeofs += (change[0] - prev_beat) * 60.0 / bpm
+            if warp_start >= 0 and bpm > 0 and timeofs > 0:
+                warp_end = change[0] - (timeofs * bpm / 60.0)
+                out_warps.append((warp_start, warp_end - warp_start))
+                if bpm != prewarp_bpm:
+                    out_bpms.append((warp_start, bpm))
+                warp_start = -1.0
+        prev_beat = change[0]
+
+        if change_is_bpm:
+            if warp_start < 0 and (change[1] < 0 or change[1] > _FAST_BPM_WARP):
+                warp_start = change[0]
+                prewarp_bpm = bpm
+                timeofs = 0.0
+            elif warp_start < 0:
+                out_bpms.append((change[0], change[1]))
+            bpm = change[1]
+            i_bpm += 1
+        else:
+            if warp_start < 0 and change[1] < 0:
+                warp_start = change[0]
+                prewarp_bpm = bpm
+                timeofs = change[1]
+            elif warp_start < 0:
+                out_stops.append((change[0], change[1]))
+            else:
+                timeofs += change[1]
+                if change[1] > 0 and timeofs > 0:
+                    warp_end = change[0]
+                    out_warps.append((warp_start, warp_end - warp_start))
+                    out_stops.append((change[0], timeofs))
+                    if bpm < 0 or bpm > _FAST_BPM_WARP:
+                        warp_start = change[0]
+                        timeofs = 0.0
+                    else:
+                        if bpm != prewarp_bpm:
+                            out_bpms.append((warp_start, bpm))
+                        warp_start = -1.0
+            i_stop += 1
+
+    if warp_start >= 0:
+        if bpm < 0 or bpm > _FAST_BPM_WARP:
+            warp_end = 99999999.0
+        else:
+            warp_end = prev_beat - (timeofs * bpm / 60.0)
+        out_warps.append((warp_start, warp_end - warp_start))
+        if bpm != prewarp_bpm:
+            out_bpms.append((warp_start, bpm))
+
+    if not out_bpms:
+        out_bpms.append((0.0, 60.0))
+    return _quantize_pairs(out_bpms), _quantize_pairs(out_stops), _quantize_warps(out_warps)
 
 
 def parse_sm(path):
@@ -43,11 +174,13 @@ def parse_sm(path):
     if not bpms:
         bpms = [(0.0, 120.0)]
 
-    scrolls = _parse_scrolls(tags.get('SCROLLS', ''))
-    speeds = _parse_speeds(tags.get('SPEEDS', ''))
+    scrolls = _quantize_pairs(_parse_scrolls(tags.get('SCROLLS', '')))
+    speeds = _quantize_speeds(_parse_speeds(tags.get('SPEEDS', '')))
     stops = _parse_bpms(tags.get('STOPS', ''))
-    delays = _parse_bpms(tags.get('DELAYS', ''))
-    warps = _parse_bpms(tags.get('WARPS', ''))
+    delays = _quantize_pairs(_parse_bpms(tags.get('DELAYS', '')))
+    warps = _quantize_warps(_parse_bpms(tags.get('WARPS', '')))
+    bpms, stops, derived_warps = process_bpms_and_stops(bpms, stops)
+    warps = sorted(warps + derived_warps)
 
     charts = []
     # SM block: #NOTES: type: desc: diff: meter: radar: notedata;
@@ -96,23 +229,29 @@ def parse_ssc(path):
 
     h = parse_tags(header)
     offset = float(h.get('OFFSET', '0') or 0)
+    try:
+        version = float(h.get('VERSION', '0') or 0)
+    except ValueError:
+        version = 0.0
     bpms_h = _parse_bpms(h.get('BPMS', ''))
-    scrolls_h = _parse_scrolls(h.get('SCROLLS', ''))
-    speeds_h = _parse_speeds(h.get('SPEEDS', ''))
+    scrolls_h = _quantize_pairs(_parse_scrolls(h.get('SCROLLS', '')))
+    speeds_h = _quantize_speeds(_parse_speeds(h.get('SPEEDS', '')))
     stops_h = _parse_bpms(h.get('STOPS', ''))
-    delays_h = _parse_bpms(h.get('DELAYS', ''))
-    warps_h = _parse_bpms(h.get('WARPS', ''))
+    delays_h = _quantize_pairs(_parse_bpms(h.get('DELAYS', '')))
+    warps_h = _parse_warps(h.get('WARPS', ''), version)
 
     charts = []
     for sec in sections[1:]:
         t = parse_tags(sec)
         notes = t.get('NOTES', '')
         bpms = _parse_bpms(t.get('BPMS', '')) or bpms_h
-        scrolls = _parse_scrolls(t.get('SCROLLS', '')) or scrolls_h
-        speeds = _parse_speeds(t.get('SPEEDS', '')) or speeds_h
+        scrolls = _quantize_pairs(_parse_scrolls(t.get('SCROLLS', ''))) or scrolls_h
+        speeds = _quantize_speeds(_parse_speeds(t.get('SPEEDS', ''))) or speeds_h
         stops = _parse_bpms(t.get('STOPS', '')) or stops_h
-        delays = _parse_bpms(t.get('DELAYS', '')) or delays_h
-        warps = _parse_bpms(t.get('WARPS', '')) or warps_h
+        delays = _quantize_pairs(_parse_bpms(t.get('DELAYS', ''))) or delays_h
+        warps = _parse_warps(t.get('WARPS', ''), version) or warps_h
+        bpms, stops, derived_warps = process_bpms_and_stops(bpms, stops)
+        warps = sorted(warps + derived_warps)
         charts.append({
             'stepstype': t.get('STEPSTYPE', ''),
             'description': t.get('DESCRIPTION', ''),
@@ -154,9 +293,31 @@ def _parse_bpms(s):
     return out
 
 
+def _parse_warps(s, version=_SSC_VERSION_SPLIT_TIMING):
+    out = []
+    for beat, value in _parse_bpms(s):
+        if version < _SSC_VERSION_SPLIT_TIMING and value > beat:
+            value = value - beat
+        if value > 0:
+            out.append((_quantize_beat(beat), _quantize_beat(value)))
+    return out
+
+
 def _parse_scrolls(s):
     """Parse #SCROLLS: beat=factor, ... into [(beat, factor)]."""
     return _parse_bpms(s)
+
+
+def _quantize_speeds(speeds):
+    out = []
+    for seg in speeds or []:
+        if len(seg) >= 4:
+            beat, ratio, delay, unit = seg[:4]
+            out.append((_quantize_beat(beat), ratio, delay, unit))
+        else:
+            beat, ratio = seg[:2]
+            out.append((_quantize_beat(beat), ratio, *seg[2:]))
+    return out
 
 
 def _parse_speeds(s):
@@ -273,84 +434,97 @@ def beat_to_time(beat, bpms, offset, stops=None, delays=None, warps=None):
     delays = sorted(delays or [])
     warps = sorted(warps or [])
 
-    # Events sorted by beat, all in one stream. Each tuple is
-    # (beat, kind, value) — kind picks the handler below.
-    #
-    # Event ordering at the same beat matters for WARPS+STOPS+DELAYS
-    # interaction, matching Etterna's FindEvent precedence:
-    #   delay at beat -> pause before bpm/warp/stop trigger
-    #   bpm/warp at beat
-    #   stop at beat -> pause after
-    events = []
-    for b, v in delays:
-        events.append((b, 0, v))
-    for b, v in bpms:
-        events.append((b, 1, v))
-    for b, v in warps:
-        events.append((b, 2, v))
-    for b, v in stops:
-        events.append((b, 3, v))
-    events.sort(key=lambda e: (e[0], e[1]))
-
-    # Walk from beat 0. Time starts at -offset (OFFSET shifts the chart).
+    # Port TimingData::GetElapsedTimeInternal closely. The target beat is a
+    # marker in the event search, so same-row precedence matters:
+    # BPM -> DELAY -> marker -> STOP -> WARP. This is why a note exactly on a
+    # STOP row maps to the pre-stop time, while a note exactly on a DELAY row
+    # maps to the post-delay time.
     t = -offset
-    cur_beat = 0.0
-    bps = bpms[0][1] / 60.0  # initial BPS at beat 0
-    warp_end = None  # if set, beats <= this are inside a warp region
+    last_beat = 0.0
+    bps = bpms[0][1] / 60.0
+    i_bpm = 0
+    i_delay = 0
+    i_stop = 0
+    i_warp = 0
+    is_warping = False
+    warp_destination = -float('inf')
 
-    for (eb, kind, val) in events:
-        if eb < 0:
-            continue
-        # First advance from cur_beat up to eb, accounting for any active warp.
-        step_beat = eb
-        if warp_end is not None and step_beat < warp_end:
-            # still inside warp — skip forward to the event
-            cur_beat = step_beat
-        elif warp_end is not None and cur_beat < warp_end <= step_beat:
-            # exit warp at warp_end
-            cur_beat = warp_end
-            warp_end = None
-            t += (step_beat - cur_beat) / bps
-            cur_beat = step_beat
-        else:
-            t += (step_beat - cur_beat) / bps
-            cur_beat = step_beat
+    while True:
+        event_beat = float('inf')
+        event_type = None
 
-        if cur_beat > beat:
-            # target beat passed within this segment — recompute partial
-            # without the event. Restore cur_beat/t to pre-event state.
-            overshoot = cur_beat - beat
-            t -= overshoot / bps
+        if is_warping and warp_destination < event_beat:
+            event_beat = warp_destination
+            event_type = 'warp_destination'
+        if i_bpm < len(bpms) and bpms[i_bpm][0] < event_beat:
+            event_beat = bpms[i_bpm][0]
+            event_type = 'bpm'
+        if i_delay < len(delays) and delays[i_delay][0] < event_beat:
+            event_beat = delays[i_delay][0]
+            event_type = 'delay'
+        if beat < event_beat:
+            event_beat = beat
+            event_type = 'marker'
+        if i_stop < len(stops) and stops[i_stop][0] < event_beat:
+            event_beat = stops[i_stop][0]
+            event_type = 'stop'
+        if i_warp < len(warps) and warps[i_warp][0] < event_beat:
+            event_beat = warps[i_warp][0]
+            event_type = 'warp'
+
+        if event_type is None:
             return t
 
-        # Apply the event at cur_beat == eb
-        if kind == 0:           # DELAY (pause before triggering)
-            t += float(val)
-        elif kind == 1:         # BPM
-            bps = float(val) / 60.0
-        elif kind == 2:         # WARP
-            warp_end = cur_beat + float(val)
-        elif kind == 3:         # STOP (pause after triggering)
-            t += float(val)
+        if event_beat >= 0:
+            if not is_warping:
+                t += (event_beat - last_beat) / bps
+            last_beat = event_beat
 
-    # Past last event: advance at current bps to the target beat
-    if warp_end is not None and beat <= warp_end:
-        # target is inside the trailing warp -> time doesn't advance
-        return t
-    if warp_end is not None:
-        # cross the warp boundary
-        beat_after_warp = max(cur_beat, warp_end)
-        if cur_beat < warp_end:
-            cur_beat = warp_end
-        t += (beat - cur_beat) / bps
-        return t
-    t += (beat - cur_beat) / bps
-    return t
+        if event_type == 'marker':
+            return t
+        if event_type == 'warp_destination':
+            is_warping = False
+        elif event_type == 'bpm':
+            bps = float(bpms[i_bpm][1]) / 60.0
+            i_bpm += 1
+        elif event_type == 'delay':
+            t += float(delays[i_delay][1])
+            i_delay += 1
+        elif event_type == 'stop':
+            t += float(stops[i_stop][1])
+            i_stop += 1
+        elif event_type == 'warp':
+            is_warping = True
+            warp_destination = max(
+                warp_destination,
+                float(warps[i_warp][0]) + float(warps[i_warp][1]),
+            )
+            i_warp += 1
 
 
 def row_to_time(noterow, bpms, offset, stops=None, delays=None, warps=None):
     """noterow / 48 = beat. Returns seconds since audio start of first beat."""
     return beat_to_time(noterow / 48.0, bpms, offset, stops, delays, warps)
+
+
+def is_beat_in_warp(beat, warps, stops=None, delays=None):
+    """Port of TimingData::IsWarpAtRow. Beats strictly inside any
+    [warp_start, warp_start + warp_length) are unjudgable / unrendered,
+    EXCEPT when a stop or delay also lands exactly at that beat (Etterna
+    allows stop-inside-warp gimmicks)."""
+    if not warps:
+        return False
+    for wb, wl in warps:
+        if wb <= beat < wb + wl:
+            if stops or delays:
+                for sb, _ in (stops or []):
+                    if sb == beat:
+                        return False
+                for db, _ in (delays or []):
+                    if db == beat:
+                        return False
+            return True
+    return False
 
 
 # parse_notes_block notetype codes. Values match Etterna's TapNoteType enum
@@ -672,6 +846,7 @@ def find_chart_by_key(chartkey, songs_dir, progress=None):
 
 
 FINGERPRINT_N = 50
+_FINGERPRINT_INDEX_VERSION = 2
 _FINGERPRINT_INDEX_CACHE = Cache('fingerprint_index.pkl')
 
 
@@ -705,16 +880,25 @@ def _normalize_fingerprint(rows_cols, n=None):
     return tuple(out)
 
 
-def _chart_fingerprint(notedata, n=FINGERPRINT_N):
+def _chart_replay_rows_cols(chart):
+    notedata = chart.get('notedata', '') if isinstance(chart, dict) else chart
+    notes, _ = parse_notes_block(notedata)
+    rows_cols = []
+    for nr, c, t in notes:
+        if t not in (NT_TAP, NT_HOLD_HEAD, NT_ROLL_HEAD):
+            continue
+        rows_cols.append((nr, c))
+    return rows_cols
+
+
+def _chart_fingerprint(chart, n=FINGERPRINT_N):
     """Return the first `n` (noterow, column) tuples for a chart, with
     chord columns sorted. None if the chart has fewer notes than n.
 
     Only taps, hold heads, and roll heads count — fakes, keysounds,
     lifts, and mines don't show up in replay noterow streams, so
     including them here would break matches against real replays."""
-    notes, _ = parse_notes_block(notedata)
-    rows_cols = [(nr, c) for (nr, c, t) in notes
-                 if t in (NT_TAP, NT_HOLD_HEAD, NT_ROLL_HEAD)]
+    rows_cols = _chart_replay_rows_cols(chart)
     if len(rows_cols) < n:
         return None
     return _normalize_fingerprint(rows_cols, n)
@@ -733,11 +917,9 @@ def _scan_one_chartfile_fp(p):
         return None
     out = []
     for ci, ch in enumerate(data['charts']):
-        notes, _ = parse_notes_block(ch['notedata'])
         # Note count matches what replays see: taps + hold heads + roll heads.
-        nc = sum(1 for (_, _, t) in notes
-                 if t in (NT_TAP, NT_HOLD_HEAD, NT_ROLL_HEAD))
-        fp = _chart_fingerprint(ch['notedata'])
+        nc = len(_chart_replay_rows_cols(ch))
+        fp = _chart_fingerprint(ch)
         if fp is not None:
             out.append((ci, fp, nc))
     return str(p), out
@@ -776,7 +958,7 @@ def get_fingerprint_index(songs_dir, refresh=False, progress=None):
         songs_mtime = os.stat(songs_dir).st_mtime
     except OSError:
         songs_mtime = 0.0
-    fp = (songs_dir, songs_mtime)
+    fp = (_FINGERPRINT_INDEX_VERSION, songs_dir, songs_mtime)
     if not refresh:
         if _FINGERPRINT_INDEX_CACHE.fingerprint() == fp:
             cached = _FINGERPRINT_INDEX_CACHE.load()

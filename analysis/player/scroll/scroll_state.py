@@ -18,7 +18,8 @@ class ScrollStateController:
     def __init__(self, player):
         self.p = player
 
-    def init(self, *, scroll_ms, cmod_bpm, osu_speed, bpms, scroll_mode):
+    def init(self, *, scroll_ms, cmod_bpm, xmod_value=1.0,
+             osu_speed, bpms, scroll_mode):
         p = self.p
 
         scroll_registry.ensure_loaded()
@@ -31,6 +32,9 @@ class ScrollStateController:
 
         if p.SCROLL_MODE_CMOD in p._mode_state:
             p._mode_state[p.SCROLL_MODE_CMOD]['value'] = float(cmod_bpm)
+
+        if p.SCROLL_MODE_XMOD in p._mode_state:
+            p._mode_state[p.SCROLL_MODE_XMOD]['value'] = float(xmod_value)
 
         if p.SCROLL_MODE_OSU in p._mode_state:
             p._mode_state[p.SCROLL_MODE_OSU]['value'] = max(

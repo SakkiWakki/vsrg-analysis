@@ -249,13 +249,15 @@ class _TimingMap:
         warps = sorted(warps or [])
         sm_offset = float(sm_offset)
 
-        # Single unified event stream. Same kind-precedence as
-        # sm_chart.beat_to_time so results are bit-identical.
+        # Single unified event stream. Etterna's FindEvent same-row
+        # precedence is BPM -> DELAY -> target marker -> STOP -> WARP.
+        # There is no marker in this prewalk, so STOP must still precede WARP;
+        # otherwise stop+warp gimmicks lose the warp collapse in lookups.
         events = []
-        for b, v in delays: events.append((b, 0, v))
-        for b, v in bpms:   events.append((b, 1, v))
-        for b, v in warps:  events.append((b, 2, v))
-        for b, v in stops:  events.append((b, 3, v))
+        for b, v in bpms:   events.append((b, 0, v))
+        for b, v in delays: events.append((b, 1, v))
+        for b, v in stops:  events.append((b, 2, v))
+        for b, v in warps:  events.append((b, 3, v))
         events.sort(key=lambda e: (e[0], e[1]))
 
         # Checkpoints: after processing each event, record
@@ -273,6 +275,7 @@ class _TimingMap:
         self._beat_exit: list[float] = []
         self._time_exit: list[float] = []
         self._bps_after: list[float] = []
+        self._event_kind: list[int] = []
 
         t = -sm_offset
         cur_beat = 0.0
@@ -298,21 +301,21 @@ class _TimingMap:
             beat_enter = cur_beat
             time_enter = t
 
-            if kind == 0:       # DELAY: pause before
-                t += float(val)
-            elif kind == 1:     # BPM change
+            if kind == 0:       # BPM change
                 bps = float(val) / 60.0
-            elif kind == 2:     # WARP — beat teleports forward, time doesn't
-                warp_end = cur_beat + float(val)
-            elif kind == 3:     # STOP: pause after
+            elif kind == 1:     # DELAY: pause before the row's notes
                 t += float(val)
+            elif kind == 2:     # STOP: pause after the row's notes
+                t += float(val)
+            elif kind == 3:     # WARP — beat teleports forward, time doesn't
+                warp_end = cur_beat + float(val)
 
             # beat_exit reflects the post-event beat cursor for bisect
             # lookups — for WARP, that's the warp landing; for others,
             # unchanged from beat_enter. The event loop's own cur_beat
             # stays at beat_enter for warps so subsequent in-warp events
             # still get skipped correctly by the warp_end state check.
-            if kind == 2:
+            if kind == 3:
                 beat_exit = warp_end
             else:
                 beat_exit = cur_beat
@@ -323,6 +326,7 @@ class _TimingMap:
             self._beat_exit.append(beat_exit)
             self._time_exit.append(time_exit)
             self._bps_after.append(bps)
+            self._event_kind.append(kind)
 
         # Initial bps for beat lookups at time < first event.
         self._bps_initial = bpms[0][1] / 60.0
@@ -397,6 +401,18 @@ class _TimingMap:
         if idx < 0:
             # Before the first event: advance from beat 0 at initial bps.
             return self._t_at_beat_zero + beat / self._bps_initial
+        # If the target is exactly on an event row, Etterna's marker
+        # precedence is after BPM/DELAY and before STOP/WARP. The prewalk has
+        # no marker event, so recover that boundary explicitly.
+        left = _b.bisect_left(self._beat_enter, beat)
+        if left <= idx and self._beat_enter[left] == beat:
+            marker_time = self._time_enter[left]
+            for j in range(left, idx + 1):
+                if self._event_kind[j] <= 1:  # BPM or DELAY happen before marker
+                    marker_time = self._time_exit[j]
+                else:                         # STOP/WARP happen after marker
+                    break
+            return marker_time
         # Is the target beat inside a WARP span that this event opened?
         # A WARP event has beat_exit > beat_enter; beats strictly between
         # land at time_exit (no time passes).
@@ -514,7 +530,9 @@ class BeatSpaceSVEngine:
                 last_db = db
         self._cache_dbs_only = [x[0] for x in self._cache_dbs_monotonic]
 
-        self.enabled = bool(self._scrolls or self._speeds)
+        self.enabled = bool(self._scrolls or self._speeds
+                            or len(self._bpms) > 1
+                            or self._stops or self._delays or self._warps)
 
     # --- real-beat ↔ real-time helpers ----------------------------------
 
@@ -644,6 +662,17 @@ class BeatSpaceSVEngine:
             return np.empty(0, dtype=np.float64)
         # beat = time_to_beat_array(t) — STOPS/DELAYS/WARPS aware.
         beats = self._timing.time_to_beat_array(t)
+        return self.project_beats(beats)
+
+    def project_beats(self, beats: np.ndarray) -> np.ndarray:
+        """Project chart beats directly into Etterna displayed-beat space.
+
+        Chart-only sprites inside old negative-BPM warp aliases need this:
+        their elapsed time collapses to the warp endpoint, but Etterna still
+        positions the sprite from its chart beat until the playhead jumps."""
+        beats = np.asarray(beats, dtype=np.float64)
+        if not beats.size:
+            return np.empty(0, dtype=np.float64)
         if self._cache_beats_np.size == 0:
             return beats * self._sec_per_base_beat
         # displayed_beat(beat) vectorized.

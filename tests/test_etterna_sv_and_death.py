@@ -4,7 +4,7 @@ import pytest
 
 from analysis.games.etterna.sm_chart import (
     parse_ssc, parse_sm, sv_sections_from_chart,
-    _parse_scrolls, _parse_speeds, beat_to_time,
+    _chart_fingerprint, _parse_scrolls, _parse_speeds, beat_to_time,
 )
 
 
@@ -24,6 +24,13 @@ def test_stop_adds_its_duration_after_beat():
     assert t == pytest.approx(1.5)
 
 
+def test_stop_row_itself_is_pre_stop_time():
+    # Etterna's target marker wins before STOP at the same row. The pause is
+    # after notes/events on that row, not before them.
+    t = beat_to_time(0.5, [(0.0, 120.0)], 0.0, stops=[(0.5, 1.0)])
+    assert t == pytest.approx(0.25)
+
+
 def test_stop_only_applies_if_passed():
     # Target beat before the stop — stop doesn't contribute
     t = beat_to_time(0.4, [(0.0, 120.0)], 0.0, stops=[(0.5, 1.0)])
@@ -41,6 +48,18 @@ def test_warp_target_inside_warp_collapses_to_warp_entry():
     # Target beat is inside the warp range — time should be the warp entry
     t = beat_to_time(0.7, [(0.0, 120.0)], 0.0, warps=[(0.5, 0.5)])
     assert t == pytest.approx(0.25)
+
+
+def test_stop_then_warp_same_row_matches_etterna_precedence():
+    # FindEvent checks STOP before WARP. During the stop, beat stays at the
+    # warp row; after the stop completes, the warp jumps beat-space forward.
+    bpms = [(0.0, 120.0)]
+    stops = [(1.0, 1.0)]
+    warps = [(1.0, 1.0)]
+    assert beat_to_time(1.0, bpms, 0.0, stops=stops, warps=warps) == pytest.approx(0.5)
+    assert beat_to_time(1.5, bpms, 0.0, stops=stops, warps=warps) == pytest.approx(1.5)
+    assert beat_to_time(2.0, bpms, 0.0, stops=stops, warps=warps) == pytest.approx(1.5)
+    assert beat_to_time(3.0, bpms, 0.0, stops=stops, warps=warps) == pytest.approx(2.0)
 
 
 def test_delay_adds_duration_before_beat():
@@ -76,6 +95,149 @@ def test_ssc_parser_captures_stops_delays_warps(tmp_path):
     assert chart['stops'] == [(1.0, 0.5)]
     assert chart['delays'] == [(2.0, 0.25)]
     assert chart['warps'] == [(3.0, 1.0)]
+
+
+def test_ssc_old_version_warps_are_absolute_destinations(tmp_path):
+    ssc = tmp_path / 'old_warp.ssc'
+    ssc.write_text(
+        """#VERSION:0.600;
+#TITLE:Old Warp;
+#BPMS:0.000=120.000;
+#WARPS:3.000=5.000;
+#NOTEDATA:;
+#STEPSTYPE:dance-single;
+#DIFFICULTY:Challenge;
+#METER:10;
+#NOTES:
+1000
+;
+""",
+        encoding='utf-8',
+    )
+    chart = parse_ssc(ssc)['charts'][0]
+    assert chart['warps'] == [(3.0, 2.0)]
+
+
+def test_timing_segments_are_quantized_to_etterna_rows(tmp_path):
+    ssc = tmp_path / 'quantized_warp.ssc'
+    ssc.write_text(
+        """#VERSION:0.700;
+#TITLE:Quantized Warp;
+#BPMS:0.000=120.000;
+#WARPS:1.011=0.030;
+#NOTEDATA:;
+#STEPSTYPE:dance-single;
+#DIFFICULTY:Challenge;
+#METER:10;
+#NOTES:
+1000
+;
+""",
+        encoding='utf-8',
+    )
+    chart = parse_ssc(ssc)['charts'][0]
+    assert chart['warps'] == [(49 / 48, 1 / 48)]
+
+
+def test_chart_fingerprint_keeps_notes_inside_warps_for_analysis():
+    chart = {
+        'warps': [(0.0, 1.0)],
+        'stops': [],
+        'delays': [],
+        'notedata': "\n".join([
+            "1000",  # beat 0, inside warp but still useful for analysis render
+            ",",
+            "0100",  # beat 4
+            ",",
+            "0010",  # beat 8
+            ",",
+            "0001",  # beat 12
+        ]),
+    }
+    assert _chart_fingerprint(chart, n=3) == ((0, 0), (192, 1), (384, 2))
+
+
+def test_adapter_renders_warped_chart_taps_as_fakes():
+    from analysis.games.etterna.adapter import EtternaAdapter
+
+    replay = {
+        'noterows': np.array([96], dtype=np.int64),
+        'columns': np.array([1], dtype=np.int32),
+        'offsets': np.array([0.0], dtype=np.float64),
+        'notetypes': np.array([0], dtype=np.int32),
+        'misses': np.array([False], dtype=bool),
+        'holds': [],
+    }
+    found = {
+        'file': 'synthetic.sm',
+        'data': {'bpms': [(0.0, 120.0)], 'offset': 0.0},
+        'chart': {
+            'stepstype': 'dance-single',
+            'bpms': [(0.0, 120.0)],
+            'offset': 0.0,
+            'warps': [(0.0, 1.0)],
+            'stops': [],
+            'delays': [],
+            'notedata': "\n".join([
+                "1000",  # warped tap, absent from replay stream
+                ",",
+                "0100",
+            ]),
+        },
+    }
+    EtternaAdapter._attach_chart_extras(replay, found)
+    assert replay['chart_fakes'] == [(0, 0)]
+
+    EtternaAdapter().prepare_replay_times(replay, [(0.0, 120.0)], 0.0)
+    assert replay['fake_times'].tolist() == [0.0]
+    assert replay['fake_cols'].tolist() == [0]
+
+
+def test_etterna_player_kwargs_use_replay_xmod_modifier():
+    from analysis.games.etterna.adapter import EtternaAdapter
+
+    out = EtternaAdapter().player_tab_kwargs(
+        {},
+        {
+            'modifiers': '1.23x, 20% Mini, Reverse, Overhead',
+            'judgments': {'W1': 1},
+            'keycount': 4,
+        },
+        ([(0.0, 120.0)], 0.0, None),
+    )
+    assert out['scroll_mode'] == 'xmod'
+    assert out['xmod_value'] == pytest.approx(1.23)
+
+
+def test_etterna_player_kwargs_use_replay_cmod_modifier():
+    from analysis.games.etterna.adapter import EtternaAdapter
+
+    out = EtternaAdapter().player_tab_kwargs(
+        {},
+        {'modifiers': 'C650, Reverse', 'judgments': {}, 'keycount': 4},
+        ([(0.0, 120.0)], 0.0, None),
+    )
+    assert out['scroll_mode'] == 'cmod'
+    assert out['cmod_bpm'] == pytest.approx(650.0)
+
+
+def test_etterna_replay_mine_hits_are_not_main_notes(tmp_path):
+    from analysis.games.etterna.replay import parse_replay
+
+    replay_file = tmp_path / 'minehit'
+    replay_file.write_text(
+        "100 0.012 0\n"
+        "144 -0.000 2 4\n"
+        "192 -0.010 1 2\n",
+        encoding='utf-8',
+    )
+    replay = parse_replay(replay_file)
+
+    assert replay['noterows'].tolist() == [100, 192]
+    assert replay['columns'].tolist() == [0, 1]
+    assert replay['notetypes'].tolist() == [0, 2]
+    assert replay['holds'] == [(192, 1)]
+    assert replay['mine_hits'] == [(144, 2, -0.0)]
 
 
 def test_sm_parser_captures_stops_delays_warps(tmp_path):
@@ -377,3 +539,29 @@ def test_cull_indices_real_time():
     times = np.array([1.0, 2.0, 3.0], dtype=np.float64)
     indices = _cull_indices(times, 1.5, 2.5)
     assert list(indices) == [1]  # only t=2.0 is in [1.5, 2.5]
+
+
+def test_chart_sprite_y_uses_row_space_sv_coordinate():
+    from types import SimpleNamespace
+
+    from analysis.player.render.layers.chart_extras import _chart_sprite_y
+
+    ctx = SimpleNamespace(
+        use_sv_space=True,
+        judge_y=400.0,
+        scroll_speed=10.0,
+        frame=SimpleNamespace(visual_cum_now=100.0, render_multiplier=2.0),
+        time_to_y=lambda _t: -999.0,
+    )
+    y = _chart_sprite_y(ctx, 31.94, np.array([112.0], dtype=np.float64), 0)
+    assert y == pytest.approx(160.0)
+
+
+def test_chart_sprite_y_falls_back_to_time_without_sv():
+    from types import SimpleNamespace
+
+    from analysis.player.render.layers.chart_extras import _chart_sprite_y
+
+    ctx = SimpleNamespace(use_sv_space=False, time_to_y=lambda t: t + 10.0)
+    y = _chart_sprite_y(ctx, 3.0, np.array([112.0], dtype=np.float64), 0)
+    assert y == pytest.approx(13.0)

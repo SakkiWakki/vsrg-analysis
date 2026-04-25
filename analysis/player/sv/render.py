@@ -61,9 +61,15 @@ class SvRenderController:
         else:
             notes.miss_hold_max_sv_dur = 0.0
 
-        notes.mine_sv = self.times_to_sv(notes.mine_times)
-        notes.lift_sv = self.times_to_sv(notes.lift_times)
-        notes.fake_sv = self.times_to_sv(notes.fake_times)
+        notes.mine_sv = self._chart_stream_to_sv(notes.mine_times, notes.mine_rows)
+        notes.lift_sv = self._chart_stream_to_sv(notes.lift_times, notes.lift_rows)
+        notes.fake_sv = self._chart_stream_to_sv(notes.fake_times, notes.fake_rows)
+
+    def _chart_stream_to_sv(self, times, rows):
+        engine = self.p._sv_engine
+        if rows.size and hasattr(engine, 'project_beats'):
+            return engine.project_beats(rows.astype(np.float64) / 48.0)
+        return self.times_to_sv(times)
 
     def cumulative_sv_at(self, t):
         return self.p._sv_engine.cumulative_at(float(t))

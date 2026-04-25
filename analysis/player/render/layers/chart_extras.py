@@ -27,6 +27,7 @@ def draw_mines(ctx: RenderContext, painter) -> None:
     p = ctx.player
     _draw_chart_sprites(ctx, painter,
                         p.notes.mine_times, p.notes.mine_cols, p.notes.mine_sv,
+                        p.notes.mine_until,
                         sprite='mine', keyed=False, y_center=True)
 
 
@@ -34,6 +35,7 @@ def draw_lifts(ctx: RenderContext, painter) -> None:
     p = ctx.player
     _draw_chart_sprites(ctx, painter,
                         p.notes.lift_times, p.notes.lift_cols, p.notes.lift_sv,
+                        p.notes.lift_until,
                         sprite='lift', keyed=True, y_center=False)
 
 
@@ -41,6 +43,7 @@ def draw_fakes(ctx: RenderContext, painter) -> None:
     p = ctx.player
     _draw_chart_sprites(ctx, painter,
                         p.notes.fake_times, p.notes.fake_cols, p.notes.fake_sv,
+                        p.notes.fake_until,
                         sprite='fake', keyed=True, y_center=False)
 
 
@@ -157,7 +160,7 @@ def _cull_indices(sorted_keys: np.ndarray,
     return np.arange(i, j, dtype=np.intp)
 
 
-def _draw_chart_sprites(ctx, painter, times, cols, sv_times, *,
+def _draw_chart_sprites(ctx, painter, times, cols, sv_times, active_until, *,
                         sprite, keyed, y_center):
     """Cull + blit a chart-stream sprite bucket (mines/lifts/fakes).
 
@@ -173,6 +176,8 @@ def _draw_chart_sprites(ctx, painter, times, cols, sv_times, *,
     search = sv_times if (ctx.use_sv_space and sv_times.size) else times
     indices = _cull_indices(search, ctx.target_lo, ctx.target_hi)
     indices = indices[cols[indices] < ctx.player.keycount]
+    if active_until.size:
+        indices = indices[float(ctx.t_now) < active_until[indices]]
     if not indices.size:
         return
 
@@ -182,7 +187,6 @@ def _draw_chart_sprites(ctx, painter, times, cols, sv_times, *,
     lane_x = ctx.lane_x
     note_h = ctx.note_h
     lane_w = ctx.lane_w
-    time_to_y = ctx.time_to_y
 
     # Mines' sprite is a square with side == lane_w, centered on y.
     # Head-shaped sprites use a `(lane_w, note_h + 2*HEAD_PAD)` pixmap
@@ -195,16 +199,27 @@ def _draw_chart_sprites(ctx, painter, times, cols, sv_times, *,
         for k in indices:
             c = int(cols[k])
             pm = cache.get(sprite, ctx, col=c)
-            y = time_to_y(float(times[k]))
+            y = _chart_sprite_y(ctx, float(times[k]), sv_times, k)
             painter.drawPixmap(QPointF(float(lane_x(c)),
                                         float(y - y_offset)), pm)
     else:
         pm = cache.get(sprite, ctx)
         for k in indices:
             c = int(cols[k])
-            y = time_to_y(float(times[k]))
+            y = _chart_sprite_y(ctx, float(times[k]), sv_times, k)
             painter.drawPixmap(QPointF(float(lane_x(c)),
                                         float(y - y_offset)), pm)
+
+
+def _chart_sprite_y(ctx, t, sv_times, k):
+    # Need this otherwise warps don't render correctly
+    if ctx.use_sv_space and sv_times.size:
+        dist = (
+            (float(sv_times[k]) - float(ctx.frame.visual_cum_now))
+            * float(ctx.frame.render_multiplier)
+        )
+        return ctx.judge_y - dist * float(ctx.scroll_speed)
+    return ctx.time_to_y(t)
 
 
 def _visible_miss_hold_indices(ctx) -> np.ndarray:

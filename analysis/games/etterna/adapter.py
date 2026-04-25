@@ -162,7 +162,7 @@ class EtternaAdapter(GameAdapter):
     def _case_insensitive_existing_path(path):
         # On case-insensitive filesystems (default NTFS, HFS+), exists()
         # returns True even when the input's case differs from the real
-        # on-disk name — and pathlib won't rewrite the case for us. So
+        # on-disk name and pathlib won't rewrite the case for us. So
         # skip both exists() fast paths there and always walk with
         # iterdir+casefold to recover the true on-disk spelling, which
         # is what Etterna's FilenameDB promises callers.
@@ -285,6 +285,15 @@ class EtternaAdapter(GameAdapter):
             notes, _ = parse_notes_block(notedata)
         except Exception:
             return
+        chart_warps = chart.get('warps') or []
+        chart_stops = chart.get('stops') or []
+        chart_delays = chart.get('delays') or []
+        from analysis.games.etterna.sm_chart import is_beat_in_warp
+
+        def _in_warp(row):
+            return is_beat_in_warp(row / 48.0, chart_warps,
+                                   chart_stops, chart_delays)
+
         mines, lifts, fakes, rolls = [], [], [], set()
         chart_max_row = 0
         for (row, col, nt) in notes:
@@ -296,6 +305,11 @@ class EtternaAdapter(GameAdapter):
                 fakes.append((row, col))
             elif nt == NT_ROLL_HEAD:
                 rolls.add((row, col))
+            if nt in (NT_TAP, NT_HOLD_HEAD, NT_ROLL_HEAD) and _in_warp(row):
+                # Old .sm negative-BPM/negative-stop warps can contain arrows
+                # that Etterna's replay stream never judges. Keep them visible
+                # as fake notes for analysis (and beauty)
+                fakes.append((row, col))
             if row > chart_max_row:
                 chart_max_row = row
         replay['chart_mines'] = mines
@@ -363,15 +377,16 @@ class EtternaAdapter(GameAdapter):
         from analysis.player.sv.engine import BeatSpaceSVEngine
         scrolls = replay.get('_etterna_scrolls') or []
         speeds = replay.get('_etterna_speeds') or []
-        if not (scrolls or speeds):
+        bpms = replay.get('_etterna_bpms') or []
+        stops = replay.get('_etterna_stops') or []
+        delays = replay.get('_etterna_delays') or []
+        warps = replay.get('_etterna_warps') or []
+        if not (scrolls or speeds or len(bpms) > 1 or stops or delays or warps):
             return None
         return BeatSpaceSVEngine(
-            scrolls, speeds,
-            replay.get('_etterna_bpms') or [],
+            scrolls, speeds, bpms,
             replay.get('_etterna_offset') or 0.0,
-            stops=replay.get('_etterna_stops') or [],
-            delays=replay.get('_etterna_delays') or [],
-            warps=replay.get('_etterna_warps') or [],
+            stops=stops, delays=delays, warps=warps,
         )
 
     def judgement_windows(self, replay, judge=None, **_):
@@ -413,6 +428,14 @@ class EtternaAdapter(GameAdapter):
             # 120bpm, 48 rows/beat => 96 rows/sec
             return float(row) / 96.0
 
+        def _active_until(row):
+            beat = int(row) / 48.0
+            for wb, wl in warps:
+                if wb <= beat < wb + wl:
+                    return row_to_time(int(round(wb * 48)), bpms, sm_offset,
+                                       stops, delays, warps)
+            return float('inf')
+
         if bpms is not None:
             times = np.array([row_to_time(int(r), bpms, sm_offset,
                                            stops, delays, warps)
@@ -424,11 +447,9 @@ class EtternaAdapter(GameAdapter):
             if len(h) == 3 and h[2] is not None:
                 hold_tails[(h[0], h[1])] = _r2t(h[2])
 
-        # Chart-derived mines/lifts/fakes — converted to time-space once
+        # Chart-derived mines/lifts/fakes; converted to time-space once
         # here so the renderer can read prebuilt arrays instead of
-        # redoing row→time per frame. Absent when resolve_all never ran
-        # (e.g. the chart file couldn't be found); renderer tolerates
-        # missing keys.
+        # redoing row→time per frame
         for src_key, t_key, c_key in (
                 ('chart_mines', 'mine_times', 'mine_cols'),
                 ('chart_lifts', 'lift_times', 'lift_cols'),
@@ -437,9 +458,14 @@ class EtternaAdapter(GameAdapter):
             if not src:
                 continue
             ts = np.array([_r2t(r) for (r, _c) in src], dtype=np.float64)
+            rs = np.array([r for (r, _c) in src], dtype=np.int64)
+            until = np.array([_active_until(r) for (r, _c) in src],
+                             dtype=np.float64)
             cs = np.array([c for (_r, c) in src], dtype=np.int32)
             order = np.argsort(ts, kind='stable')
             replay[t_key] = ts[order]
+            replay[t_key.replace('_times', '_rows')] = rs[order]
+            replay[t_key.replace('_times', '_until')] = until[order]
             replay[c_key] = cs[order]
 
         kc = keycount or replay.get('keycount') or 4
@@ -567,7 +593,7 @@ class EtternaAdapter(GameAdapter):
             'stepstype': stepstype,
             'keycount': self._STEPSTYPE_KEYCOUNT.get(stepstype, 4),
             'judgescale': float(s.get('judgescale', 1.0)),
-            # Etterna.xml's TapNoteScores block — includes HitMine /
+            # Etterna.xml's TapNoteScores block; includes HitMine /
             # AvoidMine alongside the tap counts. The replay .bin
             # doesn't record which mines were hit, so this is the only
             # way to surface mine-hit info in the player.
@@ -630,11 +656,8 @@ class EtternaAdapter(GameAdapter):
         entries = self._entries_from_xmls(
             xmls, Path(replays),
             ck2st=self._load_chartkey_stepstype(dirs))
-        # Don't poison the cache with an empty result: if the XML was
-        # unparseable (e.g. lxml missing and malformed bytes), saving
-        # []  would make every future `incremental_update` a no-op even
-        # after the user fixes the underlying problem. Leaving the
-        # cache absent forces the next call back into `rebuild`.
+        # Don't poison the cache with an empty result, e.g. if the XML was
+        # unparseable
         if entries:
             _LIBRARY_CACHE.save(entries)
         return entries
@@ -707,12 +730,14 @@ class EtternaAdapter(GameAdapter):
     # --- PlayerTab kwargs -------------------------------------------------
     def player_tab_kwargs(self, replay, entry, chart_ctx):
         bpms, sm_off, _audio = chart_ctx
-        return {
+        out = {
             'bpms': bpms,
             'sm_offset': sm_off,
             'xml_judgments': entry.get('judgments'),
             'keycount': entry.get('keycount'),
         }
+        out.update(_scroll_kwargs_from_modifiers(entry.get('modifiers')))
+        return out
 
     # --- note visualizer --------------------------------------------------
     def viz_windows(self, replay, judge=None, od=None):
@@ -763,6 +788,31 @@ def _cmod_on_exit(player, state):
 def _cmod_fmt(v):
     iv = int(round(v))
     return f'C{iv}' if abs(v - iv) < 1e-4 else f'C{v:.2f}'
+
+
+def _scroll_kwargs_from_modifiers(modifiers):
+    """Infer the replay's native Etterna scroll mode from Etterna.xml.
+
+    Old negative-BPM gimmicks are authored for beat-space XMOD. If the GUI
+    opens a ``1.23x`` replay in its saved CMOD preference, warp aliases stack
+    because CMOD uses seconds-until-note instead of beat distance.
+    """
+    import re
+
+    text = str(modifiers or '')
+    out = {}
+
+    cmod = re.search(r'(?i)(?:^|[\s,])c(?:mod)?\s*([0-9]+(?:\.[0-9]+)?)', text)
+    if cmod:
+        out['scroll_mode'] = 'cmod'
+        out['cmod_bpm'] = float(cmod.group(1))
+        return out
+
+    xmod = re.search(r'(?i)(?:^|[\s,])([0-9]+(?:\.[0-9]+)?)\s*x(?:mod)?(?:[\s,]|$)', text)
+    if xmod:
+        out['scroll_mode'] = 'xmod'
+        out['xmod_value'] = float(xmod.group(1))
+    return out
 
 
 scroll.register(scroll.ScrollMode(

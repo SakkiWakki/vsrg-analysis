@@ -27,6 +27,7 @@ class Player:
         scroll_ms=400.0,
         scroll_mode=None,
         cmod_bpm=600.0,
+        xmod_value=1.0,
         osu_speed=20,
         skin='bar',
         press_hide=False,
@@ -56,6 +57,7 @@ class Player:
         self._init_scroll_state(
             scroll_ms=scroll_ms,
             cmod_bpm=cmod_bpm,
+            xmod_value=xmod_value,
             osu_speed=osu_speed,
             bpms=bpms,
             scroll_mode=scroll_mode,
@@ -198,10 +200,12 @@ class Player:
 
     # ---------- scroll ----------
 
-    def _init_scroll_state(self, *, scroll_ms, cmod_bpm, osu_speed, bpms, scroll_mode):
+    def _init_scroll_state(self, *, scroll_ms, cmod_bpm, xmod_value,
+                           osu_speed, bpms, scroll_mode):
         return self.scroll_state.init(
             scroll_ms=scroll_ms,
             cmod_bpm=cmod_bpm,
+            xmod_value=xmod_value,
             osu_speed=osu_speed,
             bpms=bpms,
             scroll_mode=scroll_mode,

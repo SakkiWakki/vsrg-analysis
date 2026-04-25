@@ -14,6 +14,7 @@ def launch_from_replay(
     scroll_ms=400.0,
     scroll_mode=None,
     cmod_bpm=600.0,
+    xmod_value=1.0,
     osu_speed=20,
 ):
     from PySide6.QtWidgets import QApplication
@@ -30,6 +31,7 @@ def launch_from_replay(
         scroll_ms=scroll_ms,
         scroll_mode=scroll_mode,
         cmod_bpm=cmod_bpm,
+        xmod_value=xmod_value,
         osu_speed=osu_speed,
     )
     tab.resize(1200, 900)
