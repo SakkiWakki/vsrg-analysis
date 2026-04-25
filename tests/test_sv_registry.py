@@ -134,6 +134,47 @@ def _make_controller_with_etterna_chart():
     return ctrl, p
 
 
+def _make_controller_with_osu_chart():
+    """Build an SvRenderController on an osu replay (sv_sections + the
+    BPM map exposed for the cross-engine beat-space slot)."""
+    from analysis.player.sv.render import SvRenderController
+
+    p = _FakePlayer()
+    p.game = 'osu'
+    ctrl = SvRenderController(p)
+    p.scroll_mode = 'linear_ms'
+    ctrl.init(
+        sv_sections=[(0.0, 1.0), (4.0, 2.0)],
+        replay={'_osu_bpms': [(0.0, 120.0), (16.0, 240.0)]},
+    )
+    return ctrl, p
+
+
+def test_osu_chart_offers_cross_engine_beat_space():
+    ctrl, p = _make_controller_with_osu_chart()
+    keys = ctrl.available_engine_keys()
+    assert KEY_OSU_TIME in keys
+    assert KEY_ETTERNA_BEAT in keys, \
+        'osu charts with a BPM map should offer beat-space as a cross-engine'
+    assert KEY_IDENTITY in keys
+    assert ctrl.active_engine_key() == KEY_OSU_TIME
+
+
+def test_osu_chart_swap_to_beat_changes_cumulative():
+    ctrl, p = _make_controller_with_osu_chart()
+    ctrl.build_cumulative_sv()
+    cum_native = p._note_sv_cum.copy()
+
+    ctrl.swap_engine(KEY_ETTERNA_BEAT)
+    cum_swapped = p._note_sv_cum
+
+    # Native osu time-space ignores BPM; beat-space integrates BPM into
+    # the cumulative. With a BPM change in the chart, the two arrays
+    # disagree.
+    assert not np.array_equal(cum_swapped, cum_native), \
+        'osu time-space and beat-space should produce different cumulative'
+
+
 def test_controller_init_builds_registry_with_native_etterna():
     ctrl, p = _make_controller_with_etterna_chart()
     reg = ctrl.registry

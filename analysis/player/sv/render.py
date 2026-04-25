@@ -65,9 +65,18 @@ class SvRenderController:
 
         registry = SVEngineRegistry()
 
-        # --- osu-style replay: time-space sections from the chart parser.
-        if sv_sections is not None:
-            sections = list(sv_sections) if sv_sections else []
+        # --- osu-style replay: detect by the presence of replay['sv_sections']
+        # or the BPM-map projection; the `sv_sections` argument is a legacy
+        # explicit override and may be None even on real osu charts.
+        replay_sections = replay.get('sv_sections')
+        replay_osu_bpms = replay.get('_osu_bpms')
+        if sv_sections is not None or replay_sections is not None \
+                or replay_osu_bpms is not None:
+            if sv_sections is not None:
+                sections = list(sv_sections)
+            else:
+                sections = list(replay_sections or [])
+            osu_bpms = list(replay_osu_bpms or [])
 
             def make_osu_time():
                 if use_measure:
@@ -80,6 +89,30 @@ class SvRenderController:
 
             registry.register(KEY_OSU_TIME, ENGINE_LABELS[KEY_OSU_TIME],
                               make_osu_time, native=True, eager=True)
+
+            # Cross-engine beat-space: feed the chart's BPM map into a
+            # beat-space engine with empty SCROLLS, so notes scroll at
+            # `bpm/60` cull-units per second -- the Etterna XMOD model
+            # applied to an osu chart. Lossy for chart-side SV (osu's
+            # inherited timing points are time-space-native and don't
+            # round-trip through SCROLLS); the BPM behavior is the part
+            # that's meaningful cross-engine.
+            if osu_bpms:
+                def make_etterna_beat():
+                    if use_measure:
+                        from analysis.player.sv.measure_engine import \
+                            beat_space_engine
+                        return beat_space_engine(
+                            scrolls=[], speeds=[], bpms=osu_bpms,
+                            sm_offset=0.0,
+                        )
+                    return BeatSpaceSVEngine(
+                        scrolls=[], speeds=[], bpms=osu_bpms, sm_offset=0.0,
+                    )
+                registry.register(KEY_ETTERNA_BEAT,
+                                  ENGINE_LABELS[KEY_ETTERNA_BEAT],
+                                  make_etterna_beat)
+
             registry.register(KEY_IDENTITY, ENGINE_LABELS[KEY_IDENTITY],
                               IdentitySVEngine)
             return registry

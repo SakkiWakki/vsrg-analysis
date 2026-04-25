@@ -1,17 +1,26 @@
-"""Single integrator for `cumulative_at` (per DESIGN.tex §9.1).
+"""Single integrator for `cumulative_at` (per DESIGN.tex §9.1, §10).
 
 The cumulative function is
 
     C_mu(t) = int_{(t_0, t]} v(tau) d_mu(tau)
 
-with `mu` decomposed as AC density rho + atoms. For piecewise-constant `v`
-and piecewise-constant rho on a common refinement, C_mu is piecewise-linear-
-with-jumps; evaluation reduces to a bisection plus constant-time arithmetic.
+with `mu` decomposed as AC density rho + atoms. The integrand `v` may be
+piecewise-constant (the historical case, default `step` easing) or
+piecewise-linear (`linear` easing -- Quaver SSF, fluXis multiplier events
+within a single segment). The integrator stores `v` as a per-cell
+(v_start, v_end) pair on the common refinement so the AC contribution of
+each cell is a trapezoid integral
+
+    int v * rho dt  =  rho * width * (v_start + v_end) / 2,
+
+exact when `v` is linear on the cell and reducing to `rho * width * v` when
+v_start == v_end (step easing). Both behaviors are handled by the same
+arithmetic.
 
 This module computes the cumulative on a precomputed grid (the union of all
-discontinuity points) and exposes scalar / vector lookup. It is engine-agnostic:
-both time-space (rho=1, no atoms) and beat-space (rho=BPM/60, atoms at warps)
-go through the same code.
+discontinuity points + easing-window endpoints) and exposes scalar / vector
+lookup. It is engine-agnostic: both time-space (rho=1, no atoms) and
+beat-space (rho=BPM/60, atoms at warps) go through the same code.
 """
 from __future__ import annotations
 
@@ -40,11 +49,23 @@ class CumulativeIntegrator:
         mu = doc.measure
         v = doc.data
         # Build the common refinement of boundaries U sv_times U atom_times.
-        # Atoms appear in the grid at their tau so the running sum picks them
-        # up exactly once.
+        # For eased segments, also include the easing-window endpoints
+        # (record.time + record.duration) so each easing window is its
+        # own grid cell and trapezoid integration is exact.
         parts = [mu.boundaries]
         if not v.empty:
             parts.append(v.times)
+            if v.has_eased_segments():
+                # Easing-window ends: only meaningful for non-step segments.
+                ends = []
+                for i, easing in enumerate(v.easings):
+                    if easing == 'step':
+                        continue
+                    dur = float(v.durations[i])
+                    if dur > 0.0:
+                        ends.append(float(v.times[i]) + dur)
+                if ends:
+                    parts.append(np.asarray(ends, dtype=np.float64))
         if mu.atom_times.size:
             parts.append(mu.atom_times)
         grid = np.unique(np.concatenate(parts))
@@ -53,8 +74,6 @@ class CumulativeIntegrator:
         # AC density on each refinement interval [grid[i], grid[i+1]).
         # densities[k] applies on [boundaries[k], boundaries[k+1]); for any
         # grid interval contained in segment k, the density is densities[k].
-        # Mid-point of the grid interval is a robust segment selector even
-        # when the interval lies on a boundary edge.
         if grid.size >= 2:
             mids = 0.5 * (grid[:-1] + grid[1:])
             seg_idx = np.searchsorted(mu.boundaries, mids, side='right') - 1
@@ -64,28 +83,26 @@ class CumulativeIntegrator:
             rho_per_interval = np.zeros(0, dtype=np.float64)
         self._rho_interval = rho_per_interval
 
-        # v on each refinement interval. For grid[i] before v.times[0],
-        # extrapolate using multipliers[0] (matches existing engines).
+        # v at the START and END of each refinement interval. For step
+        # segments these are equal (v_start == v_end == multiplier). For
+        # linear segments, v ramps from start_multiplier to end_multiplier
+        # over `duration`; the integrator evaluates this ramp at each
+        # cell's start and end times.
         if grid.size >= 2:
-            if v.empty:
-                v_per_interval = np.ones_like(rho_per_interval)
-            else:
-                mids = 0.5 * (grid[:-1] + grid[1:])
-                vidx = np.searchsorted(v.times, mids, side='right') - 1
-                vidx_safe = np.clip(vidx, 0, v.multipliers.size - 1)
-                v_per_interval = v.multipliers[vidx_safe]
-                pre_mask = vidx < 0
-                if pre_mask.any():
-                    v_per_interval = v_per_interval.copy()
-                    v_per_interval[pre_mask] = v.multipliers[0]
+            v_start, v_end = self._evaluate_v_at_cell_endpoints(v, grid)
         else:
-            v_per_interval = np.zeros(0, dtype=np.float64)
-        self._v_interval = v_per_interval
+            v_start = np.zeros(0, dtype=np.float64)
+            v_end = np.zeros(0, dtype=np.float64)
+        self._v_interval = v_start          # back-compat alias for tests
+        self._v_interval_start = v_start
+        self._v_interval_end = v_end
 
-        # AC contributions per refinement interval.
+        # AC contributions per cell: trapezoid rule, exact for linear v.
+        # Reduces to rho * width * v for step segments (v_start == v_end).
         if grid.size >= 2:
             widths = np.diff(grid)
-            ac_contrib = v_per_interval * rho_per_interval * widths
+            ac_contrib = (0.5 * (v_start + v_end)
+                          * rho_per_interval * widths)
         else:
             ac_contrib = np.zeros(0, dtype=np.float64)
 
@@ -129,23 +146,22 @@ class CumulativeIntegrator:
         if self._grid.size == 0:
             return 0.0
         if t <= self._grid[0]:
-            # Extrapolate before grid[0] using the first interval's (v, rho).
-            if self._v_interval.size:
+            # Extrapolate before grid[0] using the first cell's (v_start, rho).
+            # Pre-grid v is constant at v_start[0] (no easing applies).
+            if self._v_interval_start.size:
                 return float(self._cum[0]
                              + (t - self._grid[0])
-                             * self._v_interval[0]
+                             * self._v_interval_start[0]
                              * self._rho_interval[0])
             return 0.0
         idx = int(np.searchsorted(self._grid, t, side='right')) - 1
         idx = max(0, min(idx, self._grid.size - 1))
         base = self._cum[idx]
         if idx + 1 < self._grid.size:
-            v_k = self._v_interval[idx]
-            rho_k = self._rho_interval[idx]
-            return float(base + (t - self._grid[idx]) * v_k * rho_k)
-        # Past last grid point: extrapolate with last interval's (v, rho).
-        if self._v_interval.size:
-            v_k = self._v_interval[-1]
+            return float(base + self._cell_partial_contrib(idx, t))
+        # Past last grid point: extrapolate with last cell's (v_end, rho).
+        if self._v_interval_end.size:
+            v_k = self._v_interval_end[-1]
             rho_k = self._rho_interval[-1]
             return float(base + (t - self._grid[-1]) * v_k * rho_k)
         return float(base)
@@ -158,48 +174,69 @@ class CumulativeIntegrator:
         if self._grid.size == 0:
             return np.zeros_like(t)
         idx = np.searchsorted(self._grid, t, side='right') - 1
-        # Pre-grid samples: extrapolate from grid[0] with first (v,rho).
         pre_mask = idx < 0
         idx_safe = np.clip(idx, 0, self._grid.size - 1)
         base = self._cum[idx_safe]
-        # For idx == grid.size - 1 (past end), use last interval's (v,rho).
-        # For interior, use _v_interval[idx] / _rho_interval[idx]. Build a
-        # per-sample (v, rho) by indexing into _v_interval / _rho_interval
-        # with idx clipped to interval count - 1.
-        if self._v_interval.size:
-            interval_idx = np.clip(idx_safe, 0, self._v_interval.size - 1)
-            v_k = self._v_interval[interval_idx]
-            rho_k = self._rho_interval[interval_idx]
-            base_t = self._grid[idx_safe]
-            out = base + (t - base_t) * v_k * rho_k
+        if self._v_interval_start.size:
+            # Two cases:
+            #   (a) idx in [0, grid.size - 2]: t lies in cell `idx`.
+            #       Partial = trapezoid from grid[idx] to t.
+            #   (b) idx == grid.size - 1: t is past the last grid point.
+            #       Extrapolate: partial = (t - grid[-1]) * v_e[-1] * rho[-1].
+            past_end = idx_safe >= self._grid.size - 1
+            interval_idx = np.clip(idx_safe, 0, self._v_interval_start.size - 1)
+            cell_start = self._grid[interval_idx]
+            v_s = self._v_interval_start[interval_idx]
+            v_e = self._v_interval_end[interval_idx]
+            rho = self._rho_interval[interval_idx]
+            cell_widths_full = np.diff(self._grid)
+            cell_widths = cell_widths_full[interval_idx]
+            dt = t - cell_start
+            with np.errstate(divide='ignore', invalid='ignore'):
+                frac = np.where(cell_widths > 0, dt / cell_widths, 0.0)
+            v_at_t = v_s + (v_e - v_s) * frac
+            partial = rho * dt * 0.5 * (v_s + v_at_t)
+            # Past-end override: dt is from grid[-1], not from cell_start.
+            if past_end.any():
+                dt_past = t - self._grid[-1]
+                partial = np.where(past_end, dt_past * v_e * rho, partial)
+            out = base + partial
             if pre_mask.any():
                 out[pre_mask] = (self._cum[0]
                                  + (t[pre_mask] - self._grid[0])
-                                 * self._v_interval[0]
+                                 * self._v_interval_start[0]
                                  * self._rho_interval[0])
             return out
         return np.zeros_like(t)
 
     def velocity_at(self, t: float) -> float:
-        """Local d(C_mu)/dt at t = v(t) * rho(t) (the AC density times the
-        integrand). Atoms are not visible to a derivative; the velocity here
-        is the smooth part. Used by the visual-playhead predictor."""
-        if self._v_interval.size == 0:
+        """Local d(C_mu)/dt at t = v(t) * rho(t). For linear-easing cells,
+        v(t) varies within the cell; returns the linearly interpolated
+        value. Atoms are not visible to a derivative."""
+        if self._v_interval_start.size == 0:
             return 0.0
         if t <= self._grid[0]:
-            return float(self._v_interval[0] * self._rho_interval[0])
+            return float(self._v_interval_start[0] * self._rho_interval[0])
         idx = int(np.searchsorted(self._grid, t, side='right')) - 1
-        idx = max(0, min(idx, self._v_interval.size - 1))
-        return float(self._v_interval[idx] * self._rho_interval[idx])
+        idx = max(0, min(idx, self._v_interval_start.size - 1))
+        v_t = self._v_at_t_in_cell(idx, t)
+        return float(v_t * self._rho_interval[idx])
 
     def inverse_at(self, sv: float) -> float:
-        """Inverse C_mu: smallest t such that C_mu(t) >= sv. Used by the
-        cull-space clock smoother. Atoms produce flat regions in t (a jump
-        in C); we return the atom's tau in that case."""
+        """Inverse C_mu: smallest t such that C_mu(t) >= sv. Atoms produce
+        flat regions in t (a jump in C); we return the atom's tau there.
+
+        For step cells (v_start == v_end) the inverse is linear: solve
+        rho * dt * v = sv - cum_lo for dt. For linear cells, the cumulative
+        is quadratic in dt, and we'd need the quadratic formula -- not
+        implemented; cross-engine consumers don't currently inverse over
+        eased segments, so we approximate with the average v of the cell.
+        """
         if self._cum.size == 0:
             return float(sv)
         if sv <= self._cum[0]:
-            v0 = self._v_interval[0] if self._v_interval.size else 1.0
+            v0 = (self._v_interval_start[0]
+                  if self._v_interval_start.size else 1.0)
             rho0 = self._rho_interval[0] if self._rho_interval.size else 1.0
             denom = v0 * rho0
             if denom == 0.0:
@@ -208,35 +245,135 @@ class CumulativeIntegrator:
         idx = int(np.searchsorted(self._cum, sv, side='right')) - 1
         idx = max(0, min(idx, self._cum.size - 1))
         if idx + 1 >= self._cum.size:
-            v_k = self._v_interval[-1] if self._v_interval.size else 1.0
+            v_k = (self._v_interval_end[-1]
+                   if self._v_interval_end.size else 1.0)
             rho_k = self._rho_interval[-1] if self._rho_interval.size else 1.0
             denom = v_k * rho_k
             if denom == 0.0:
                 return float(self._grid[-1])
             return float(self._grid[idx] + (sv - self._cum[idx]) / denom)
-        v_k = self._v_interval[idx]
+        # Average v over the cell (exact for step, average-trapezoid for
+        # linear). Good enough for the cull-space inverse use case.
+        v_avg = 0.5 * (self._v_interval_start[idx]
+                       + self._v_interval_end[idx])
         rho_k = self._rho_interval[idx]
-        denom = v_k * rho_k
+        denom = v_avg * rho_k
         if denom == 0.0:
             return float(self._grid[idx])
         return float(self._grid[idx] + (sv - self._cum[idx]) / denom)
 
     # -------------------------------------------------------------------
-    # Helper
+    # Per-cell evaluation helpers
     # -------------------------------------------------------------------
+
+    def _cell_partial_contrib(self, idx: int, t: float) -> float:
+        """AC contribution from `grid[idx]` to `t`, where `t` lies in the
+        cell starting at `grid[idx]`. Trapezoid rule with linear
+        interpolation of v."""
+        cell_start = self._grid[idx]
+        cell_end = self._grid[idx + 1]
+        v_s = self._v_interval_start[idx]
+        v_e = self._v_interval_end[idx]
+        rho = self._rho_interval[idx]
+        dt = t - cell_start
+        width = cell_end - cell_start
+        if width <= 0:
+            return 0.0
+        v_at_t = v_s + (v_e - v_s) * (dt / width)
+        return rho * dt * 0.5 * (v_s + v_at_t)
+
+    def _v_at_t_in_cell(self, idx: int, t: float) -> float:
+        cell_start = self._grid[idx]
+        if idx + 1 >= self._grid.size:
+            return float(self._v_interval_end[idx])
+        cell_end = self._grid[idx + 1]
+        width = cell_end - cell_start
+        if width <= 0:
+            return float(self._v_interval_start[idx])
+        v_s = self._v_interval_start[idx]
+        v_e = self._v_interval_end[idx]
+        return float(v_s + (v_e - v_s) * ((t - cell_start) / width))
+
+    # -------------------------------------------------------------------
+    # Helpers
+    # -------------------------------------------------------------------
+
+    @staticmethod
+    def _evaluate_v_at_cell_endpoints(v: SVData, grid: np.ndarray):
+        """Return (v_start, v_end) per grid cell.
+
+        For step segments these are equal: the segment's multiplier.
+        For linear segments, v ramps from `multiplier` at `time` to
+        `end_multiplier` at `time + duration`, then holds at
+        `end_multiplier` until the next segment starts. The returned
+        arrays are sampled at `grid[:-1]` (cell starts, side='right' for
+        ties so a segment-start tick gives the segment's value, not the
+        previous segment's) and `grid[1:]` (cell ends, side='left').
+        """
+        n_cells = grid.size - 1
+        if v.empty:
+            return (np.ones(n_cells, dtype=np.float64),
+                    np.ones(n_cells, dtype=np.float64))
+
+        cell_starts = grid[:-1]
+        cell_ends = grid[1:]
+        # Cell-start: value at tau^+ -- the segment whose [time, ...) covers
+        # tau. searchsorted(side='right') - 1 gives the index of the latest
+        # segment with time <= tau. Pre-first-segment extrapolates as the
+        # first segment's start multiplier (matches legacy behavior).
+        v_start = CumulativeIntegrator._eval_v_array(v, cell_starts, side='right')
+        # Cell-end: value at tau^- -- the segment that *ends* at tau is the
+        # one whose [time, next_time) ends at this cell-end. side='left' - 1
+        # gives the segment whose time < tau (excluding ties).
+        v_end = CumulativeIntegrator._eval_v_array(v, cell_ends, side='left')
+        return v_start, v_end
+
+    @staticmethod
+    def _eval_v_array(v: SVData, taus: np.ndarray, side: str) -> np.ndarray:
+        """Vectorized v(tau) at each tau, honoring per-segment easing.
+
+        `side='right'` attributes ties to the next segment (a tau equal to
+        a segment-start lands in that segment); `side='left'` to the
+        previous (a tau equal to a segment-start lands in the segment
+        that ends there). This matches numpy.searchsorted semantics.
+        """
+        taus = np.asarray(taus, dtype=np.float64)
+        if not taus.size:
+            return np.empty(0, dtype=np.float64)
+        if v.empty:
+            return np.ones_like(taus)
+
+        idx = np.searchsorted(v.times, taus, side=side) - 1
+        out = np.empty_like(taus)
+        pre_mask = idx < 0
+        if pre_mask.any():
+            # Pre-first-segment: extrapolate as multiplier[0].
+            out[pre_mask] = v.multipliers[0]
+        post_mask = ~pre_mask
+        if post_mask.any():
+            idx_p = idx[post_mask]
+            taus_p = taus[post_mask]
+            seg_time = v.times[idx_p]
+            seg_mult = v.multipliers[idx_p]
+            seg_end_mult = v.end_multipliers[idx_p]
+            seg_duration = v.durations[idx_p]
+            # Within the easing window: lerp from seg_mult to seg_end_mult.
+            # After: hold at seg_end_mult. (For step segments, seg_end_mult
+            # == seg_mult so this collapses to a constant.)
+            tau_in_seg = taus_p - seg_time
+            with np.errstate(divide='ignore', invalid='ignore'):
+                ramp_frac = np.where(seg_duration > 0,
+                                     np.clip(tau_in_seg / seg_duration, 0.0, 1.0),
+                                     1.0)   # zero duration: skip directly to end
+            out[post_mask] = seg_mult + (seg_end_mult - seg_mult) * ramp_frac
+        return out
 
     @staticmethod
     def _v_at_pointwise(tau, side, v: SVData) -> float:
         """v(tau^+) when side='right', v(tau^-) when side='left'.
-        Used to attribute atom mass; piecewise-constant v means the value
-        right after tau is the multiplier of the segment starting at or
-        before tau."""
-        if v.empty:
-            return 1.0
-        if side == 'right':
-            idx = int(np.searchsorted(v.times, tau, side='right')) - 1
-        else:
-            idx = int(np.searchsorted(v.times, tau, side='left')) - 1
-        if idx < 0:
-            return float(v.multipliers[0])
-        return float(v.multipliers[idx])
+        Used to attribute atom mass. For step segments this returns the
+        segment multiplier; for linear segments, the lerped value at tau.
+        """
+        out = CumulativeIntegrator._eval_v_array(
+            v, np.array([tau], dtype=np.float64), side=side)
+        return float(out[0])

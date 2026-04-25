@@ -232,6 +232,36 @@ def parse_replay(osr_path, osu_path=None, songs_dir=None, hit_window_ms=None):
         'chart_meta': {k: chart[k] for k in
                        ('title', 'artist', 'creator', 'version', 'keycount')},
         'sv_sections': chart.get('sv_sections', []),
+        # Uninherited timing points as (beat, bpm) for cross-engine
+        # beat-space rendering. osu native engine is time-space and
+        # consumes only `sv_sections`, but switching to beat-space needs
+        # the raw BPM map.
+        '_osu_bpms': _osu_bpms_from_timing_points(chart.get('timing_points', [])),
         'od': float(chart.get('od', 8.0)),
         'mods': int(meta.get('mods', 0)),
     }
+
+
+def _osu_bpms_from_timing_points(timing_points):
+    """Project uninherited timing points to (beat, bpm) pairs in
+    Etterna's beat-space convention. Beats accumulate from t=0 along the
+    BPM segment in effect. Returns at least one segment so beat-space
+    consumers always have a base BPM."""
+    uninherited = sorted(
+        ((t_ms, mpb) for t_ms, mpb in timing_points if mpb > 0),
+        key=lambda x: x[0],
+    )
+    if not uninherited:
+        return [(0.0, 120.0)]
+    out = []
+    cur_beat = 0.0
+    cur_t_ms = 0.0
+    cur_bpm = 60000.0 / uninherited[0][1]
+    out.append((0.0, cur_bpm))
+    for t_ms, mpb in uninherited[1:]:
+        dt_ms = max(0.0, t_ms - cur_t_ms)
+        cur_beat += (dt_ms / 1000.0) * (cur_bpm / 60.0)
+        cur_bpm = 60000.0 / mpb
+        cur_t_ms = t_ms
+        out.append((cur_beat, cur_bpm))
+    return out
