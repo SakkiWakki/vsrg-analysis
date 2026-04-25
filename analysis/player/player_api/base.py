@@ -158,6 +158,24 @@ class Player:
     def attach_audio_clock(self, getter) -> None:
         return self.playback.attach_audio_clock(getter)
 
+    def attach_audio_status(self, getter) -> None:
+        """Register a `() -> (count, last_status_str)` callable so the
+        Frame Analyzer panel (and anything else with audio diagnostics)
+        can read PortAudio's underflow / overflow signals without
+        needing a direct handle to the audio engine. `count > 0` means
+        we've been missing the audio-callback deadline."""
+        self._audio_status_getter = getter
+
+    def audio_status_snapshot(self) -> tuple[int, str]:
+        getter = getattr(self, '_audio_status_getter', None)
+        if getter is None:
+            return 0, ''
+        try:
+            count, last = getter()
+            return int(count), str(last)
+        except Exception:
+            return 0, ''
+
     @property
     def t_intended(self) -> float:
         return self.playback.t_intended

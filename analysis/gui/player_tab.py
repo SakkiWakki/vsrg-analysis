@@ -217,6 +217,7 @@ class PlayerTab(QWidget):
                 float(self._audio._base_duration),
             )
             self.player.attach_audio_clock(self._audio.current_chart_time)
+            self.player.attach_audio_status(self._audio.callback_status_snapshot)
 
     def _connect_player_events(self) -> None:
         self.player.events.on('scroll_changed', self._on_scroll_change)

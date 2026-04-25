@@ -48,6 +48,7 @@ class PlayerDataSource:
         'sv_enabled', 'sv_suspended', 'sv_sections',
         'skin', 'press_hide', 'scroll_mode', 'scroll_value',
         'effective_scroll_ms', 'layer_visible', 'layer_tree',
+        'audio_status',
         # Chart + play snapshots (all surfaces with a loaded replay)
         'chart_metadata', 'chart_stats', 'chart_paths',
         'player_name', 'score', 'max_combo', 'current_grade',
@@ -339,6 +340,18 @@ class PlayerDataSource:
 
     def paused(self) -> bool:
         return bool(getattr(self._p, 'paused', True))
+
+    def audio_status(self) -> tuple[int, str]:
+        # Stubs / non-AudioEngine surfaces (e.g. tests with a bare player)
+        # don't carry the snapshot getter; default to "no events seen".
+        snap = getattr(self._p, 'audio_status_snapshot', None)
+        if snap is None:
+            return 0, ''
+        try:
+            count, last = snap()
+            return int(count), str(last)
+        except Exception:
+            return 0, ''
 
     def sv_enabled(self) -> bool:
         return bool(getattr(self._p, 'sv_enabled', False))

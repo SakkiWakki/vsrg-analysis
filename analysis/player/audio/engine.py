@@ -38,6 +38,7 @@ import numpy as np
 
 from analysis.player.sv.debug import LOGGER as _SV_DEBUG_LOGGER
 
+from .audio_producer import AudioProducer, AudioRing
 from .phase_vocoder import StreamingPhaseVocoder
 from .source import WaveSource
 from .stream_worker import StreamWorker
@@ -118,6 +119,12 @@ class AudioEngine:
         # _lead_in_seconds, so chart-time is negative during lead-in and
         # crosses 0 on the exact source-frame boundary.
         self._lead_in_seconds = 0.0
+        # Diagnostic counters for PortAudio callback status flags
+        # (underflow / overflow / priming / etc). A non-zero count means
+        # we're missing the audio deadline; the last-string lets callers
+        # see which flag fired most recently without grepping the log.
+        self._cb_status_count = 0
+        self._cb_last_status = ''
 
         if not audio_path or not os.path.exists(audio_path):
             return
@@ -232,6 +239,24 @@ class AudioEngine:
     def _callback(self, outdata, frames, time_info, status):
         # Runs on the audio thread. Must be real-time-safe-ish: no I/O, no
         # allocations beyond what the PV does internally.
+        if status:
+            # PortAudio is telling us about an underflow / overflow /
+            # priming / etc. for THIS block. Almost always a sign that
+            # the previous callback returned late (output_underflow) or
+            # we couldn't keep up with the requested rate. Log under the
+            # engine lock so the timeline is consistent with everything
+            # else, and keep an in-process counter so callers can read
+            # the rate without parsing the debug log.
+            with self._lock:
+                self._cb_status_count += 1
+                self._cb_last_status = str(status)
+                self._debug_log_locked('audio_status', {
+                    'status': str(status),
+                    'frames': int(frames),
+                    'rate': float(self._rate),
+                    'silent': bool(self._silent),
+                    'count': int(self._cb_status_count),
+                })
         with self._pv_lock:
             with self._lock:
                 pv = self._pv
@@ -330,6 +355,15 @@ class AudioEngine:
     def set_volume(self, v: float) -> None:
         with self._lock:
             self._volume = float(v)
+
+    def callback_status_snapshot(self) -> tuple[int, str]:
+        """Return `(count, last_status)` of PortAudio status flags seen
+        in `_callback`. `count > 0` means we've been missing the audio
+        deadline; `last_status` is e.g. `'output underflow'`. Callers
+        can poll this from the GUI thread (read-only), no lock needed
+        because both fields are independent reads of plain Python
+        objects."""
+        return self._cb_status_count, self._cb_last_status
 
     def set_pitch_correct(self, on: bool) -> None:
         # Lock-free: `pv.set_pitch_correct` is a single bool write into a

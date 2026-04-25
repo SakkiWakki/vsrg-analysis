@@ -17,13 +17,13 @@ MANIFEST = Manifest(
     key='builtin:frame_analyzer',
     name='Frame Analyzer',
     supported_surfaces={SURFACE_GUI},
-    requires_data={'t_now', 'paused'},
+    requires_data={'t_now', 'paused', 'audio_status'},
     plugin_fields={
         'sidebar': SidebarFields(
             priority=110,
             draggable=True,
             default_free_xy=(0.02, 0.44),
-            default_size=(240, 170),
+            default_size=(240, 185),
         ),
     },
 )
@@ -99,6 +99,22 @@ def _fps(v: float) -> str:
     return f'{1.0 / v:6.1f}'
 
 
+def _audio_line(count: int, last: str) -> str:
+    """Format the audio-callback status line.
+
+    `count` is the number of PortAudio status events seen (output
+    underflow / overflow / priming) since the engine started; `last`
+    is the most recent flag string. We render `audio: ok` when nothing
+    has fired so the line stays compact in the common case, and surface
+    the last flag string when something has fired so the user can
+    distinguish underflow (we missed a deadline) from overflow (input
+    overrun, irrelevant for us) at a glance."""
+    if count <= 0:
+        return 'audio:        ok'
+    short = last.split(' ')[-1] if last else 'event'
+    return f'audio:    {count} ({short})'
+
+
 def _draw(ctx):
     if getattr(ctx, 'measure_only', False):
         return
@@ -108,10 +124,13 @@ def _draw(ctx):
     s = _STATS.summary()
 
     state = 'PAUSED' if ctx.data.paused() else 'PLAYING'
+    audio_count, audio_last = ctx.data.audio_status()
+    audio_line = _audio_line(audio_count, audio_last)
     if s is None:
         ctx.draw_text('Frame Analyzer')
         ctx.draw_text('collecting samples...')
         ctx.draw_text(f'state: {state}')
+        ctx.draw_text(audio_line)
         return
 
     lines = (
@@ -123,6 +142,7 @@ def _draw(ctx):
         f'dt   min/max = {_ms(s["min_dt"])} / {_ms(s["max_dt"])}',
         f'jitter (std) = {_ms(s["std_dt"])}',
         f'hitches (2x) = {s["hitches"]} / {s["n"]}',
+        audio_line,
     )
     for line in lines:
         ctx.draw_text(line)
