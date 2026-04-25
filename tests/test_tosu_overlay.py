@@ -6,6 +6,7 @@ and view.py require a QApplication and are integration-tested in
 """
 from __future__ import annotations
 
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -475,6 +476,10 @@ class TestDiscovery:
 
         assert results == [('community-overlay', extra_overlay / 'index.html')]
 
+    @pytest.mark.skipif(
+        sys.platform == 'win32',
+        reason="uses ':' path separator and $VAR syntax; POSIX-only",
+    )
     def test_discovers_expanduser_and_expandvars(self, tmp_path, monkeypatch):
         from plugins.unsafe.tosu_overlay.discovery import find_overlays
 
