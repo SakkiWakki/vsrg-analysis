@@ -205,6 +205,16 @@ class CullSpacePredictor:
         self._next_break_idx: int = 0
         self._last_raw_t: float | None = None
         self._last_play_rate: float = 1.0
+        # Monotonic clamp: the largest C we've ever returned since the
+        # last explicit reset. Cumulative_at is monotone non-decreasing
+        # in chart-time on every supported engine (v >= 0, w >= 0, atoms
+        # add positive mass), so under forward playback the predictor's
+        # output should never decrease wall-tick-to-wall-tick. Audio
+        # callbacks delivering a slightly-behind raw_t, sub-ms backstep
+        # tolerance, and stream-clock noise can all individually pull
+        # the prediction backward by sub-pixel amounts. The clamp absorbs
+        # those into a flat hold instead of a visible snap.
+        self._max_C_returned: float = -float('inf')
 
     def reset(self, raw_t: float) -> None:
         """Force a re-anchor at chart-time `raw_t`. Call after seek,
@@ -213,6 +223,10 @@ class CullSpacePredictor:
         produce a raw_t jump)."""
         self._anchor_at(float(raw_t))
         self._last_raw_t = float(raw_t)
+        # Reset clears the clamp: a seek can legitimately move backward
+        # in C, and rate / engine changes invalidate the prior frame of
+        # reference entirely.
+        self._max_C_returned = self._anchor_C
 
     def cumulative_now(self, raw_t: float, play_rate: float = 1.0) -> float:
         """Return the predicted C at the current wall-clock instant.
@@ -244,6 +258,7 @@ class CullSpacePredictor:
             self._anchor_at(raw_t)
             self._last_raw_t = raw_t
             self._last_play_rate = play_rate
+            self._max_C_returned = self._anchor_C
             return self._anchor_C
 
         # Rate change without a raw_t discontinuity: re-anchor so future
@@ -255,16 +270,19 @@ class CullSpacePredictor:
             self._anchor_at(raw_t)
             self._last_raw_t = raw_t
             self._last_play_rate = play_rate
+            self._max_C_returned = self._anchor_C
             return self._anchor_C
 
         last_raw_t = (self._last_raw_t
                       if self._last_raw_t is not None else raw_t)
         raw_dt = raw_t - last_raw_t
 
-        # Backward jump (seek, scrub release): snap.
+        # Backward jump (seek, scrub release): snap, and reset the clamp
+        # since a seek is a legitimate backward move.
         if raw_dt < -self._BACKTRACK_THRESHOLD:
             self._anchor_at(raw_t)
             self._last_raw_t = raw_t
+            self._max_C_returned = self._anchor_C
             return self._anchor_C
 
         now_wall = time.monotonic()
@@ -280,16 +298,29 @@ class CullSpacePredictor:
         if abs(actual_chart_dt - predicted_chart_dt) > self._RAW_JUMP_THRESHOLD:
             self._anchor_at(raw_t)
             self._last_raw_t = raw_t
-            return self._anchor_C
+            return self._clamp(self._anchor_C)
 
         # Normal path: extrapolate from anchor at local rate, crossing
         # breakpoints exactly along the way. Loop because a single
         # render frame can span multiple breakpoints in fast SV regions.
         c = self._extrapolate_to_wall(now_wall, play_rate)
         self._last_raw_t = raw_t
-        return c
+        return self._clamp(c)
 
     # -- internal -------------------------------------------------------
+
+    def _clamp(self, c: float) -> float:
+        """Monotone-non-decreasing guard. Under forward playback, C
+        cannot decrease (Theorem in DESIGN.tex sec.4: dC/dt = v*w >= 0
+        a.e., and warp atoms add positive mass). Backward output of the
+        predictor on a forward-playing stream is therefore always noise
+        (audio-callback delivering a slightly-stale raw_t, sub-ms
+        backstep tolerance, stream-clock jitter). Hold flat for a frame
+        instead of snapping backward."""
+        if c < self._max_C_returned:
+            return self._max_C_returned
+        self._max_C_returned = c
+        return c
 
     def _anchor_at(self, t: float) -> None:
         engine = self._engine

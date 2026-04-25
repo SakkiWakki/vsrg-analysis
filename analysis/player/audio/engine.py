@@ -68,10 +68,6 @@ except Exception:
 
 class AudioEngine:
     RESYNC_THRESHOLD_S = 0.15
-    # Allow tiny negative corrections from the hardware clock to avoid
-    # visible freeze-then-jump motion when callback/stream timing jitters.
-    # Larger negative jumps are still clamped so seeks/resume never backstep.
-    _SMALL_BACKSTEP_TOLERANCE_S = 0.003
 
     def __init__(self, audio_path: str | None, volume: float = 0.5,
                  pitch_correct: bool = True):
@@ -360,22 +356,19 @@ class AudioEngine:
 
         The callback-backed DAC anchor refines this below sample-grain
         when valid. When the anchor is stale (startup, just after seek),
-        we fall back to the latest written `_chart_time`. Tiny backsteps
-        from clock jitter are accepted; larger ones are clamped away.
+        we fall back to the latest written `_chart_time`. The reading is
+        clamped to be monotone non-decreasing -- the cull-space predictor
+        absorbs sub-ms stream-clock jitter on its side, and `_chart_time`
+        is the contract surface that downstream consumers (timing maps,
+        seek logic) rely on being monotone.
         """
         if not self._dac_anchor_valid:
             return self._chart_time
         now = self._safe_stream_time_locked()
         if now is None:
             return self._chart_time
-        t = self._hw_pos + (now - self._hw_wall) * self._rate
-        t = float(t)
-        if t >= self._chart_time:
-            self._chart_time = t
-            return self._chart_time
-
-        backstep = self._chart_time - t
-        if backstep <= self._SMALL_BACKSTEP_TOLERANCE_S:
+        t = float(self._hw_pos + (now - self._hw_wall) * self._rate)
+        if t > self._chart_time:
             self._chart_time = t
         return self._chart_time
 

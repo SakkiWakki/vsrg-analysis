@@ -273,6 +273,78 @@ def test_no_engine_returns_raw_t(fake_clock):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Monotonicity guard
+# ---------------------------------------------------------------------------
+
+
+def test_output_is_monotone_under_forward_playback(fake_clock):
+    """Under forward playback, cumulative_now must be monotone non-
+    decreasing in wall-time. Any sub-ms backward output is noise (stream-
+    clock jitter, sub-tolerance audio backsteps) and must be clamped to
+    the previous high-water mark.
+
+    The cumulative function itself is monotone non-decreasing (Theorem,
+    DESIGN.tex sec.4: dC/dt = v*w >= 0 a.e., warp atoms add positive
+    mass), so this is the predictor honoring its target's contract."""
+    engine = TimeSpaceSVEngine([(0.0, 1.0), (2.5, 1.5), (4.0, 0.5)])
+    pred = CullSpacePredictor(engine, breakpoints=engine.breakpoints())
+
+    fake_clock['t'] = 0.0
+    pred.reset(0.0)
+
+    # Simulate raw_t arriving with 0.5 ms RMS Gaussian jitter (typical
+    # PortAudio stream.time noise) on a clean monotone chart-time stream.
+    rng = np.random.default_rng(seed=0xC07107)
+    chart_t = 0.0
+    prev = 0.0
+    for _ in range(2000):
+        chart_t += 0.008      # ~125Hz frame cadence
+        fake_clock['t'] = chart_t
+        noisy_raw = chart_t + rng.normal(0.0, 0.0005)
+        out = pred.cumulative_now(noisy_raw, play_rate=1.0)
+        assert out >= prev - 1e-12, \
+            f'predictor went backward: prev={prev}, out={out}'
+        prev = out
+
+
+def test_clamp_does_not_corrupt_correctness_on_clean_stream(fake_clock):
+    """The clamp must not push the predictor away from cumulative_at on
+    a clean stream. After settling past any initial transient, the
+    predictor + clamp should still hit cumulative_at within float
+    epsilon."""
+    engine = TimeSpaceSVEngine([(0.0, 1.0), (2.5, 1.5), (4.0, 0.5)])
+    pred = CullSpacePredictor(engine, breakpoints=engine.breakpoints())
+
+    fake_clock['t'] = 0.0
+    pred.reset(0.0)
+
+    chart_t = 0.0
+    while chart_t < 6.0:
+        chart_t += 0.05
+        fake_clock['t'] = chart_t
+        out = pred.cumulative_now(chart_t, play_rate=1.0)
+        assert out == pytest.approx(engine.cumulative_at(chart_t),
+                                     abs=1e-9)
+
+
+def test_reset_clears_the_clamp(fake_clock):
+    """An explicit reset (seek, rate change, engine swap) is a
+    legitimate backward move; the clamp must release."""
+    engine = TimeSpaceSVEngine([(0.0, 1.0)])
+    pred = CullSpacePredictor(engine, breakpoints=[])
+
+    # Drive the clamp's high-water mark up to ~5.0 by anchoring there.
+    fake_clock['t'] = 0.0
+    pred.reset(5.0)
+
+    # User seeks backward via reset(). New raw_t = 1.0 should be the
+    # output, not the clamped 5.0.
+    pred.reset(1.0)
+    out = pred.cumulative_now(1.0, play_rate=1.0)
+    assert out == pytest.approx(1.0, abs=1e-12)
+
+
 def test_predictor_matches_cumulative_at_on_dense_sample(fake_clock):
     """Dense parity sweep: at every chart-time the predictor would see,
     its output must equal cumulative_at(raw_t) when the wall-time

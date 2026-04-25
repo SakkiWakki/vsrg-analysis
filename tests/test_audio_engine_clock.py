@@ -67,11 +67,11 @@ def test_current_chart_time_scales_with_play_rate():
     assert engine.current_chart_time() == pytest.approx(30.120, abs=1e-9)
 
 
-def test_current_chart_time_allows_tiny_backstep_jitter():
-    """Small timing jitter should not freeze the playhead and then jump.
-
-    A tiny regression from the hardware clock is accepted to keep motion
-    continuous, while larger regressions are still clamped elsewhere.
+def test_current_chart_time_clamps_backstep_jitter():
+    """Stream-clock jitter that pulls the reading backward must not
+    propagate into the engine's chart time. The cull-space predictor
+    smooths sub-ms jitter on the render side; the audio layer's job is
+    to expose a strictly monotone non-decreasing chart time.
     """
     engine, stream = _engine_with_stream(50.000)
     engine._hw_pos = 10.000
@@ -82,10 +82,11 @@ def test_current_chart_time_allows_tiny_backstep_jitter():
     forward = engine.current_chart_time()
     assert forward == pytest.approx(10.010, abs=1e-9)
 
-    # 2ms backward jitter should be accepted (tolerance is 3ms).
+    # Backward jitter on the stream clock holds the reading flat.
     stream.time = 50.008
     back = engine.current_chart_time()
-    assert back == pytest.approx(10.008, abs=1e-9)
+    assert back == pytest.approx(10.010, abs=1e-9)
+    assert back >= forward
 
 
 def test_first_callback_does_not_backstep_before_audible_time_catches_up():
