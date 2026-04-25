@@ -1,0 +1,616 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{mathtools}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\hypersetup{colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{lemma}[theorem]{Lemma}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{remark}[theorem]{Remark}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Rpos}{\R_{>0}}
+\newcommand{\Rnn}{\R_{\geq 0}}
+\newcommand{\bpmz}{\mathrm{BPM}_0}
+\newcommand{\bpm}{\mathrm{BPM}}
+\newcommand{\dB}{\,dB}
+\newcommand{\dtau}{\,d\tau}
+\newcommand{\dmu}{\,d\mu}
+\newcommand{\Lone}{L^{1}}
+\newcommand{\BV}{\mathrm{BV}}
+\newcommand{\AC}{\mathrm{AC}}
+\newcommand{\one}{\mathbf{1}}
+
+\title{SV Engine: Mathematical Design}
+\author{vsrg-analysis Player}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{quote}
+\textbf{TL;DR.} \emph{Time-space} is smooth: notes scroll at a velocity that's
+a function of wall-clock time, and the cumulative position is a continuous
+function. \emph{Beat-space} is not smooth, because charts can have
+\emph{stops} (time passes, beats don't) and \emph{warps} (beats jump, time
+doesn't) --- and a warp creates a literal jump in the cumulative-position
+function that no time-space velocity can reproduce.
+
+Came up by Yucky, written up by a \textbf{CLANKER}. If you want a even simpler explaination, 
+think about it like the difference between an indestructible ball and a destructible
+ball that is usually round but sometimes not (make a PR if you still don't understand this)
+
+The rest of this document formalizes that observation: time-space is integration
+against ordinary Lebesgue measure $d\tau$; beat-space is integration against a
+\emph{Stieltjes measure} $dB$ that allows point masses (= warps). Once you
+write it this way, ``which game's SV are we using'' collapses to ``which
+measure are we integrating against,'' and switching engines at runtime is just
+swapping $\mu$ on the chart document. One integrator, multiple measures, one
+codebase.
+\end{quote}
+
+\begin{abstract}
+This document gives the mathematical foundation for the unified scroll-velocity
+(SV) framework used by the Player. The framework is built on a single
+\emph{measure-theoretic primitive}: render distance is a Lebesgue--Stieltjes
+integral of a velocity against a chart-derived measure on chart time. Engines
+differ only in their choice of measure; the document carries the integrand and
+the measure as orthogonal data.
+
+Three structural facts drive the design. First, time-space and beat-space are
+not different positioning theories but two choices of measure --- Lebesgue
+$\dtau$ versus the Stieltjes measure $dB$ induced by the timing map.
+Second, the failure of time-space to represent warps is a property of the
+\emph{measure}: $\Lone(T, d\tau)$ functions cannot place mass at a point, so
+no enrichment of the integrand alone can recover warps under Lebesgue measure.
+Third, conversion between measures is exact wherever the timing map is
+absolutely continuous, by Radon--Nikodym; warps are precisely the failure of
+absolute continuity.
+
+The engine architecture follows: the canonical document carries a measure $d\mu$
+and an $\Lone(T, d\mu)$ integrand $v$. A single integrator computes
+$\int v\dmu$. Engine swap reduces to swapping the measure on the document; the
+integrator is unchanged. Per-column SV is $K$ integrands against one shared
+measure; per-note SV is sparse-indexed integrands against the same measure.
+\end{abstract}
+
+\tableofcontents
+
+% =====================================================================
+\section{Function spaces and measures}
+\label{sec:spaces}
+
+We work on a closed chart-time interval $T = [t_0, t_{\mathrm{end}}] \subset \R$.
+The framework is parameterized by a pair $(\mu, v)$ where $\mu$ is a positive
+Radon measure on $T$ and $v$ is a $\mu$-integrable function. The render distance
+is $\int v\dmu$. The two ``spaces'' the rhythm-game literature distinguishes
+correspond to two choices of $\mu$.
+
+\begin{definition}[Time-space]
+\label{def:time-space}
+The time-space framework is the pair $(d\tau, v)$ with $v \in \Lone(T, d\tau)$
+and $d\tau$ Lebesgue measure on $T$.
+\end{definition}
+
+\begin{definition}[Beat-space]
+\label{def:beat-space}
+A \emph{timing map} is a non-decreasing right-continuous function
+$B : T \to \Rnn$ of bounded variation, with $B(t_0) = 0$. The
+\emph{Stieltjes measure} $dB$ is the unique Radon measure on $T$ with
+\[
+dB([\alpha, \beta]) \;=\; B(\beta) - B(\alpha^-)
+\quad \text{for } \alpha \leq \beta \in T.
+\]
+The beat-space framework is the pair $(dB, s \circ B)$ with
+$s : \Rnn \to \R$ measurable and $s \circ B \in \Lone(T, dB)$.
+\end{definition}
+
+\begin{remark}[Anatomy of $dB$]
+\label{rem:dB-anatomy}
+By the Lebesgue decomposition, every Radon measure on $T$ splits as
+$dB = (dB)_{\AC} + (dB)_{\mathrm{sing}}$, where $(dB)_{\AC} \ll d\tau$ has a
+Radon--Nikodym density $B'(\tau) \dtau$ and $(dB)_{\mathrm{sing}} \perp d\tau$
+is supported on a Lebesgue-null set. For chart timing maps the singular part is
+purely atomic: it is a finite sum of point masses, one at each warp:
+\begin{equation}
+\label{eq:dB-decomp}
+dB \;=\; B'(\tau)\dtau \;+\; \sum_{w} \Delta b_w \cdot \delta_{\tau_w}.
+\end{equation}
+The atoms encode warps; the absolutely continuous part encodes BPM. Stops
+contribute to $(dB)_{\AC}$ via $B' = 0$ on the stop interval --- they are
+absolutely continuous, just degenerate.
+\end{remark}
+
+\begin{definition}[Position-dependent zoom]
+The \emph{zoom} $z : T \to \Rpos$ is bounded measurable in chart time and is
+applied multiplicatively at the playhead, outside the integral. Time-space
+engines fix $z \equiv 1$; Etterna's \texttt{\#SPEEDS} produces a nontrivial
+$z$.
+\end{definition}
+
+\begin{definition}[Base BPM]
+$\bpmz \coloneqq \bpm(t_0)$ is the BPM of the first segment.
+\end{definition}
+
+\begin{definition}[Column index]
+Let $C = \{0, \dots, K-1\}$ index the playfield columns. Where the integrand
+varies per column we write $v(\tau, c)$ and $z(\tau, c)$. The measure $\mu$ is
+column-independent: it is a property of the chart timing data only.
+\end{definition}
+
+% =====================================================================
+\section{The render-distance functional}
+\label{sec:functional}
+
+\begin{definition}[Render distance]
+\label{def:render-distance}
+Given a measure $\mu$ on $T$, an integrand $v \in \Lone(T, \mu)$, and a zoom
+$z$, the \emph{render distance} between chart times $a, b \in T$ as observed
+from playhead $a$ is
+\begin{equation}
+\label{eq:d}
+d_\mu(a, b) \;\coloneqq\; z(a) \cdot \int_{(a, b]} v(\tau)\dmu(\tau).
+\end{equation}
+We use half-open intervals $(a, b]$ throughout to make point-mass attribution
+unambiguous: a warp at $\tau_w$ contributes to $d_\mu(a, b)$ iff $\tau_w \in
+(a, b]$.
+\end{definition}
+
+\begin{definition}[Cumulative function]
+\label{def:cumulative}
+The \emph{cumulative function} is
+\begin{equation}
+\label{eq:C}
+C_\mu(t) \;\coloneqq\; \int_{(t_0, t]} v(\tau)\dmu(\tau).
+\end{equation}
+\end{definition}
+
+\begin{proposition}[Cumulative decomposition]
+\label{prop:decomp}
+For all $a, b \in T$,
+\[
+d_\mu(a, b) \;=\; z(a) \cdot \bigl(C_\mu(b) - C_\mu(a)\bigr).
+\]
+When $z \equiv 1$, $C_\mu$ alone determines render distance; cull-space queries
+reduce to a single bisection on a precomputed array of $C_\mu$ samples.
+\end{proposition}
+
+\begin{remark}[Why $C$ is cached and $z$ is per-frame]
+\label{rem:why-split}
+$C_\mu$ depends only on the chart, so it is computed once at chart load and
+queried at $O(\log n)$ per call. $z(a)$ depends on the playhead and is
+evaluated per frame. Splitting them lets the cull-space window be a single
+bisect over $C_\mu$, with $z$ applied as a uniform multiplier on the visible
+delta. This is exactly the structure the existing \texttt{SVEngine} Protocol
+exposes (\texttt{cumulative\_at}, \texttt{render\_multiplier\_at},
+\texttt{distance}).
+\end{remark}
+
+\begin{remark}[Cull-space approximation under nontrivial $z$]
+When $z$ varies, $z(a) \cdot (C_\mu(b) - C_\mu(a))$ approximates the true
+integral by treating $z$ as constant over $(a, b]$. The error during a brief
+$z$-transition is at most one segment's multiplier, which the Player pads for.
+This matches Etterna's ArrowEffects.cpp XMOD branch.
+\end{remark}
+
+% =====================================================================
+\section{Instantiations}
+\label{sec:instances}
+
+\subsection{Time-space (osu!mania, Quaver)}
+
+$\mu = d\tau$, $z \equiv 1$:
+\[
+d_{d\tau}(a, b) \;=\; \int_{(a,b]} v(\tau)\dtau.
+\]
+The timing map $B$ does not appear. Stops and warps are not natively
+expressible (\S\ref{sec:stops-warps}).
+
+\subsection{Beat-space (Etterna XMOD)}
+\label{sec:beat-instance}
+
+$\mu = dB$, integrand $v(\tau) = s(B(\tau))$, $z(a) = \mathrm{speed\_percent}(a)$.
+By definition,
+\begin{equation}
+\label{eq:stieltjes}
+d_{dB}(a, b)
+\;=\; z(a) \cdot \int_{(a,b]} s(B(\tau))\dB(\tau).
+\end{equation}
+On any interval where $B$ is absolutely continuous, $dB = B'(\tau)\dtau$ and
+\eqref{eq:stieltjes} reduces to a Lebesgue integral. Substituting $b = B(\tau)$
+when $B$ is AC and strictly increasing,
+\[
+\int_{(a,b]} s(B(\tau)) B'(\tau)\dtau \;=\; \int_{B(a)}^{B(b)} s(\beta)\, d\beta
+\;=\; D(B(b)) - D(B(a)),
+\]
+where $D(\beta) = \int_0^\beta s$ is the displayed-beat function. Converting to
+render seconds via the base BPM:
+\[
+d_{dB}(a, b) \;=\; z(a) \cdot \frac{60}{\bpmz} \cdot \bigl(D(B(b)) - D(B(a))\bigr) \quad \text{(AC region)}.
+\]
+This is exactly Etterna's XMOD positioning equation. At a warp $\tau_w \in (a,b]$,
+the singular part of $dB$ contributes an additional point-mass term
+$s(b_w^+) \cdot \Delta b_w$ via \eqref{eq:dB-decomp}, which the AC formulation
+above does not capture.
+
+\subsection{Constant-BPM (IIDX)}
+
+$\mu = dB$, $v \equiv 1$, $z \equiv h$ for player-chosen hi-speed $h$:
+\[
+d_{dB}(a, b) \;=\; h \cdot dB((a, b]) \;=\; h \cdot (B(b) - B(a)).
+\]
+Chart SV is dropped; BPM changes propagate through $B'$ and warps through the
+atoms of $dB$, but the constant integrand neutralizes any chart-authored
+multiplier. Floating hi-speed is a separate solve for $h$ at chart load and
+lives outside the integrator.
+
+\subsection{Identity}
+
+$\mu = d\tau$, $v \equiv 1$, $z \equiv 1$: $d(a,b) = b - a$.
+
+% =====================================================================
+\section{Lossless conversion}
+\label{sec:conv}
+
+The conversion between time-space and beat-space is the Radon--Nikodym
+relationship between the two measures, valid wherever it applies.
+
+\begin{theorem}[Equivalence on AC intervals]
+\label{thm:conversion}
+Let $I \subseteq T$ be an interval on which $B$ is absolutely continuous (no
+warps in $I$; stops are permitted). Let $s \in \Lone(B(I), d\beta)$ be a
+beat-space integrand. Define
+\begin{equation}
+\label{eq:beat-to-time}
+v^*(\tau) \;\coloneqq\; s(B(\tau)) \cdot \frac{\bpm(\tau)}{\bpmz}, \qquad \tau \in I.
+\end{equation}
+Then for all $a, b \in I$,
+\[
+\int_{(a,b]} v^*(\tau)\dtau
+\;=\; \frac{60}{\bpmz} \int_{(a,b]} s(B(\tau))\dB(\tau).
+\]
+That is, the time-space integral of $v^*$ against $d\tau$ equals the
+beat-space integral of $s \circ B$ against $dB$, up to the global factor
+$60/\bpmz$.
+\end{theorem}
+
+\begin{proof}
+On $I$, $B$ is AC, so by Radon--Nikodym $dB = B'(\tau)\dtau$ with
+$B' \in \Lone(I, d\tau)$, and $B'(\tau) = \bpm(\tau)/60$ a.e. Then
+\[
+\int_{(a,b]} s(B(\tau))\dB(\tau)
+\;=\; \int_{(a,b]} s(B(\tau))\, B'(\tau)\dtau
+\;=\; \int_{(a,b]} s(B(\tau)) \cdot \frac{\bpm(\tau)}{60}\dtau.
+\]
+Multiplying by $60/\bpmz$ gives the right-hand side equal to
+$\int_{(a,b]} s(B(\tau)) \cdot \bpm(\tau)/\bpmz \dtau = \int_{(a,b]} v^*(\tau)\dtau$.
+\qedhere
+\end{proof}
+
+\begin{theorem}[Time $\to$ beat]
+\label{thm:t2b}
+Under the same hypotheses as Theorem~\ref{thm:conversion}, given a time-space
+integrand $v \in \Lone(I, d\tau)$, define
+\begin{equation}
+\label{eq:time-to-beat}
+s^*(\beta) \;\coloneqq\; v(B^{-1}(\beta)) \cdot \frac{\bpmz}{\bpm(B^{-1}(\beta))}
+\qquad \text{for } dB\text{-a.e.\ } \beta \in B(I).
+\end{equation}
+Then $\int_{(a,b]} v(\tau)\dtau = (60/\bpmz) \int_{(a,b]} s^*(B(\tau))\dB(\tau)$.
+\end{theorem}
+
+\begin{proof}
+Symmetric to Theorem~\ref{thm:conversion}. $B^{-1}$ is well-defined
+$dB$-a.e.\ on $B(I)$: stops are atoms in the $\dtau$-pushforward but
+$dB$-null in beat space (stops are intervals where $B$ is constant, so $dB$
+assigns them measure zero), so the failure of pointwise invertibility on
+stops occurs on a $dB$-null set and does not affect the integral.
+\qedhere
+\end{proof}
+
+\begin{remark}[Where conversion fails]
+\label{rem:conv-fails}
+Theorem~\ref{thm:conversion} requires $B$ absolutely continuous on $I$.
+Warps violate AC: at a warp $\tau_w$, $B$ has a jump
+$B(\tau_w) - B(\tau_w^-) = \Delta b_w > 0$, so $dB$ has an atom
+$\Delta b_w \cdot \delta_{\tau_w}$ that cannot be written as $B'(\tau)\dtau$
+for any $B' \in \Lone$. The conversion theorem does not extend across warps;
+\S\ref{sec:stops-warps} treats this as an irreducible obstruction.
+\end{remark}
+
+\begin{corollary}[Zoom is orthogonal]
+\label{cor:z-ortho}
+The zoom $z(a)$ is multiplied outside the integral and does not appear in
+\eqref{eq:beat-to-time} or \eqref{eq:time-to-beat}. Conversion preserves $z$
+verbatim; the engine independently chooses whether to honor it.
+\end{corollary}
+
+\begin{remark}[Distance preserved; cumulative not]
+\label{rem:cum-not-invariant}
+Theorems~\ref{thm:conversion} and \ref{thm:t2b} preserve $d_\mu(a, b)$ for all
+$a, b$. The cumulative $C_\mu$ is \emph{not} preserved pointwise across a
+change of measure: an antiderivative is measure-specific. Engine swap must
+rebuild $C_\mu$ from scratch in the new measure; cached values are not
+translatable.
+\end{remark}
+
+% =====================================================================
+\section{Stops, delays, and warps}
+\label{sec:stops-warps}
+
+\subsection{Stops and delays}
+
+A stop at chart time $\tau_s$ of duration $\delta$ has $B$ constant on
+$[\tau_s, \tau_s + \delta]$. Then $dB$ assigns this interval measure zero, so
+\[
+\int_{(\tau_s, \tau_s + \delta]} s(B(\tau))\dB(\tau) \;=\; 0
+\]
+for any integrand --- notes do not move. In time-space, the analogous behavior
+requires setting $v = 0$ on the stop and re-parameterizing the chart-time
+domain by $+\delta$ for all subsequent events. This is a domain extension, not
+a pointwise patch.
+
+\subsection{Warps}
+
+A warp at $\tau_w$ of beat extent $\Delta b > 0$ contributes the atom
+$\Delta b \cdot \delta_{\tau_w}$ to $dB$. Then
+\[
+\int_{(a, b]} s(B(\tau))\dB(\tau)
+\;=\; \int_{(a,b] \setminus \{\tau_w\}} s \cdot B'\dtau
+\;+\; s(b_w^+) \cdot \Delta b \cdot \one_{\tau_w \in (a, b]}.
+\]
+The atom contributes a step jump in $C_{dB}$ at $\tau_w$ with size proportional
+to the SCROLLS ratio at the warp's landing beat.
+
+\begin{proposition}[Warp irreducibility]
+\label{prop:warp-irreducible}
+There is no $v \in \Lone(T, d\tau)$ such that
+$\int_{(a, b]} v(\tau)\dtau$ has a jump discontinuity in $b$ at some
+$\tau_w \in (a, b]$.
+\end{proposition}
+
+\begin{proof}
+For $v \in \Lone(T, d\tau)$, the cumulative
+$F(b) = \int_{(t_0, b]} v(\tau)\dtau$ is absolutely continuous in $b$, hence
+continuous. No $\Lone$ density against Lebesgue measure produces jump
+discontinuities in its antiderivative. \qedhere
+\end{proof}
+
+\begin{remark}[The obstruction is the measure, not the integrand]
+\label{rem:obstruction-is-measure}
+Proposition~\ref{prop:warp-irreducible} is stronger than ``you'd need a
+Dirac.'' Even allowing $v$ to range over signed Radon measures rather than
+$\Lone$ functions does not help \emph{within time-space}: if one extends the
+integrand to a measure $v\dtau \to \nu$, then $\int_{(a,b]} \nu$ depends on
+$\nu$, not on $\dtau$; one has effectively replaced the time-space pair
+$(d\tau, v)$ with $(\nu, 1)$, which is a beat-space integral against a
+different measure. Thus warps are not expressible by enriching the integrand
+within the time-space framework: they require a different measure.
+\end{remark}
+
+\begin{corollary}[Canonical form]
+\label{cor:canonical}
+Any framework intended to support warps must integrate against a measure with
+nontrivial singular part. The canonical \texttt{SVData} stores $dB$
+with explicit warp atoms, making beat-space the structurally complete
+representation. Time-space-authored charts (osu!, Quaver) embed by setting the
+singular part to zero.
+\end{corollary}
+
+% =====================================================================
+\section{BPM--SV coupling toggle}
+\label{sec:coupling}
+
+Some authoring formats (Quaver) expose a flag controlling whether timing-point
+BPM scales SVs (\texttt{BPMDoesNotAffectScrollVelocity}). In the present
+framework this is not a separate space: it is a choice of which integrand
+the chart authored.
+
+\begin{definition}[Coupled and decoupled time-space]
+The \emph{BPM-coupled} time-space integral is
+$\int v(\tau) \cdot \bpm(\tau)/\bpmz \dtau$;
+the \emph{BPM-decoupled} integral is the plain $\int v(\tau)\dtau$.
+\end{definition}
+
+\begin{proposition}[Coupling is a choice of authoring frame]
+\label{prop:coupling}
+A BPM-coupled time-space integrand $v_{\mathrm{coup}}$ produces the same
+render distance as a beat-space integrand $s$ on AC intervals iff
+$v_{\mathrm{coup}} = s \circ B$ (after multiplying by $60/\bpmz$).
+\end{proposition}
+
+\begin{proof}
+Direct from Theorem~\ref{thm:conversion} with $v^* = (s \circ B) \cdot \bpm/\bpmz$.
+\qedhere
+\end{proof}
+
+The flag therefore declares which authoring frame the file uses; the canonical
+document stores the equivalent decoupled form, and the engine applies coupling
+at evaluation if requested by the chart's flag.
+
+% =====================================================================
+\section{Per-column and per-note SV}
+\label{sec:per-column}
+
+\begin{definition}[Selector]
+A \emph{selector} is an element of
+$\mathrm{All} \,\sqcup\, 2^C \,\sqcup\, 2^{\mathcal{N}}$
+($\mathrm{All}$, a column subset, or a note-id subset).
+\end{definition}
+
+Each velocity record carries a selector. The per-column integrand is
+\[
+v(\tau, c) \;=\; m_k \quad \text{where } k = \max\{ i : \tau_i \leq \tau,\ c \in \mathrm{sel}(i)\}.
+\]
+
+\begin{theorem}[Per-column independence]
+\label{thm:per-column}
+Fix a measure $\mu$ on $T$ and a per-column integrand $v(\tau, c)$ with
+$v(\cdot, c) \in \Lone(T, \mu)$ for each $c$. Define
+$d_c(a, b) = z(a, c) \cdot \int_{(a,b]} v(\tau, c)\dmu(\tau)$ and
+$C_c(t) = \int_{(t_0, t]} v(\tau, c)\dmu(\tau)$. Then
+\S\ref{sec:functional}--\S\ref{sec:conv} apply column-wise: the conversion of
+Theorem~\ref{thm:conversion} preserves $d_c$ for each $c$ independently,
+and stop/warp behavior under $\mu = dB$ is per-column identical.
+\end{theorem}
+
+\begin{proof}
+$\mu$ is column-independent and the analyses of
+\S\ref{sec:functional}--\S\ref{sec:conv} depend on $v$ only through its
+$\Lone(T, \mu)$ membership. Apply column-wise. \qedhere
+\end{proof}
+
+\begin{remark}[Storage and per-note]
+The cumulative cache becomes $K$ parallel arrays $C_0, \dots, C_{K-1}$.
+Records with selector $\mathrm{All}$ share segments structurally; per-column
+records branch the affected columns. Per-note SV (selector
+$N \subseteq \mathcal{N}$) is type-compatible: the integrand becomes
+$v(\tau, n)$ indexed by note. Sparse storage is required for efficient
+$|\mathcal{N}|$-many cumulative arrays; the math (Theorem~\ref{thm:per-column})
+extends without change.
+\end{remark}
+
+% =====================================================================
+\section{Numerical exactness}
+\label{sec:numerics}
+
+\begin{proposition}[Exactness for piecewise-constant integrands]
+\label{prop:exact}
+If $v$ is piecewise-constant on a finite partition of $T$ and $\mu$ is a finite
+sum of an AC part with piecewise-constant density plus finitely many atoms,
+then $C_\mu$ is piecewise-linear-with-jumps on the common refinement of
+the partitions. Evaluation of $C_\mu(t)$ at any $t$ reduces to one bisection
+plus a constant-time arithmetic expression
+\[
+C_\mu(t) \;=\; C_\mu(\tau_k) + (t - \tau_k) \cdot v_k \cdot \rho_k
+\;+\; \sum_{w : \tau_w \in (\tau_k, t]} v(\tau_w^+) \cdot a_w,
+\]
+where $\rho_k$ is the AC density of $\mu$ on segment $k$ and $a_w$ is the
+atomic mass at warp $\tau_w$. No quadrature is required.
+\end{proposition}
+
+\begin{remark}[Test invariant]
+For any $\mathrm{SVData}$ and any sample time $t$, the integrator's
+$C_\mu(t)$ must agree with the brute-force reference
+\[
+C_{\mathrm{ref}}(t) \;=\; \sum_i v_i \cdot \mu(I_i \cap (t_0, t])
+\]
+to numerical precision (modulo summation order). This is a property test
+across the full $\mathrm{SVData}$ space.
+\end{remark}
+
+\begin{remark}[Eased segments]
+Quaver SSF and fluXis multiplier events relax piecewise-constant $v$ to
+piecewise-smooth (linear, sinusoidal, etc.). The framework is unchanged: the
+integrator must compute per-segment closed-form antiderivatives instead of
+the constant case in Proposition~\ref{prop:exact}. Numerical exactness becomes
+exactness up to the analytic accuracy of the easing-curve antiderivative.
+\end{remark}
+
+% =====================================================================
+\section{Architectural mapping}
+\label{sec:arch}
+
+The structural payoff of the measure-theoretic framing is that the engine
+collapses to a single integrator parameterized by the document's measure.
+Engine identity reduces to a choice of $\mu$.
+
+\subsection{The integrator}
+
+A single procedure handles all engines:
+\[
+\texttt{cumulative\_at}(t, \mathrm{doc}) \;=\;
+\int_{(t_0, t]} v(\tau)\, d\mu_{\mathrm{doc}}(\tau).
+\]
+The procedure decomposes the integral by segments of the common refinement
+(Proposition~\ref{prop:exact}) and accumulates AC contributions and atoms
+separately. \texttt{distance}, \texttt{render\_multiplier\_at}, and
+\texttt{inverse\_cumulative\_at} are derived from this primitive.
+
+\subsection{SVData}
+
+The canonical document carries:
+\begin{itemize}[leftmargin=2em]
+    \item $\mu$: the integration measure, stored as
+          $(\rho(\tau)\dtau, \{(\tau_w, a_w)\})$ --- a piecewise-constant AC
+          density plus a list of atoms. For time-space-authored charts,
+          $\rho \equiv 1$ and the atom list is empty. For beat-space-authored
+          charts, $\rho = B'$ and atoms are warps.
+    \item Velocity records: piecewise-constant $v$ with selectors per
+          \S\ref{sec:per-column}. Each record carries $(\tau, b, m, \mathrm{sel}, \mathrm{group})$;
+          the engine uses $\tau$ for time-space evaluation, $b$ for beat-space.
+    \item Speed curves $z$: position-dependent zoom, optional, with
+          per-segment easing.
+    \item Time offsets: per-(time, group) animated visual offsets, optional.
+    \item Coupling flag: BPM-coupled vs.\ BPM-decoupled
+          (\S\ref{sec:coupling}).
+\end{itemize}
+
+By Corollary~\ref{cor:canonical}, the canonical form supports atoms in $\mu$;
+time-space-authored charts embed losslessly by leaving the atom list empty.
+
+\subsection{Engines as measure choices}
+
+Each engine corresponds to a fixed $\mu$:
+
+\begin{center}
+\begin{tabular}{lccccc}
+\toprule
+Engine & $\mu$ & atoms & $z$ & warps & per-col \\
+\midrule
+TimeSpace      & $d\tau$           & dropped  & opt   & dropped   & opt \\
+BeatSpace      & $dB$              & honored  & yes   & native    & opt \\
+ConstantBPM    & $dB$, $v\equiv 1$ & honored  & const & dropped   & no \\
+Identity       & $d\tau$, $v\equiv 1$ & ---   & no    & ---       & no \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The TimeSpace and BeatSpace engines run \emph{the same integrator} on the same
+$\mathrm{SVData}$; they differ only in the $\mu$ they request. ConstantBPM
+additionally pins $v \equiv 1$ and $z$ to the player's hi-speed. Identity
+pins both to constants.
+
+\subsection{Engine swap}
+\label{sec:swap}
+
+Per Remark~\ref{rem:cum-not-invariant}, swap reduces to:
+\begin{enumerate}[leftmargin=2em]
+    \item Reconfigure the integrator's measure to the new engine's $\mu$.
+    \item Discard $C_\mu$ and rebuild from the document.
+    \item Re-anchor the clock smoother by mapping the current chart-time $t$
+          forward through the new $C_\mu$, not by translating the old value.
+    \item Refresh \texttt{sv\_enabled} from the new engine's flag; if a
+          CMOD-style override is suspended, refresh that state too.
+\end{enumerate}
+The renderer's per-frame contract is unchanged.
+
+% =====================================================================
+\section{Open extensions}
+
+\begin{itemize}[leftmargin=2em]
+    \item \textbf{Per-note SV}: formally supported by
+          Theorem~\ref{thm:per-column}; deferred pending sparse cumulative
+          storage.
+    \item \textbf{Modscripting}: adds a per-frame mutation of $v$, $z$, and
+          $\mathrm{sel}$. Out of scope; the framework's static-positioning
+          subset is sufficient for non-modfile charts.
+    \item \textbf{Eased SV segments}: Proposition~\ref{prop:exact} relaxes to
+          per-segment closed-form antiderivatives; Remark on numerical
+          exactness applies.
+    \item \textbf{Singular non-atomic measures}: the framework permits
+          $\mu_{\mathrm{sing}}$ that is non-atomic (e.g.\ Cantor-like).
+          No game uses these; the framework would handle them in principle
+          but no engine implements such measures.
+\end{itemize}
+
+\end{document}
