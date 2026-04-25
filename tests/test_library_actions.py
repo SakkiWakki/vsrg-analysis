@@ -2,7 +2,7 @@
 
 The registry is the backend for plugin-contributed buttons on the
 library tab. Tests exercise add/replace-by-key semantics, per-module
-cleanup, listener notification, and listener error isolation — each
+cleanup, listener notification, and listener error isolation ; each
 property is load-bearing for a plugin to safely add or remove buttons
 without the UI going stale or a badly-written listener taking the
 registry down."""

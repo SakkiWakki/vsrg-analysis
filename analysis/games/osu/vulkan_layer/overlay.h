@@ -24,7 +24,7 @@ namespace vsrg {
 
 // Lazily opens the shm segment (same path as the gamescope overlay:
 // /dev/shm/vsrg_overlay). Returns true once attached. Safe to call
-// every frame — no-op once attached.
+// every frame ; no-op once attached.
 bool shm_ensure(void);
 
 // Draw the current widget snapshot into the ImGui background draw

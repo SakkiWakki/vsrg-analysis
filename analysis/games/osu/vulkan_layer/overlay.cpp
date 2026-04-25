@@ -3,7 +3,7 @@
 // Reads the same /dev/shm/vsrg_overlay segment the gamescope overlay
 // binary reads (single contract, two consumers), and replays each
 // widget as an ImGui background-drawlist primitive. We intentionally
-// do NOT use any ImGui widgets (Begin/Button/etc.) — the HUD is just
+// do NOT use any ImGui widgets (Begin/Button/etc.) ; the HUD is just
 // raw rects + text, same shape as our NanoVG/gamescope renderer, so
 // it won't look like a debug menu.
 //
@@ -138,7 +138,7 @@ bool shm_ensure(void) {
     struct stat st;
     if (::fstat(fd, &st) < 0) { ::close(fd); return false; }
     if (st.st_size < (off_t)sizeof(VsrgOverlayShm)) {
-        // Don't truncate here — if the publisher hasn't run yet, an
+        // Don't truncate here ; if the publisher hasn't run yet, an
         // empty file won't have VSRG_OVERLAY_MAGIC so shm_read will
         // just fail benignly.
         if (::ftruncate(fd, sizeof(VsrgOverlayShm)) < 0) {

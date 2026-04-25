@@ -2,7 +2,7 @@
 
 Shown automatically on first launch (no prior saved paths) and re-openable
 later from the Library tab. Iterates over every registered GUI adapter and
-builds one row per game — no game-literal names live in this module."""
+builds one row per game ; no game-literal names live in this module."""
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -113,14 +113,14 @@ class PathsDialog(QDialog):
     def __init__(self, parent=None, *, first_run=False):
         super().__init__(parent)
         self.setWindowTitle('Set install paths' if not first_run
-                            else 'Welcome — set your install paths')
+                            else 'Welcome ; set your install paths')
         self.setMinimumWidth(560)
 
         v = QVBoxLayout(self)
         if first_run:
             intro = QLabel(
                 "Looks like this is your first run. Point the app at your "
-                "game install folders — you can change these later from the "
+                "game install folders ; you can change these later from the "
                 "Library tab.")
             intro.setWordWrap(True)
             v.addWidget(intro)

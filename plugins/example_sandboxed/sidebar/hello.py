@@ -2,9 +2,9 @@
 
 Demonstrates:
 
-  * The declarative component API — the plugin returns a ``Component``
+  * The declarative component API ; the plugin returns a ``Component``
     tree, the host renders it.
-  * Per-plugin persisted config via ``host_api.plugin_config`` — the
+  * Per-plugin persisted config via ``host_api.plugin_config`` ; the
     click counter below survives restarts, and updates to it from one
     window fan out to every other window live.
 """

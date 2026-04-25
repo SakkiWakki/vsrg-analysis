@@ -3,7 +3,7 @@
 Note-like elements outside the main replay stream. Shares the same cull
 window with the notes layer (single SV-space bisect per bucket).
 
-All visible-index computation is vectorized with NumPy — the Python loop
+All visible-index computation is vectorized with NumPy ; the Python loop
 only runs over notes that actually need drawing.
 """
 from __future__ import annotations
@@ -154,7 +154,7 @@ def draw_lane_line(painter, color, lane_x, lane_w, y0, y1, width=1):
 def _cull_indices(sorted_keys: np.ndarray,
                   lo: float, hi: float) -> np.ndarray:
     """Return an int array of indices whose keys fall within [lo, hi).
-    Uses bisect on the sorted array — O(log n) + O(visible)."""
+    Uses bisect on the sorted array ; O(log n) + O(visible)."""
     i = bisect.bisect_left(sorted_keys, lo)
     j = bisect.bisect_right(sorted_keys, hi)
     return np.arange(i, j, dtype=np.intp)
@@ -164,10 +164,10 @@ def _draw_chart_sprites(ctx, painter, times, cols, sv_times, active_until, *,
                         sprite, keyed, y_center):
     """Cull + blit a chart-stream sprite bucket (mines/lifts/fakes).
 
-    - `sprite`   — sprite cache key
-    - `keyed`    — True when the sprite keys on `col` (lifts, fakes).
+    - `sprite`   ; sprite cache key
+    - `keyed`    ; True when the sprite keys on `col` (lifts, fakes).
       False for palette-independent glyphs like mines.
-    - `y_center` — True when the sprite's pixmap is `(lane_w, lane_w)`
+    - `y_center` ; True when the sprite's pixmap is `(lane_w, lane_w)`
       and should blit centered on `y` (mines). False for head-shaped
       pixmaps `(lane_w, note_h)` that blit at `y - note_h / 2`.
     """

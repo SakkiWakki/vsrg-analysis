@@ -64,7 +64,7 @@ struct Region {
 ///
 /// Every mapping that is *writable or executable* **and** either:
 ///   * lies inside osu!.exe's PE image (bounds derived from the PE
-///     header's ``SizeOfImage``, not from maps-file pathnames — on
+///     header's ``SizeOfImage``, not from maps-file pathnames ; on
 ///     Linux/wine the ``.text`` section is an anonymous sibling of the
 ///     tiny named header mapping), **or**
 ///   * is an anonymous ``rwxp`` region (the .NET JIT pool).
@@ -84,7 +84,7 @@ struct Region {
 /// # Why this is stricter than tosu
 ///
 /// Tosu's ``tsprocess`` keeps every mapping whose perms start with
-/// ``rw`` — including all anonymous ``rw-p`` data heaps. That's
+/// ``rw`` ; including all anonymous ``rw-p`` data heaps. That's
 /// looser than needed (signatures never match in pure data) and it
 /// drops ``r-xp`` PE code entirely. Our set is a superset of the
 /// executable portion of tosu's: we find the same JIT-resident sigs
@@ -97,7 +97,7 @@ fn osu_scan_regions(pid: u32) -> io::Result<Vec<Region>> {
 
     // Locate osu!.exe's image base via the header mapping, then read
     // SizeOfImage out of the PE header to get the real image bounds.
-    // Failure here is not fatal — we simply scan the anonymous JIT
+    // Failure here is not fatal ; we simply scan the anonymous JIT
     // pool without the PE-image fast path.
     let image_bounds = pe_image_bounds(pid, &text).ok();
 
@@ -118,7 +118,7 @@ fn osu_scan_regions(pid: u32) -> io::Result<Vec<Region>> {
             continue;
         };
 
-        // Keep mappings inside the PE image regardless of path —
+        // Keep mappings inside the PE image regardless of path ;
         // wine maps the image header as named ``osu!.exe`` and the
         // rest of the image anonymously, so a path filter alone drops
         // ``.text``.
@@ -126,7 +126,7 @@ fn osu_scan_regions(pid: u32) -> io::Result<Vec<Region>> {
             Some((base, img_end)) => start >= base && end <= img_end,
             None => false,
         };
-        // Otherwise only keep anonymous executable regions — the JIT
+        // Otherwise only keep anonymous executable regions ; the JIT
         // pool. Named mappings (wine DLLs, .nls files, mapped .so's)
         // are not osu! code.
         let is_anon_exec = perms.contains('x') && path.is_empty();
@@ -147,7 +147,7 @@ fn osu_scan_regions(pid: u32) -> io::Result<Vec<Region>> {
 ///   [base + 0x3c]: e_lfanew (i32, offset to PE header)
 ///   [base + e_lfanew]: "PE\0\0"
 ///   [base + e_lfanew + 0x18]: OptionalHeader magic (0x10b PE32,
-///                             0x20b PE32+) — SizeOfImage sits at
+///                             0x20b PE32+) ; SizeOfImage sits at
 ///                             +0x38 of the optional header in both.
 fn pe_image_bounds(pid: u32, maps_text: &str) -> io::Result<(u64, u64)> {
     let mut image_base: Option<u64> = None;
@@ -279,7 +279,7 @@ pub fn scan(pid: u32, pattern: &Pattern) -> io::Result<Option<u64>> {
             let slice = &mut buf[..want];
             if let Err(err) = read_exact(pid, cursor, slice) {
                 // One unreadable page inside a region is odd but not
-                // fatal — skip the chunk and keep going.
+                // fatal ; skip the chunk and keep going.
                 cursor = cursor.saturating_add(want as u64);
                 // Suppress common transient failures; surface others.
                 if err.raw_os_error() != Some(libc::EIO) && err.raw_os_error() != Some(libc::EFAULT)

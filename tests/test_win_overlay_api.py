@@ -1,4 +1,4 @@
-"""Windows counterpart to ``test_overlay_api`` — covers the named-
+"""Windows counterpart to ``test_overlay_api`` ; covers the named-
 mapping branch in ``OverlayPublisher.start`` and verifies that a second
 opener of the same name sees the publisher's writes.
 
@@ -60,8 +60,8 @@ def test_start_creates_named_mapping(publisher):
     # The publisher's ``_shm_path`` is the basename we passed; the
     # actual tagname is the same string (no prefix on Windows per
     # publisher.py).
-    tag = publisher._shm_path  # noqa: SLF001 — whitebox; tag is the contract.
-    # Reopening by name must succeed — that's the whole point of the
+    tag = publisher._shm_path  # noqa: SLF001 ; whitebox; tag is the contract.
+    # Reopening by name must succeed ; that's the whole point of the
     # Windows path (one writer, many readers).
     view = _open_mapping(tag)
     try:
@@ -128,7 +128,7 @@ def test_stop_empties_frame_before_closing(publisher):
     # The DLL consumer polls forever; when the publisher stops, it
     # commits one last empty frame so an attached renderer clears
     # instead of latching whatever the last commit left behind.
-    # Keep a reader open across the stop — if we drop our handle first,
+    # Keep a reader open across the stop ; if we drop our handle first,
     # the named object is gone with nothing to re-open.
     with publisher.frame() as f:
         f.rect('a', 0.0, 0.0, 0.1, 0.1)

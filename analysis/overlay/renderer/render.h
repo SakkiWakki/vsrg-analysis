@@ -3,7 +3,7 @@
 // This is the ONLY file outside render.c that gets to see the
 // underlying graphics library. Today that library is NanoVG; if we
 // ever swap it out (Skia, direct-GL, Vulkan), only render.c needs to
-// change — osu_overlay.c and everything else calls through this API.
+// change ; osu_overlay.c and everything else calls through this API.
 //
 // Contract:
 //  - render_init() must be called once after the GL context is
@@ -12,7 +12,7 @@
 //    The caller passes the drawable size in pixels (not DPR-scaled;
 //    our overlay runs at the compositor's native resolution).
 //  - Colours are the publisher's RGBA32 format (byte 0 = R,
-//    byte 3 = A — see analysis.overlay.api::rgba).
+//    byte 3 = A ; see analysis.overlay.api::rgba).
 //  - Text is drawn from a top-left anchor at the caller's specified
 //    pixel height, consistent with the publisher's bitmap-era layout.
 //    render_text_measure returns the exact pixel advance + ascent
@@ -49,7 +49,7 @@ void render_text(const char *s, float x, float y,
 // font isn't loaded. Matches render_text's advancing pen exactly.
 float render_text_width(const char *s, float px_height);
 
-// Height of a text box at ``px_height`` — used so the resolve-box
+// Height of a text box at ``px_height`` ; used so the resolve-box
 // layout math produces a bounding rect the hit-test can trust.
 float render_text_height(float px_height);
 

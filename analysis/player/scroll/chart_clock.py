@@ -8,7 +8,7 @@ that comes from the audio engine (when playing) or a wall-clock accumulator
 
 Why this exists: chart time used to be a plain float advanced from
 `time.monotonic()` dt each tick. The audio callback produces samples at
-its own hardware cadence, so the two drifted — every stall (long paint,
+its own hardware cadence, so the two drifted ; every stall (long paint,
 GC pause, OS scheduling) widened the gap. `AudioEngine.set_state` then
 seek-resynced to close it, which flushes the phase vocoder's OLA buffer
 and chops audible chunks out.
@@ -63,7 +63,7 @@ class CullSpaceSmoother:
 
     The "advance" step tracks audio's own cull-space velocity (which bakes
     in local SV factor) so the smoother doesn't lag on high-SV sections.
-    Only residual drift — not the whole velocity — is low-passed.
+    Only residual drift ; not the whole velocity ; is low-passed.
     """
 
     _DRIFT_HALF_LIFE = 0.05      # seconds (half of sv-drift closed per 50ms)
@@ -97,7 +97,7 @@ class CullSpaceSmoother:
 
         elapsed = max(0.0, now_wall - self._last_read_wall)
         # Advance current by audio's own cull-space delta since last read.
-        # This captures local SV rate for free — no need to compute a
+        # This captures local SV rate for free ; no need to compute a
         # d(sv)/dt ourselves.
         advanced = self._current_sv + (target_sv - self._last_target_sv)
         drift = target_sv - advanced
@@ -215,7 +215,7 @@ class ChartClock:
         self._t_max = float(t_max) if t_max is not None else float('inf')
         # Audio time reader: callable returning source-file seconds, thread-
         # safe on the caller's side (the audio engine locks internally).
-        # `None` means no audio — fall back to wall-clock.
+        # `None` means no audio ; fall back to wall-clock.
         self._audio_getter: Callable[[], float] | None = None
         # Retained only for tests/experiments. Production reads return the
         # audio engine's DAC-clock-anchored chart time directly.
@@ -316,7 +316,7 @@ class ChartClock:
             return t
 
     def intended(self) -> float:
-        """Chart time the Player has asked for — the wall-clock anchor,
+        """Chart time the Player has asked for ; the wall-clock anchor,
         advanced forward if unpaused + not audio-driven. Differs from
         `now()` only when an audio source is attached: `now()` reads the
         PV's actual position; `intended()` reads what seek/setter calls

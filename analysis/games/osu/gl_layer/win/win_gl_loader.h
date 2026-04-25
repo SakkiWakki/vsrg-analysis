@@ -126,7 +126,7 @@ extern PFNGLTEXSUBIMAGE2DPROC            vsrg_glTexSubImage2D;
 #define glVertexAttribPointer       vsrg_glVertexAttribPointer
 #define glTexSubImage2D             vsrg_glTexSubImage2D
 
-// Needed by nanovg_gl.h constant references — not in Windows SDK gl.h.
+// Needed by nanovg_gl.h constant references ; not in Windows SDK gl.h.
 #define GL_TEXTURE0                     0x84C0u
 #define GL_ARRAY_BUFFER                 0x8892u
 #define GL_STREAM_DRAW                  0x88E0u

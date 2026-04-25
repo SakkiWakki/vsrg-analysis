@@ -9,7 +9,7 @@ blit per sprite.
 Design constraints (from the refactor brief):
 
 1. **One buffer per note-part.** Tap head, LN head, LN tail, LN body,
-   mine, lift, fake — each owns an independent buffer namespace so a
+   mine, lift, fake ; each owns an independent buffer namespace so a
    game can skin them independently (e.g. LN heads different from taps).
 2. **Per-replay allocation.** Only the sprites the active game's
    adapter declares get pre-allocated. An LN-only game never rasterizes

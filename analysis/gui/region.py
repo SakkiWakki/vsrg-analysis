@@ -12,12 +12,12 @@ register with the router.
 
 Shape:
 
-  * ``Region`` is a lightweight protocol — any object with ``contains``
+  * ``Region`` is a lightweight protocol ; any object with ``contains``
     and the optional ``on_wheel`` / ``on_mouse_down`` hooks works. No
     inheritance required.
   * ``InputRouter`` walks regions in registered order and returns True
     if one handled the event. The tab short-circuits on True.
-  * Keyboard events are global (not positional) and stay on the tab —
+  * Keyboard events are global (not positional) and stay on the tab ;
     regions only see wheel + mouse.
 """
 from __future__ import annotations
@@ -42,7 +42,7 @@ class Region(Protocol):
 class InputRouter:
     """Dispatches positional events to the first region that contains
     the cursor. Regions are scanned in registration order; later
-    registrations win for overlapping areas if you put them first — the
+    registrations win for overlapping areas if you put them first ; the
     common pattern is to register overlays before the base region they
     cover.
     """
@@ -98,7 +98,7 @@ class InputRouter:
         """Broadcast moves to every region's ``on_mouse_move`` (if any).
 
         Unlike wheel/down, moves aren't owned by the region under the
-        cursor — during a drag the cursor can cross region boundaries
+        cursor ; during a drag the cursor can cross region boundaries
         and each region needs to see the event (e.g. the sidebar must
         draw the insertion line when the cursor enters it even though
         the drag started on a free-region widget). Handlers return True

@@ -2,7 +2,7 @@
 //!
 //! The plugin calls into this crate to avoid the tosu HTTP hop. Every
 //! public PyO3 function returns either a plain value or a Python-side
-//! exception — we keep the API small because each addition means one
+//! exception ; we keep the API small because each addition means one
 //! more thing that can drift against osu! binary updates.
 //!
 //! Surface (Linux/wine and native Windows, mania-only):
@@ -64,7 +64,7 @@ fn find_osu_pid() -> PyResult<Option<u32>> {
 /// wildcard byte. Example: ``"F8 01 74 04 ?? 65 8B"``. Returns the
 /// absolute address of the match, or None if not found.
 ///
-/// Debug/verification tool only — real callers should use ``resolve``
+/// Debug/verification tool only ; real callers should use ``resolve``
 /// and let ``signatures.rs`` own the byte literals.
 #[pyfunction]
 fn scan_for_pattern(pid: u32, pattern_hex: &str) -> PyResult<Option<u64>> {
@@ -205,13 +205,13 @@ fn resolve(pid: u32) -> PyResult<ResolvedHandle> {
 ///
 /// Returns a dict with the keys consumed by ``LiveSnapshot``:
 ///
-///   - ``playing``: bool — False means the pointer chain is null
+///   - ``playing``: bool ; False means the pointer chain is null
 ///     (player on menu / between maps).
 ///   - ``combo``, ``max_combo``: int
-///   - ``mode``: int — osu! ruleset id (0=std, 1=taiko, 2=catch, 3=mania)
+///   - ``mode``: int ; osu! ruleset id (0=std, 1=taiko, 2=catch, 3=mania)
 ///   - ``accuracy``: float (percent, 0..100)
 ///   - ``hit_300``/``hit_100``/``hit_50``/``hit_miss``/``hit_geki``/``hit_katu``: int
-///   - ``hit_errors_ms``: list[int] — per-hit timing offsets in ms
+///   - ``hit_errors_ms``: list[int] ; per-hit timing offsets in ms
 #[pyfunction]
 fn read_state<'py>(py: Python<'py>, handle: &ResolvedHandle) -> PyResult<Bound<'py, PyDict>> {
     #[cfg(any(target_os = "linux", target_os = "windows"))]

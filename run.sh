@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# vsrg-analysis — end-user launcher for a prebuilt release zip.
+# vsrg-analysis ; end-user launcher for a prebuilt release zip.
 # First run creates a venv, installs dependencies + bundled native
 # wheel, and stages the overlay .so. Subsequent runs jump to the GUI.
 #
 # A prebuilt release only needs Python 3.10+. No Rust, C compilers,
-# or CMake required — all native pieces are pre-compiled.
+# or CMake required ; all native pieces are pre-compiled.
 #
 # Source contributors should run `make` instead.
 

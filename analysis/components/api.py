@@ -4,7 +4,7 @@ A component is a plugin-supplied ``(manifest, draw)`` pair. The manifest
 declares *where* the component is allowed to live (``sidebar``,
 ``overlay``, future surfaces) and what live data it needs. The draw
 function is called once per frame on every surface that agreed to host
-it — each surface's backend translates the component's calls into its
+it ; each surface's backend translates the component's calls into its
 native primitives (QPainter for the sidebar, shared-memory widgets for
 the gamescope overlay, and so on).
 
@@ -422,7 +422,7 @@ class DataAnalysis(Protocol):
 # ── Drawing primitives ─────────────────────────────────────────────
 
 # All coordinates passed to :class:`Context` are *component-local
-# pixels* — the component thinks of itself as painting into its own
+# pixels* ; the component thinks of itself as painting into its own
 # ``(0, 0, ctx.w, ctx.h)`` box. Each backend translates to its native
 # coord system: sidebar adds the column offset; overlay normalises to
 # [0, 1] of the framebuffer.
@@ -435,7 +435,7 @@ class Context(Protocol):
     The plugin calls geometry helpers + primitives; the backend decides
     what painting actually means. ``measure_only=True`` lets the sidebar
     pre-measure a component (for pinned-bottom layout) without touching
-    the painter — overlay backends ignore the flag.
+    the painter ; overlay backends ignore the flag.
     """
 
     surface: str                  # one of SURFACE_*
@@ -509,7 +509,7 @@ class Manifest:
     """Declarative spec for a component. One per plugin; lists every
     surface the component is allowed on and what data it needs. The
     registry refuses to mount a component on a surface whose data source
-    doesn't cover ``requires_data`` — prevents first-frame crashes from
+    doesn't cover ``requires_data`` ; prevents first-frame crashes from
     mis-targeted components.
 
     Surface-specific layout hints live in ``plugin_fields`` under the
@@ -536,7 +536,7 @@ class Manifest:
         object.__setattr__(self, 'layers', tuple(self.layers))
 
 
-# The draw callable's type alias. ``None`` return — the backend owns
+# The draw callable's type alias. ``None`` return ; the backend owns
 # cursor flushing and hitbox commit.
 DrawFn = Callable[[Context], None]
 

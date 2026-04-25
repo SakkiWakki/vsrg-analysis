@@ -23,7 +23,7 @@ A plugin module exposes::
 
 The registry discovers these modules across bundles the same way
 ``PluginManager.discover`` handles replay/sidebar modules. It *does
-not* replace the existing sidebar/overlay registries — it feeds them
+not* replace the existing sidebar/overlay registries ; it feeds them
 by registering an adapter section/spec so the rest of the renderer
 continues to work without surgery. Plugins opt in to the new API one
 at a time.
@@ -131,7 +131,7 @@ def discover_from_bundles(bundles) -> ComponentRegistry:
     Looks for ``register_components(add)`` on any module in
     ``bundle.replay_modules``, ``bundle.sidebar_modules``,
     ``bundle.overlay_modules``, ``bundle.viz_modules``. This mirrors how the existing
-    sidebar/overlay registries search — a plugin author can put a
+    sidebar/overlay registries search ; a plugin author can put a
     unified component anywhere, and the right surface picks it up.
     """
     registry = ComponentRegistry()
@@ -173,7 +173,7 @@ def bridge_into_gui_registry(components: ComponentRegistry,
     are skipped with a recorded mount report.
 
     This is the glue that lets the existing Qt renderer host unified
-    components without knowing anything about the new API — the section
+    components without knowing anything about the new API ; the section
     behaves like any other sidebar section.
     """
     from analysis.components.gui_backend import (
@@ -240,13 +240,13 @@ def bridge_into_overlay_registry(components: ComponentRegistry,
         # frame after state appeared", "first frame after state
         # disappeared") to avoid flooding the log. The dict can't be
         # named ``diag`` because the closure also references the
-        # ``analysis.diag`` module — Python's name resolution would
+        # ``analysis.diag`` module ; Python's name resolution would
         # shadow the import.
         latches = {'last_state_present': None, 'last_records': -1}
 
         # Closure captures the component so the overlay-side draw_fn
         # can pull live game state at frame time. The game state lookup
-        # is deliberately deferred — the overlay registry invokes draw_fn
+        # is deliberately deferred ; the overlay registry invokes draw_fn
         # on its thread; whichever module owns the state provides it
         # via a registered callback.
         def _draw(frame, _comp=comp, _m=m, _state=latches):

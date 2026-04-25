@@ -14,11 +14,11 @@ pixmap's top-left. They never know about screen coordinates; the
 drawer blits the result with `drawPixmap` at the right `(x, y)`.
 
 State keys (shared across head-like sprites):
-  'normal'    — upcoming / tap / held
-  'miss_tap'  — missed non-LN
-  'miss_ln'   — missed LN (head or tail)
-  'roll'      — roll-headed LN tail
-  'released'  — successfully released LN tail
+  'normal'    ; upcoming / tap / held
+  'miss_tap'  ; missed non-LN
+  'miss_ln'   ; missed LN (head or tail)
+  'roll'      ; roll-headed LN tail
+  'released'  ; successfully released LN tail
 
 LN bodies are 1-row tile pixmaps meant for `drawTiledPixmap`; they get
 their height from the draw-time rect, not from `size()`.
@@ -178,7 +178,7 @@ def _rasterize_ln_body(painter, key, ctx):
 
 
 def _rasterize_mine(painter, key, ctx):
-    """Concentric discs — red inner + gray outer."""
+    """Concentric discs ; red inner + gray outer."""
     lane_w = ctx.lane_w
     cx = lane_w / 2
     cy = lane_w / 2
@@ -212,7 +212,7 @@ def _rasterize_lift(painter, key, ctx):
 
 
 def _rasterize_fake(painter, key, ctx):
-    """Dimmed tap shape — fakes never judge."""
+    """Dimmed tap shape ; fakes never judge."""
     skin = ctx.player.skin
     lane_w, note_h = ctx.lane_w, ctx.note_h
     col = key['col']
@@ -276,7 +276,7 @@ _MISS_X_PAD = MISS_X_PAD
 
 
 def _miss_x_size(ctx):
-    """Miss-X pixmap is taller than a note head — the red outline box
+    """Miss-X pixmap is taller than a note head ; the red outline box
     extends `pad` above and below to wrap the note, and the outline
     pen itself is 3 px wide so we pad another half-pen + 1 for safety.
     Blit offset (computed by the caller) shifts it by `-pad` in y so

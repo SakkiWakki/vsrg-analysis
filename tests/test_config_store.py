@@ -60,7 +60,7 @@ def test_delete_removes_leaf(store):
     store.set('a.b.c', 1)
     assert store.delete('a.b.c') is True
     assert store.get('a.b.c') is None
-    # Parent dicts stay — we don't garbage-collect empty branches,
+    # Parent dicts stay ; we don't garbage-collect empty branches,
     # since future writes may re-fill them.
     assert store.get('a.b') == {}
 
@@ -206,7 +206,7 @@ def test_flush_is_idempotent(tmp_path):
 
 def test_autosave_debounce_coalesces_writes(tmp_path):
     """Burst of sets should produce one write. We observe indirectly by
-    flushing once at the end — the on-disk contents should match the
+    flushing once at the end ; the on-disk contents should match the
     final state regardless of intermediate values."""
     path = tmp_path / 'config.json'
     s = ConfigStore(path, debounce_s=0.05)
@@ -229,7 +229,7 @@ def test_autosave_disabled_skips_writes(tmp_path):
 
 
 def test_persisted_values_roundtrip_exact(tmp_path):
-    """Multi-type round-trip — JSON doesn't preserve tuples (become
+    """Multi-type round-trip ; JSON doesn't preserve tuples (become
     lists), so document that explicitly."""
     path = tmp_path / 'config.json'
     s = ConfigStore(path)

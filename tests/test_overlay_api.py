@@ -3,7 +3,7 @@
 The publisher writes into a fixed-size shared-memory region whose
 layout is pinned by ``overlay_shm.h``. Any mismatch between the
 struct format and the region size, or any off-by-one in slot
-indexing, would corrupt adjacent slots — and because the consumer is
+indexing, would corrupt adjacent slots ; and because the consumer is
 a C binary, a miscompile shows up as a renderer crash rather than a
 Python exception. So: pin every boundary as a test.
 
@@ -166,7 +166,7 @@ def test_struct_format_strings_parse():
 
 def test_commit_caps_at_max_widgets(publisher):
     # Emit twice as many widgets as the region holds. The extras
-    # must not be written beyond the slot array — worst case would
+    # must not be written beyond the slot array ; worst case would
     # be mmap.mmap.__setitem__ raising, better case we silently
     # truncate. Either way, no segfault, no past-end write.
     with publisher.frame() as f:
@@ -179,7 +179,7 @@ def test_commit_caps_at_max_widgets(publisher):
         f'n_widgets written as {n}, expected clamp to {MAX_WIDGETS}')
 
     # The byte one past the region end must not be writable via the
-    # publisher's commit path — it doesn't exist. Access here is
+    # publisher's commit path ; it doesn't exist. Access here is
     # just to confirm the region is exactly _TOTAL_SIZE long.
     assert len(mm) == _TOTAL_SIZE
 
@@ -192,7 +192,7 @@ def test_commit_clears_stale_slots(publisher):
                    color=rgba(123, 45, 67, 200))
 
     # Frame 2 emits only one widget. The other four slots from
-    # frame 1 must be zeroed, not left with stale data — otherwise
+    # frame 1 must be zeroed, not left with stale data ; otherwise
     # the renderer would draw phantom widgets.
     with publisher.frame() as f:
         f.rect('frame2_only', 0.2, 0.2, 0.1, 0.1, color=WHITE)
@@ -240,7 +240,7 @@ def test_long_text_is_truncated_without_overrun(publisher):
     # px_scale (slot0[11]) must be our requested 2.0, not garbage
     # from an overrunning text write.
     assert slot0[11] == pytest.approx(2.0), (
-        'px_scale was clobbered — text overran its field')
+        'px_scale was clobbered ; text overran its field')
 
     # And the second slot must be intact.
     slot1 = _WIDGET_STRUCT.unpack_from(mm, _HEADER_SIZE + _WIDGET_SIZE)
@@ -304,7 +304,7 @@ def test_widget_roundtrip_matches_input(publisher):
     assert kind == KIND_RECT
     assert anchor == ANCHOR_TL
     assert w_id == rid
-    assert g_id == 0              # no group — standalone
+    assert g_id == 0              # no group ; standalone
     assert x == pytest.approx(0.25)
     assert y == pytest.approx(0.5)
     assert w == pytest.approx(0.1)
@@ -349,7 +349,7 @@ def test_drag_delta_persists_under_group_key(publisher):
     # Widget slot 0 x/y offsets: kind(1)+anchor(1)+pad(2)+wid(4)+gid(4) = 12
     x_off = _HEADER_SIZE + 12
     struct.pack_into('<ff', mm, x_off, 0.3, 0.4)
-    # Header: drag_active at 17 (cleared — simulating post-release),
+    # Header: drag_active at 17 (cleared ; simulating post-release),
     # dragged_seq at 24 (bumped to 1 to trigger the capture path).
     mm[17] = 0
     struct.pack_into('<I', mm, 24, 1)
@@ -415,7 +415,7 @@ def test_active_drag_does_not_snap_widget_back(publisher):
     mm = publisher._mm
     # Simulate C mid-drag: move the widget to (0.42, 0.55) and set
     # drag_active=1, dragged_widget_id=<wid>. dragged_seq stays at
-    # its previous value — bump only happens on release.
+    # its previous value ; bump only happens on release.
     wid = widget_id('r')
     x_off = _HEADER_SIZE + 12
     struct.pack_into('<ff', mm, x_off, 0.42, 0.55)
@@ -423,7 +423,7 @@ def test_active_drag_does_not_snap_widget_back(publisher):
     struct.pack_into('<I', mm, 20, wid)
 
     # Frame 2: publisher commits again. The dragged widget's shm
-    # (x, y) must survive — i.e. the publisher must read 0.42/0.55
+    # (x, y) must survive ; i.e. the publisher must read 0.42/0.55
     # back and write them unchanged, NOT re-stamp baseline+delta.
     with publisher.frame() as f:
         with f.group('panel'):
@@ -469,7 +469,7 @@ def test_load_deltas_applies_on_next_frame(publisher):
 
 def test_noninteger_coords_do_not_corrupt_slot(publisher):
     # Floats from numpy or arithmetic can be inf/nan. The publisher
-    # must not let those crash pack_into — they'll pack as their IEEE
+    # must not let those crash pack_into ; they'll pack as their IEEE
     # bit pattern, but we at least check the call completes and the
     # adjacent slot stays intact.
     import math
@@ -486,7 +486,7 @@ def test_noninteger_coords_do_not_corrupt_slot(publisher):
 def test_widget_id_never_zero():
     # widget_id == 0 is reserved on the wire as "no widget dragged".
     # The FNV hash collides with 0 essentially never, but we still
-    # guard against it — regression would silently erase drag tracking
+    # guard against it ; regression would silently erase drag tracking
     # for that widget.
     for name in ['', 'a', 'b' * 512, '\x00null\x00bytes\x00', '星']:
         assert widget_id(name) != 0
@@ -523,7 +523,7 @@ def test_commit_overwrites_deleted_widget_completely(publisher):
 def test_commit_preserves_edit_mode_and_dragged_fields(publisher):
     # The C side writes edit_mode, drag_active, dragged_widget_id,
     # dragged_seq independently of our commits. Our commit path must
-    # *not* overwrite those — we only own magic, version, seq, n_widgets.
+    # *not* overwrite those ; we only own magic, version, seq, n_widgets.
     mm = publisher._mm
     # Simulate C writing the fields it owns.
     mm[16] = 1                                   # edit_mode = 1
@@ -544,7 +544,7 @@ def test_commit_preserves_edit_mode_and_dragged_fields(publisher):
 
 def test_many_frames_no_monotonic_overflow_crash(publisher):
     # A long-running publisher will wrap uint32_t seq eventually. We
-    # don't simulate the actual wrap (too slow) — just force it into
+    # don't simulate the actual wrap (too slow) ; just force it into
     # the upper range and confirm we handle it without raising.
     publisher._seq = 0xfffffff0
     for _ in range(20):
@@ -611,7 +611,7 @@ def test_disabling_overlay_skips_spec_but_keeps_publisher(tmp_path):
 
     In the single-shm world, every overlay shares one publisher and
     one render thread. Toggling one plugin off should keep every other
-    plugin drawing — the toggled spec just sits out of the merged
+    plugin drawing ; the toggled spec just sits out of the merged
     draw on the next tick. This pins that behavior so a future refactor
     doesn't accidentally restore per-spec start/stop.
     """
@@ -633,7 +633,7 @@ def test_disabling_overlay_skips_spec_but_keeps_publisher(tmp_path):
     try:
         assert running.get(key).enabled is True
 
-        # Disable through the second registry — the config change must
+        # Disable through the second registry ; the config change must
         # propagate to the running one via the subscription.
         assert toggler.set_enabled(key, False) is True
         assert running.get(key).enabled is False

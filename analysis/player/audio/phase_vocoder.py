@@ -32,7 +32,7 @@ class StreamingPhaseVocoder:
     being centered halfway through the FFT buffer; magnitude-only PGHI then
     appears to "collapse" phases and the normal IFFT cancels the main lobe.
 
-    All phase state is float64 — float32 overflows bin*omega_a products at
+    All phase state is float64 ; float32 overflows bin*omega_a products at
     high bins after a few seconds and manifests as high-frequency buzz."""
     N_FFT = 2048
     HOP = 512          # synthesis hop at rate=1; analysis hop scales by rate
@@ -55,7 +55,7 @@ class StreamingPhaseVocoder:
         self._win_sq = self._win * self._win
         # Analytic COLA divisor: the steady-state value of
         # sum_k w(n - k*hop)^2 equals sum(w^2) / hop. For Hann N=2048,
-        # hop=512 this evaluates to 1.5 — verified numerically in the
+        # hop=512 this evaluates to 1.5 ; verified numerically in the
         # test suite.
         self._cola_norm = float(np.sum(self._win_sq) / self.HOP)
         # Bin center freqs in rad/sample, float64; used for the
@@ -117,7 +117,7 @@ class StreamingPhaseVocoder:
 
     def seek(self, chart_time: float) -> None:
         """Jump playback to `chart_time` seconds. We seek the source to the
-        underlying sample, reset PV state, and clear the OLA buffer — small
+        underlying sample, reset PV state, and clear the OLA buffer ; small
         audible transient is acceptable."""
         self.source.seek(int(round(chart_time * self.source.sr)))
         self._src_pos = float(self.source.pos)
@@ -141,7 +141,7 @@ class StreamingPhaseVocoder:
         drained the residual OLA tail."""
         # Fast path when rate==1 and pitch correction is on (nothing to do).
         # Also when pitch correction is off we do a simple linear-interp
-        # resample — pitch tracks rate, same as the old engine's fallback.
+        # resample ; pitch tracks rate, same as the old engine's fallback.
         if not self.pitch_correct:
             return self._resample_read(n_frames)
 

@@ -54,7 +54,7 @@ def test_disabled_list_sidebar_kind_uses_distinct_flag(tmp_path, store):
     path.write_text(json.dumps({'disabled': ['sec:one']}))
     _migrate_disabled_list(store, path, 'sidebar')
     assert store.get('plugins.sec:one.sidebar_disabled') is True
-    # Replay flag remains unset — the two roles track independently.
+    # Replay flag remains unset ; the two roles track independently.
     assert store.get('plugins.sec:one.replay_disabled') is None
 
 
@@ -71,7 +71,7 @@ def test_disabled_list_escapes_dots_in_keys(tmp_path, store):
 
 def test_migrate_legacy_is_idempotent(tmp_path):
     """Second call with legacy files present should not re-migrate
-    (schema version guards it) — but also must not crash."""
+    (schema version guards it) ; but also must not crash."""
     cfg = tmp_path / 'config.json'
     legacy = tmp_path / 'player_plugins.json'
     legacy.write_text(json.dumps({'disabled': ['one']}))
@@ -89,5 +89,5 @@ def test_migrate_legacy_is_idempotent(tmp_path):
     legacy2 = tmp_path / 'player_plugins.json'  # same path, new content
     legacy2.write_text(json.dumps({'disabled': ['two']}))
     migrate_legacy(s)
-    # 'two' should NOT appear — schema guard short-circuited.
+    # 'two' should NOT appear ; schema guard short-circuited.
     assert s.get('plugins.two.replay_disabled') is None

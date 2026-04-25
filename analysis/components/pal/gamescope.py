@@ -1,7 +1,7 @@
 """Linux/Gamescope overlay platform.
 
 Wraps the existing :class:`analysis.overlay.publisher.OverlayPublisher`
-— the shm + seqlock + C-side drag handshake all stay exactly as they
+; the shm + seqlock + C-side drag handshake all stay exactly as they
 were. The only job of this adapter is to translate the neutral
 :class:`~analysis.components.pal.base.OverlayFrame` command list into
 the publisher's ``_FrameBuilder`` calls inside an atomic frame.
@@ -118,7 +118,7 @@ class GamescopeOverlayPlatform:
                     builder.text(str(id_str), str(s), float(x), float(y),
                                  px_scale=float(px_scale),
                                  color=int(color), anchor=int(anchor))
-                # Unknown kinds are silently dropped — forward-compat.
+                # Unknown kinds are silently dropped ; forward-compat.
         finally:
             # Close any groups the frame forgot to end so we don't
             # leak state across frames.

@@ -7,7 +7,7 @@ Ported to the unified component API: one ``draw(ctx)`` renders on the
 sidebar (where ``judge_nudge`` clicks do route back to the player) and
 on any future overlay that exposes ``judgment_counts`` in its game
 state. On the gamescope overlay today the buttons render as chrome
-only since clicks don't route back — that's fine, the live readout is
+only since clicks don't route back ; that's fine, the live readout is
 the useful part there.
 """
 from __future__ import annotations
@@ -24,7 +24,7 @@ from plugins.builtin.sidepanel import SidebarFields
 
 
 _NUDGE_BTN_W = 28
-# Etterna judges are integer steps — sign is all that matters. osu OD is
+# Etterna judges are integer steps ; sign is all that matters. osu OD is
 # float; ±0.1 per click mirrors the rate slider's feel.
 _OSU_OD_STEP = 0.1
 
@@ -34,7 +34,7 @@ def _draw(ctx):
     ctx.draw_heading('Judgments')
 
     # Switcher row. The data needed for the label (judge_label) is
-    # replay-side only — overlay data source raises DataNotAvailable.
+    # replay-side only ; overlay data source raises DataNotAvailable.
     # Skip the row cleanly on surfaces without it.
     try:
         judge_label = ctx.data.judge_label()

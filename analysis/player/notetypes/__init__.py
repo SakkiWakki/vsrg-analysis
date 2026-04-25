@@ -3,7 +3,7 @@
 Today these modules mostly just expose the Etterna TapNoteType enum
 values each type maps to. They exist as deliberately-thin placeholders
 so that per-type behavior (mine damage, fake-skip, lift-on-release,
-roll-retap) has a natural home when it lands — the Player shouldn't
+roll-retap) has a natural home when it lands ; the Player shouldn't
 grow a `if notetype == ...` ladder for every new feature.
 
 Source of truth for the enum values is still

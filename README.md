@@ -20,13 +20,13 @@ A Python toolkit for offline analysis of **Etterna** and **osu!mania** replays. 
 
 ## Features
 
-- **Unified replay library** — auto-discovers Etterna profiles (`ReplaysV2` + `Etterna.xml`) and osu! installs (`Data/r/*.osr` + Songs dir), merging scores into one searchable list. First-run prompt lets you point it at custom install paths, and you can change them later from the Library tab's **Paths…** button.
-- **Per-note timing analysis** — mean/std offset, judgments, hand splits, per-column drift, rolling stability, chord-size timing, coupling (solo vs paired notes).
-- **Bundled plugin system** — visualizations, sidebar HUD sections, lane-space draw overlays, in-game overlays, and themes all ship as plugin **bundles** under `plugins/`. Sandboxed bundles get a restricted Python environment with an import allow-list; trusted bundles go under `plugins/builtin/` or `plugins/unsafe/`. See [plugins/README.md](plugins/README.md).
-- **Embedded replay player** — native Qt/QPainter chart view, with audio sync, playbar scrubbing, scroll/rate controls, swappable note skins (bar/circle), draw-stage plugins, and **SV (scroll velocity)** support for osu!mania.
-- **In-game overlay** — Linux uses a standalone C renderer under gamescope, or LD_PRELOAD hooks for bare Wine, or a Vulkan layer for DXVK/lazer. Windows uses an in-process DLL that MinHooks `wglSwapBuffers`, loaded into osu!.exe via a small `inject.exe`. All paths share the same widget feed (shared memory on Linux, a named memory-mapped file on Windows) and the same plugin API in `analysis.overlay.api`.
-- **HTML report export** — single-file self-contained summary report with all plots embedded as base64.
-- **Batch mode** — run analysis across every score in a profile and produce leaderboards / cross-chart comparisons.
+- **Unified replay library** ; auto-discovers Etterna profiles (`ReplaysV2` + `Etterna.xml`) and osu! installs (`Data/r/*.osr` + Songs dir), merging scores into one searchable list. First-run prompt lets you point it at custom install paths, and you can change them later from the Library tab's **Paths…** button.
+- **Per-note timing analysis** ; mean/std offset, judgments, hand splits, per-column drift, rolling stability, chord-size timing, coupling (solo vs paired notes).
+- **Bundled plugin system** ; visualizations, sidebar HUD sections, lane-space draw overlays, in-game overlays, and themes all ship as plugin **bundles** under `plugins/`. Sandboxed bundles get a restricted Python environment with an import allow-list; trusted bundles go under `plugins/builtin/` or `plugins/unsafe/`. See [plugins/README.md](plugins/README.md).
+- **Embedded replay player** ; native Qt/QPainter chart view, with audio sync, playbar scrubbing, scroll/rate controls, swappable note skins (bar/circle), draw-stage plugins, and **SV (scroll velocity)** support for osu!mania.
+- **In-game overlay** ; Linux uses a standalone C renderer under gamescope, or LD_PRELOAD hooks for bare Wine, or a Vulkan layer for DXVK/lazer. Windows uses an in-process DLL that MinHooks `wglSwapBuffers`, loaded into osu!.exe via a small `inject.exe`. All paths share the same widget feed (shared memory on Linux, a named memory-mapped file on Windows) and the same plugin API in `analysis.overlay.api`.
+- **HTML report export** ; single-file self-contained summary report with all plots embedded as base64.
+- **Batch mode** ; run analysis across every score in a profile and produce leaderboards / cross-chart comparisons.
 
 ## Previews
 
@@ -34,7 +34,7 @@ Embedded replay player (osu!mania 10K):
 
 ![Player preview](player_preview.png)
 
-Full-report export (osu!mania 10K — *xi - Aragami*):
+Full-report export (osu!mania 10K ; *xi - Aragami*):
 
 ![Example report](report.png)
 
@@ -82,22 +82,22 @@ Makefile targets (Linux): `make venv`, `make native`, `make overlay`,
 gui`.
 
 On first launch you'll be prompted for your osu! Songs folder and Etterna
-Save folder — both optional, both editable later via **Library → Paths…**.
+Save folder ; both optional, both editable later via **Library → Paths…**.
 
 **Platform notes:**
 
-- **Linux** — the GUI uses Qt. Most desktop distros work with the PySide6
+- **Linux** ; the GUI uses Qt. Most desktop distros work with the PySide6
   wheels directly; on minimal installs, add your distro's Qt/XCB runtime
   packages if the app fails to create a window.
-- **macOS** — everything installs via pip directly. On Apple Silicon make
+- **macOS** ; everything installs via pip directly. On Apple Silicon make
   sure you're on Python 3.11+ so the arm64 PySide6 wheels are used.
-- **Windows** — no extra system deps for the Python side; all PySide6
+- **Windows** ; no extra system deps for the Python side; all PySide6
   wheels ship with their DLLs. For the native pieces (memory reader + GL
   overlay) you need Rust (`rustup`), CMake, and MSVC Build Tools. Both
   the overlay DLL and injector build as **x86** to match osu!.exe's
   bitness. Python itself should be 64-bit (WoW64 handles cross-bitness
   memory reads from the 64-bit Python process into 32-bit osu!.exe).
-- **osu!-on-Wine (Linux)** — the autodetect looks in `~/.local/share/osu-wine/`
+- **osu!-on-Wine (Linux)** ; the autodetect looks in `~/.local/share/osu-wine/`
   and the standard Lutris/Bottles paths, but if yours is elsewhere just
   point Library → Paths… at it manually.
 
@@ -119,10 +119,10 @@ will tell you which package to install.
 
 ### Optional: convenience launchers (source checkouts)
 
-- `run.sh` / `run.bat` — same scripts as the release, but detect a
+- `run.sh` / `run.bat` ; same scripts as the release, but detect a
   source checkout (no `native/*.whl`) and tell you to run `make` first.
-- `make gui` / `make.bat gui` — run the GUI after a source build.
-- `analyze` — CLI entrypoint on any OS.
+- `make gui` / `make.bat gui` ; run the GUI after a source build.
+- `analyze` ; CLI entrypoint on any OS.
 
 On Linux, `make` (or `make run`) rebuilds whatever's out of date and
 launches the GUI. On Windows, `make.bat` does the same.
@@ -130,7 +130,7 @@ launches the GUI. On Windows, `make.bat` does the same.
 ## Running
 
 ```bash
-# GUI (recommended — library browser, embedded player, all plugins)
+# GUI (recommended ; library browser, embedded player, all plugins)
 ./run.sh                                             # Linux/macOS
 .\run.bat                                            # Windows (release zip)
 .\make.bat                                           # Windows (source: build + launch)
@@ -144,7 +144,7 @@ python -m analysis.player.launch /path/to/replay.bin --sm chart.sm   # Etterna
 
 App state (install paths, per-plugin settings, window geometry, scroll
 speed, etc.) is persisted in `~/.config/vsrg-analysis/config.json`. Writes
-are debounced and changes fan out live to every open window — no restart
+are debounced and changes fan out live to every open window ; no restart
 needed. Qt-specific UI state (geometry, filter/sort choices) still uses
 `QSettings` alongside the JSON config.
 
@@ -174,7 +174,7 @@ precedence, `PathsDialog` save/clear/prefill behavior, and first-run prompt gati
 
 ## Plugin bundles
 
-Plugins now ship as **bundles** — self-contained directories under
+Plugins now ship as **bundles** ; self-contained directories under
 `plugins/` that can contribute visualizations, sidebar sections, lane-space
 draw overlays, in-game overlay feeds, and themes. Minimum viz plugin:
 
@@ -200,10 +200,10 @@ A directory is recognized as a bundle if it contains at least one of
 
 Trust model:
 
-- `plugins/builtin/` — trusted, ships with the app.
-- `plugins/unsafe/<bundle>/` — trusted opt-in escape hatch for things that
+- `plugins/builtin/` ; trusted, ships with the app.
+- `plugins/unsafe/<bundle>/` ; trusted opt-in escape hatch for things that
   need raw Python (network, subprocess, threads, `/dev/shm`).
-- Anywhere else — **sandboxed**: restricted `__builtins__` plus an import
+- Anywhere else ; **sandboxed**: restricted `__builtins__` plus an import
   allow-list (stdlib pure modules, `numpy`, and the `analysis.*` host APIs).
 
 Built-in visualizations: timing scatter, offset distribution, per-column
@@ -247,7 +247,7 @@ Keys (when the chart view has focus):
 | R | restart |
 | mouse wheel | seek ±0.5s (Shift for ±5s) |
 
-Bottom controls: play/pause, playbar (click anywhere to jump), scroll ±, rate ±, restart, and **SV toggle** (osu!mania only — disabled when the chart has no SV).
+Bottom controls: play/pause, playbar (click anywhere to jump), scroll ±, rate ±, restart, and **SV toggle** (osu!mania only ; disabled when the chart has no SV).
 
 ## Player draw plugins
 
@@ -281,9 +281,9 @@ def register(add):
 Available stages: `AFTER_LANES`, `AFTER_JUDGMENT`, `AFTER_NOTES`,
 `AFTER_GHOSTS`, `HUD`, `POST_FRAME`. Lower priority runs earlier within the
 same stage. Plugins outside `plugins/builtin/` and `plugins/unsafe/` run
-sandboxed — if you need `PySide6`, put the bundle under `unsafe/`.
+sandboxed ; if you need `PySide6`, put the bundle under `unsafe/`.
 
-The replay player's right sidebar has a collapsible `Plugins` panel — open
+The replay player's right sidebar has a collapsible `Plugins` panel ; open
 it to enable or disable any discovered plugin. Choices persist in the
 shared config store under `plugins.<bundle>:<key>.replay_disabled`.
 
@@ -291,6 +291,6 @@ shared config store under `plugins.<bundle>:<key>.replay_disabled`.
 
 - Etterna `.bin` offsets are quantized relative to judgment; parsing replicates the game's `GetOffset` interpretation but may disagree with in-game grade display at the edges.
 - osu!mania note→press alignment is greedy-nearest within a ±188ms window. Heavily ghost-tapping scores may misattribute presses.
-- At non-1x rates, pitch correction is handled by a small numpy phase vocoder (RTPGHI-style heap integration). Output is ~1 dB quieter on dense broadband material at rate ≠ 1 because reconstructed phases OLA less coherently than the analysis phases — audible as a slight loudness dip, not a bug in the math. Turning pitch correction off falls back to simple resampling, so pitch shifts with rate.
-- No Windows-style file lock handling for `Etterna.xml` — close the game before scanning.
+- At non-1x rates, pitch correction is handled by a small numpy phase vocoder (RTPGHI-style heap integration). Output is ~1 dB quieter on dense broadband material at rate ≠ 1 because reconstructed phases OLA less coherently than the analysis phases ; audible as a slight loudness dip, not a bug in the math. Turning pitch correction off falls back to simple resampling, so pitch shifts with rate.
+- No Windows-style file lock handling for `Etterna.xml` ; close the game before scanning.
 - This is a personal side project. See the warning above.

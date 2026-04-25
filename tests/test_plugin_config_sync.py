@@ -71,7 +71,7 @@ def test_sidebar_toggle_propagates(store):
 
 def test_managers_registered_late_pick_up_current_state(store):
     """A new window opened after the user already disabled something
-    should honor that state — the state lives in the store, not in
+    should honor that state ; the state lives in the store, not in
     per-manager memory."""
     first = PluginManager(config=store)
     _install_plugin(first, 'shared:widget')
@@ -103,7 +103,7 @@ def test_close_stops_further_updates(store):
 
     b.close()
     a.set_enabled('shared:widget', False)
-    # b closed — shouldn't have been notified.
+    # b closed ; shouldn't have been notified.
     assert b.all_plugins()[0].enabled is True
 
 

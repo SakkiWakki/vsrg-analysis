@@ -1,7 +1,7 @@
 // Private backend contract. Each backend exposes three functions; the
 // dispatcher in input.c picks one at init time and calls it per frame.
 //
-// Raw state (no edge detection) — the dispatcher computes the edges
+// Raw state (no edge detection) ; the dispatcher computes the edges
 // against the previous poll so backends only have to answer "what is
 // true right now?"
 

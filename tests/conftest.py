@@ -1,7 +1,7 @@
 """Shared pytest setup.
 
 QSettings is global per (org, app). Tests must not clobber the real user's
-settings — so we point QSettings at an isolated INI file in a temp dir and
+settings ; so we point QSettings at an isolated INI file in a temp dir and
 reset the `get_settings()` module cache around each test.
 """
 import os
@@ -28,7 +28,7 @@ if 'osrparse' not in sys.modules:
 
 @pytest.fixture(scope='session', autouse=True)
 def _qapp():
-    """QDialog widgets need a QApplication. Create one once for the session —
+    """QDialog widgets need a QApplication. Create one once for the session ;
     reinstantiating it per-test tends to crash under offscreen platforms."""
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     from PySide6.QtWidgets import QApplication

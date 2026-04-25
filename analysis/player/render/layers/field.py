@@ -26,7 +26,7 @@ _DEATH_LINE_PEN = QPen(_DEATH_RED, 2)
 _NO_PEN         = QPen(QColor(0, 0, 0, 0))
 
 # Judgment-window overlay brushes are keyed by (r, g, b) and built on
-# first use — the color set depends on the active judge scheme which
+# first use ; the color set depends on the active judge scheme which
 # can change at runtime, but within a session the same ~5 colors repeat
 # every frame.
 _JUDGE_BRUSHES: dict[tuple, QBrush] = {}
@@ -44,7 +44,7 @@ def _judge_brush(color: tuple) -> QBrush:
 # ── draw functions ──────────────────────────────────────────────────
 
 def draw_background(ctx, painter):
-    """Single fullscreen fill — one draw call, zero allocations."""
+    """Single fullscreen fill ; one draw call, zero allocations."""
     painter.fillRect(QRectF(0, 0, ctx.player.W, ctx.player.H), _BG_BRUSH)
 
 

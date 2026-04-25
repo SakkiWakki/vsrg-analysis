@@ -9,22 +9,22 @@ equivalent output via a ``QOpenGLPaintDevice`` instead of a raw
 This module provides the pieces tests need to stay honest across both
 backends:
 
-  - :func:`render_sidebar_section_to_image` — render a ``draw(sctx)``
+  - :func:`render_sidebar_section_to_image` ; render a ``draw(sctx)``
     callable into a fresh ``QImage`` through a named backend. Backend
     ``"qimage"`` is the always-available QPainter-on-QImage path;
     ``"opengl"`` is a Phase 2 QPainter-on-QOpenGLPaintDevice path. The
     ``"opengl"`` backend returns ``None`` when GL isn't usable (CI, no
     display) so parametrized tests auto-skip without a hard dependency.
 
-  - :func:`raster_similarity` — structural similarity between two
+  - :func:`raster_similarity` ; structural similarity between two
     ``QImage`` outputs. Returns a float in ``[0, 1]`` where ``1.0`` is
     pixel-identical. Tests assert ``>= 0.98`` or similar; the exact
     threshold depends on how much subpixel font hinting differs between
     paint devices. Golden references are stored per-backend to keep the
     metric robust.
 
-  - :func:`golden_path` — resolve a golden-image path for a test name;
-    :func:`assert_matches_golden` — compare a ``QImage`` to its golden
+  - :func:`golden_path` ; resolve a golden-image path for a test name;
+    :func:`assert_matches_golden` ; compare a ``QImage`` to its golden
     with a tolerance. Environment ``UPDATE_GOLDENS=1`` writes the
     current output to the golden path instead of asserting.
 
@@ -35,7 +35,7 @@ Design constraints:
     separate goldens; similarity between the two is asserted by tests
     that care.
 
-  - The harness never imports the Player or a real sidebar — it wires a
+  - The harness never imports the Player or a real sidebar ; it wires a
     minimal ``SidebarContext`` directly. Tests that want to render a
     full component call ``draw_component_in_sidebar`` via the wrapper.
 """

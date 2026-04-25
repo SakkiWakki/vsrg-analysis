@@ -1,5 +1,5 @@
 // Implementation for widgets.h. Lifted verbatim from the original
-// osu_overlay.c — the code was never osu-specific, only its
+// osu_overlay.c ; the code was never osu-specific, only its
 // location was.
 
 #include "widgets.h"

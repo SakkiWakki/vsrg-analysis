@@ -31,7 +31,7 @@ from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavToolbar
 
 class JumpSlider(QSlider):
     """QSlider where a left-click on the groove jumps to that position (default
-    Qt behavior is a page step — we want absolute seek). Uses Qt's native
+    Qt behavior is a page step ; we want absolute seek). Uses Qt's native
     SH_Slider_AbsoluteSetButtons style hint so sliderPressed/sliderReleased
     fire at the right times for both clicks and drags."""
 

@@ -533,7 +533,7 @@ def is_beat_in_warp(beat, warps, stops=None, delays=None):
 # learned about the enum; kept for back-compat with the fingerprint path.
 NT_TAP = 1
 NT_HOLD_HEAD = 2      # '2'
-NT_ROLL_HEAD = 4      # '4' — distinct from HOLD for scoring; stored as its
+NT_ROLL_HEAD = 4      # '4' ; distinct from HOLD for scoring; stored as its
                       # own value so the fingerprint can tell them apart even
                       # though Etterna's chartkey coalesces them to enum 2.
 NT_MINE = -1          # 'M'
@@ -591,7 +591,7 @@ def parse_notes_block(notedata, keycount_hint=None):
                     notes.append((row, col, NT_FAKE))
                 elif ch == 'K':
                     notes.append((row, col, NT_AUTO_KEYSOUND))
-                # else: unknown/commented-out (A/I/N/etc.) — skip silently
+                # else: unknown/commented-out (A/I/N/etc.) ; skip silently
     return notes, holds
 
 
@@ -601,7 +601,7 @@ def parse_notes_block(notedata, keycount_hint=None):
 # in column order and append TapNoteType.type as a decimal int, then append
 # int(BPM_at_row + 0.374643). Prepend "X" and hex-encode.
 #
-# Reproducing this for .sm files lets us skip the fingerprint fallback — the
+# Reproducing this for .sm files lets us skip the fingerprint fallback ; the
 # XML's chartkey resolves deterministically to the right chart file even
 # when multiple charts share an identical first-N-notes prefix.
 #
@@ -615,7 +615,7 @@ def parse_notes_block(notedata, keycount_hint=None):
 _ETT_TAPTYPE = {
     '1': 1,  # Tap
     '2': 2,  # HoldHead (hold)
-    '4': 2,  # HoldHead (roll) — same enum value in Etterna
+    '4': 2,  # HoldHead (roll) ; same enum value in Etterna
     'M': 4,  # Mine
     'L': 5,  # Lift
     'F': 7,  # Fake
@@ -632,7 +632,7 @@ def _iter_chart_rows(notedata, num_tracks):
     Row computation mirrors Etterna's `BeatToNoteRow((m + l/size) * 4)`:
     a round-to-nearest based on float position into the measure, not plain
     integer division. This matters for measures whose line count doesn't
-    divide 192 evenly (quintuplets, 7-lets, etc.) — otherwise the rows
+    divide 192 evenly (quintuplets, 7-lets, etc.) ; otherwise the rows
     drift and the BPM-at-row / per-row types end up at different indices
     than Etterna's, changing the chartkey."""
     measures = _strip_comments(notedata).strip().split(',')
@@ -726,7 +726,7 @@ def _scan_one_chartfile(p):
     .sm file. For .ssc, index the file's stored #CHARTKEY tag and also the
     generated key when it differs; real files can carry stale tags after note
     edits. .sm files and .ssc blocks missing the tag use the generated key.
-    Pure CPU/IO — safe under ThreadPoolExecutor."""
+    Pure CPU/IO ; safe under ThreadPoolExecutor."""
     p_str = str(p)
     try:
         if p_str.endswith('.ssc'):
@@ -856,7 +856,7 @@ def _normalize_fingerprint(rows_cols, n=None):
 
     Two reorderings need fixing:
       1. Within a chord group, charts list columns ascending but replays
-         record press order — a sort within equal-row runs flattens that.
+         record press order ; a sort within equal-row runs flattens that.
       2. Across chord groups, replays are *usually* monotonic by row but
          some charts (observed: Hall of Kings) produce brief row inversions
          where a later row records first (e.g. 6600 then 6588). Etterna's
@@ -895,7 +895,7 @@ def _chart_fingerprint(chart, n=FINGERPRINT_N):
     """Return the first `n` (noterow, column) tuples for a chart, with
     chord columns sorted. None if the chart has fewer notes than n.
 
-    Only taps, hold heads, and roll heads count — fakes, keysounds,
+    Only taps, hold heads, and roll heads count ; fakes, keysounds,
     lifts, and mines don't show up in replay noterow streams, so
     including them here would break matches against real replays."""
     rows_cols = _chart_replay_rows_cols(chart)
@@ -928,7 +928,7 @@ def _scan_one_chartfile_fp(p):
 def _build_fingerprint_index(songs_dir, progress=None):
     """Walk Songs, fingerprint every chart. Returns
     `{fingerprint: [(file, chart_idx, note_count), ...]}`. Multiple charts in
-    the same file (or different files) can share an intro-fingerprint —
+    the same file (or different files) can share an intro-fingerprint ;
     common with packs that ship Beginner/Hard cuts of the same song. The
     resolver disambiguates by matching note count against the replay length.
     Parsed in parallel since this is the slow path used when chartkey lookup
@@ -994,7 +994,7 @@ def find_chart_for_replay(replay_noterows, replay_columns, songs_dir,
     replay_n = len(replay_noterows)
     # Exact note-count match wins; otherwise closest-by-count. Identical
     # fingerprints on charts with identical note counts are assumed to be
-    # the same chart content (safe — first match wins by order).
+    # the same chart content (safe ; first match wins by order).
     best = min(candidates, key=lambda c: abs(c[2] - replay_n))
     path_str, chart_idx, _ = best
     try:

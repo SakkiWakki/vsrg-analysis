@@ -107,7 +107,7 @@ def test_sandboxed_plugin_cannot_reach_into_unlisted_ui_modules(ui_bundle_root):
     bundles = discover_bundles()
     bad = next(b for b in bundles if b.key == 'bad_ui')
     # Either refused by the sandbox or failed as ModuleNotFoundError.
-    # Either outcome is acceptable — the plugin must not successfully
+    # Either outcome is acceptable ; the plugin must not successfully
     # load.
     assert len(bad.load_errors) == 1
     assert len(bad.sidebar_modules) == 0

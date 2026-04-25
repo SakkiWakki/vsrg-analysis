@@ -1,4 +1,4 @@
-"""Etterna GUI adapter — path discovery, root validation, enrichment,
+"""Etterna GUI adapter ; path discovery, root validation, enrichment,
 chart-context resolution, and note-viz config. Delegates to the game
 package's replay/chart modules; the GUI never imports those directly."""
 from __future__ import annotations
@@ -11,7 +11,7 @@ from analysis.core.gui_adapter import GuiAdapter
 class EtternaGuiAdapter(GuiAdapter):
     name = 'etterna'
     label = 'Etterna install folder'
-    hint = ('Point at your Etterna install folder — the one that contains '
+    hint = ('Point at your Etterna install folder ; the one that contains '
             '`Save/` and `Songs/`. Additional song folders listed in '
             '`Preferences.ini` are picked up automatically.')
     placeholder = 'e.g. ~/.etterna or ~/etterna'
@@ -65,7 +65,7 @@ class EtternaGuiAdapter(GuiAdapter):
         j = judge or 'J4'
         return {
             'windows': etterna_windows(j),
-            'unit_label': f'noterow  —  {j}',
+            'unit_label': f'noterow  ;  {j}',
             'rows_per_ms': 0.37,
             'win': 2400,
         }

@@ -1,4 +1,4 @@
-// Vulkan layer glue — the only file in this module that speaks Vulkan.
+// Vulkan layer glue ; the only file in this module that speaks Vulkan.
 //
 // Scope (stage 1): prove the implicit-layer discovery + chainloading
 // path end-to-end. Override vkCreateInstance, vkCreateDevice,
@@ -66,7 +66,7 @@ public:
         VkInstance*                   pInstance) {
         VkResult r = create(pCreateInfo, pAllocator, pInstance);
         if (r == VK_SUCCESS) {
-            log_once("instance created — layer live");
+            log_once("instance created ; layer live");
         }
         return r;
     }
@@ -80,7 +80,7 @@ public:
         VkResult r = d.CreateDevice(physicalDevice, pCreateInfo, pAllocator,
                                     pDevice);
         if (r == VK_SUCCESS) {
-            log_once("device created — device dispatch live");
+            log_once("device created ; device dispatch live");
         }
         return r;
     }

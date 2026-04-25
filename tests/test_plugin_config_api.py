@@ -1,4 +1,4 @@
-"""Tests for :class:`PluginConfig` — the scoped config handle plugins
+"""Tests for :class:`PluginConfig` ; the scoped config handle plugins
 use to persist their own settings into the unified JSON.
 
 The interesting properties:
@@ -45,7 +45,7 @@ def test_get_default_on_missing(store):
 def test_writes_land_under_plugin_subtree(store):
     cfg = PluginConfig('bundle:name', config=store)
     cfg.set('volume', 0.5)
-    # Raw tree path — verifies the scoping layout the dialog/UI expects.
+    # Raw tree path ; verifies the scoping layout the dialog/UI expects.
     assert store.get('plugins.bundle:name.settings.volume') == 0.5
 
 
@@ -74,7 +74,7 @@ def test_subscribe_reports_relative_field(store):
 
 
 def test_cross_window_propagation(store):
-    """Two handles for the same plugin — a write in one reaches a
+    """Two handles for the same plugin ; a write in one reaches a
     subscriber on the other. This is the user-visible promise: a
     plugin's other-window instance updates when config changes."""
     a = PluginConfig('bundle:name', config=store)

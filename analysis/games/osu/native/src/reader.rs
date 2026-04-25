@@ -10,7 +10,7 @@
 //! the fields we care about.
 //!
 //! The pointer chain (``rulesets → ruleset → gameplay → score``) is
-//! walked in exactly one place — ``gameplay_pointers`` — and every
+//! walked in exactly one place ; ``gameplay_pointers`` ; and every
 //! reader consumes its output. Compare to tosu's per-method
 //! copy-paste.
 //!
@@ -18,7 +18,7 @@
 //!
 //! All reads assume the active ruleset is mania. Calling these
 //! functions while the player is in std/taiko/catch will still
-//! succeed — the struct layout is shared — but the numbers may or
+//! succeed ; the struct layout is shared ; but the numbers may or
 //! may not be meaningful. The caller should gate reads on the
 //! plugin's existing mania check.
 
@@ -33,7 +33,7 @@ use crate::signatures::{
 
 /// Cached signature resolutions for one osu! process. Cheap to clone
 /// (all fields are copyable integers). Invalidated by an osu!
-/// restart — the PID and absolute addresses both change.
+/// restart ; the PID and absolute addresses both change.
 #[derive(Debug, Clone, Copy)]
 pub struct Resolved {
     pub pid: u32,
@@ -46,7 +46,7 @@ pub struct Resolved {
 }
 
 /// Scan the process once and return a handle with every known
-/// signature resolved. Fails if any required pattern is missing —
+/// signature resolved. Fails if any required pattern is missing ;
 /// better to fail loudly than let the reader return zeros.
 pub fn resolve(pid: u32) -> io::Result<Resolved> {
     let rulesets_ptr = scan_required(pid, &sig::RULESETS_PTR)?;
@@ -82,7 +82,7 @@ fn scan_required(pid: u32, s: &Signature) -> io::Result<u64> {
     };
     // Apply the signed offset to the match. ``as u64`` is fine even
     // for negative offsets because the underlying arithmetic is
-    // wrapping — addresses are unsigned 64-bit, and the pattern
+    // wrapping ; addresses are unsigned 64-bit, and the pattern
     // authors chose offsets knowing the match site.
     Ok(addr.wrapping_add(s.offset_from_match as u64))
 }
@@ -107,7 +107,7 @@ pub struct GameplayPointers {
 /// methods; we don't.
 ///
 /// Returns ``Ok`` even when the chain hits a null pointer (means
-/// "not currently playing") — callers branch on ``Option`` emptiness.
+/// "not currently playing") ; callers branch on ``Option`` emptiness.
 /// ``Err`` is reserved for syscall failures.
 pub fn gameplay_pointers(r: &Resolved) -> io::Result<GameplayPointers> {
     let mut out = GameplayPointers::default();
@@ -328,7 +328,7 @@ fn read_chart_stats(pid: u32, bm: u64) -> io::Result<ChartStats> {
 }
 
 /// Given a pointer-to-a-pointer-to-a-.NET-string, read the string.
-/// Returns an empty string if the indirection is null — the caller
+/// Returns an empty string if the indirection is null ; the caller
 /// can't distinguish "no string" from "empty string" but in osu!'s
 /// data model the fields we read are never legitimately "".
 fn read_string_at_ptr(pid: u32, addr: u64) -> io::Result<String> {
@@ -375,7 +375,7 @@ fn read_hit_errors(pid: u32, score_base: u64) -> io::Result<Vec<i32>> {
     if items == 0 || size == 0 {
         return Ok(Vec::new());
     }
-    // Reject implausible sizes — a bogus pointer chain can return
+    // Reject implausible sizes ; a bogus pointer chain can return
     // 0xFFFFFFFF here and we'd try to allocate 16 GB.
     const MAX_HITS: u32 = 1_000_000;
     if size > MAX_HITS {
@@ -396,7 +396,7 @@ fn read_hit_errors(pid: u32, score_base: u64) -> io::Result<Vec<i32>> {
     mem::read_exact(pid, items + dotnet_list::LEADER_START, &mut buf)?;
     for chunk in buf.chunks_exact(4) {
         let v = i32::from_le_bytes(chunk.try_into().unwrap());
-        // Same clamp tosu applies — stale chains sometimes surface
+        // Same clamp tosu applies ; stale chains sometimes surface
         // million-ish values.
         if v < -10_000 || v > 10_000 {
             break;

@@ -127,7 +127,7 @@ class OsuAdapter(GameAdapter):
     # --- library scan -----------------------------------------------------
     def scan_library(self, progress=None):
         """Parse every .osr on disk into a placeholder entry (no song
-        title — enrichment fills those). Kept for parity with the old
+        title ; enrichment fills those). Kept for parity with the old
         adapter contract; `rebuild` and `incremental_update` are the
         library pipeline's real entry points."""
         paths = _osr_paths()

@@ -50,7 +50,7 @@ def test_section_region_round_trip():
     assert reg.section_region('demo:two') == REGION_FREE
 
     # Non-draggable sections are always sidepanel regardless of saved
-    # value — the registry ignores the key rather than respecting a
+    # value ; the registry ignores the key rather than respecting a
     # nonsense override.
     reg.add('three', lambda s: None, key='demo:three',
             draggable=False, default_region=REGION_FREE)
@@ -232,13 +232,13 @@ def test_finish_drag_routes_by_cursor_x():
     )
     controller = LayoutEditController(shim)
 
-    # Drop at x in sidebar column — stays in sidepanel.
+    # Drop at x in sidebar column ; stays in sidepanel.
     sidebar_x = W - theme.SIDEBAR_WIDTH
     controller.finish_drag(sidebar_x + 5, 200)
     assert reg.section_region('demo:one') == REGION_PANEL
     assert shim.hud.drag_key is None
 
-    # New drag, drop to the left of the sidebar — goes free.
+    # New drag, drop to the left of the sidebar ; goes free.
     hud.drag_key = 'demo:one'
     hud.drag_offset = (20, 10)
     controller.finish_drag(100, 400)

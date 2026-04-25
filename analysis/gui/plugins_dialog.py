@@ -161,7 +161,7 @@ class PluginsDialog(QDialog):
 
         header = QHBoxLayout()
         header.addWidget(QLabel(
-            'Installed plugins — toggle checkboxes to enable/disable.'
+            'Installed plugins ; toggle checkboxes to enable/disable.'
         ))
         header.addStretch(1)
 

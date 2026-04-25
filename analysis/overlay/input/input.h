@@ -2,22 +2,22 @@
 //
 // The overlay has two jobs that need input: toggling edit mode, and
 // dragging a widget. Both are driven from a per-frame snapshot of the
-// user's keyboard + mouse state — ``vsrg_input_poll`` fills one in.
+// user's keyboard + mouse state ; ``vsrg_input_poll`` fills one in.
 //
 // We intentionally do NOT expose X11 (or evdev, or Wayland) types
 // through this header. Hosts speak in semantic fields only:
 //
-//   edit_toggle_pressed   — one-frame rising edge of the bind
+//   edit_toggle_pressed   ; one-frame rising edge of the bind
 //                           (shift+tab today)
-//   mouse_x / mouse_y     — client-area pixels, same coord space as
+//   mouse_x / mouse_y     ; client-area pixels, same coord space as
 //                           the renderer's begin_frame(w, h)
-//   primary_button_down   — current level of left mouse
-//   primary_button_pressed / _released — one-frame edges
+//   primary_button_down   ; current level of left mouse
+//   primary_button_pressed / _released ; one-frame edges
 //
 // This lets us swap the backend (poll vs. event-hook vs. evdev) without
 // touching the host. Pick one at init via VSRG_INPUT_BACKEND; default
 // is "poll" which uses XQueryKeymap/XQueryPointer on our own X11
-// connection (see input_x11_poll.c for why — MangoHud does the same).
+// connection (see input_x11_poll.c for why ; MangoHud does the same).
 
 #ifndef VSRG_OVERLAY_INPUT_H
 #define VSRG_OVERLAY_INPUT_H
@@ -64,7 +64,7 @@ void vsrg_input_set_surface(uintptr_t handle);
 // frame after the transition).
 //
 // ``surface_w`` / ``surface_h`` is the drawable size the host is
-// rendering into — some backends need it to clip root-relative
+// rendering into ; some backends need it to clip root-relative
 // cursor coords into the surface.
 void vsrg_input_poll(int surface_w, int surface_h, VsrgInputState *out);
 

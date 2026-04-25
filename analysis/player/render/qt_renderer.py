@@ -44,7 +44,7 @@ def _precompute_candidate_ys(ctx) -> None:
     head_times = p.times[idx]
     ctx.candidate_head_y = p.batch_time_to_y(head_times, ctx.frame)
 
-    # LN tails only — for non-LN candidates the cached tail array holds
+    # LN tails only ; for non-LN candidates the cached tail array holds
     # NaN, which the batched path happily propagates; `_build_note_view`
     # only reads tail_y when is_ln is True so those entries are ignored.
     tail_times = p.notes.ln_tail_times[idx]
@@ -79,7 +79,7 @@ class QtPlayerRenderer:
         culling.prepare_time_window(ctx)
         ctx.candidates = culling.select_note_candidates(ctx)
         # Precompute Y positions for every candidate's head + LN tail in one
-        # numpy pass. Saves N*(2..4) scalar `ctx.time_to_y` calls per frame —
+        # numpy pass. Saves N*(2..4) scalar `ctx.time_to_y` calls per frame ;
         # on dense Etterna charts that's ~600 Python→SV-engine bisects per
         # frame collapsed to two numpy operations.
         _precompute_candidate_ys(ctx)
@@ -109,7 +109,7 @@ class QtPlayerRenderer:
 
     def draw(self, player, painter, t_now):
         ctx = self.build_context(player, painter, t_now)
-        # Hitboxes are frame-scoped — clear them up front so the free
+        # Hitboxes are frame-scoped ; clear them up front so the free
         # region (painted *before* the sidebar) can register its buttons
         # + drag handles without the sidebar pass wiping them later.
         hud = getattr(player, 'hud', None) if player is not None else None
@@ -172,7 +172,7 @@ class QtPlayerRenderer:
         top = self.plugins.sidebar.top_sections()
         bottom = self.plugins.sidebar.bottom_sections()
 
-        # Measure bottom first — top viewport ends where bottom starts, so
+        # Measure bottom first ; top viewport ends where bottom starts, so
         # we need bottom's total height to figure out the top viewport's
         # max y and thus the clamp for the top scroll offset.
         bottom_h = 0
@@ -267,7 +267,7 @@ class QtPlayerRenderer:
         Each section gets its own panel at the saved ``(x, y, w, h)``,
         with an edit-mode outline + resize handle when the user is
         editing layout. The section's existing ``draw(sctx)`` callable
-        is reused — sections work identically in both regions because
+        is reused ; sections work identically in both regions because
         they paint into whatever column the sidebar context hands out.
         """
         # No-op for narrowly-mocked contexts (e.g. layer-gating tests
@@ -286,7 +286,7 @@ class QtPlayerRenderer:
 
         rects: dict = {}
         for section in free:
-            # Skip the dragged component here — it's drawn as a floating
+            # Skip the dragged component here ; it's drawn as a floating
             # ghost at the cursor instead (see `_draw_drag_ghost`), so
             # painting it in place would double-render.
             if p.hud.edit_mode and p.hud.drag_key == section.key:
@@ -473,7 +473,7 @@ class QtPlayerRenderer:
     @staticmethod
     def _run_sections(sections, sctx):
         """Paint each section's in-place ``draw``. Flyout sections always
-        paint their collapsed header here (regardless of open state) —
+        paint their collapsed header here (regardless of open state) ;
         the expanded panel is drawn separately by ``_draw_flyout`` and
         anchored next to the header, so the header must stay visible as
         the anchor point and re-click target. When a flyout is open,
@@ -503,7 +503,7 @@ class QtPlayerRenderer:
                     anchors[section.key] = rect
                 # Edit-mode affordances: outline + full-rect drag grab
                 # for sections the plugin marked draggable. Flyout
-                # sections skip drag-grab entirely — they're complex
+                # sections skip drag-grab entirely ; they're complex
                 # controls that'd be confusing to move around.
                 if (p.hud.edit_mode and section.draggable
                         and section.draw_expanded is None

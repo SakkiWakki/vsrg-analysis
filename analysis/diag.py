@@ -12,7 +12,7 @@ Sink path, in order of preference:
   macOS:    ~/Library/Caches/vsrg-analysis/vsrg-diag.log
   Windows:  %LOCALAPPDATA%\\vsrg-analysis\\vsrg-diag.log
 
-Best-effort and lossy by design — if the file can't be opened we
+Best-effort and lossy by design ; if the file can't be opened we
 silently drop the line. Diagnostics must not raise into the caller.
 """
 from __future__ import annotations

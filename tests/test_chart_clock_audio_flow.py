@@ -8,10 +8,10 @@ DSP. They exercise the CONTRACT the engine has to honor:
   2. Detaching preserves t (already covered in test_chart_clock; reinforced
      here as part of the full flow).
   3. Seeking updates `intended` immediately but `now` only tracks once
-     the audio source catches up — matches the real flow where the GUI
+     the audio source catches up ; matches the real flow where the GUI
      writes the wall anchor but the PV seek takes a moment.
   4. When audio returns a frozen (stepped) time, `now` still extrapolates
-     smoothly because the engine's own smoothing does it — here we just
+     smoothly because the engine's own smoothing does it ; here we just
      confirm the clock doesn't accidentally cache/stall.
   5. The pause-then-seek-then-resume ordering leaves t where expected.
 """

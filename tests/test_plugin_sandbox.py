@@ -2,8 +2,8 @@
 
 Two layers are tested:
 
-  1. ``_is_allowed`` decisions — the policy table.
-  2. End-to-end loader behavior via a temp-dir bundle — does a real
+  1. ``_is_allowed`` decisions ; the policy table.
+  2. End-to-end loader behavior via a temp-dir bundle ; does a real
      ``import`` statement in a sandboxed module actually get blocked?
 """
 from __future__ import annotations
@@ -31,7 +31,7 @@ from analysis.plugins.sandbox import (
     'analysis.plugins.host_api',
     'analysis.components.viz_backend',
     'analysis.overlay.api',
-    # Parent of an allow-listed submodule — required for
+    # Parent of an allow-listed submodule ; required for
     # ``from analysis.player.render import theme`` (__import__ fetches parent).
     'analysis.player',
 ])
@@ -252,7 +252,7 @@ def test_sandboxed_plugin_cannot_call_eval(sandboxed_root):
 
 
 def test_sandboxed_relative_import_within_bundle_works(sandboxed_root):
-    """Sibling helpers (``from ._helper import X``) must still resolve —
+    """Sibling helpers (``from ._helper import X``) must still resolve ;
     the sandbox vets ``import`` targets, but within-bundle relative
     imports are pre-vetted at discovery time."""
     _write_bundle(sandboxed_root, 'rel_bundle', {

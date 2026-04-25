@@ -119,7 +119,7 @@ def test_validate_osu_requires_cfg(tmp_path):
     assert S.validate_osu_root(None) is False
     assert S.validate_osu_root('') is False
     assert S.validate_osu_root('/nope/12345') is False
-    # Empty dir — no osu!.<user>.cfg.
+    # Empty dir ; no osu!.<user>.cfg.
     assert S.validate_osu_root(str(tmp_path)) is False
     install = _make_osu_install(tmp_path)
     assert S.validate_osu_root(str(install)) is True
@@ -286,7 +286,7 @@ def test_paths_dialog_profile_picker_shown_with_multiple_cfg(qapp, tmp_path):
     from analysis.gui.paths_dialog import PathsDialog
     dlg = PathsDialog()
     # Dialog needs to be shown (or at least laid out) for visibility flags to
-    # register under Qt's headless test backend — use a direct state check.
+    # register under Qt's headless test backend ; use a direct state check.
     row = _row_for(dlg, 'osu')
     row.edit.setText(str(install))
     # After refresh, combo holds both entries.

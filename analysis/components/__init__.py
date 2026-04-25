@@ -4,8 +4,8 @@ Plugins that want to run on multiple surfaces (gui, overlay, ...)
 register a single ``(Manifest, draw)`` pair. Each surface
 picks up the component through its backend:
 
-    GuiBackend      — draws via QPainter, routes clicks via hitboxes
-    OverlayBackend  — emits PAL records, rendered by the active platform
+    GuiBackend      ; draws via QPainter, routes clicks via hitboxes
+    OverlayBackend  ; emits PAL records, rendered by the active platform
 
 The platform layer (``pal/``) isolates OS-specific overlay plumbing so
 Windows and macOS hosts plug in new platforms without touching the

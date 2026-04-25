@@ -21,7 +21,7 @@ static int                     g_have_prev = 0;
 static int                     g_debug     = 0;  // VSRG_INPUT_DEBUG=1
 static unsigned long           g_frame     = 0;
 
-// Log only transitions, not every frame — per-frame log would flood
+// Log only transitions, not every frame ; per-frame log would flood
 // the file at 1000 Hz gameplay. Each line shows the fields that
 // actually changed plus the running frame index so you can tell how
 // long a key was held.
@@ -112,7 +112,7 @@ void vsrg_input_poll(int surface_w, int surface_h, VsrgInputState *out) {
     memset(&raw, 0, sizeof(raw));
     g_backend->poll(surface_w, surface_h, &raw);
     if (!raw.valid) {
-        // Don't cross an invalid poll with the previous valid one —
+        // Don't cross an invalid poll with the previous valid one ;
         // that would produce a spurious release edge. Drop the prev
         // history so the next valid poll starts clean.
         g_have_prev = 0;

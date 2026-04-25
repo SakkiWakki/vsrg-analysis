@@ -29,7 +29,7 @@ def test_on_emit_scalar_payload():
 
 
 def test_on_emit_tuple_payload_is_spread():
-    """Tuple payloads unpack as positional args — lets handlers declare
+    """Tuple payloads unpack as positional args ; lets handlers declare
     their real signature instead of tuple-unpacking by hand."""
     bus = EventBus()
     calls = []
@@ -65,7 +65,7 @@ def test_off_is_idempotent():
 
 
 def test_handler_exception_does_not_stop_chain():
-    """A throwing handler must not prevent later handlers from firing —
+    """A throwing handler must not prevent later handlers from firing ;
     otherwise one buggy plugin could silently break the whole app."""
     bus = EventBus()
     later_called = []

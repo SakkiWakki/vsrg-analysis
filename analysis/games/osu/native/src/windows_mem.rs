@@ -106,7 +106,7 @@ fn region_kept(info: &MEMORY_BASIC_INFORMATION) -> bool {
     if info.Protect.0 & READABLE == 0 {
         return false;
     }
-    // Skip non-image PAGE_READONLY — it's just .rdata string literals
+    // Skip non-image PAGE_READONLY ; it's just .rdata string literals
     // our signatures never match. Keep PAGE_READONLY when MEM_IMAGE
     // because the PE header mapping sometimes lands here.
     if info.Protect.0 == PAGE_READONLY.0 && info.Type.0 != MEM_IMAGE.0 {
@@ -180,7 +180,7 @@ fn scan_loop(
     pattern: &Pattern,
     all: bool,
 ) -> io::Result<Vec<u64>> {
-    const CHUNK: usize = 1 << 20; // 1 MiB — matches linux_mem's chunking.
+    const CHUNK: usize = 1 << 20; // 1 MiB ; matches linux_mem's chunking.
     let plen = pattern.len();
     let mut hits = Vec::new();
     if plen == 0 {
@@ -198,7 +198,7 @@ fn scan_loop(
             let slice = &mut buf[..want];
             if read_exact_with(handle, cursor, slice).is_err() {
                 // A single unreadable chunk (guard page we misfiltered,
-                // torn region, …) is not fatal — skip and keep going.
+                // torn region, …) is not fatal ; skip and keep going.
                 cursor = cursor.saturating_add(want as u64);
                 continue;
             }

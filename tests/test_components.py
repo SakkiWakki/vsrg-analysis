@@ -312,7 +312,7 @@ def test_sidebar_ctx_button_registers_hitbox_at_absolute_rect():
     sctx = _FakeSctx(y=100)
     ds = PlayerDataSource(_fake_player())
     # measure_only on sctx is True which would swallow hitboxes in a real
-    # sidebar flow, but our fake records every hitbox regardless — so
+    # sidebar flow, but our fake records every hitbox regardless ; so
     # we can assert on the absolute coords.
     cctx = SidebarContext(
         sctx, x0=500, y0=100, w=200, h=0, data_source=ds)

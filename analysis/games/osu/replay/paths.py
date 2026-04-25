@@ -2,7 +2,7 @@
 
 User override (from GUI settings) wins. Otherwise we walk a list of
 common install locations and pick the first that has at least one
-`osu!.<user>.cfg` — then read `BeatmapDirectory` from that cfg to
+`osu!.<user>.cfg` ; then read `BeatmapDirectory` from that cfg to
 resolve the real Songs path."""
 import os
 import sys
@@ -162,7 +162,7 @@ def find_osu_dirs():
             return {'root': str(root), 'songs_dir': songs,
                     'replays_dirs': _osu_replays_for(str(root), songs)}
 
-    # Last resort: a stock Songs/ without a cfg — preserves autodetect
+    # Last resort: a stock Songs/ without a cfg ; preserves autodetect
     # for users who only have charts.
     for c in _songs_only_candidates():
         if c.is_dir():

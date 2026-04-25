@@ -2,8 +2,8 @@
 command list.
 
 The frame is the *portable* contract between the overlay backend and the
-platform. It is a flat list of ``(kind, args)`` records — intentionally
-dumb — so a future Windows or macOS platform can interpret it however
+platform. It is a flat list of ``(kind, args)`` records ; intentionally
+dumb ; so a future Windows or macOS platform can interpret it however
 that OS's overlay API wants. The current Linux/Gamescope platform
 serialises these records into the shared-memory widget format that
 ``osu_overlay.c`` already understands.
@@ -41,7 +41,7 @@ class OverlayFrame:
     don't need to know the component size.
     """
 
-    # Target resolution the frame was laid out against — used by the
+    # Target resolution the frame was laid out against ; used by the
     # platform to decide whether to remap on a resolution change.
     width: int = 1920
     height: int = 1080
@@ -76,7 +76,7 @@ class OverlayHandle:
     key: str
     width: int
     height: int
-    # Platform-specific extras live here — typed as Any so the base
+    # Platform-specific extras live here ; typed as Any so the base
     # package doesn't leak Linux/X11 types.
     impl: Any = None
 

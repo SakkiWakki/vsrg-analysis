@@ -90,7 +90,7 @@ def test_audio_getter_exception_falls_back_to_wall_clock():
 
 
 def test_paused_audio_source_still_returns_frozen_time():
-    """When paused, ignore the audio source even if it's installed — the
+    """When paused, ignore the audio source even if it's installed ; the
     user might have hit pause while audio was still producing samples."""
     c = ChartClock()
     source = [50.0]

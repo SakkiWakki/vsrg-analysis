@@ -1,4 +1,4 @@
-"""Long notes — holds ('2'→'3') and rolls ('4'→'3').
+"""Long notes ; holds ('2'→'3') and rolls ('4'→'3').
 
 In Etterna these are separate TapNoteType values but share the same
 start+end layout: a head row, then a span of empty rows, then a tail

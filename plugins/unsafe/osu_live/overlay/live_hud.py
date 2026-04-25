@@ -116,7 +116,7 @@ _PROVIDER_DIAG = {'last_present': None, 'last_phase': None}
 def _live_state_provider():
     """Provider for unified overlay components (see analysis.components.provider).
 
-    Unified components — e.g. the ported judgments plugin — read live
+    Unified components ; e.g. the ported judgments plugin ; read live
     game state through ``current_game_state()`` on the overlay render
     thread. They're surface-agnostic, so they can't reach into osu!'s
     client directly. We install this shim once at registration time.
@@ -137,7 +137,7 @@ def _live_state_provider():
             _PROVIDER_DIAG['last_present'] = False
             _PROVIDER_DIAG['last_phase'] = phase
             diag.log('osu_live.provider',
-                     f'not playing — phase={phase} '
+                     f'not playing ; phase={phase} '
                      f'connected={snap.connected}')
         return None
     if _PROVIDER_DIAG['last_present'] is not True \
@@ -145,7 +145,7 @@ def _live_state_provider():
         _PROVIDER_DIAG['last_present'] = True
         _PROVIDER_DIAG['last_phase'] = phase
         diag.log('osu_live.provider',
-                 f'state available — phase={phase} '
+                 f'state available ; phase={phase} '
                  f'keycount={state.keycount} '
                  f'judgments={state.judgments}')
     return state

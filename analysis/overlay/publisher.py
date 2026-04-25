@@ -4,7 +4,7 @@ Trusted host code that wants to draw HUD widgets over osu! (or any other
 game we run through gamescope) publishes via :class:`OverlayPublisher`.
 The C binary at ``analysis/games/osu/gamescope_overlay/osu_overlay``
 attaches to the shm region, reads the widget array each frame, and
-renders — it knows nothing about the plugin's game semantics.
+renders ; it knows nothing about the plugin's game semantics.
 
 Binary contract: ``analysis/overlay/widgets/overlay_shm.h``.
 All types, offsets, and sizes mirror that header exactly.
@@ -114,7 +114,7 @@ class _FrameBuilder:
 
     Grouping: use ``with f.group('panel'): ...`` to stamp every widget
     emitted inside with the same ``group_id``. Grouped widgets drag
-    together and share one persisted ``(dx, dy)`` offset — the user
+    together and share one persisted ``(dx, dy)`` offset ; the user
     perceives them as one HUD element.
     """
 
@@ -150,7 +150,7 @@ class _FrameBuilder:
         # we could compute from baseline + persisted delta. Read it
         # back so our commit doesn't snap the widget to its old spot
         # every frame. On drag release, drag_active clears and the
-        # normal baseline+delta path takes over — with the now-saved
+        # normal baseline+delta path takes over ; with the now-saved
         # delta reflecting the drop location.
         live_xy = self._pub._live_drag_xy(wid, gid)
         if live_xy is not None:
@@ -183,7 +183,7 @@ class _FrameBuilder:
     def text(self, id_str: str, s: str, x: float, y: float,
              *, px_scale: float = 2.0, color: int = WHITE,
              anchor: int = ANCHOR_TL) -> None:
-        # w/h are unused for text widgets — the renderer derives width
+        # w/h are unused for text widgets ; the renderer derives width
         # from string length * px_scale * 9 (glyph + kerning) so drag
         # hit-testing on the C side has a meaningful bounding box.
         self._record(KIND_TEXT, id_str, x, y, 0.0, 0.0, color, s,
@@ -230,7 +230,7 @@ class OverlayPublisher:
         self.plugin_key   = plugin_key
         self.width        = int(width)
         self.height       = int(height)
-        # Single global shm by default — every plugin in the live
+        # Single global shm by default ; every plugin in the live
         # session draws into the same segment. Tests may pass a
         # per-test path to keep parallel runs from racing on it.
         self._shm_path    = shm_path or '/dev/shm/vsrg_overlay'
@@ -389,7 +389,7 @@ class OverlayPublisher:
                     gid = widgets[i][4]
                     self._widget_group[wid] = gid
                 else:
-                    # Clear stale slots fully — otherwise a deleted
+                    # Clear stale slots fully ; otherwise a deleted
                     # widget would linger until the region is zeroed.
                     ctypes.memset(
                         ctypes.addressof(ctypes.c_char.from_buffer(mm, off)),
@@ -414,7 +414,7 @@ class OverlayPublisher:
            ``dragged_seq`` once per drag, on ButtonRelease. When we
            observe the bump we walk the widget array, compute the
            final delta against the widget's baseline, and persist
-           it. The drag is done — future frames go back to writing
+           it. The drag is done ; future frames go back to writing
            ``baseline + delta`` as usual.
 
         Header layout (see overlay_shm.h):
@@ -444,7 +444,7 @@ class OverlayPublisher:
             return
         self._last_dragged_seq = dragged_seq
 
-        # dragged_seq just advanced — a drag just ended. Capture the
+        # dragged_seq just advanced ; a drag just ended. Capture the
         # final (x, y) for every widget that was moved, translate to
         # group-keyed deltas, and persist.
         for i in range(MAX_WIDGETS):
@@ -485,7 +485,7 @@ class OverlayPublisher:
                 except (TypeError, ValueError, KeyError):
                     continue
                 self._group_deltas[gid] = (dx, dy)
-        # Per-widget deltas (standalone widgets — group_id == 0 on
+        # Per-widget deltas (standalone widgets ; group_id == 0 on
         # the wire, but persisted under the widget's own id).
         widgets = self._cfg.get(f'{self._cfg_prefix}.{self._res_key}.widgets', {})
         if isinstance(widgets, dict):
@@ -503,7 +503,7 @@ class OverlayPublisher:
         if self._cfg is None:
             return
         bucket = 'groups' if grouped else 'widgets'
-        # JSON object keys must be strings — stringify the id.
+        # JSON object keys must be strings ; stringify the id.
         path = f'{self._cfg_prefix}.{self._res_key}.{bucket}.{key}'
         self._cfg.set(path, {'dx': float(dx), 'dy': float(dy)})
 
@@ -553,7 +553,7 @@ class OverlayPublisher:
         return self.run_thread(_build, hz=hz, name=name)
 
 
-# Session-wide overlay refresh rate. Hardcoded — every spec drew at
+# Session-wide overlay refresh rate. Hardcoded ; every spec drew at
 # its own ``hz`` when each lived in its own publisher; now they share
 # one draw thread, so the slowest plugin doesn't slow down the rest
 # and the fastest doesn't oversample everyone else.
@@ -599,7 +599,7 @@ class OverlayRegistry:
         self._overlays: list[OverlaySpec] = []
         self._runtime: tuple[OverlayPublisher, threading.Thread] | None = None
         self._last_start: tuple[int | None, int | None, object] | None = None
-        # Specs whose draw raised this session — kept off until restart
+        # Specs whose draw raised this session ; kept off until restart
         # or until the user re-enables them through the dialog (mirrors
         # PluginManager._runtime_disabled).
         self._runtime_disabled: set[str] = set()
@@ -642,7 +642,7 @@ class OverlayRegistry:
               config_store=None) -> OverlayPublisher:
         """Start the session publisher.
 
-        ``key`` is accepted for back-compat but ignored — there is one
+        ``key`` is accepted for back-compat but ignored ; there is one
         publisher per session, not per plugin. Repeat calls return the
         same publisher.
         """
@@ -674,14 +674,14 @@ class OverlayRegistry:
 
         Each spec's draw runs inside its own try/except so a single
         misbehaving plugin can't take the whole overlay down. A spec
-        that raises is latched off for the rest of the session — same
+        that raises is latched off for the rest of the session ; same
         policy as :class:`PluginManager` for replay plugins.
         """
         from analysis import diag
         if not self._logged_first_tick:
             self._logged_first_tick = True
             diag.log('overlay.registry',
-                     f'first session tick — specs: '
+                     f'first session tick ; specs: '
                      f'{[(s.key, s.enabled) for s in self._overlays]}')
         for spec in list(self._overlays):
             if not spec.enabled or spec.key in self._runtime_disabled:
@@ -718,7 +718,7 @@ class OverlayRegistry:
         if not any(o.key == key for o in self._overlays):
             return False
         if enabled and key in self._runtime_disabled:
-            # User explicitly re-enabled — give it another shot.
+            # User explicitly re-enabled ; give it another shot.
             self._runtime_disabled.discard(key)
         self._config.set(
             f'plugins.{_escape_config_key(key)}.overlay_disabled',
@@ -726,7 +726,7 @@ class OverlayRegistry:
         for spec in self._overlays:
             if spec.key == key:
                 spec.enabled = bool(enabled)
-        # Note: we do NOT stop the session when one spec is disabled —
+        # Note: we do NOT stop the session when one spec is disabled ;
         # other plugins keep drawing. The disabled spec is just skipped
         # in _draw_session next tick.
         return True

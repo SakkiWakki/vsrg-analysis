@@ -110,7 +110,7 @@ def _build(ctx, i, pos) -> _NoteView | None:
 
 def prepare(ctx) -> None:
     """Build every per-candidate `_NoteView` once. The `taps` and `lns`
-    layer drawers read from `ctx.note_views` — splitting the previous
+    layer drawers read from `ctx.note_views` ; splitting the previous
     combined loop into two layer passes would otherwise rebuild each
     view twice."""
     views: list[_NoteView | None] = []
@@ -232,7 +232,7 @@ def _draw_head(ctx, painter, n) -> bool:
 
 
 def _head_vis(ctx, n) -> tuple:
-    """`(visible, sprite_state, y)` — sprite_state drives the cache
+    """`(visible, sprite_state, y)` ; sprite_state drives the cache
     key, not a raw color. `normal` / `miss_tap` / `miss_ln`."""
     if n.miss:
         state = 'miss_ln' if n.is_ln else 'miss_tap'
@@ -278,7 +278,7 @@ def _draw_miss_x(ctx, painter, n):
     from PySide6.QtCore import QPointF
     from analysis.player.render.layers.note_sprites import MISS_X_PAD
     pm = ctx.sprite_cache.get('miss_x', ctx, jcolor=n.jcolor)
-    # miss_x pixmap is `note_h + 2*pad` tall — shift the blit up by
+    # miss_x pixmap is `note_h + 2*pad` tall ; shift the blit up by
     # `pad` so the note-head area inside the sprite lines up with the
     # actual note head beneath.
     painter.drawPixmap(
@@ -292,12 +292,12 @@ class NoteType(NamedTuple):
     """One note kind a game declares. Each maps 1:1 to a toggleable
     layer in the render plan.
 
-    - `key`   — stable layer id (matches `LayerRegistry` key).
-    - `name`  — human label for the HUD visibility tree.
-    - `source` — 'player' (shares the prebuilt candidate list +
+    - `key`   ; stable layer id (matches `LayerRegistry` key).
+    - `name`  ; human label for the HUD visibility tree.
+    - `source` ; 'player' (shares the prebuilt candidate list +
       `_NoteView` prepass) or 'chart' (owns its own cull).
-    - `draw`  — `(ctx, painter) -> None`; same signature as any layer.
-    - `stage` — optional plugin stage to fire *after* this layer draws.
+    - `draw`  ; `(ctx, painter) -> None`; same signature as any layer.
+    - `stage` ; optional plugin stage to fire *after* this layer draws.
       Preserves the `AFTER_NOTES` / `AFTER_GHOSTS` hook points now that
       the layers that used to own them are per-adapter.
     """

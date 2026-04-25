@@ -1,4 +1,4 @@
-"""osu!mania GUI adapter — path discovery, root validation, profile listing,
+"""osu!mania GUI adapter ; path discovery, root validation, profile listing,
 enrichment from .osu chart files, and note-viz config."""
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ _PLACEHOLDER_NIX = 'e.g. ~/.local/share/osu-wine/osu!'
 class OsuGuiAdapter(GuiAdapter):
     name = 'osu'
     label = 'osu! install folder'
-    hint = ('Point at your osu! install folder — the one that contains '
+    hint = ('Point at your osu! install folder ; the one that contains '
             "`osu!.<username>.cfg`. The Songs folder is resolved from "
             "the config's BeatmapDirectory setting.")
     placeholder = _PLACEHOLDER_WIN if sys.platform == 'win32' else _PLACEHOLDER_NIX
@@ -99,7 +99,7 @@ class OsuGuiAdapter(GuiAdapter):
         eff_od = effective_osu_od(base_od, mods)
         return {
             'windows': osu_mania_windows(od=eff_od),
-            'unit_label': f'time (ms)  —  OD {eff_od:.1f}',
+            'unit_label': f'time (ms)  ;  OD {eff_od:.1f}',
             'rows_per_ms': None,
             'win': 8000,
         }

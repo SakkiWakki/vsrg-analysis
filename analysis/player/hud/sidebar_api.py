@@ -18,7 +18,7 @@ bottom of the sidebar.
 ``SidebarContext`` exposes the full drawing vocabulary sections need
 (``text``, ``rect``, ``line``, ``button``, ``checkbox``, ``split_row``,
 cursor helpers). Plugin authors should use these rather than importing Qt
-helpers directly — this way the sidebar stays consistent with the theme
+helpers directly ; this way the sidebar stays consistent with the theme
 and stays backend-agnostic for future renderers.
 
 Design tokens (colors, row heights, paddings) live in
@@ -183,7 +183,7 @@ class SidebarContext:
 
     def button_at(self, rect, label, action, payload=None, *,
                   enabled=True, center=False):
-        """Button at an explicit rect — does NOT advance the cursor.
+        """Button at an explicit rect ; does NOT advance the cursor.
 
         Use when you need multiple buttons on one row (call with rects from
         ``split_row``) or an inline control inside a larger layout.

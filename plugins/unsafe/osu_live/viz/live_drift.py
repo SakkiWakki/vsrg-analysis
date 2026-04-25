@@ -28,7 +28,7 @@ def register(add):
 def _open_live_stats_window():
     """Open a tabbed top-level window with every live viz in this
     bundle. Each tab is the same ``LiveFigureWidget`` the viz picker
-    would build — we just cohabit them so the user sees the whole live
+    would build ; we just cohabit them so the user sees the whole live
     dashboard with one click instead of five separate windows."""
     from PySide6.QtWidgets import (QApplication, QMessageBox, QTabWidget,
                                    QVBoxLayout, QWidget)
@@ -156,7 +156,7 @@ def _start_osu_with_overlay():
       ``VSRG_GL_OVERLAY_DISABLE=1``), fall through to the original
       gamescope-wrapped path.
 
-    The shm publisher is the same in both cases — the layer and the
+    The shm publisher is the same in both cases ; the layer and the
     external overlay binary read the same ``/dev/shm/vsrg_overlay``
     segment.
     """
@@ -231,7 +231,7 @@ def _start_osu_with_overlay():
         env = dict(os.environ, VSRG_GL_OVERLAY='1')
         # Point the renderer at a bundled font. The host's
         # /usr/share/fonts tree isn't bind-mounted into the
-        # pressure-vessel sandbox yawl-winello uses, but $HOME is —
+        # pressure-vessel sandbox yawl-winello uses, but $HOME is ;
         # so a path under the repo root resolves inside the game's
         # process too.
         repo_root = Path(__file__).resolve().parents[4]
@@ -295,7 +295,7 @@ def _start_osu_with_overlay_windows(parent):
     There's no ``osu-wine`` wrapper on Windows and no LD_PRELOAD, so the
     whole Linux launch machinery above is unusable here. Instead:
     MinHook patches ``wglSwapBuffers`` from inside osu!.exe once the DLL
-    is loaded — see ``analysis/games/osu/gl_layer/win/win_gl_layer.cpp``.
+    is loaded ; see ``analysis/games/osu/gl_layer/win/win_gl_layer.cpp``.
     """
     import os
     import subprocess
@@ -330,7 +330,7 @@ def _start_osu_with_overlay_windows(parent):
     if missing:
         QMessageBox.warning(
             parent, 'Start osu (with overlay)',
-            'Cannot start overlay — missing:\n\n  - '
+            'Cannot start overlay ; missing:\n\n  - '
             + '\n  - '.join(missing))
         return
 

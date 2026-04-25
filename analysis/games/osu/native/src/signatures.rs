@@ -1,4 +1,4 @@
-//! Named signatures and struct offsets — the *only* place in the
+//! Named signatures and struct offsets ; the *only* place in the
 //! crate that contains osu!-binary-derived magic numbers.
 //!
 //! # Discipline
@@ -28,7 +28,7 @@
 /// offset added to the match address before use.
 ///
 /// ``offset_from_match`` is what tosu calls ``offset``. Negative
-/// offsets are legitimate — some patterns match an instruction a few
+/// offsets are legitimate ; some patterns match an instruction a few
 /// bytes *after* the pointer we actually want.
 #[derive(Debug, Clone, Copy)]
 pub struct Signature {
@@ -49,7 +49,7 @@ pub struct Signature {
 ///
 /// The ``-0xb`` and ``+0x4`` constants below are the two immediate
 /// dereferences tosu does on the pattern match (not raw struct
-/// offsets — they're part of the instructions the pattern matched
+/// offsets ; they're part of the instructions the pattern matched
 /// against, so they live here with the signature).
 ///
 /// Source: tosu StableMemory.scanPatterns.rulesetsAddr.
@@ -61,7 +61,7 @@ pub const RULESETS_PTR: Signature = Signature {
 
 /// Immediate to add to the ``RULESETS_PTR`` match before the first
 /// deref. Part of the mov instruction the pattern matches, not a
-/// struct layout offset — but keeping it here avoids magic numbers in
+/// struct layout offset ; but keeping it here avoids magic numbers in
 /// the reader.
 pub const RULESETS_IND_OFFSET: i64 = -0xb;
 

@@ -2,12 +2,12 @@
 
 Two legacy JSON files live next to the new config:
 
-  * ``player_plugins.json``  — ``{"disabled": [key, ...]}``
-  * ``sidebar_sections.json`` — same shape
+  * ``player_plugins.json``  ; ``{"disabled": [key, ...]}``
+  * ``sidebar_sections.json`` ; same shape
 
 QSettings also holds a few UI-chrome values (paths, first-run flag).
 Both are folded into the unified tree, then the legacy files are
-deleted so they can't drift. QSettings entries are left in place —
+deleted so they can't drift. QSettings entries are left in place ;
 QSettings is a system-managed store and removing entries from it
 races with other Qt code. We just stop reading from it.
 
@@ -24,7 +24,7 @@ _SCHEMA_VERSION = 1
 
 def migrate_legacy(store) -> None:
     """Fold legacy JSON files into ``store``. Safe to call repeatedly
-    — after the first run, ``_schema_version`` marks the tree and
+    ; after the first run, ``_schema_version`` marks the tree and
     subsequent calls are no-ops."""
     if store.get('_schema_version', 0) >= _SCHEMA_VERSION:
         return
@@ -82,7 +82,7 @@ def _migrate_disabled_list(store, path: Path, kind: str) -> bool:
 
 def _migrate_qsettings(store) -> bool:
     """Fold Qt-side paths + first-run flag into the config tree. Only
-    reads — QSettings entries stay where they are. Safe if PySide6
+    reads ; QSettings entries stay where they are. Safe if PySide6
     isn't importable (headless tests)."""
     try:
         from analysis.gui import settings as qs
@@ -108,7 +108,7 @@ def _migrate_qsettings(store) -> bool:
 
 
 def _escape(key: str) -> str:
-    """Plugin keys can contain dots (rare but legal — bundle authors
+    """Plugin keys can contain dots (rare but legal ; bundle authors
     pick them). Dotted path parts are the store's separator, so rewrite
     any dots in a key to underscores at migration time. Colons and
     other characters stay verbatim."""

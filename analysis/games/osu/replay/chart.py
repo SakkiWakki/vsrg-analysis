@@ -88,7 +88,7 @@ def parse_osu_file(osu_path):
                     coerce(meta, key, v)
             elif section == 'HitObjects':
                 # Keycount may appear after HitObjects in weird charts, but
-                # osu!'s own loader assumes 4 when missing — match that.
+                # osu!'s own loader assumes 4 when missing ; match that.
                 obj = _parse_hitobject(line, meta.get('keycount') or 4)
                 if obj is not None:
                     meta['hitobjects'].append(obj)

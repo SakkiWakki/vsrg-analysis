@@ -1,4 +1,4 @@
-# vsrg-analysis — top-level build orchestration.
+# vsrg-analysis ; top-level build orchestration.
 #
 # Targets group by subsystem:
 #   make            → (default) build everything and launch the GUI
@@ -86,7 +86,7 @@ $(NATIVE_STAMP): $(NATIVE_SRCS) | venv
 	$(Q)echo "[native] maturin develop --release"
 	$(Q)cd $(NATIVE_DIR) && ../../../../$(VENV_MATURIN) develop --release
 	$(Q)$(VENV_PY) -c "import osu_memory_native" \
-	    || { echo "[native] post-build import failed — venv mismatch?"; exit 1; }
+	    || { echo "[native] post-build import failed ; venv mismatch?"; exit 1; }
 	$(Q)touch $@
 
 .PHONY: native
@@ -102,7 +102,7 @@ $(WEBTEX_STAMP): $(WEBTEX_SRCS) | venv
 	$(Q)echo "[webtex] maturin develop --release"
 	$(Q)cd $(WEBTEX_DIR) && ../../../$(VENV_MATURIN) develop --release
 	$(Q)$(VENV_PY) -c "import web_texture_ipc" \
-	    || { echo "[webtex] post-build import failed — venv mismatch?"; exit 1; }
+	    || { echo "[webtex] post-build import failed ; venv mismatch?"; exit 1; }
 	$(Q)touch $@
 
 .PHONY: webtex

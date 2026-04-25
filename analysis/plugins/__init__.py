@@ -12,9 +12,9 @@ A *bundle* is a directory with this layout::
 
 Bundles are discovered at these locations (later paths override earlier):
 
-  1. ``plugins/`` at the repo root — ships the built-in bundle
-  2. ``$EA_PLUGINS_PATH`` — colon-separated list of extra bundle roots
-  3. ``~/.config/vsrg-analysis/plugins/`` — per-user bundles
+  1. ``plugins/`` at the repo root ; ships the built-in bundle
+  2. ``$EA_PLUGINS_PATH`` ; colon-separated list of extra bundle roots
+  3. ``~/.config/vsrg-analysis/plugins/`` ; per-user bundles
 
 Each *bundle root* contains one or more bundle subdirectories. The folder
 name is the default bundle key (lowercased) if ``manifest.toml`` does not

@@ -1,7 +1,7 @@
 """PySide6 GUI for Etterna + osu!mania replay analysis.
 Every action opens in an embedded in-app tab instead of a separate window.
 
-This module is the app shell only — the real logic lives in:
+This module is the app shell only ; the real logic lives in:
   theme.py         dark palette + QSS
   widgets.py       JumpSlider, MplTab, HtmlTab, _viz_toolbar
   loaders.py       Worker thread + replay/chart/audio resolvers

@@ -27,14 +27,14 @@ class NotesModel:
         default_factory=lambda: np.empty(0, dtype=np.float64))
     ln_indices: list[int] = field(default_factory=list)
 
-    # Ghost taps — (time_sec, column) for presses that missed every note.
+    # Ghost taps ; (time_sec, column) for presses that missed every note.
     # osu only; Etterna .bin has no raw key stream.
     ghost_times: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.float64))
     ghost_cols: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.int32))
 
-    # Miss holds — spans where the player held a key through a missed LN.
+    # Miss holds ; spans where the player held a key through a missed LN.
     # Press/release are stored unclipped so overholds stay visible.
     miss_hold_ln_heads_ms: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.int64))
@@ -52,7 +52,7 @@ class NotesModel:
     miss_head_suppressed: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=bool))
 
-    # SV-space caches — populated by the SV builder, kept here so every
+    # SV-space caches ; populated by the SV builder, kept here so every
     # "per-note stream" lives in one place.
     ghost_sv_times: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.float64))
@@ -63,7 +63,7 @@ class NotesModel:
     miss_hold_max_sv_dur: float = 0.0
 
     # SM note streams. Mines, lifts, and fakes never
-    # appear in the .bin replay — the adapter pulls them off the
+    # appear in the .bin replay ; the adapter pulls them off the
     # matched .sm/.ssc and stashes time-converted arrays on the replay
     # dict. Empty for osu!mania.
     mine_times: np.ndarray = field(
@@ -96,7 +96,7 @@ class NotesModel:
         default_factory=lambda: np.empty(0, dtype=np.float64))
     fake_sv: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.float64))
-    # (head_row, col) for rolls — same key shape as hold_tails. The
+    # (head_row, col) for rolls ; same key shape as hold_tails. The
     # renderer uses this to tint LN tails green for rolls.
     roll_head_keys: set = field(default_factory=set)
 

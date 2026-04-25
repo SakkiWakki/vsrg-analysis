@@ -4,7 +4,7 @@ through ``analysis.plugins.discover_bundles``.
 
 ``builder(replay, game, **kw)`` must return a matplotlib Figure (static) or
 a QWidget (interactive). Everything discovered here shows up in the GUI's
-"Visualize" menu and works for any number of keys — builders should derive
+"Visualize" menu and works for any number of keys ; builders should derive
 keycount from the replay.
 """
 from __future__ import annotations

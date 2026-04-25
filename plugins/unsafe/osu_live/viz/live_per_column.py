@@ -3,7 +3,7 @@
 Per-column mean-offset bars. **Caveat:** we don't receive per-hit
 column from osu!, so the client round-robins hits across the keycount
 for continuity. The bar heights here are therefore *not* real lane
-timing — they converge to the session mean as hits accumulate. Kept
+timing ; they converge to the session mean as hits accumulate. Kept
 wrapped so the viz is discoverable in the live slot, but treat it as
 a sanity check rather than lane analysis until a real column feed
 lands.

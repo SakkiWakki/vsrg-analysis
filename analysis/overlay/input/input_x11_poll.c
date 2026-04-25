@@ -1,4 +1,4 @@
-// X11 poll backend — opens an independent Display connection and asks
+// X11 poll backend ; opens an independent Display connection and asks
 // the server for keyboard + pointer state each frame. Same idea as
 // MangoHud's X11 keybind path.
 //
@@ -16,7 +16,7 @@
 // coords directly, which only match the render surface when the game
 // is fullscreen (exclusive or borderless fullscreen covering 0,0→WxH).
 // To support windowed mode we need to translate via the game window's
-// origin — ``set_surface`` records the Window XID and we can call
+// origin ; ``set_surface`` records the Window XID and we can call
 // XTranslateCoordinates on each poll to map root→client. Left for
 // later since osu!stable-with-overlay is a fullscreen-first flow.
 
@@ -30,7 +30,7 @@
 #include <string.h>
 
 static Display *g_dpy          = NULL;
-static Window   g_surface      = 0;    // informational — see note below
+static Window   g_surface      = 0;    // informational ; see note below
 static KeyCode  g_kc_shift_l   = 0;
 static KeyCode  g_kc_shift_r   = 0;
 static KeyCode  g_kc_tab       = 0;
@@ -50,7 +50,7 @@ static int x11_poll_init(void) {
                         "- DISPLAY not set or unreachable\n");
         return 0;
     }
-    // Install once per process. This is a global handler — if Wine
+    // Install once per process. This is a global handler ; if Wine
     // itself installs one later we'll get replaced, which is fine
     // (Wine's handler is also non-fatal for its own errors).
     XSetErrorHandler(x11_poll_error_handler);
@@ -86,7 +86,7 @@ static void x11_poll_poll(int w, int h, VsrgInputRaw *out) {
     // connection (Wine's); XIDs are not shared across Display
     // connections, so querying it here yields BadWindow.
     //
-    // Root-relative coords are fine for fullscreen games — osu!stable
+    // Root-relative coords are fine for fullscreen games ; osu!stable
     // covers 0,0 → WxH. TODO: windowed mode needs a root→client
     // translation step; we still record the handle in g_surface so a
     // future version can use it.

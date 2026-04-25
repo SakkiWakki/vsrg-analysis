@@ -4,7 +4,7 @@ column shuffle, matching ManiaModRandom.ApplyToBeatmap."""
 
 class _LegacyRandom:
     """Port of .NET System.Random (osu!stable's RNG). Ref: osu!framework
-    LegacyRandom.cs — subtractive generator with seed array of 56 ints."""
+    LegacyRandom.cs ; subtractive generator with seed array of 56 ints."""
     MBIG = 2147483647
     MSEED = 161803398
 

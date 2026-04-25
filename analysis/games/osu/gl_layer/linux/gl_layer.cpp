@@ -16,7 +16,7 @@
 #include <dlfcn.h>
 #include <unistd.h>
 
-// The NanoVG-backed shim is 64-bit only for now — building NanoVG in
+// The NanoVG-backed shim is 64-bit only for now ; building NanoVG in
 // 32-bit requires multilib GL/fontstash dependencies we don't ship.
 // Step 1 lights up the 64-bit path (which is what osu!stable uses on
 // current Wine builds); the 32-bit .so stays a logging-only stub.
@@ -139,7 +139,7 @@ void log_first(std::atomic_bool& flag, const char* hook, int w, int h) {
 
 #if defined(VSRG_GL_LAYER_HAS_RENDERER)
 // NanoVG init is deferred until a GL context is current on our
-// thread — that doesn't happen until the game's first swap. After
+// thread ; that doesn't happen until the game's first swap. After
 // that, we draw a sanity-check rect per-frame bracketed by full GL
 // state save/restore so the game's renderer is unaffected.
 
@@ -182,7 +182,7 @@ void draw_overlay_frame(int w, int h, uintptr_t surface_handle) {
     if (!g_render_ready.load()) return;
     if (w <= 0 || h <= 0) return;
 
-    // Input is non-fatal — if it fails (no DISPLAY reachable) we
+    // Input is non-fatal ; if it fails (no DISPLAY reachable) we
     // still draw widgets, we just can't enter edit mode.
     if (!g_input_init_tried.exchange(true)) {
         bool ok = vsrg_input_init() != 0;
@@ -192,7 +192,7 @@ void draw_overlay_frame(int w, int h, uintptr_t surface_handle) {
                      ok ? "succeeded" : "FAILED");
     }
 
-    // Attach to the publisher's shm lazily — the feed may come up
+    // Attach to the publisher's shm lazily ; the feed may come up
     // after the game window, and we should survive that. On any
     // given frame it's fine to have no shm yet; we just draw nothing.
     bool have_shm = shm_consumer_ensure() != 0;
@@ -214,7 +214,7 @@ void draw_overlay_frame(int w, int h, uintptr_t surface_handle) {
                                    have_snap ? &snap : nullptr,
                                    mut, w, h);
 
-        // Re-read the snapshot after drag — we may have just
+        // Re-read the snapshot after drag ; we may have just
         // written new widget positions into shm, and the publisher
         // may also be racing us with a new frame. vsrg_draw_widgets
         // reads from our local ``snap`` so keep it current.
@@ -238,7 +238,7 @@ void draw_overlay_frame(int w, int h, uintptr_t surface_handle) {
     // Draw edit decorations regardless of have_snap: on menus the
     // publisher may not have any widgets yet, but the user still needs
     // to see that shift+tab registered. vsrg_draw_edit_decorations
-    // tolerates a null/empty widget list — it only iterates widgets
+    // tolerates a null/empty widget list ; it only iterates widgets
     // when painting outlines, and the screen-dim + help-bar draws
     // unconditionally.
     if (g_drag_state.edit_mode) {
@@ -415,11 +415,11 @@ void glXSwapBuffers(Display* dpy, GLXDrawable drawable) {
     log_first(g_logged_glx_swap, "glXSwapBuffers", w, h);
 
 #if defined(VSRG_GL_LAYER_HAS_RENDERER)
-    // GLXDrawable is an XID — for standard windowed/fullscreen GLX
+    // GLXDrawable is an XID ; for standard windowed/fullscreen GLX
     // (what osu!stable uses) it's the Window itself, which is what
     // the X11 input backend needs. If osu! ever used a GLXPbuffer
     // or GLXPixmap here, this would need XGetGeometry to find the
-    // parent Window — left as a TODO.
+    // parent Window ; left as a TODO.
     if (enabled()) {
         draw_overlay_frame(w, h,
                            static_cast<uintptr_t>(drawable));

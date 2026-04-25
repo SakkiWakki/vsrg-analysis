@@ -1,17 +1,17 @@
 Third-party code vendored into this directory:
 
-1. vkroots.h — Apache-2.0 OR MIT
+1. vkroots.h ; Apache-2.0 OR MIT
    https://github.com/misyltoad/vkroots
    Author: Joshua Ashton <joshua@froggi.es>
    (Generated from the Vulkan Registry, which uses the same licenses.)
 
-2. imgui/ — MIT
+2. imgui/ ; MIT
    https://github.com/ocornut/imgui
    Author: Omar Cornut and contributors
    See imgui/LICENSE.txt for the full text.
    Vendored from tag v1.92.7.
 
-3. imgui/imstb_{rectpack,textedit,truetype}.h — Public Domain (stb)
+3. imgui/imstb_{rectpack,textedit,truetype}.h ; Public Domain (stb)
    https://github.com/nothings/stb
    Author: Sean Barrett and contributors
 

@@ -72,7 +72,7 @@ void draw_overlay_frame(int w, int h, HWND hwnd) {
             if (c % 60 == 1) {
                 VSRG_LOG("[vsrg-gl] shm not available yet "
                          "(OpenFileMapping(\"vsrg_overlay\") returned NULL) "
-                         "— publisher running?");
+                         "; publisher running?");
             }
         }
     }
@@ -177,10 +177,10 @@ void remove_hook() {
 BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         if (enabled()) {
-            VSRG_LOG("[vsrg-gl] DllMain attach — installing hook");
+            VSRG_LOG("[vsrg-gl] DllMain attach ; installing hook");
             install_hook();
         } else {
-            VSRG_LOG("[vsrg-gl] DllMain attach — VSRG_GL_OVERLAY unset, "
+            VSRG_LOG("[vsrg-gl] DllMain attach ; VSRG_GL_OVERLAY unset, "
                      "not hooking");
         }
     } else if (reason == DLL_PROCESS_DETACH) {

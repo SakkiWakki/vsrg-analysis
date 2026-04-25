@@ -1,6 +1,6 @@
 """Platform abstraction layer for overlay hosting.
 
-The sidebar is always Qt-in-process — nothing platform-specific about it.
+The sidebar is always Qt-in-process ; nothing platform-specific about it.
 The *overlay*, however, needs a way to get pixels on top of a running
 game, and every OS offers a different contract for that:
 
@@ -9,7 +9,7 @@ game, and every OS offers a different contract for that:
         widgets from /dev/shm via mmap.
     Windows:           hypothetical DWM thumbnail / D3D overlay swapchain.
     macOS:             hypothetical Metal layer on the shared window server.
-    (no overlay):      NullOverlayPlatform — overlay surface simply isn't
+    (no overlay):      NullOverlayPlatform ; overlay surface simply isn't
                        registered; components with 'overlay' in their
                        supported_surfaces silently skip it.
 
@@ -45,7 +45,7 @@ def detect() -> OverlayPlatform:
     Priority:
       1. ``VSRG_OVERLAY_PLATFORM`` env var wins, if set to a known name.
       2. Linux + gamescope session detected → ``GamescopeOverlayPlatform``.
-      3. Fall back to :class:`NullOverlayPlatform` — overlay disabled.
+      3. Fall back to :class:`NullOverlayPlatform` ; overlay disabled.
 
     The detection deliberately never *requires* gamescope at import
     time: headless CI, sidebar-only Macs, and unit tests all land on

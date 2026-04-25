@@ -2,13 +2,13 @@
 //
 // Why this exists: the polling backend samples key state at the host's
 // swap rate. osu!stable drops to ~30 Hz on menus, and a shift+tab tap
-// can complete entirely between two samples — both keys appear to flip
+// can complete entirely between two samples ; both keys appear to flip
 // simultaneously, which misses the rising-edge semantics the overlay's
 // edit-mode toggle relies on.
 //
 // XI2 raw events are delivered by the X server as they happen, queued
 // per-client on our own Display connection. We drain the queue each
-// poll(), fold the events into level state, and return that — the
+// poll(), fold the events into level state, and return that ; the
 // dispatcher in input.c still turns the level state into edges, but
 // now the level already reflects every transition that happened since
 // the last poll, not just the state at sample time.
@@ -16,7 +16,7 @@
 // "Raw" vs. regular XI2 events matters because osu! often grabs the
 // pointer (and sometimes keyboard) on menus; regular events would stop
 // flowing to us during the grab. Raw events are delivered to any client
-// that asked for them regardless of grabs — same mechanism MangoHud
+// that asked for them regardless of grabs ; same mechanism MangoHud
 // uses for its F12 keybind.
 //
 // The backend still has to know "is shift down right now?" so we keep a
@@ -184,7 +184,7 @@ static void xi2_poll(int w, int h, VsrgInputRaw *out) {
     out->tab_down   = g_keys_down[g_kc_tab];
     out->primary_button_down = g_button1_down;
 
-    // Pointer position still needs a query — raw motion events are
+    // Pointer position still needs a query ; raw motion events are
     // relative deltas and reconstructing absolute screen coords from
     // them is more fragile than just asking the server.
     Window root = DefaultRootWindow(g_dpy);

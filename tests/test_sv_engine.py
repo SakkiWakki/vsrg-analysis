@@ -2,7 +2,7 @@
 
 The core invariants enforced here:
 
-1. `cumulative_at(t) == project_times([t])[0]` exactly — this is what keeps
+1. `cumulative_at(t) == project_times([t])[0]` exactly ; this is what keeps
    the cull bisect in culling.py consistent with what `_time_to_y` draws.
 
 2. `distance(a, b) == cumulative_at(b) - cumulative_at(a)` when no
@@ -202,7 +202,7 @@ def test_beat_space_distance_matches_etterna_formula():
 
 
 def test_beat_space_speed_zero_freezes_field():
-    """SPEEDS=0 means the field zoom is 0 — all notes collapse to the
+    """SPEEDS=0 means the field zoom is 0 ; all notes collapse to the
     receptor. Etterna uses this for the stutter-end gimmick in charts
     like Undiscovered Colors."""
     e = BeatSpaceSVEngine(
@@ -263,7 +263,7 @@ def test_beat_space_max_visible_caps_lookahead_in_beats():
 
 def test_scroll_zero_region_collapses_to_same_cumulative():
     """All notes inside a scroll=0 region map to the same cull-space
-    cumulative — the whole point of the scroll-stack gimmick. Without
+    cumulative ; the whole point of the scroll-stack gimmick. Without
     this check, accidentally applying scroll to beats inside the region
     would spread the pile out."""
     e = BeatSpaceSVEngine([(0.0, 0.0), (26.0, 1.0)], [], [(0.0, 140.0)], 0.0)
@@ -283,7 +283,7 @@ def test_identity_engine_max_visible_is_infinity():
 
 def test_beat_space_matches_sm_chart_walker():
     """Pre-walked TimingMap must return bit-identical values to the
-    reference beat_to_time walker — regression against a perf refactor
+    reference beat_to_time walker ; regression against a perf refactor
     that could silently introduce rounding drift on large charts.
 
     Restricted to BPM + STOP + DELAY cases so the basic timing-boundary
@@ -305,7 +305,7 @@ def test_beat_space_matches_sm_chart_walker():
 
 
 def test_beat_space_warp_inside_range_collapses_time():
-    """Beats inside a WARP region share the time of the warp entry —
+    """Beats inside a WARP region share the time of the warp entry ;
     they're teleported-over in beat space with no time elapsing."""
     bpms = [(0.0, 120.0)]  # 0.5s per beat
     warps = [(10.0, 2.0)]  # warp 2 beats forward at beat 10

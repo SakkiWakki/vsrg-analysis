@@ -3,7 +3,7 @@
 Histogram of per-hit timing offsets, rebuilt each tick from the
 native/tosu feed. Uses only ``offsets`` and ``columns``; columns are
 the synthetic round-robin lanes, which means the per-hand split is
-not real osu! hand data — but the overall distribution shape is
+not real osu! hand data ; but the overall distribution shape is
 still meaningful and tracks the live session accurately.
 """
 from __future__ import annotations

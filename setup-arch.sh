@@ -10,7 +10,7 @@
 #   - gamescope (the live in-game overlay compositor)
 # Then runs `make all` to build everything.
 #
-# osu-winello is *not* installed automatically — it has its own
+# osu-winello is *not* installed automatically ; it has its own
 # installer with interactive prompts. The script points you at it
 # at the end if osu-wine isn't already on PATH.
 set -euo pipefail

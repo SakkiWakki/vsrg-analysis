@@ -93,7 +93,7 @@ static int inject(DWORD pid, const wchar_t *dll_path_w) {
 
     if (exit_code == 0) {
         fprintf(stderr,
-                "LoadLibraryW returned NULL in target — DLL failed to load "
+                "LoadLibraryW returned NULL in target ; DLL failed to load "
                 "(check bitness match, missing deps, DllMain errors)\n");
         return 1;
     }
@@ -131,7 +131,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // Relative paths resolve against the target's cwd, not ours — reject
+    // Relative paths resolve against the target's cwd, not ours ; reject
     // them up front rather than debug a silent NULL from the remote thread.
     if (dll_w[0] == 0 || (dll_w[1] != L':' && dll_w[0] != L'\\')) {
         fprintf(stderr, "dll path must be absolute: %s\n", dll);

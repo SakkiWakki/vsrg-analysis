@@ -44,7 +44,7 @@ class PluginManager:
         self._plugins: list[DrawPlugin] = []
         self.sidebar = SidebarSectionRegistry(config=self._config)
         self.layers = LayerRegistry(config=self._config)
-        # Unified component registry — the source of truth for plugins
+        # Unified component registry ; the source of truth for plugins
         # that opted into the new cross-surface API. Ported sidebar
         # sections feed in here too; ``discover`` bridges them back
         # into ``self.sidebar`` so the existing renderer picks them up.
@@ -53,7 +53,7 @@ class PluginManager:
         self._config_sub = self._config.subscribe(
             'plugins', self._on_config_change)
         # Runtime failures (an exception inside a draw callable) force
-        # the plugin off regardless of config — these keys stay off
+        # the plugin off regardless of config ; these keys stay off
         # even if the user flips the dialog checkbox back on. Cleared
         # on rediscovery.
         self._runtime_disabled: set[str] = set()
@@ -104,7 +104,7 @@ class PluginManager:
             return False
         cleared_latch = False
         if enabled and key in self._runtime_disabled:
-            # User explicitly re-enabled — forget the runtime-failure
+            # User explicitly re-enabled ; forget the runtime-failure
             # latch so the plugin gets another chance.
             self._runtime_disabled.discard(key)
             cleared_latch = True
@@ -151,7 +151,7 @@ class PluginManager:
             if disabled:
                 p.enabled = False
             elif p.key in self._runtime_disabled:
-                # Config says "on" but the plugin crashed earlier — keep
+                # Config says "on" but the plugin crashed earlier ; keep
                 # it off until discover() resets.
                 pass
             else:
@@ -173,8 +173,8 @@ class PluginManager:
             for mod in bundle.sidebar_modules:
                 mgr._register_sidebar(mod, bundle)
             # Library-toolbar actions can live in any of the bundle's
-            # module roles (viz is the natural home — a viz bundle may
-            # want a "go live" button — but we don't force a shape).
+            # module roles (viz is the natural home ; a viz bundle may
+            # want a "go live" button ; but we don't force a shape).
             for mod in (list(bundle.replay_modules)
                         + list(bundle.sidebar_modules)
                         + list(getattr(bundle, 'viz_modules', []) or [])):

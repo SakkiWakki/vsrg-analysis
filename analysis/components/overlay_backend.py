@@ -15,7 +15,7 @@ degrade or were filtered out at registration time by ``requires_data``.
 
 Interactive primitives (buttons, checkboxes) still render their chrome
 so the overlay and sidebar look the same, but no hitboxes are
-registered — the gamescope path routes no click events back. Components
+registered ; the gamescope path routes no click events back. Components
 that care about this branch on ``ctx.supports_input``.
 """
 from __future__ import annotations
@@ -44,7 +44,7 @@ from analysis.player.render import theme
 class OverlayFields:
     """Overlay-specific layout hints for a component manifest.
 
-    The overlay has no panel region — all components float freely.
+    The overlay has no panel region ; all components float freely.
     ``default_xy`` and ``default_size`` are normalized to [0, 1] of the
     framebuffer dimensions."""
     hz: float = 30.0
@@ -350,7 +350,7 @@ class OverlayContext:
         self.rect(box, theme.COLOR_CHECKBOX_FILL,
                   outline=theme.COLOR_CHECKBOX_BORDER)
         if checked:
-            # Two line segments form the tick — ``line`` supports
+            # Two line segments form the tick ; ``line`` supports
             # axis-aligned only; the diagonal parts drop cleanly.
             self.line((int(x) + 2, int(y) + 5),
                       (int(x) + 4, int(y) + 8),

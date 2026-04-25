@@ -25,8 +25,8 @@ try:
 except Exception:
     _sd = None
 
-# Decoding stack: soundfile (libsndfile — wav/flac/ogg/opus) as the primary,
-# audioread (ffmpeg/gstreamer wrapper — mp3/m4a/anything) as the fallback for
+# Decoding stack: soundfile (libsndfile ; wav/flac/ogg/opus) as the primary,
+# audioread (ffmpeg/gstreamer wrapper ; mp3/m4a/anything) as the fallback for
 # formats libsndfile doesn't handle. Both are pure decoders that hand us
 # float samples directly, no mixer roundtrip.
 try:
@@ -87,7 +87,7 @@ class AudioEngine:
         if not audio_path or not os.path.exists(audio_path):
             return
         if _sd is None:
-            print('audio: sounddevice not installed — no audio playback')
+            print('audio: sounddevice not installed ; no audio playback')
             return
 
         samples, sr = self._decode(audio_path)
@@ -122,7 +122,7 @@ class AudioEngine:
                 arr, sr = _sf.read(path, dtype='float32', always_2d=True)
                 return arr, int(sr)
             except Exception as e:
-                # Fall through to audioread — libsndfile doesn't do mp3/m4a
+                # Fall through to audioread ; libsndfile doesn't do mp3/m4a
                 # on every build.
                 sf_err = e
         else:
@@ -412,7 +412,7 @@ class AudioEngine:
 
     def seek(self, t: float) -> None:
         """Explicitly seek the PV to chart time `t`. Called on scrub
-        release, restart, or any user-visible jump — the OLA buffer flush
+        release, restart, or any user-visible jump ; the OLA buffer flush
         is the price of a non-contiguous seek."""
         if not self.ready:
             return
@@ -458,7 +458,7 @@ class AudioEngine:
         self._stream = None
 
     def prewarm_rates(self, rates) -> None:
-        """No-op — the streaming PV has no per-rate precompute."""
+        """No-op ; the streaming PV has no per-rate precompute."""
         return
 
 

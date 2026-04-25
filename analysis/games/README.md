@@ -28,7 +28,7 @@ imports every `<game>/adapter.py`, and registers the exposed adapter.
        def default_scroll_mode(self): return 'mygame-scroll'
        def player_kwargs(self, replay, **_): return {}
 
-   # Scroll modes are global — registering them here makes them available
+   # Scroll modes are global ; registering them here makes them available
    # to players regardless of which game the current replay is from, so
    # users can compare speeds across games.
    scroll.register(scroll.ScrollMode(
@@ -48,7 +48,7 @@ imports every `<game>/adapter.py`, and registers the exposed adapter.
    ADAPTER = MyGameAdapter()
    ```
 
-4. That's it — no registry files to edit. The game's modes appear in the
+4. That's it ; no registry files to edit. The game's modes appear in the
    player HUD's scroll-type cycle next to the others.
 
 ## Conventions
@@ -61,5 +61,5 @@ imports every `<game>/adapter.py`, and registers the exposed adapter.
   `options` dict with sensible defaults. Users access them via
   `player.get_mode_option` / `player.set_mode_option`.
 - Use lifecycle hooks (`on_enter` / `on_exit`) for side effects that need
-  to survive the mode switch — CMOD uses them to suspend SV on entry and
+  to survive the mode switch ; CMOD uses them to suspend SV on entry and
   restore it on exit.

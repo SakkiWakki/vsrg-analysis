@@ -4,7 +4,7 @@
 // size, this module resolves every widget's normalized (x, y) +
 // anchor into pixel coordinates, then emits ``render_*`` calls from
 // render.h. It is the one place where the on-screen layout math
-// lives — anyone drawing the HUD (the gamescope external overlay,
+// lives ; anyone drawing the HUD (the gamescope external overlay,
 // the stable GL preload layer, an imaginary future SDL backend)
 // calls through here.
 //
@@ -53,7 +53,7 @@ VsrgResolvedBox vsrg_resolve_box(const VsrgOverlayWidget *w,
 
 // Given a desired resolved pixel top-left, compute the
 // normalized, pre-anchor (x, y) that would yield it. Used during
-// drag — caller typically clamps the result into [0, 1] before
+// drag ; caller typically clamps the result into [0, 1] before
 // writing it back to shm.
 void vsrg_reverse_anchor(const VsrgOverlayWidget *w,
                          int canvas_w, int canvas_h,
@@ -116,8 +116,8 @@ void vsrg_draw_edit_decorations(const VsrgOverlayShm *s,
 //
 // ``shm_mut`` is the publisher-writable mapping (same as the snapshot
 // read target in the gamescope binary; NULL is tolerated and makes
-// drag a no-op — useful if the host hasn't attached yet). The
-// snapshot ``s`` is read-only — drag math reads positions from it.
+// drag a no-op ; useful if the host hasn't attached yet). The
+// snapshot ``s`` is read-only ; drag math reads positions from it.
 //
 // Returns the hover index (-1 if no widget hovered, only valid in
 // edit mode) so the host can pass it to vsrg_draw_edit_decorations.

@@ -22,7 +22,7 @@ class OpenVisualizationAction(EntryActionBase):
 
         name, builder, category = match
         title_song = self.title_song(entry)
-        tab_title = f'📊 {name} — {title_song}'
+        tab_title = f'📊 {name} ; {title_song}'
 
         def job(progress):
             progress('parsing replay…')

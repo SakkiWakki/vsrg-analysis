@@ -6,12 +6,12 @@ converts between chart-time (what the replay stores) and SV-space (what the
 renderer uses for note Y positions and visible-window culling).
 
 Ex:
-- `TimeSpaceSVEngine`  — piecewise-constant multiplier in time-space. osu!mania
+- `TimeSpaceSVEngine`  ; piecewise-constant multiplier in time-space. osu!mania
                          uses this (SV from timing points is a time-space curve).
-- `BeatSpaceSVEngine`  — Etterna's #SCROLLS as a piecewise-constant velocity
+- `BeatSpaceSVEngine`  ; Etterna's #SCROLLS as a piecewise-constant velocity
                          on *beats*, plus #SPEEDS as a uniform-field zoom
                          sampled at the song position. Required for charts
-                         where #SCROLLS spans BPM changes — integrating in
+                         where #SCROLLS spans BPM changes ; integrating in
                          time-space silently accumulates error.
 
 Games that don't populate SV leave `adapter.build_sv_engine()` at the base
@@ -31,7 +31,7 @@ class SVEngine(Protocol):
     Two spaces are exposed:
 
     * **Render-space** (`distance`): used by `_time_to_y`. May depend on the
-      current song position — e.g. Etterna #SPEEDS zooms the whole field
+      current song position ; e.g. Etterna #SPEEDS zooms the whole field
       based on where the playhead sits. Called per visible note per frame.
 
     * **Cull-space** (`project_times` / `cumulative_at`): monotonic, purely
@@ -42,7 +42,7 @@ class SVEngine(Protocol):
           WHEN no position-dependent effect applies (e.g. SPEEDS = 1 flat).
 
       During brief position-dependent transitions (Etterna SPEEDS change),
-      the culling window is approximate — typically one SPEEDS segment's
+      the culling window is approximate ; typically one SPEEDS segment's
       multiplier off, which the Player pads for.
     """
 
@@ -69,7 +69,7 @@ class SVEngine(Protocol):
         chart-time within the plateau."""
 
     def project_times(self, times: np.ndarray) -> np.ndarray:
-        """Batch `cumulative_at` — the renderer bisects the result."""
+        """Batch `cumulative_at` ; the renderer bisects the result."""
 
     def as_sections(self) -> list[tuple[float, float]]:
         """Legacy `[(time_sec, multiplier)]` projection for components and
@@ -89,7 +89,7 @@ class SVEngine(Protocol):
         """Upper bound on chart-time for the visible window. Defaults to
         infinity (culling is purely SV-space driven). Etterna's engine
         returns a beat-based cap matching ArrowEffects::FindDisplayedBeats'
-        binary-search convergence — without it, scroll=0 regions produce
+        binary-search convergence ; without it, scroll=0 regions produce
         huge SV-equal runs that all pass cull-space bisection."""
         return float('inf')
 
@@ -99,7 +99,7 @@ def _empty_engine_sections(_engine) -> list[tuple[float, float]]:
 
 
 # ----------------------------------------------------------------------
-# Time-space engine — osu!mania, and any other game that models SV as a
+# Time-space engine ; osu!mania, and any other game that models SV as a
 # piecewise-constant multiplier sampled on wall-clock time.
 # ----------------------------------------------------------------------
 
@@ -107,7 +107,7 @@ def _empty_engine_sections(_engine) -> list[tuple[float, float]]:
 class TimeSpaceSVEngine:
     """Integrates a piecewise-constant `(time_sec, multiplier)` curve.
 
-    This is the original SV model. Used by osu!mania verbatim — its timing
+    This is the original SV model. Used by osu!mania verbatim ; its timing
     points map to time-space SV ratios and nothing in the positioning
     formula depends on the current song position."""
 
@@ -155,7 +155,7 @@ class TimeSpaceSVEngine:
         return self.cumulative_at(t_to) - self.cumulative_at(t_from)
 
     def project_times(self, times: np.ndarray) -> np.ndarray:
-        """Vectorized `cumulative_at` over an array — one np.searchsorted
+        """Vectorized `cumulative_at` over an array ; one np.searchsorted
         + fused numpy arithmetic replaces the N-iteration Python loop."""
         t = np.asarray(times, dtype=np.float64)
         if not t.size:
@@ -199,7 +199,7 @@ class TimeSpaceSVEngine:
 
 
 # ----------------------------------------------------------------------
-# Beat-space engine — Etterna's XMOD positioning.
+# Beat-space engine ; Etterna's XMOD positioning.
 # ----------------------------------------------------------------------
 #
 # Etterna (ArrowEffects.cpp::GetYOffset, XMOD branch):
@@ -211,7 +211,7 @@ class TimeSpaceSVEngine:
 # DisplayedBeat is a piecewise-linear function of real beats, built by
 # integrating #SCROLLS ratios (PlayerState.cpp::ResetCacheInfo).
 # GetDisplayedSpeedPercent is evaluated at the CURRENT song position (not at
-# the note) — it acts as a uniform zoom factor on the whole field. To fit
+# the note) ; it acts as a uniform zoom factor on the whole field. To fit
 # into the Player's px/sec contract, we convert beat distance to an
 # "effective-seconds" quantity using the chart's base BPM.
 #
@@ -237,7 +237,7 @@ class _TimingMap:
 
     Walking the event stream on every `_beat_to_time` / `_time_to_beat` call
     was the render-hot-path bottleneck on Etterna charts with many BPM/stop
-    segments (Undiscovered Colors has 310 BPMs + 591 stops — a linear walk
+    segments (Undiscovered Colors has 310 BPMs + 591 stops ; a linear walk
     costs ~34us per call, and `distance()` does two of those per visible
     note per frame). Walking once into checkpoint arrays drops the per-call
     cost to a bisect + constant-time arithmetic."""
@@ -307,11 +307,11 @@ class _TimingMap:
                 t += float(val)
             elif kind == 2:     # STOP: pause after the row's notes
                 t += float(val)
-            elif kind == 3:     # WARP — beat teleports forward, time doesn't
+            elif kind == 3:     # WARP ; beat teleports forward, time doesn't
                 warp_end = cur_beat + float(val)
 
             # beat_exit reflects the post-event beat cursor for bisect
-            # lookups — for WARP, that's the warp landing; for others,
+            # lookups ; for WARP, that's the warp landing; for others,
             # unchanged from beat_enter. The event loop's own cur_beat
             # stays at beat_enter for warps so subsequent in-warp events
             # still get skipped correctly by the warp_end state check.
@@ -365,7 +365,7 @@ class _TimingMap:
 
         tr = t[remaining]
         # Pause window test: t lies between time_enter[idx] and time_exit[idx]
-        # at the same idx — beat is frozen to beat_exit[idx].
+        # at the same idx ; beat is frozen to beat_exit[idx].
         pause_idx = np.searchsorted(self._time_enter_np, tr, side='right') - 1
         pause_valid = pause_idx >= 0
         pause_in = np.zeros_like(tr, dtype=bool)
@@ -394,7 +394,7 @@ class _TimingMap:
             return self._t_at_beat_zero + beat / self._bps_initial
         # Find last event whose beat_enter <= target beat. (If target beat
         # lies in the event's own span [beat_enter, beat_exit], time is
-        # mid-transition — return time_enter for beats before event
+        # mid-transition ; return time_enter for beats before event
         # completion, time_exit for after. Effectively: if target_beat ==
         # beat_enter, the PRE-event time is correct.)
         idx = _b.bisect_right(self._beat_enter, beat) - 1
@@ -419,7 +419,7 @@ class _TimingMap:
         bx = self._beat_exit[idx]
         if beat < bx:
             return self._time_exit[idx]
-        # Past this event — advance at bps_after to `beat`.
+        # Past this event ; advance at bps_after to `beat`.
         return self._time_exit[idx] + (beat - bx) / self._bps_after[idx]
 
     def time_to_beat(self, t: float) -> float:
@@ -441,7 +441,7 @@ class _TimingMap:
         idx = _b.bisect_right(self._time_exit, t) - 1
         if idx < 0:
             return self._beat_exit[0]
-        # Past all events — use the last event's post-event state.
+        # Past all events ; use the last event's post-event state.
         return self._beat_exit[idx] + (t - self._time_exit[idx]) * self._bps_after[idx]
 
     def bps_at_time(self, t: float) -> float:
@@ -469,7 +469,7 @@ class BeatSpaceSVEngine:
     bpms:    list[(beat, bpm)] used to convert beat-space distance to the
              Player's time-space px/sec units
     sm_offset: song OFFSET in seconds (positive = audio starts later)
-    stops/delays/warps: optional timing events — passed to beat_to_time so
+    stops/delays/warps: optional timing events ; passed to beat_to_time so
              beat<->time conversion tracks Etterna's GetElapsedTimeInternal."""
 
     def __init__(self, scrolls, speeds, bpms, sm_offset,
@@ -490,7 +490,7 @@ class BeatSpaceSVEngine:
         self._base_bpm = float(self._bpms[0][1]) if self._bpms else 120.0
         self._sec_per_base_beat = 60.0 / self._base_bpm
         # Pre-walked timing map so _beat_to_time / _time_to_beat are O(log n)
-        # instead of O(segments) per call — critical on charts with 100s of
+        # instead of O(segments) per call ; critical on charts with 100s of
         # BPM changes and stops (e.g. Undiscovered Colors).
         self._timing = _TimingMap(self._bpms, self._sm_offset,
                                    self._stops, self._delays, self._warps)
@@ -513,7 +513,7 @@ class BeatSpaceSVEngine:
                 last_beat = b
                 last_ratio = r
         self._cache_beats = [c[0] for c in self._cache]
-        # Numpy mirrors for vectorized displayed_beat over arrays — kept in
+        # Numpy mirrors for vectorized displayed_beat over arrays ; kept in
         # sync with `_cache`; `_cache` stays Python-list for scalar hits.
         self._cache_beats_np = np.asarray(self._cache_beats, dtype=np.float64)
         self._cache_db_np = np.asarray([c[1] for c in self._cache], dtype=np.float64)
@@ -655,12 +655,12 @@ class BeatSpaceSVEngine:
     def project_times(self, times: np.ndarray) -> np.ndarray:
         """Vectorized `cumulative_at` over an array. Calls the _TimingMap
         and displayed-beat lookups in batch (one np.searchsorted each)
-        instead of two Python bisects per entry — gives the renderer
+        instead of two Python bisects per entry ; gives the renderer
         O(log n) per note with a single numpy pass for the whole frame."""
         t = np.asarray(times, dtype=np.float64)
         if not t.size:
             return np.empty(0, dtype=np.float64)
-        # beat = time_to_beat_array(t) — STOPS/DELAYS/WARPS aware.
+        # beat = time_to_beat_array(t) ; STOPS/DELAYS/WARPS aware.
         beats = self._timing.time_to_beat_array(t)
         return self.project_beats(beats)
 
@@ -734,7 +734,7 @@ class BeatSpaceSVEngine:
 
     # ArrowEffects::FindDisplayedBeats does a binary search for the first
     # off-screen beat. When scroll=0 the search collapses because YOffset
-    # stays 0 regardless of how far ahead you look — the 10/2/... halving
+    # stays 0 regardless of how far ahead you look ; the 10/2/... halving
     # sum caps out around songBeat + ~20. Without matching that cap, our
     # SV-space bisect keeps every note with the same SV-cum value, so a
     # scroll=0 region lets the entire pile pass culling.
@@ -746,7 +746,7 @@ class BeatSpaceSVEngine:
 
 
 # ----------------------------------------------------------------------
-# Identity fallback — used when the adapter returns None or the chart has
+# Identity fallback ; used when the adapter returns None or the chart has
 # no SV data. Keeps the Player's code path uniform.
 # ----------------------------------------------------------------------
 

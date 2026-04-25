@@ -34,7 +34,7 @@ def build_library(refresh=False, progress=None):
     """Return the full library as a flat list of entry dicts.
 
     Each adapter owns its own cache. By default we ask each adapter for
-    an incremental update (fast — picks up new replays, reuses cache).
+    an incremental update (fast ; picks up new replays, reuses cache).
     Pass `refresh=True` to force a full rebuild of every enabled game;
     callers that want to rebuild only one game should call
     `adapter.rebuild()` directly.
@@ -52,7 +52,7 @@ def build_library(refresh=False, progress=None):
             got = adapter.incremental_update(progress=progress) or []
         entries.extend(got)
         if progress:
-            progress(f'{name}: {len(got)} entries — total {len(entries)}')
+            progress(f'{name}: {len(got)} entries ; total {len(entries)}')
     return entries
 
 

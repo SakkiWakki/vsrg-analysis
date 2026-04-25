@@ -5,7 +5,7 @@
 #include <string.h>
 #include <stdio.h>
 
-// No namespace prefix — Windows puts the mapping in the session-default
+// No namespace prefix ; Windows puts the mapping in the session-default
 // namespace, which both the publisher (our GUI) and the consumer (osu!.exe
 // as our child process) share. Avoids Global\'s SeCreateGlobalPrivilege
 // requirement and Local\'s odd interaction with CPython's mmap tagname.

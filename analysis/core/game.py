@@ -86,7 +86,7 @@ class GameAdapter:
     # --- library cache lifecycle -----------------------------------------
     # Three entry points, all optional. Default impls fall back to
     # `scan_library` so an adapter that only implements the old hook still
-    # works — it just won't benefit from incremental updates or separate
+    # works ; it just won't benefit from incremental updates or separate
     # caching.
     def load_cached(self) -> list | None:
         """Return this game's cached entries, or None if no valid cache
@@ -112,7 +112,7 @@ class GameAdapter:
 
     # --- standalone-launch resolver (CLI / player __main__) ---------------
     def can_handle_path(self, path) -> bool:
-        """True if `path` looks like a replay this adapter can parse — used
+        """True if `path` looks like a replay this adapter can parse ; used
         by the player's standalone entry point to pick an adapter."""
         return False
 
@@ -149,7 +149,7 @@ class GameAdapter:
     def note_types(self, replay) -> list:
         """Return the list of `NoteType` the renderer should draw for
         this replay. Each entry becomes its own toggleable layer in the
-        HUD. Adapters can subset, reorder, or extend the default set —
+        HUD. Adapters can subset, reorder, or extend the default set ;
         a game without mines simply omits the `mines` entry so no dead
         toggle appears. Default: every note type the shared renderer
         layers know how to draw."""

@@ -15,7 +15,7 @@
 #define __GL_H__
 #define __glext_h_
 #define __GLEXT_H__
-// Windows font fallback — Consolas is the closest monospace to DejaVu.
+// Windows font fallback ; Consolas is the closest monospace to DejaVu.
 // Override with VSRG_OVERLAY_FONT env var (same as Linux).
 #define DEFAULT_FONT_PATH "C:\\Windows\\Fonts\\consola.ttf"
 

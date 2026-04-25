@@ -30,7 +30,7 @@ class Cache:
 
     def fingerprint(self):
         """Return stored fingerprint without touching data. Still pays an
-        unpickle cost — Python's pickle format is not random-access — but
+        unpickle cost ; Python's pickle format is not random-access ; but
         callers can use it to decide whether to discard `load()`'s result."""
         blob = self._read()
         if blob is None:

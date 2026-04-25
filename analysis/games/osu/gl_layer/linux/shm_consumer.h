@@ -30,7 +30,7 @@ int shm_consumer_read(VsrgOverlayShm *out);
 //
 // We try RDWR on first attach; if the file was created read-only we
 // silently fall back to read-only and this returns NULL. Callers
-// must treat it as "nice to have" — drag simply becomes a no-op
+// must treat it as "nice to have" ; drag simply becomes a no-op
 // when it's missing.
 VsrgOverlayShm *shm_consumer_writable(void);
 

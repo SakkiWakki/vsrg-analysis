@@ -14,7 +14,7 @@ _RANK = {j: i for i, j in enumerate(_JUDGEMENTS)}
 
 def stable_hit_windows(od):
     """osu!stable / lazer-Classic hit windows, ms.
-    Order: [MAX(300g), 300, 200, 100, 50, MISS]. MISS is the widest —
+    Order: [MAX(300g), 300, 200, 100, 50, MISS]. MISS is the widest ;
     anything past it doesn't consume the note at all.
     Source: osu!lazer ManiaHitWindows.cs non-convert Classic branch."""
     inv = max(0.0, min(10.0, 10.0 - float(od)))
@@ -136,7 +136,7 @@ def _simulate_column(col, notes, events, windows, tail_windows):
         next_unjudged += 1
 
     _advance_misses(per, next_unjudged, 10**18, late_expire_w)
-    # Song ended mid-hold — treat as tail miss.
+    # Song ended mid-hold ; treat as tail miss.
     if held_idx is not None:
         per[held_idx]['broken'] = True
         per[held_idx]['judgement'] = 'miss'
@@ -150,7 +150,7 @@ def simulate_mania(notes_by_col, key_events_by_col, windows):
     `key_events_by_col[c]`: chronological `(t_ms, is_press)` list.
     `windows`: `[MAX, 300, 200, 100, 50, MISS]` ms.
 
-    Returns a flat list of result dicts — see `_new_result` for shape.
+    Returns a flat list of result dicts ; see `_new_result` for shape.
     """
     tail_windows = [w * TAIL_RELEASE_LENIENCE for w in windows]
     results = []

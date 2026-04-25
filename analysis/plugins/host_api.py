@@ -147,7 +147,7 @@ def set_invoke_on_main(fn: Callable[[Callable], None]) -> None:
 class PlayerState:
     """Read-only snapshot of the current player state.
 
-    Fields are deliberately minimal for v1 — add more as concrete plugin
+    Fields are deliberately minimal for v1 ; add more as concrete plugin
     needs appear. All arrays are provided as tuples so plugins can't
     mutate the live game state.
     """
@@ -177,7 +177,7 @@ class PlayerState:
 
 
 def _escape_key(key: str) -> str:
-    """Plugin keys can contain dots (rare but legal — bundle authors
+    """Plugin keys can contain dots (rare but legal ; bundle authors
     pick them). Dotted path parts are the store's separator, so rewrite
     any dots in a key to underscores. Matches ``_escape_key`` in
     :mod:`analysis.player.hud.sidebar_api` so all layers line up."""
@@ -194,8 +194,8 @@ class PluginConfig:
     ``paths.*`` / ``player.*`` state.
 
     Writes fan out through the store's subscription graph, so another
-    window's instance of the same plugin — or the plugin's own config
-    UI — picks up the change on the next frame. No polling, no reload.
+    window's instance of the same plugin ; or the plugin's own config
+    UI ; picks up the change on the next frame. No polling, no reload.
 
     This is a convenience boundary for sandboxed plugins; it isn't
     load-bearing security. Trusted plugins could bypass it by touching
@@ -234,14 +234,14 @@ class PluginConfig:
     def snapshot(self) -> dict:
         """Shallow copy of this plugin's full settings dict. Useful for
         dumping to JSON or comparing two states. Deeper values are
-        shared references — treat as read-only."""
+        shared references ; treat as read-only."""
         current = self._store.get(self._root, {}) or {}
         return dict(current) if isinstance(current, dict) else {}
 
     def subscribe(self, fn: Callable[[str, Any, Any], None]):
         """Listen for changes to this plugin's settings.
 
-        ``fn(field, old, new)`` — ``field`` is the dotted path relative
+        ``fn(field, old, new)`` ; ``field`` is the dotted path relative
         to this plugin's root (so ``set('volume', 0.5)`` fires with
         ``field='volume'``). Returns an opaque handle; pass to
         :meth:`unsubscribe` to stop listening.

@@ -3,7 +3,7 @@
 Tap windows (marv/perf/great/good) scale linearly from the J4 baseline.
 Bad is also scaled for J1..J4 but clamps at 180 ms from J5 down (the
 wiki table footnotes this, and Etterna's code freezes it there). Hold,
-Roll, and Mine windows behave the same way — they scale with judge 1..4
+Roll, and Mine windows behave the same way ; they scale with judge 1..4
 and freeze at the J4 value for harder judges.
 
 Exposed through `EtternaAdapter.judgement_windows(replay, judge='J4')`.
@@ -43,13 +43,13 @@ def windows_for(judge='J4'):
     them yet."""
     scale = ETT_JUDGE_SCALES.get(str(judge).upper(), 1.0)
     windows = [(n, w * scale) for (n, w) in _TAP_J4]
-    # Bad clamps — scale down for easy judges, hold flat for hard ones.
+    # Bad clamps ; scale down for easy judges, hold flat for hard ones.
     windows.append(('bad', _BAD_J4 * min(1.0, scale)))
     return windows
 
 
 def extra_windows_for(judge='J4'):
-    """Hold / roll / mine tolerance in seconds. Same clamp rule as bad —
+    """Hold / roll / mine tolerance in seconds. Same clamp rule as bad ;
     scales only for J1..J4 where the table still moves, then freezes."""
     scale = ETT_JUDGE_SCALES.get(str(judge).upper(), 1.0)
     clamp = min(1.0, scale)

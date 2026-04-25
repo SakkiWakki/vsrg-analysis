@@ -1,5 +1,5 @@
 """`.osr` replay decoding. Reads the LZMA frame payload directly because
-osrparse drops the two leading placeholder frames *with* their deltas —
+osrparse drops the two leading placeholder frames *with* their deltas ;
 on maps that open with a skip the 2nd placeholder carries the skip
 duration (~8s), and losing it shifts every press earlier by that amount.
 See kszlim/osu-replay-parser#41.
@@ -89,7 +89,7 @@ def _decode_osr_frames(osr_path):
 
 def _fix_leading_placeholder_ordering(raw):
     """The first two frames in old replays can have out-of-order absolute
-    times after accumulation — stable's player treats them as t=0. Mirror
+    times after accumulation ; stable's player treats them as t=0. Mirror
     that so the first real press doesn't get a bogus negative offset."""
     if len(raw) >= 2 and raw[1][0] < raw[0][0]:
         raw[1][0] = raw[0][0]

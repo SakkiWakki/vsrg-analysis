@@ -1,5 +1,5 @@
 @echo off
-REM vsrg-analysis — Windows build + launcher. Mirrors `make run` minus the
+REM vsrg-analysis ; Windows build + launcher. Mirrors `make run` minus the
 REM Linux-only overlay / gl-layer / vulkan-layer targets. Windows has its
 REM own in-process overlay path: vsrg_gl_overlay.dll (hooks wglSwapBuffers)
 REM + inject.exe (loader), both built from the top-level CMakeLists.txt.
@@ -128,14 +128,14 @@ pushd "%NATIVE_DIR%" || exit /b 1
 if errorlevel 1 ( popd & exit /b 1 )
 popd
 "%VENV_PY%" -c "import osu_memory_native" || (
-    echo [native] post-build import failed — venv mismatch?
+    echo [native] post-build import failed ; venv mismatch?
     exit /b 1
 )
 echo.>"%NATIVE_STAMP%"
 exit /b 0
 
 REM Build the overlay DLL + injector as one CMake project. Both targets
-REM are 32-bit to match osu!.exe — a 64-bit DLL cannot be loaded into a
+REM are 32-bit to match osu!.exe ; a 64-bit DLL cannot be loaded into a
 REM 32-bit process.
 :do_overlay
 call :check_cmake || exit /b 1
@@ -160,7 +160,7 @@ if not exist "%EP_CACHE%" exit /b 0
 set "EP_HAVE="
 for /f "tokens=2 delims==" %%V in ('findstr /b /c:"CMAKE_GENERATOR_PLATFORM:" "%EP_CACHE%" 2^>nul') do set "EP_HAVE=%%V"
 if /i "!EP_HAVE!"=="%EP_WANT%" exit /b 0
-echo [cmake] platform mismatch in %EP_DIR% (have "!EP_HAVE!", want %EP_WANT%) — wiping
+echo [cmake] platform mismatch in %EP_DIR% (have "!EP_HAVE!", want %EP_WANT%) ; wiping
 rmdir /s /q "%EP_DIR%" || exit /b 1
 exit /b 0
 
@@ -178,7 +178,7 @@ exit /b 1
 
 :check_rust
 where cargo >nul 2>&1 && exit /b 0
-REM cargo not on PATH — but rustup may have installed it at ~/.cargo/bin
+REM cargo not on PATH ; but rustup may have installed it at ~/.cargo/bin
 REM and the user hasn't opened a fresh shell yet. Add it temporarily so
 REM builds work without reopening. Done via goto (not an `if (...)` block)
 REM because %PATH% on Windows usually contains "Program Files (x86)", whose
@@ -218,7 +218,7 @@ if "!DOCTOR_FAIL!"=="0" (
     exit /b 0
 )
 echo.
-echo [doctor] one or more toolchains missing — see hints above.
+echo [doctor] one or more toolchains missing ; see hints above.
 exit /b 1
 
 REM ── release: zip built artifacts into dist\ for GitHub release ──────

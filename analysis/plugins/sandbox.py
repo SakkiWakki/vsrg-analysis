@@ -132,7 +132,7 @@ _EXPLICIT_DENY = frozenset({
 
 
 # Builtins that can be used for syscall-equivalent effects. Stripped.
-# ``__import__`` is handled separately — replaced with a gated version
+# ``__import__`` is handled separately ; replaced with a gated version
 # rather than removed outright (plain ``import`` statements compile to
 # ``__import__`` calls, so removing it breaks the sandbox entirely).
 _UNSAFE_BUILTINS = frozenset({
@@ -223,21 +223,21 @@ def _gated_import(name, globals=None, locals=None, fromlist=(), level=0):
     ``from x import y`` work)."""
     if level != 0:
         # Relative imports (``from ._helper import ...``) stay within the
-        # bundle's own package — we've already vetted its helpers.
+        # bundle's own package ; we've already vetted its helpers.
         return builtins.__import__(name, globals, locals, fromlist, level)
     if not _is_allowed(name):
         raise SandboxViolation(
             f'sandboxed plugin may not import {name!r}. '
             f'If you need this capability, request it via the host API.')
     mod = builtins.__import__(name, globals, locals, fromlist, level)
-    # ``from x.y import z`` — __import__ returns the top-level 'x', but
+    # ``from x.y import z`` ; __import__ returns the top-level 'x', but
     # also vet each submodule in the dotted path.
     for part in name.split('.')[1:]:
         # Subpackages inherit their parent's allow status, so nothing
         # extra to check here. The check above already covered the full
         # dotted name.
         _ = part
-    # ``from pkg import name`` — also vet each fromlist entry as
+    # ``from pkg import name`` ; also vet each fromlist entry as
     # ``pkg.name`` so a sandboxed plugin can't ``from numpy import
     # ctypeslib`` when a future tightening bans that specific submodule.
     if fromlist:

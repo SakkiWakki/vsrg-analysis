@@ -8,12 +8,12 @@
 #   - Rust toolchain (prefers apt's rustc; falls back to rustup
 #     if apt's version is too old for pyo3)
 #   - X11/GL/Xext development headers (for the gamescope overlay)
-#   - gamescope (the live in-game overlay compositor) — only on
+#   - gamescope (the live in-game overlay compositor) ; only on
 #     Ubuntu 24.04+/Debian 13+; older releases don't ship it and
 #     the user needs to build from source
 # Then runs `make all` to build everything.
 #
-# osu-winello is *not* installed automatically — it has its own
+# osu-winello is *not* installed automatically ; it has its own
 # installer with interactive prompts. The script points you at it
 # at the end if osu-wine isn't already on PATH.
 set -euo pipefail
@@ -60,7 +60,7 @@ $SUDO apt-get install -y --no-install-recommends \
 
 # ── Rust ────────────────────────────────────────────────────────────
 # pyo3 (used by osu_memory_native) needs rustc ≥ 1.75. Ubuntu 24.04
-# ships 1.75, 22.04 ships 1.70 — too old. We probe apt's version
+# ships 1.75, 22.04 ships 1.70 ; too old. We probe apt's version
 # and fall back to rustup if necessary.
 need_rustup=1
 if apt-cache show rustc >/dev/null 2>&1; then
@@ -82,7 +82,7 @@ if (( need_rustup )); then
         say "apt's rustc is too old for pyo3; installing via rustup"
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --default-toolchain stable --profile minimal
-        # rustup puts cargo in ~/.cargo/bin — make sure the rest of
+        # rustup puts cargo in ~/.cargo/bin ; make sure the rest of
         # this script picks it up.
         export PATH="$HOME/.cargo/bin:$PATH"
     fi
@@ -90,7 +90,7 @@ fi
 
 # ── gamescope ───────────────────────────────────────────────────────
 # Ubuntu 24.04 (noble) and Debian 13 (trixie) onwards ship gamescope
-# in the main repos. Older releases need to build it themselves —
+# in the main repos. Older releases need to build it themselves ;
 # the GUI still works, just not the in-game overlay.
 if command -v gamescope >/dev/null 2>&1; then
     say "gamescope already installed"

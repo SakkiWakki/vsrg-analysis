@@ -92,7 +92,7 @@ class LibraryJobRunner:
 
     def load_library(self, *, refresh=False) -> None:
         if self._scan_worker is not None and self._scan_worker.isRunning():
-            self.tab.status_lbl.setText('already scanning — please wait')
+            self.tab.status_lbl.setText('already scanning ; please wait')
             return
 
         self.tab.status_lbl.setText('scanning…')
@@ -111,7 +111,7 @@ class LibraryJobRunner:
 
     def rebuild_game(self, name: str) -> None:
         if self._scan_worker is not None and self._scan_worker.isRunning():
-            self.tab.status_lbl.setText('already scanning — please wait')
+            self.tab.status_lbl.setText('already scanning ; please wait')
             return
 
         self.tab.status_lbl.setText(f'rebuilding {name}…')

@@ -61,7 +61,7 @@ static const VsrgInputBackend win32_backend = {
     win32_shutdown,
 };
 
-// Implements input.h directly — no platform-agnostic input.c on Windows.
+// Implements input.h directly ; no platform-agnostic input.c on Windows.
 
 static const VsrgInputBackend *g_backend = NULL;
 

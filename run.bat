@@ -1,11 +1,11 @@
 @echo off
-REM vsrg-analysis — end-user launcher for a prebuilt release zip.
+REM vsrg-analysis ; end-user launcher for a prebuilt release zip.
 REM Expects overlay\ and native\ next to this file. First run creates
 REM a venv, installs dependencies + bundled native wheel, and stages
 REM the overlay DLL/injector. Subsequent runs jump to the GUI.
 REM
 REM A prebuilt release only needs Python 3.10+. No Rust, CMake, or
-REM MSVC required — all native pieces are pre-compiled.
+REM MSVC required ; all native pieces are pre-compiled.
 REM
 REM Source contributors should run make.bat instead.
 
@@ -72,7 +72,7 @@ if errorlevel 1 goto :fail
 REM Stage the overlay DLL + injector under the path the plugin looks
 REM for (matches what make.bat overlay produces, so runtime is identical).
 REM Defining OVERLAY_DEST outside the `if (...)` block because cmd.exe
-REM parses the whole block at once — a `set X=Y` inside only takes effect
+REM parses the whole block at once ; a `set X=Y` inside only takes effect
 REM after the block exits, so `%X%` references within would expand empty.
 set "OVERLAY_DEST=build\win\analysis\games\osu\gl_layer\win\Release"
 if exist "overlay\vsrg_gl_overlay.dll" (

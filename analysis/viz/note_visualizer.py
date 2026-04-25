@@ -23,7 +23,7 @@ from analysis.games.etterna.judgment import (
     ETT_JUDGE_SCALES, windows_for as _ett_windows_for)
 from analysis.games.osu.judgment import windows_for as _osu_windows_for
 
-# Per-window color palette (viz only — the player uses JCLR from
+# Per-window color palette (viz only ; the player uses JCLR from
 # analysis.player.init.judgment for its hit marks).
 _ETT_WCOLOR = {'marv': '#ffffff', 'perf': '#ffd54f', 'great': '#81c784',
                'good': '#4fc3f7', 'bad': '#ba68c8'}
@@ -37,7 +37,7 @@ def etterna_windows(judge='J4', scale=None):
     viz layer and the player can't drift apart."""
     if scale is not None:
         # Numeric override: apply flat scale to J4 taps without the
-        # Bad-clamp — matches the legacy behavior this argument enabled.
+        # Bad-clamp ; matches the legacy behavior this argument enabled.
         base = [('marv', 0.0225), ('perf', 0.045), ('great', 0.090),
                 ('good', 0.135), ('bad', 0.180)]
         return [(n, w * scale, _ETT_WCOLOR[n]) for (n, w) in base]
@@ -70,7 +70,7 @@ OSU_MOD_HALFTIME = 1 << 8
 
 def effective_osu_od(base_od, mods=0):
     """Apply HR (×1.4) / EZ (×0.5) mod to OD. DT/HT don't change OD values
-    themselves in stable, though they stretch note spacing — we ignore that
+    themselves in stable, though they stretch note spacing ; we ignore that
     here since we display windows in absolute ms."""
     od = float(base_od)
     if mods & OSU_MOD_HARDROCK:

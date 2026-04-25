@@ -38,7 +38,7 @@ def test_clear_hitboxes():
 
 
 def test_hitboxes_per_instance():
-    """Independent instances must not share the default list — a classic
+    """Independent instances must not share the default list ; a classic
     mutable-default pitfall guard."""
     a = HudState()
     b = HudState()

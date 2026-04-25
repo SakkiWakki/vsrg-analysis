@@ -1,6 +1,6 @@
 """Unified, observable config store.
 
-One nested dict holds every setting the app persists — paths, player
+One nested dict holds every setting the app persists ; paths, player
 chrome state, per-plugin state. Readers access leaves by dotted path
 (``'plugins.builtin:judgment.enabled'``) and subscribe to a prefix to
 get fanout when any descendant changes. Writers mutate single leaves,
@@ -23,13 +23,13 @@ Design:
   * **Shared mutable state + fanout.** All windows hold a reference to
     the same store; a write in one window's dialog reaches the others
     through their subscriptions. No snapshotting, no COW at the object
-    layer — the JSON file is the persisted snapshot.
+    layer ; the JSON file is the persisted snapshot.
   * **Debounced writes.** Bursts of ``set`` calls (e.g. the user
     toggling several checkboxes in a row) coalesce into one disk
     write. Tests can flush synchronously via ``flush()``.
 
 Not covered by this module: cross-process sync. If a second OS process
-writes the file, we won't pick it up — the app is single-process today.
+writes the file, we won't pick it up ; the app is single-process today.
 """
 from __future__ import annotations
 
@@ -215,7 +215,7 @@ class ConfigStore:
 
     def snapshot(self) -> dict:
         """Return a deep copy of the current tree. Useful for debug
-        dumps and tests — production code should prefer ``get`` on
+        dumps and tests ; production code should prefer ``get`` on
         specific paths."""
         import copy
         with self._lock:
@@ -227,7 +227,7 @@ class ConfigStore:
                   fn: Callable[[tuple, Any, Any], None]) -> Subscription:
         """Register ``fn(path, old, new)`` for any change under
         ``prefix`` (or all changes if prefix is empty). The handler
-        receives the full dotted path parts — a subscriber to
+        receives the full dotted path parts ; a subscriber to
         ``'plugins'`` seeing a flip of ``plugins.foo.enabled`` gets
         ``path=('plugins','foo','enabled')``."""
         prefix_parts = _split(prefix)

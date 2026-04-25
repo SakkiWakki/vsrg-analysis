@@ -52,11 +52,11 @@ so adding other modes later is additive.
 - **HTTP fallback**: tosu running locally (default
   `http://127.0.0.1:24050`). See upstream docs.
 
-This is an `unsafe/` bundle — it reads another process's memory and
+This is an `unsafe/` bundle ; it reads another process's memory and
 makes outbound HTTP calls, which sandboxed plugins cannot. The
 read-only memory access is scoped to the osu! pid and same-uid
 (`process_vm_readv` on Linux, `OpenProcess(PROCESS_VM_READ |
-PROCESS_QUERY_INFORMATION)` on Windows — no ptrace, no injection for
+PROCESS_QUERY_INFORMATION)` on Windows ; no ptrace, no injection for
 the memory read).
 
 ## Current state

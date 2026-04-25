@@ -32,7 +32,7 @@ def test_stop_row_itself_is_pre_stop_time():
 
 
 def test_stop_only_applies_if_passed():
-    # Target beat before the stop — stop doesn't contribute
+    # Target beat before the stop ; stop doesn't contribute
     t = beat_to_time(0.4, [(0.0, 120.0)], 0.0, stops=[(0.5, 1.0)])
     assert t == pytest.approx(0.2)
 
@@ -45,7 +45,7 @@ def test_warp_teleports_forward_with_no_time():
 
 
 def test_warp_target_inside_warp_collapses_to_warp_entry():
-    # Target beat is inside the warp range — time should be the warp entry
+    # Target beat is inside the warp range ; time should be the warp entry
     t = beat_to_time(0.7, [(0.0, 120.0)], 0.0, warps=[(0.5, 0.5)])
     assert t == pytest.approx(0.25)
 

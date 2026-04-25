@@ -1,6 +1,6 @@
 # Plugins
 
-This directory holds **bundles** — self-contained plugin packages that can
+This directory holds **bundles** ; self-contained plugin packages that can
 contribute replay overlays, sidebar sections, visualizations, and themes.
 The shipped `builtin/` bundle is a reference implementation; anything you
 drop alongside it follows the same layout.
@@ -31,17 +31,17 @@ plugins/
 
 A directory is recognized as a bundle if it contains at least one of
 `sidebar/`, `sidepanel/`, `replay/`, `viz/`, `overlay/`, or a manifest alongside those folders.
-Both `sidebar/` and `sidepanel/` populate the same `sidebar_modules` list — they are equivalent.
+Both `sidebar/` and `sidepanel/` populate the same `sidebar_modules` list ; they are equivalent.
 Files whose names start with `_` are ignored (use them for shared helpers
-— see `builtin/viz/_common.py`).
+; see `builtin/viz/_common.py`).
 
 ## Discovery
 
 Bundles are picked up from, in order (later wins for duplicate keys):
 
-1. The repo's `plugins/` directory — where `builtin/` lives.
-2. `$EA_PLUGINS_PATH` — a colon-separated list of extra bundle roots.
-3. `~/.config/vsrg-analysis/plugins/` — per-user bundles.
+1. The repo's `plugins/` directory ; where `builtin/` lives.
+2. `$EA_PLUGINS_PATH` ; a colon-separated list of extra bundle roots.
+3. `~/.config/vsrg-analysis/plugins/` ; per-user bundles.
 
 ## `manifest.toml`
 
@@ -149,7 +149,7 @@ def register_overlay(add):
     add('Hello HUD', draw, key='hello_hud', hz=30)
 ```
 
-Use a stable, filesystem-safe `key` — it identifies the spec in the
+Use a stable, filesystem-safe `key` ; it identifies the spec in the
 plugins dialog and namespaces the persisted layout bucket. (Every spec
 shares the single session feed at `/dev/shm/vsrg_overlay`; the key is
 not part of the path.)
@@ -180,7 +180,7 @@ Plugins publish a HUD widget feed; the host picks the right renderer for
 the OS and overlay backend. Architecture:
 
 - Publisher: Python, in the GUI process. `analysis.overlay.publisher`
-  writes to a shared memory segment — `/dev/shm/vsrg_overlay` on Linux,
+  writes to a shared memory segment ; `/dev/shm/vsrg_overlay` on Linux,
   a named memory-mapped file (`vsrg_overlay`) on Windows.
 - Consumer/renderer: C code that attaches to the same SHM and draws
   rects + text. Which consumer depends on backend:
@@ -196,8 +196,8 @@ the OS and overlay backend. Architecture:
     `inject.exe`.
 
 One session = one publisher = one SHM segment = one consumer. Every
-overlay spec — both `register_overlay` plugins and unified components
-— shares that segment by drawing into the same frame each tick.
+overlay spec ; both `register_overlay` plugins and unified components
+; shares that segment by drawing into the same frame each tick.
 
 Most plugins should use the `overlay/*.py` role shown above. The lower
 level `OverlayPublisher` still exists for trusted host code that needs to
@@ -228,8 +228,8 @@ Two trust levels:
 
 | Location | Trust | Access |
 |---|---|---|
-| `plugins/builtin/` | trusted | full Python — ships with the app |
-| `plugins/unsafe/<bundle>/` | trusted | full Python — opt-in escape hatch |
+| `plugins/builtin/` | trusted | full Python ; ships with the app |
+| `plugins/unsafe/<bundle>/` | trusted | full Python ; opt-in escape hatch |
 | Anywhere else (`plugins/<bundle>`, `$EA_PLUGINS_PATH`, `~/.config/…`) | sandboxed | restricted imports + stripped builtins |
 
 ### Sandboxed bundles
@@ -247,19 +247,19 @@ imported:
 - **Third-party:** `numpy`.
 - **Host API:** `analysis.player.render.theme`, `analysis.player.hud.sidebar_api`,
   `analysis.player.plugin.plugin_api`, `analysis.player.input.events`,
-  `analysis.plugins.host_api` (includes `plugin_config` — see below),
+  `analysis.plugins.host_api` (includes `plugin_config` ; see below),
   `analysis.ui` (+ `analysis.ui.components`, `analysis.ui.render_sidebar`),
   `analysis.overlay.api`.
 
-Anything else — notably `os`, `sys`, `pathlib`, `subprocess`, `socket`,
-`urllib`, `requests`, `ctypes`, `threading`, `pickle`, `importlib` — is
+Anything else ; notably `os`, `sys`, `pathlib`, `subprocess`, `socket`,
+`urllib`, `requests`, `ctypes`, `threading`, `pickle`, `importlib` ; is
 refused. A refused module raises `SandboxViolation` at import time; the
 bundle still loads, but the offending file is recorded in
 `bundle.load_errors` and flagged in the Plugins sidebar panel.
 
 **This is best-effort, not a security boundary.** NumPy in particular
 has known escape vectors (`numpy.ctypeslib`). The goal is to stop lazy
-harm and push plugin authors toward the host API — not to stop a
+harm and push plugin authors toward the host API ; not to stop a
 determined attacker. Only install bundles from sources you trust,
 regardless of where they live in the layout above.
 
@@ -275,8 +275,8 @@ surface if you're writing something for general distribution.
 ## Persistent per-plugin config
 
 A plugin can persist its own settings through the shared config store.
-All app config lives in one file — `~/.config/vsrg-analysis/config.json`
-— under a nested tree:
+All app config lives in one file ; `~/.config/vsrg-analysis/config.json`
+; under a nested tree:
 
 ```json
 {
@@ -307,13 +307,13 @@ _cfg.subscribe(_on_change)     # fires when your settings change
 ```
 
 Writes are debounced (bursts coalesce into one disk write) and fan out
-to every running window — a config change made from one window's
+to every running window ; a config change made from one window's
 dialog reaches the same plugin's instance in another window on the
 next frame, with no restart.
 
 The handle is scoped: one plugin can't reach another plugin's settings
 or the top-level `paths.*` tree. This is a convenience boundary, not a
-security boundary — trusted plugins could bypass it by touching the
+security boundary ; trusted plugins could bypass it by touching the
 store directly, but shouldn't.
 
 ## Minimal example
@@ -324,7 +324,7 @@ plugins/sussy_baka/
   sidepanel/hello.py
 ```
 
-`sidepanel/hello.py` (declarative — works in sandboxed bundles):
+`sidepanel/hello.py` (declarative ; works in sandboxed bundles):
 
 ```python
 from analysis.ui import Button, Column, Heading, Spacer

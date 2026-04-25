@@ -1,12 +1,12 @@
 """Phase-vocoder correctness tests.
 
-The PV is easy to break subtly — a wrong COLA constant, float32 phase
+The PV is easy to break subtly ; a wrong COLA constant, float32 phase
 drift, or a botched first-frame init all produce the same "sounds muffled"
 symptom. These tests pin down specific numerical invariants so regressions
 show up as failing assertions instead of "something sounds off."
 
 Signals are synthesized so we can assert RMS, spectral peaks, and
-round-trip equality without needing fixtures. No audio device required —
+round-trip equality without needing fixtures. No audio device required ;
 we instantiate StreamingPhaseVocoder directly against a WaveSource built
 from an ndarray.
 """
@@ -91,7 +91,7 @@ def test_stretched_rms_within_leakage_tolerance():
     out = _pump_all(pv, int(SR * 2 * 1.25))[2048:]  # skip OLA ramp
     rms = float(np.sqrt(np.mean(out ** 2)))
     expected = 0.3 / math.sqrt(2)
-    # 20% tolerance — windowing + finite-frame bias eats a bit of energy.
+    # 20% tolerance ; windowing + finite-frame bias eats a bit of energy.
     assert rms == pytest.approx(expected, rel=0.2)
 
 
@@ -102,7 +102,7 @@ def test_stretched_rms_within_leakage_tolerance():
 def test_all_frequencies_preserved_when_stretching(rate):
     """Stretching at modest rates should not attenuate high-frequency tones
     relative to low-frequency ones. This is the "muffled" regression
-    guard — a float32-overflowed phase accumulator silently kills HF
+    guard ; a float32-overflowed phase accumulator silently kills HF
     content."""
     freqs = (100, 1000, 5000, 12000)
     sig = _multitone(freqs, 3.0, amp=0.2)
@@ -124,7 +124,7 @@ def test_all_frequencies_preserved_when_stretching(rate):
 
 
 def test_pitch_preserved_under_stretch():
-    """The whole point of pitch correction — a 440Hz input at rate 1.25
+    """The whole point of pitch correction ; a 440Hz input at rate 1.25
     should still peak at 440Hz, not at 440*1.25=550Hz. That would mean the
     PV is accidentally resampling instead of time-stretching."""
     sig = _sine(440, 2.0, amp=0.3)

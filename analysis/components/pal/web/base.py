@@ -14,12 +14,12 @@ never sees the backend choice.
 
 Frame-kind taxonomy:
 
-- ``qpixmap``       — ``QPixmap`` backed by a CPU buffer. Always works.
-- ``qsg_texture``   — ``QSGTexture`` inside Qt's scene graph. In-process.
-- ``gl_texture_id`` — ``int`` GL texture name + context share group id.
-- ``dmabuf_fd``     — Linux dmabuf fd + modifier + strides. Cross-process.
-- ``win32_shared``  — Win32 shared NT handle. Cross-process, Windows.
-- ``vk_image``      — ``VkImage`` + ``VkSemaphore``. Cross-process Vulkan.
+- ``qpixmap``       ; ``QPixmap`` backed by a CPU buffer. Always works.
+- ``qsg_texture``   ; ``QSGTexture`` inside Qt's scene graph. In-process.
+- ``gl_texture_id`` ; ``int`` GL texture name + context share group id.
+- ``dmabuf_fd``     ; Linux dmabuf fd + modifier + strides. Cross-process.
+- ``win32_shared``  ; Win32 shared NT handle. Cross-process, Windows.
+- ``vk_image``      ; ``VkImage`` + ``VkSemaphore``. Cross-process Vulkan.
 
 Only ``qpixmap`` is implemented today; the tag space is fixed up front so
 later backends plug in without touching consumers.
@@ -43,7 +43,7 @@ KIND_VK_IMAGE      = 'vk_image'
 # ── Surface selection ───────────────────────────────────────────────
 
 # The "where is this frame headed" signal drives backend picking.
-# Intentionally distinct from the component API's SURFACE_* constants —
+# Intentionally distinct from the component API's SURFACE_* constants ;
 # one component may mount on several surfaces with different PAL needs
 # (sidebar wants qpixmap; gamescope overlay wants dmabuf).
 SURFACE_LOCAL_CPU   = 'local_cpu'      # QPainter compositor, any host widget
@@ -152,7 +152,7 @@ class WebTextureBackend(Protocol):
     def capabilities(self) -> WebTextureBackendCaps: ...
 
     def is_available(self) -> bool:
-        """Fast probe — can this backend actually run here and now?
+        """Fast probe ; can this backend actually run here and now?
         May inspect QApplication state, check for required extensions,
         etc. Must be safe to call repeatedly."""
         ...

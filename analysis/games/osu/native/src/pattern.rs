@@ -4,7 +4,7 @@
 //!   "F8 01 74 04 ?? 65 8B"
 //!
 //! Output: a ``Pattern`` of (byte, is_wildcard) pairs, directly
-//! consumable by the linear scanner. Kept intentionally dumb — we
+//! consumable by the linear scanner. Kept intentionally dumb ; we
 //! don't bother with Boyer-Moore or vectorization yet. For the
 //! single-digit number of signatures we resolve per startup, a
 //! straight scan over a few tens of MB is sub-100ms and fine.

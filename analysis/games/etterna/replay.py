@@ -17,7 +17,7 @@ def _sanitize_nonascii(raw: bytes) -> bytes:
     leaving valid UTF-8 sequences untouched. Etterna.xml is declared
     UTF-8 and is mostly valid UTF-8 (Japanese/Greek song names work
     fine), but occasionally contains a stray latin-1 byte (e.g.
-    `Punkt\xfcre` — `ü` as 0xFC) that breaks the parser. Escaping every
+    `Punkt\xfcre` ; `ü` as 0xFC) that breaks the parser. Escaping every
     high byte would corrupt the legit multi-byte characters, so we
     round-trip through `utf-8` with `backslashreplace` to isolate just
     the bad bytes and rewrite those as entities."""
@@ -50,7 +50,7 @@ def parse_replay(filepath):
 
     Format (per Replay.cpp in etternagame/etterna):
 
-    V2 — one line per replay event:
+    V2 ; one line per replay event:
         <noterow> <offset> <track> [<TapNoteType>]
             The 4th field is only written when it's not TapNoteType_Tap.
             Etterna's enum uses HoldHead=2 and Mine=4. Mine-hit events
@@ -59,11 +59,11 @@ def parse_replay(filepath):
 
         H <noterow> <track> [<HoldNoteScore>]
             One line per *dropped* hold (HoldReplayResult). These are
-            NOT hold-head declarations — every hold gets its head
+            NOT hold-head declarations ; every hold gets its head
             encoded via TapNoteType above. The dropped-hold list is the
             v2 equivalent of "player let go mid-hold".
 
-    V1 — the legacy basic format:
+    V1 ; the legacy basic format:
         <noterow> <offset>
             Only two tokens per line; no track column, no note type,
             no H lines. Detected by `len(parts) < 3`. Etterna falls
@@ -128,7 +128,7 @@ def parse_replay(filepath):
 
     misses = np.isclose(offsets, MISS_SENTINEL)
 
-    # TapNoteType_HoldHead == 2 — one entry per hold head actually judged.
+    # TapNoteType_HoldHead == 2 ; one entry per hold head actually judged.
     holds = [(int(noterows[i]), int(columns[i]))
              for i in np.flatnonzero(notetypes == TAP_NOTE_TYPE_HOLD_HEAD)]
 
@@ -164,7 +164,7 @@ def parse_etterna_xml(filepath):
         root = tree.getroot()
     except ET.ParseError:
         # Some Etterna.xml files have malformed entries. Strip control
-        # bytes and rewrite stray non-ASCII bytes (e.g. `Punkt\xfcre` —
+        # bytes and rewrite stray non-ASCII bytes (e.g. `Punkt\xfcre` ;
         # latin-1 `ü` in a file declared UTF-8) as numeric entities so
         # the stdlib parser accepts them. Also retries with the XML
         # declaration stripped in case the encoding claim itself is
@@ -263,7 +263,7 @@ def _etterna_root_override():
 def _parse_additional_song_folders(save):
     """Read AdditionalSongFolders / AdditionalFolders from Preferences.ini.
     Etterna writes these semicolon-separated; we also accept commas defensively.
-    Returns a list of absolute path strings — only dirs that actually exist."""
+    Returns a list of absolute path strings ; only dirs that actually exist."""
     prefs = Path(save) / 'Preferences.ini'
     if not prefs.is_file():
         return []
@@ -288,7 +288,7 @@ def _parse_additional_song_folders(save):
 def _resolve_etterna_save(save):
     """Build the dirs dict for an existing save directory. Returns None if
     missing. `save` must point at the Save folder itself (not the install
-    root) — callers handle install-root → Save resolution."""
+    root) ; callers handle install-root → Save resolution."""
     save = Path(save)
     if not save.exists():
         return None

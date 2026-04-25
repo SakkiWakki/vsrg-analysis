@@ -1,4 +1,4 @@
-# `unsafe/` — trusted bundles that skip the sandbox
+# `unsafe/` ; trusted bundles that skip the sandbox
 
 Bundles placed here run with **full Python access**: raw filesystem,
 network, subprocess, threads, ctypes, anything the host process can do.
@@ -24,7 +24,7 @@ Do **not** use it when:
 
 ## Layout
 
-Identical to sandboxed bundles — see [`../README.md`](../README.md).
+Identical to sandboxed bundles ; see [`../README.md`](../README.md).
 Drop each bundle in its own subdirectory:
 
 ```
@@ -43,7 +43,7 @@ There is no sandboxing applied to anything under this directory. A
 malicious bundle placed here can read your files, make network
 connections, install or overwrite software, etc. Treat installing an
 `unsafe/` bundle the same way you'd treat running a random script from
-the internet — only install from sources you trust.
+the internet ; only install from sources you trust.
 
 ## Deprecation notice
 

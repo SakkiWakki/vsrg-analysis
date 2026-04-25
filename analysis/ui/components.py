@@ -1,6 +1,6 @@
 """Declarative component tree for sidebar-style UIs.
 
-Components are plain immutable values describing *what* to draw — not
+Components are plain immutable values describing *what* to draw ; not
 how. A renderer (see ``render_sidebar.py``) walks the tree and calls
 the imperative primitives on ``SidebarContext`` to actually paint +
 register hitboxes.
@@ -12,14 +12,14 @@ Why this shape:
     the plugin code side-effect-free and trivially testable (you can
     snapshot the tree).
   * Immediate-mode: the tree is rebuilt every frame. No reconciliation,
-    no component state, no lifecycle — the surrounding replay state is
+    no component state, no lifecycle ; the surrounding replay state is
     the single source of truth. Svelte minus the reactivity.
   * Renderer-agnostic: ``Text``, ``Button``, etc. don't know about Qt
     or the painted HUD. A future Qt-widget renderer or a headless text
     dump can traverse the same tree.
 
 The existing imperative ``SidebarContext`` API (``draw_button``,
-``draw_text``, etc.) is **not** deprecated — built-in sections may
+``draw_text``, etc.) is **not** deprecated ; built-in sections may
 still use it. Components are the recommended surface for new plugins.
 """
 from __future__ import annotations
@@ -77,7 +77,7 @@ class Spacer:
 
 @dataclass(frozen=True)
 class Box:
-    """An explicit rectangle. Rare — most layout comes from Column/Row.
+    """An explicit rectangle. Rare ; most layout comes from Column/Row.
     ``fill=None`` leaves the background; ``outline`` draws a border."""
     width: int
     height: int

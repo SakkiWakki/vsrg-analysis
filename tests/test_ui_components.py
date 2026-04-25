@@ -1,6 +1,6 @@
 """Tests for the declarative component system + sidebar renderer.
 
-The components are plain dataclasses — trivial to test in isolation.
+The components are plain dataclasses ; trivial to test in isolation.
 The renderer is exercised against a fake ``SidebarContext`` that
 records each primitive call, so we can assert tree-of-components →
 expected-sequence-of-primitives without dragging in Qt.
@@ -151,7 +151,7 @@ def test_render_spacer_default_height():
     ctx = _FakeCtx()
     render(ctx, Spacer())
     assert ctx.y == theme.SECTION_SPACER
-    # No primitives drawn — spacer is pure layout.
+    # No primitives drawn ; spacer is pure layout.
     assert all(c[0] == 'setFont' or c[0] not in ('text', 'rect', 'hitbox',
                                                   'button', 'checkbox')
                for c in ctx.calls)
@@ -208,7 +208,7 @@ def test_render_row_splits_width_and_advances_by_max_child():
     assert left_rect[2] == 98  # slot width
     assert right_rect[0] == 102  # left + slot + gap
     assert right_rect[2] == 98
-    # Row height is the taller child — both buttons are the same here.
+    # Row height is the taller child ; both buttons are the same here.
     assert ctx.y == theme.ROW_BUTTON_H
 
 
@@ -276,7 +276,7 @@ def test_section_helper_renders_like_heading_plus_children():
 
 def test_same_tree_renders_deterministically():
     """Immediate-mode means rendering the same tree twice produces the
-    same primitive sequence — no hidden state."""
+    same primitive sequence ; no hidden state."""
     tree = Column((Heading('t'), Text('body'), Button('go', 'do')))
     a = _FakeCtx()
     b = _FakeCtx()

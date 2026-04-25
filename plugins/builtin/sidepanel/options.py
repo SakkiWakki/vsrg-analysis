@@ -1,5 +1,5 @@
 """Built-in sidebar section: per-replay display options. Rendered as a
-flyout — the sidebar shows a one-line ``Options ▸`` button that opens a
+flyout ; the sidebar shows a one-line ``Options ▸`` button that opens a
 panel to the left of the sidebar with the full control set."""
 from __future__ import annotations
 

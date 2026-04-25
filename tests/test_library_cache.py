@@ -54,7 +54,7 @@ def test_cache_clear(iso_cache):
     assert c.load() == 'x'
     c.clear()
     assert c.load() is None
-    # idempotent — clearing twice doesn't raise
+    # idempotent ; clearing twice doesn't raise
     c.clear()
 
 
@@ -81,7 +81,7 @@ def _make_etterna_env(tmp_path, scores):
 
 def _patch_etterna(monkeypatch, iso_cache_dir, dirs, scores_by_call):
     """Stub out find_etterna_dirs to return `dirs` and parse_etterna_xml
-    to yield `scores_by_call` (a list of lists — one per invocation).
+    to yield `scores_by_call` (a list of lists ; one per invocation).
     Also redirect the adapter's library cache into the isolated dir."""
     from analysis.games.etterna import adapter as ea
     monkeypatch.setattr('analysis.core.cache.cache_dir',

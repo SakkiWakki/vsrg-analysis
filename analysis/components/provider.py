@@ -20,7 +20,7 @@ Usage (from a game adapter's live-session module)::
 The provider is called on the overlay render thread, so it must be
 thread-safe (or cheap enough that a short lock is fine). When no
 provider is installed (sidebar-only runs, tests, headless CI),
-overlay components silently render nothing — better than crashing.
+overlay components silently render nothing ; better than crashing.
 """
 from __future__ import annotations
 

@@ -12,7 +12,7 @@ robustly, independent of which SVEngine is attached:
 2. **CPU stalls / long read gaps**: if the render thread is starved for a
    long time (GC pause, expensive paint, OS scheduling), the next `now()`
    read sees a big wall-clock delta. The smoother must either snap
-   cleanly or recover smoothly — never overshoot past the audio target,
+   cleanly or recover smoothly ; never overshoot past the audio target,
    never freeze pinned to a stale value.
 
 The SVEngines used here are stubs (not the real Etterna/osu ones), so the
@@ -64,7 +64,7 @@ class _StepEngine:
 
 class _HighSVEngine:
     """sv = 10 * t. A 1ms chart-time drift should produce 10ms of cull-space
-    lag — the smoother must correct that 10ms gradually without snapping
+    lag ; the smoother must correct that 10ms gradually without snapping
     the visual."""
     def cumulative_at(self, t): return 10.0 * float(t)
     def cumulative_velocity_at(self, t): return 10.0
@@ -84,11 +84,11 @@ def test_smoother_returns_target_on_first_call():
 def test_smoother_snap_on_huge_drift():
     """If the render-thread falls way behind audio (e.g. long stall then
     audio finally reports), the smoother snaps hard rather than lerping
-    over hundreds of ms — the user's input latency should never exceed
+    over hundreds of ms ; the user's input latency should never exceed
     the snap threshold."""
     s = CullSpaceSmoother(_IdentityEngine())
     s.now(0.0)  # prime
-    # Immediately jump 10 seconds forward — drift is way above SNAP.
+    # Immediately jump 10 seconds forward ; drift is way above SNAP.
     result = s.now(10.0)
     # Snap branch: current_sv := target_sv, so result == target
     assert result == pytest.approx(10.0)
@@ -176,7 +176,7 @@ def test_drift_in_high_sv_region_damps_in_sv_space():
     s.reset(0.0)
     # Audio jumps forward by 2ms chart-time (= 20ms cull-space, under snap).
     # The smoother's "advance" step sees target_sv change by 20ms and
-    # updates current_sv by the same amount — so no visible lag even at
+    # updates current_sv by the same amount ; so no visible lag even at
     # 10x SV.
     result = s.now(0.002)
     # Result should closely match 0.002 (in chart-time); the smoother's
@@ -204,7 +204,7 @@ def test_uniform_visual_correction_across_sv_regions():
         # For _IdentityEngine: target = 0.01; for _HighSVEngine: target = 0.001
         # But advance adds (target_sv - last_target_sv) = drift, so
         # advanced = current_sv + drift, and residual drift = 0 → no lerp.
-        # That's the advance step's whole point — there's no visible
+        # That's the advance step's whole point ; there's no visible
         # correction needed because the smoother tracks audio's delta.
         # The test here is just that calling this doesn't blow up and
         # returns the target.
@@ -220,7 +220,7 @@ def test_uniform_visual_correction_across_sv_regions():
 
 def test_stall_behavior_does_not_freeze_render():
     """If the audio engine stalls (target stays the same across reads),
-    the smoother must also stay the same — not drift forward on its own.
+    the smoother must also stay the same ; not drift forward on its own.
     This prevents the 'render advances past audio' artifact."""
     s = CullSpaceSmoother(_IdentityEngine())
     s.now(5.0)

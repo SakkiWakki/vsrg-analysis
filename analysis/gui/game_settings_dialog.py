@@ -7,7 +7,7 @@ out of the tree on the next scan. A per-row "Rebuild" button triggers
 that game's ``adapter.rebuild()`` in a background worker and asks the
 library tab to reload from all adapters' caches when it finishes.
 
-Like the plugins dialog, toggles persist immediately — there's no
+Like the plugins dialog, toggles persist immediately ; there's no
 Apply step.
 """
 from __future__ import annotations

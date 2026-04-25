@@ -21,7 +21,7 @@ int shm_consumer_ensure(void) {
     if (g_shm) return 1;
     // Try RDWR first so drag can publish widget moves. If the file
     // is read-only (or we raced its creation), fall back to RDONLY
-    // so the HUD still renders — drag just becomes a no-op.
+    // so the HUD still renders ; drag just becomes a no-op.
     int fd       = open(SHM_PATH, O_RDWR);
     int writable = 1;
     if (fd < 0) {

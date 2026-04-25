@@ -54,7 +54,7 @@ def _patch_draw_recorders(monkeypatch):
 
     Returns `(lines, ticks)` lists plus a fake painter ready to pass
     through to the press-mark call site. Each tick entry is
-    `(y, pixmap)` — we don't know the color at blit time because the
+    `(y, pixmap)` ; we don't know the color at blit time because the
     cache collapses that into the pixmap identity, but count/position
     are what these tests care about."""
     lines = []
@@ -84,7 +84,7 @@ def _patch_draw_recorders(monkeypatch):
 
 def test_missed_ln_skips_press_mark_when_pressed(monkeypatch):
     """Regression: a missed LN where the player DID press (miss_pressed=True)
-    must not draw a press-mark — `_draw_miss_holds` owns that stroke, so
+    must not draw a press-mark ; `_draw_miss_holds` owns that stroke, so
     drawing press-mark too would double up."""
     renderer = QtPlayerRenderer(plugin_manager=SimpleNamespace())
     lines, ticks, fake_painter = _patch_draw_recorders(monkeypatch)
@@ -99,7 +99,7 @@ def test_missed_ln_skips_press_mark_when_pressed(monkeypatch):
 
 
 def test_missed_ln_skips_press_mark_when_not_pressed(monkeypatch):
-    """Same rule for a missed LN with no recorded press — it's still the
+    """Same rule for a missed LN with no recorded press ; it's still the
     miss-hold drawer's domain (if any), never the press-mark's."""
     renderer = QtPlayerRenderer(plugin_manager=SimpleNamespace())
     lines, ticks, fake_painter = _patch_draw_recorders(monkeypatch)
@@ -128,7 +128,7 @@ def test_hit_tap_draws_press_mark(monkeypatch):
 
 
 def test_missed_tap_still_draws_press_mark(monkeypatch):
-    """Missed non-LN draws a red press-mark — the rule only excludes LNs
+    """Missed non-LN draws a red press-mark ; the rule only excludes LNs
     and never-pressed misses."""
     renderer = QtPlayerRenderer(plugin_manager=SimpleNamespace())
     lines, ticks, fake_painter = _patch_draw_recorders(monkeypatch)
@@ -164,7 +164,7 @@ def test_missed_tap_without_press_skips_press_mark(monkeypatch):
 def test_press_mark_uses_projected_time_to_y(monkeypatch):
     """Press marks must use the same projected time->Y mapping as notes,
     not a raw `offset * scroll_speed` shortcut. Observable as the
-    `y1` endpoint passed to `chart_extras.draw_lane_line` — that's
+    `y1` endpoint passed to `chart_extras.draw_lane_line` ; that's
     whatever `ctx.time_to_y(press_t)` returned."""
     renderer = QtPlayerRenderer(plugin_manager=SimpleNamespace())
     lines, _ticks, fake_painter = _patch_draw_recorders(monkeypatch)
@@ -311,7 +311,7 @@ def test_sv_culling_pad_converts_seconds_to_cumulative_units():
 
 def test_run_sections_always_draws_header_and_records_anchor_when_open():
     """Regression: the collapsed header must draw even when its flyout
-    is open — it stays on screen as the anchor point and re-click target.
+    is open ; it stays on screen as the anchor point and re-click target.
     When open, the header's rect is recorded in
     ``plugin_data['flyout_anchors']`` so the flyout panel can align to
     it. Non-flyout sections draw normally and don't record anchors."""

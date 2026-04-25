@@ -3,7 +3,7 @@ last-used library filters, window geometry, etc.).
 
 Also owns the install-path overrides for Etterna and osu!. Core modules
 call `find_etterna_dirs` / `find_osu_dirs`, which consult these overrides
-before falling back to autodetection — so a user-configured path wins
+before falling back to autodetection ; so a user-configured path wins
 even though the core modules don't depend on Qt.
 
 The overrides now store **install roots** (e.g. `~/etterna/`, not
@@ -60,7 +60,7 @@ def _str_or_none(v):
 
 def _fold_to_install_root(path, subdir_names):
     """If `path` ends in one of `subdir_names` (case-insensitive), return its
-    parent — otherwise return `path` unchanged. Used to migrate legacy
+    parent ; otherwise return `path` unchanged. Used to migrate legacy
     Save/Songs paths to install roots."""
     p = Path(path)
     if p.name.lower() in {s.lower() for s in subdir_names}:
@@ -95,7 +95,7 @@ def set_osu_root_override(path):
 
 def get_osu_profile_override():
     """The selected osu!.<user>.cfg filename (not a path). None means 'pick
-    automatically' — resolver falls back to newest-mtime cfg."""
+    automatically' ; resolver falls back to newest-mtime cfg."""
     return _str_or_none(get_settings().value(OSU_PROFILE_KEY))
 
 
@@ -108,7 +108,7 @@ def set_osu_profile_override(name):
         s.setValue(OSU_PROFILE_KEY, p)
 
 
-# Back-compat shims — migrate.py and any external callers still refer to these
+# Back-compat shims ; migrate.py and any external callers still refer to these
 # names. They now return/accept install roots, which is what callers want
 # anyway (migrate.py just echoes the value into the config tree).
 get_etterna_save_override = get_etterna_root_override

@@ -27,7 +27,7 @@
 // Concurrency: seqlock on `seq` (odd = writer mid-update). The
 // Python publisher is the primary writer. In edit mode the C
 // overlay *also* writes, but only into each widget's (x, y)
-// fields — the publisher treats those fields as read-from-shm
+// fields ; the publisher treats those fields as read-from-shm
 // rather than authoritative on its side. That's a one-way drag
 // handoff; no cross-seqlock contention because the publisher
 // only *reads* (x, y) then writes the full slot once per tick.
@@ -61,7 +61,7 @@
 // republishes, and dropping frames is preferable to blocking.
 #define VSRG_OVERLAY_KIND_WEB_TEXTURE  3u
 
-// Widget.anchor — the corner of the canvas (x, y) is measured
+// Widget.anchor ; the corner of the canvas (x, y) is measured
 // from. Lets publishers pin widgets to an edge without knowing
 // the resolution. 0 = top-left, 1 = top-right, 2 = bottom-left,
 // 3 = bottom-right, 4 = center.
@@ -122,7 +122,7 @@ typedef struct {
     //   edit_mode: 0 normal, 1 edit (shift+tab toggles).
     //   drag_active: 1 while the user is holding the mouse button
     //       down on a widget. While set, the publisher must NOT
-    //       re-stamp the dragged widget's (x, y) — the C side is
+    //       re-stamp the dragged widget's (x, y) ; the C side is
     //       the source of truth for position until release, so that
     //       the user sees the widget follow the cursor instead of
     //       snapping back to baseline+delta each frame.

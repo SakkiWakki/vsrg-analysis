@@ -2,15 +2,15 @@
 
 ## Goal
 
-The plugin system is designed so that a third-party plugin — including one
-submitted as a contribution to `plugins/builtin/` — cannot harm users who
+The plugin system is designed so that a third-party plugin ; including one
+submitted as a contribution to `plugins/builtin/` ; cannot harm users who
 install it. "Harm" means: reading another user's files, exfiltrating data over
 the network, reading another plugin's private config, or corrupting shared
 application state.
 
 This is a **best-effort** model, not a formal security guarantee. The
 mitigations are layered so that bypassing one layer still requires bypassing
-others. The threat model is a lazy or opportunistic attacker — someone who
+others. The threat model is a lazy or opportunistic attacker ; someone who
 adds `import os` to a plugin hoping it goes unnoticed, not someone who has
 already compromised the repository and can modify the runtime.
 
@@ -26,7 +26,7 @@ already compromised the repository and can modify the runtime.
 
 Note: `plugins/builtin/` being sandboxed means it is held to the *same*
 standard as third-party plugins. It is not trusted by virtue of being in the
-repository. This is intentional — it removes the assumption "if it shipped
+repository. This is intentional ; it removes the assumption "if it shipped
 with the app it must be safe" and ensures the enforce machinery actually runs
 on all non-`unsafe/` code.
 
@@ -37,7 +37,7 @@ on all non-`unsafe/` code.
 Sandboxed modules run with a patched `__import__` that rejects any module
 not on the explicit allow-list (`_HOST_API_ALLOW | _STDLIB_ALLOW | _THIRDPARTY_ALLOW`
 in `analysis/plugins/sandbox.py`). The explicit deny-list (`_EXPLICIT_DENY`) is
-checked first and beats the allow-list — this closes submodule escape vectors
+checked first and beats the allow-list ; this closes submodule escape vectors
 even when a parent package is allowed:
 
 - **NumPy** is allowed but `numpy.ctypeslib`, `numpy.ctypes`, `numpy.distutils`,
@@ -45,7 +45,7 @@ even when a parent package is allowed:
   can load arbitrary shared libraries; `numpy.ctypes` is a module-level alias
   to `ctypes`. The raw `__array_interface__` pointer is harmless when `ctypes`
   is unreachable.
-- **Frame walking** — `gc`, `inspect`, `traceback`, and `linecache` are
+- **Frame walking** ; `gc`, `inspect`, `traceback`, and `linecache` are
   explicitly denied. `gc.get_objects()` walks to live frame objects; `inspect`
   and `traceback` expose `sys._getframe()` equivalents without importing `sys`.
 - **matplotlib** is allowed but `matplotlib.testing` is denied (runs subprocess
@@ -76,7 +76,7 @@ verifier (`analysis/plugins/verifier/`). The verifier:
   (`open`, `eval`, `setattr`, `getattr`, `object.__setattr__`, etc.) and
   blocked attribute accesses (`__class__`, `__dict__`, `__builtins__`, etc.).
 - Uses Z3 string reasoning to verify that `config.set(field, ...)` calls
-  are always scoped to the plugin's own namespace — detecting path traversal
+  are always scoped to the plugin's own namespace ; detecting path traversal
   even when the field is a non-literal variable.
 
 Verification failure is a **hard block**: the module is not loaded and the

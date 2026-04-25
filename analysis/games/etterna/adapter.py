@@ -61,7 +61,7 @@ class EtternaAdapter(GameAdapter):
         return found['data']['bpms'], found['data']['offset']
 
     def resolve_all(self, replay, entry=None, progress=None):
-        """Single-pass combined resolver — avoids parsing the .sm/.ssc twice.
+        """Single-pass combined resolver ; avoids parsing the .sm/.ssc twice.
         Returns (bpms, offset, audio_path).
 
         Side effect: enriches `replay['holds']` from 2-tuples `(head_row,
@@ -207,7 +207,7 @@ class EtternaAdapter(GameAdapter):
         """Merge chart-derived hold end-rows into the replay's hold list.
 
         Etterna's .bin only records `(head_row, col)` for each hold; the
-        tail row lives in the .sm/.ssc. Idempotent — a second call with
+        tail row lives in the .sm/.ssc. Idempotent ; a second call with
         already-3-tuple holds is a no-op."""
         from analysis.games.etterna.sm_chart import parse_notes_block
         chart = (found or {}).get('chart') or {}
@@ -244,16 +244,16 @@ class EtternaAdapter(GameAdapter):
         fakes aren't judged (PlayerReplay.cpp excludes them), lifts score
         on key release but Etterna's replay writer doesn't emit a row
         for them either, and roll heads are encoded as HoldHead (enum 2)
-        in the replay — indistinguishable from regular holds without the
+        in the replay ; indistinguishable from regular holds without the
         chart. So the renderer gets them from here or not at all.
 
         Writes:
-          ``chart_mines``  — list of (row, col)
-          ``chart_lifts``  — list of (row, col)
-          ``chart_fakes``  — list of (row, col)
-          ``roll_heads``   — set of (row, col); lets the LN renderer
+          ``chart_mines``  ; list of (row, col)
+          ``chart_lifts``  ; list of (row, col)
+          ``chart_fakes``  ; list of (row, col)
+          ``roll_heads``   ; set of (row, col); lets the LN renderer
                              flip holds to roll-colored tails.
-          ``keycount``     — track count from the chart's stepstype."""
+          ``keycount``     ; track count from the chart's stepstype."""
         from analysis.games.etterna.sm_chart import (parse_notes_block,
                                                       stepstype_keycount,
                                                       row_to_time,
@@ -371,7 +371,7 @@ class EtternaAdapter(GameAdapter):
         GetYOffset, XMOD branch). #SCROLLS is a velocity on beats, not time,
         and #SPEEDS is a uniform field zoom sampled at the current song
         position. Integrating the combined curve in time-space accumulates
-        error whenever a SCROLLS segment straddles a BPM change — noticeable
+        error whenever a SCROLLS segment straddles a BPM change ; noticeable
         on charts like Undiscovered Colors, where the scroll ratio ramps
         across the whole song."""
         from analysis.player.sv.engine import BeatSpaceSVEngine
@@ -395,7 +395,7 @@ class EtternaAdapter(GameAdapter):
 
     def nudge_judge(self, current, delta):
         """Step through J1..J9 by one per click. Etterna's judge is
-        discrete — integers only — so we take the sign of `delta` and
+        discrete ; integers only ; so we take the sign of `delta` and
         clamp to [1, 9]."""
         cur = str(current or 'J4').upper()
         if cur == 'JUSTICE':
@@ -413,7 +413,7 @@ class EtternaAdapter(GameAdapter):
         import numpy as np
         from analysis.games.etterna.sm_chart import row_to_time
 
-        # Chart-resolved STOPS/DELAYS/WARPS — these affect real time via
+        # Chart-resolved STOPS/DELAYS/WARPS ; these affect real time via
         # pauses and beat-space teleports, so row->time has to use them for
         # anything better than constant-BPM charts. Absent when the chart
         # didn't resolve; in that case row_to_time falls back to BPM-only.
@@ -542,7 +542,7 @@ class EtternaAdapter(GameAdapter):
         pump, etc.) get the right keycount. Etterna.xml's ``<Chart>`` has
         no StepsType attribute, so without this lookup every score ends
         up labeled dance-single by default. Returns ``{}`` if the cache
-        is missing or unreadable — callers fall back to dance-single for
+        is missing or unreadable ; callers fall back to dance-single for
         each unresolved chartkey, matching the old behavior."""
         save = dirs.get('save_dir')
         if not save:
@@ -619,7 +619,7 @@ class EtternaAdapter(GameAdapter):
     def _entries_from_xmls(self, xml_paths, rdir: Path, want_keys=None,
                            ck2st=None):
         """Merge entries from every profile's Etterna.xml. Deduped by
-        scorekey — the replay .bin is shared across profiles via the
+        scorekey ; the replay .bin is shared across profiles via the
         ReplaysV2 folder, so if two profiles reference the same score
         we keep the first occurrence (profiles are iterated in sorted
         order, so 00000000 wins)."""
@@ -836,7 +836,7 @@ def _xmod_to_pxps(value, opts, p):
     each beat as ArrowSpacing * xmod_value pixels, independent of BPM. We
     express the scalar as the multiplier so xmod=1.0 → 64 px/beat at the
     reference field height. Respects mini via NoteField zoom; no receptor
-    scaling here — the user said 'if something exists for CMOD but not for
+    scaling here ; the user said 'if something exists for CMOD but not for
     XMOD, don't implement it for XMOD as well'. SV layers on top (XMOD is
     the branch where GetDisplayedSpeedPercent actually applies SV).
 

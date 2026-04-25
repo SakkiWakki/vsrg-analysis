@@ -63,7 +63,7 @@ def test_router_picks_containing_region():
 
 
 def test_router_first_match_wins_for_overlap():
-    """Registration order determines priority — overlays register first."""
+    """Registration order determines priority ; overlays register first."""
     r = InputRouter()
     overlay = _FakeRegion((0, 0, 200, 200))
     base = _FakeRegion((0, 0, 200, 200))
@@ -82,7 +82,7 @@ def test_router_returns_false_outside_any_region():
 
 
 def test_router_region_without_hook_returns_false():
-    """A region with ``contains`` but no ``on_wheel`` should not crash —
+    """A region with ``contains`` but no ``on_wheel`` should not crash ;
     the router treats the missing hook as 'didn't handle'."""
     r = InputRouter()
     no_wheel = SimpleNamespace(contains=lambda x, y: True)
@@ -122,7 +122,7 @@ def test_router_region_at():
 
 
 def test_region_protocol_is_structural():
-    """Any object with ``contains`` satisfies the protocol — no base
+    """Any object with ``contains`` satisfies the protocol ; no base
     class required. Guards against accidental inheritance coupling."""
     obj = SimpleNamespace(contains=lambda x, y: True)
     assert isinstance(obj, Region)

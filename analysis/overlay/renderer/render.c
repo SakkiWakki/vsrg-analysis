@@ -11,7 +11,7 @@
 //
 // Font: DejaVu Sans Mono, loaded at init from the system path. If the
 // font is missing, render_init still returns 1 (drawing still works)
-// and text calls become no-ops — matching the behaviour of the old
+// and text calls become no-ops ; matching the behaviour of the old
 // font_ttf fallback so the rest of the overlay degrades gracefully
 // rather than failing to start.
 
@@ -76,7 +76,7 @@ int render_init(void) {
     if (g_font_id == -1) {
         fprintf(stderr, "[render] nvgCreateFont('%s') failed; "
                         "text will not render\n", font_path);
-        // Still a successful init — rects keep working.
+        // Still a successful init ; rects keep working.
     } else {
         printf("[render] NanoVG GL2 up; font='%s'\n", font_path);
     }
@@ -93,7 +93,7 @@ void render_shutdown(void) {
 
 void render_begin_frame(int width, int height) {
     if (!g_vg) return;
-    // Pixel ratio 1.0 — gamescope reports the true compositor size and
+    // Pixel ratio 1.0 ; gamescope reports the true compositor size and
     // we don't do HiDPI scaling inside the overlay.
     nvgBeginFrame(g_vg, (float)width, (float)height, 1.0f);
 }
@@ -138,7 +138,7 @@ void render_text(const char *s, float x, float y,
     if (!ensure_text_ready(px_height)) return;
     NVGcolor c;
     rgba_to_nvg(rgba, &c);
-    // Top-left alignment so (x, y) is the top-left of the text box —
+    // Top-left alignment so (x, y) is the top-left of the text box ;
     // same contract the publisher's layout math assumes.
     nvgTextAlign(g_vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
     nvgFillColor(g_vg, c);

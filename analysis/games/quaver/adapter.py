@@ -1,4 +1,4 @@
-"""Quaver game adapter — scroll mode only for now.
+"""Quaver game adapter ; scroll mode only for now.
 
 Everything else is a stub: parse_replay/judgement/library scan raise or
 return empty so the game registers, its scroll mode shows up in the HUD

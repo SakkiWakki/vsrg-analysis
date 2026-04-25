@@ -2,7 +2,7 @@
 
 Splitting the primitive helpers out of qt_renderer.py keeps the layer
 files (notes, chart_extras, sidebar, ...) from importing their own
-cache state — every caller goes through the same `_qcolor`/`_qpen`/
+cache state ; every caller goes through the same `_qcolor`/`_qpen`/
 `_qbrush` interners so the same (r,g,b) tuple produces one QColor
 instance across the whole process. The cache is module-global because
 Qt objects are interchangeable across paint operations and we never
@@ -17,7 +17,7 @@ from PySide6.QtGui import QBrush, QColor, QPen
 
 
 # Qt primitive cache. Every frame used to spin up a fresh QColor/QPen/QBrush
-# per draw call — on heavy Etterna charts that's ~thousands of transient Qt
+# per draw call ; on heavy Etterna charts that's ~thousands of transient Qt
 # objects per second, enough to visibly jitter frame timing. Intern by tuple
 # so the same (r,g,b[,a]) / (color, width) / color keys reuse one instance
 # forever. Color palette is finite (lane palette, judge colors, theme

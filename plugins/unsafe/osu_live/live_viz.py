@@ -55,11 +55,11 @@ class LiveFigureWidget(QWidget):
         snap = self._client.snapshot()
         if not snap.connected and len(snap.offsets) == 0:
             self._set_status(
-                'Not connected to osu! — is the game running?')
+                'Not connected to osu! ; is the game running?')
             return
         if len(snap.offsets) == 0:
             self._set_status(
-                f'Connected — waiting for hits  |  map: {snap.map_title}')
+                f'Connected ; waiting for hits  |  map: {snap.map_title}')
             return
 
         try:
@@ -69,7 +69,7 @@ class LiveFigureWidget(QWidget):
             return
 
         # Swap canvases. Tearing the old one down before building the
-        # new keeps peak memory low — matplotlib figures aren't tiny.
+        # new keeps peak memory low ; matplotlib figures aren't tiny.
         if self._canvas is not None:
             self._layout.removeWidget(self._canvas)
             self._canvas.setParent(None)
