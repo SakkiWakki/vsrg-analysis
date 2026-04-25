@@ -57,10 +57,11 @@ class SvRenderController:
                                                   KEY_IDENTITY, KEY_OSU_TIME,
                                                   SVEngineRegistry)
 
-        # When VSRG_MEASURE_ENGINE=1 is set, factories produce measure-based
-        # engines instead of reference engines. Either way identity is
-        # unchanged.
-        use_measure = os.environ.get('VSRG_MEASURE_ENGINE') == '1'
+        # The measure-based integrator (per DESIGN.tex) is the default.
+        # Set VSRG_LEGACY_SV_ENGINE=1 to fall back to the reference
+        # BeatSpaceSVEngine / TimeSpaceSVEngine implementations -- kept as
+        # an opt-out for regression debugging.
+        use_measure = os.environ.get('VSRG_LEGACY_SV_ENGINE') != '1'
 
         registry = SVEngineRegistry()
 
@@ -123,9 +124,22 @@ class SvRenderController:
                 if not has_sv:
                     return IdentitySVEngine()
                 native = registry.get(KEY_ETTERNA_BEAT)
-                sections = native.as_sections()
+                sections = list(native.as_sections())
                 if not sections:
                     return IdentitySVEngine()
+                # Beat-space extrapolates with ratio=1.0 for t<0 (matching
+                # Etterna's GetDisplayedBeat fallthrough). Time-space, by
+                # contrast, extrapolates with the FIRST section's
+                # multiplier -- which can flip the sign of cumulative_at
+                # in the lead-in region if the chart starts with negative
+                # or non-1 scroll. If the chart's first SCROLLS rate is
+                # not 1.0, prepend a synthetic (t=0, 1.0) section so the
+                # time-space engine's pre-first-segment extrapolation
+                # uses ratio 1.0 too. This keeps cumulative continuous
+                # at t=0 across an engine swap.
+                first_t, first_m = sections[0]
+                if first_t > 0.0 or abs(first_m - 1.0) > 1e-12:
+                    sections = [(0.0, 1.0)] + sections
                 if use_measure:
                     from analysis.player.sv.measure_engine import \
                         time_space_engine
@@ -354,6 +368,17 @@ class SvRenderController:
         p._render_timeline = RenderTimeline(engine)
         if hasattr(p, 'times'):
             self.build_cumulative_sv()
+        # Ghost-note caches (miss-hold press/release, mines, lifts, fakes)
+        # also live in cumulative space; without rebuild they drift
+        # silently against live notes after a swap. build_ghost_sv_caches
+        # tolerates `notes` being absent (e.g. early in chart load).
+        if hasattr(p, 'notes'):
+            try:
+                self.build_ghost_sv_caches()
+            except AttributeError:
+                # Notes container not fully populated yet; live caches are
+                # rebuilt anyway when the chart finishes loading.
+                pass
 
         _SV_DEBUG_LOGGER.log({
             'type': 'engine_swap',

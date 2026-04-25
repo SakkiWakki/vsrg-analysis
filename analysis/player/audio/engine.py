@@ -1,6 +1,30 @@
 """Public `AudioEngine`: owns decoding, the PortAudio output stream, and
-mediates between the GUI thread (set_state/seek/volume) and the audio
-callback thread via a mutex. The heavy DSP lives in StreamingPhaseVocoder."""
+mediates between the GUI thread and the audio callback thread via a mutex.
+The heavy DSP lives in StreamingPhaseVocoder.
+
+Surface:
+
+  seek_to_chart_time(t)   -- Jump to chart-time `t`. Negative t becomes
+                             a lead-in: the engine emits silent frames
+                             until the source-frame counter passes the
+                             lead-in mark, then the PV starts producing
+                             audio. The transition is exact at one
+                             sample-rate frame boundary.
+  set_silent(silent)      -- GUI-requested silence (paused / scrubbing).
+                             Independent of lead-in. Either source of
+                             silence makes the callback emit zeros.
+  set_rate(rate)          -- Playback rate; propagated to the PV. Source
+                             frames advance at `rate * frames` per
+                             callback regardless of silence so chart-time
+                             stays accurate when the user un-silences.
+  set_volume(v)
+  set_pitch_correct(bool)
+  current_chart_time()    -- Source position in seconds, minus lead-in.
+                             Negative during lead-in, exact across
+                             callbacks via DAC-anchor refinement when
+                             available, sample-grain accurate otherwise.
+  stop()
+"""
 from __future__ import annotations
 
 import json
@@ -57,32 +81,41 @@ class AudioEngine:
         self._sr = 44100
         self._base_duration = 0.0
         self._ended = False
-        self._playing = False
         # Engine state kept under a lock because the audio callback (on the
-        # PortAudio thread) and set_state/seek (on the GUI thread) both
-        # touch it.
+        # PortAudio thread) and the GUI thread both touch it.
         self._lock = threading.Lock()
         # Serialize all access to the phase vocoder/source state. The audio
-        # callback calls `generate()` while the GUI thread may concurrently call
-        # `seek()` / `set_rate()` / `set_pitch_correct()`. Those mutate the same
+        # callback calls `generate()` while the GUI thread may concurrently
+        # call seek/set_rate/set_pitch_correct. Those mutate the same
         # internal buffers and cursors and must never race.
         self._pv_lock = threading.Lock()
         self._source: WaveSource | None = None
         self._pv: StreamingPhaseVocoder | None = None
         self._stream = None
-        # Single authoritative chart-time value. While paused, seeking, or
-        # waiting for the first callback after a discontinuity, reads return
-        # this value directly. Once a callback-backed DAC anchor exists, reads
-        # advance this value from the hardware clock but never step backward.
-        self._chart_time = 0.0
+        # GUI-requested silence (paused / scrubbing). Independent of
+        # lead-in: either source makes the callback emit zeros.
+        self._silent = True
         self._rate = 1.0
-        # PortAudio-backed anchor: `hw_pos` chart-time is audible at DAC clock
-        # time `hw_wall`. This anchor is only valid after a callback has
-        # provided real DAC timestamps for queued audio.
+        # Source position in seconds. Always >= 0 (audio domain). The
+        # callback advances this on every block (silent or not) so
+        # chart-time stays accurate during silence. Sub-frame refinement
+        # comes from the DAC-anchor pair below when valid.
+        self._chart_time = 0.0
+        # PortAudio-backed anchor: `hw_pos` (in chart-time-seconds) is
+        # audible at DAC clock time `hw_wall`. Valid after the first
+        # post-discontinuity callback. Used to refine current_chart_time()
+        # below sample-grain accuracy by extrapolating from the stream
+        # clock.
         self._hw_pos = 0.0
         self._hw_wall = 0.0
         self._scheduled_chart_pos = 0.0
         self._dac_anchor_valid = False
+        # Lead-in: the engine emits silent frames until source frames
+        # accumulated since the negative seek pass this threshold (in
+        # seconds). Exposed via current_chart_time() = _chart_time -
+        # _lead_in_seconds, so chart-time is negative during lead-in and
+        # crosses 0 on the exact source-frame boundary.
+        self._lead_in_seconds = 0.0
 
         if not audio_path or not os.path.exists(audio_path):
             return
@@ -188,30 +221,39 @@ class AudioEngine:
         with self._pv_lock:
             with self._lock:
                 pv = self._pv
-                playing = self._playing
+                gui_silent = self._silent
                 volume = self._volume
                 rate = self._rate
                 block_chart_start = self._scheduled_chart_pos
+                lead_in_seconds = self._lead_in_seconds
                 prev_hw_pos = self._hw_pos
                 prev_hw_wall = self._hw_wall
                 prev_anchor_valid = self._dac_anchor_valid
-            if pv is None or not playing:
+            # Two sources of silence:
+            #   1) GUI request (paused / scrubbing)        -> _silent=True
+            #   2) Lead-in: source position hasn't reached the lead-in
+            #      mark yet (block_chart_start < _lead_in_seconds).
+            # Either way we emit zeros AND advance the source-frame
+            # counter at `rate * frames` so chart-time stays accurate.
+            in_lead_in = block_chart_start < lead_in_seconds
+            silent = gui_silent or in_lead_in or pv is None
+            cont = True
+            if silent:
                 outdata.fill(0.0)
-                if pv is None or not playing:
-                    # report ended when we're past the end of the source
-                    return
-                return
-            try:
-                samples, cont = pv.generate(frames)
-            except Exception as e:
-                outdata.fill(0.0)
-                print(f'audio callback: {e}')
-                return
-        if samples.shape[0] < frames:
-            pad = np.zeros((frames - samples.shape[0], samples.shape[1]),
-                           dtype=np.float32)
-            samples = np.concatenate([samples, pad], axis=0)
-        np.multiply(samples, volume, out=outdata)
+                samples = None
+            else:
+                try:
+                    samples, cont = pv.generate(frames)
+                except Exception as e:
+                    outdata.fill(0.0)
+                    print(f'audio callback: {e}')
+                    samples = None
+        if samples is not None:
+            if samples.shape[0] < frames:
+                pad = np.zeros((frames - samples.shape[0], samples.shape[1]),
+                               dtype=np.float32)
+                samples = np.concatenate([samples, pad], axis=0)
+            np.multiply(samples, volume, out=outdata)
         # Anchor the render clock to the PortAudio stream clock, not to
         # callback-invocation wall time. `outputBufferDacTime` is when the
         # FIRST sample of this block reaches the DAC; the end-of-block DAC
@@ -221,6 +263,9 @@ class AudioEngine:
         callback_now = float(getattr(time_info, 'currentTime',
                                      time_info.outputBufferDacTime))
         stream_time_now = self._safe_stream_time_locked()
+        # Source-domain advance per block: `rate * frames / sr`. Same for
+        # silent and non-silent blocks, so chart-time keeps ticking during
+        # silence and the user resumes at the right place.
         block_chart_end = block_chart_start + (frames / self._sr) * rate
         dac_end = float(time_info.outputBufferDacTime) + (frames / self._sr)
         jump_at_callback_now = None
@@ -257,7 +302,9 @@ class AudioEngine:
                 'prev_hw_wall': float(prev_hw_wall),
                 'prev_anchor_valid': bool(prev_anchor_valid),
                 'rate': float(rate),
-                'playing': bool(self._playing),
+                'silent': bool(silent),
+                'gui_silent': bool(gui_silent),
+                'in_lead_in': bool(in_lead_in),
                 'cont': bool(cont),
                 'hw_pos': float(self._hw_pos),
                 'hw_wall': float(self._hw_wall),
@@ -283,17 +330,21 @@ class AudioEngine:
         return self._pitch_correct
 
     def current_chart_time(self) -> float:
-        """Audio-master chart time for the ChartClock to read.
+        """Chart-time for the ChartClock to read.
 
-        The only live clock is the callback-backed DAC anchor. Until a callback
-        has provided that anchor (startup, immediately after seek, pause->play),
-        reads return the last explicit chart-time written by the transport.
+        Source position in seconds, minus lead-in. Negative during lead-in
+        (audio is emitting silence; source frame counter still advances so
+        chart-time crosses 0 at an exact source-frame boundary). DAC-anchor
+        refinement gives sub-frame accuracy when the stream is rolling.
         """
         with self._lock:
-            t = self._current_chart_time_locked()
+            audible = self._current_source_position_locked()
+            t = audible - self._lead_in_seconds
             self._debug_log_locked('audio_current_chart_time', {
                 'result': float(t),
-                'playing': bool(self._playing),
+                'audible_src': float(audible),
+                'lead_in_seconds': float(self._lead_in_seconds),
+                'silent': bool(self._silent),
                 'rate': float(self._rate),
                 'chart_time': float(self._chart_time),
                 'scheduled_chart_pos': float(self._scheduled_chart_pos),
@@ -304,9 +355,14 @@ class AudioEngine:
             })
             return t
 
-    def _current_chart_time_locked(self) -> float:
-        if not self._playing:
-            return self._chart_time
+    def _current_source_position_locked(self) -> float:
+        """Audible source-domain position in seconds (always >= 0).
+
+        The callback-backed DAC anchor refines this below sample-grain
+        when valid. When the anchor is stale (startup, just after seek),
+        we fall back to the latest written `_chart_time`. Tiny backsteps
+        from clock jitter are accepted; larger ones are clamped away.
+        """
         if not self._dac_anchor_valid:
             return self._chart_time
         now = self._safe_stream_time_locked()
@@ -318,13 +374,21 @@ class AudioEngine:
             self._chart_time = t
             return self._chart_time
 
-        # Tiny regressions happen around callback-anchor handoff and host-time
-        # quantisation. Accepting a very small backstep avoids plateaus that
-        # render as jitter. Large backsteps remain clamped away.
         backstep = self._chart_time - t
         if backstep <= self._SMALL_BACKSTEP_TOLERANCE_S:
             self._chart_time = t
         return self._chart_time
+
+    # Back-compat: existing tests poke `_playing` to enable the
+    # DAC-anchor math. In the new model the math is always live, so
+    # _playing maps to "not silent".
+    @property
+    def _playing(self) -> bool:
+        return not self._silent
+
+    @_playing.setter
+    def _playing(self, value: bool) -> None:
+        self._silent = not bool(value)
 
     def _safe_stream_time_locked(self) -> float | None:
         stream = self._stream
@@ -342,113 +406,108 @@ class AudioEngine:
         rec.update(payload)
         _SV_DEBUG_LOGGER.log(rec)
 
-    def set_state(self, t: float, rate: float, playing: bool) -> None:
-        """Apply chart-clock intent to the audio engine.
+    # --- new surface: silence, seek, rate as orthogonal mutators ---
 
-        Does NOT seek by itself: with audio as the chart clock master, the
-        per-tick `set_state` call only propagates pause/rate changes and
-        end-of-chart detection. The render clock comes from the stream's DAC
-        timeline, so re-seeking the PV every tick would just flush its OLA
-        buffer and chop the audio. Use `seek()` for explicit jumps (unpause,
-        scrub release, restart)."""
-        if not self.ready:
-            return
+    def set_silent(self, silent: bool) -> None:
+        """GUI-requested silence (paused, scrubbing). Independent of
+        lead-in. While silent, the source-frame counter still advances
+        so chart-time stays correct when the GUI un-silences."""
+        with self._lock:
+            self._silent = bool(silent)
+            self._debug_log_locked('audio_set_silent', {
+                'silent': bool(self._silent),
+            })
+
+    def set_rate(self, rate: float) -> None:
+        """Update playback rate. Propagated to the PV so source frames
+        per output frame stays in sync."""
         rate = max(0.05, float(rate))
         with self._pv_lock:
             with self._lock:
-                cur = self._current_chart_time_locked()
-                self._debug_log_locked('audio_set_state_enter', {
-                    'requested_t': float(t),
-                    'requested_rate': float(rate),
-                    'requested_playing': bool(playing),
-                    'current': float(cur),
-                    'playing': bool(self._playing),
-                    'rate': float(self._rate),
-                    'chart_time': float(self._chart_time),
-                    'scheduled_chart_pos': float(self._scheduled_chart_pos),
-                    'hw_pos': float(self._hw_pos),
-                    'hw_wall': float(self._hw_wall),
-                    'anchor_valid': bool(self._dac_anchor_valid),
-                    'stream_time': self._safe_stream_time_locked(),
-                })
-                pv = self._pv
                 rate_changed = abs(rate - self._rate) > 1e-3
-                was_playing = self._playing
+                pv = self._pv
             if rate_changed and pv is not None:
                 pv.set_rate(rate)
             with self._lock:
                 if rate_changed:
                     self._rate = rate
-                if not playing:
-                    self._playing = False
-                    self._chart_time = cur
-                    self._scheduled_chart_pos = cur
-                    self._dac_anchor_valid = False
-                    self._ended = False
-                elif t >= self._base_duration:
-                    self._playing = False
-                    self._chart_time = float(t)
-                    self._scheduled_chart_pos = float(t)
-                    self._dac_anchor_valid = False
-                    self._ended = True
-                else:
-                    if not was_playing:
-                        self._chart_time = float(t)
-                        self._scheduled_chart_pos = float(t)
-                        self._dac_anchor_valid = False
-                    self._playing = True
-                    self._ended = False
-                self._debug_log_locked('audio_set_state_exit', {
-                    'chart_time': float(self._chart_time),
-                    'playing': bool(self._playing),
+                self._debug_log_locked('audio_set_rate', {
                     'rate': float(self._rate),
-                    'ended': bool(self._ended),
-                    'scheduled_chart_pos': float(self._scheduled_chart_pos),
-                    'hw_pos': float(self._hw_pos),
-                    'hw_wall': float(self._hw_wall),
-                    'anchor_valid': bool(self._dac_anchor_valid),
-                    'stream_time': self._safe_stream_time_locked(),
                 })
 
-    def seek(self, t: float) -> None:
-        """Explicitly seek the PV to chart time `t`. Called on scrub
-        release, restart, or any user-visible jump ; the OLA buffer flush
-        is the price of a non-contiguous seek."""
+    def seek_to_chart_time(self, chart_t: float) -> None:
+        """Jump to chart-time `chart_t`. Negative values become a lead-in
+        offset; the PV is parked at source-frame 0 and the engine emits
+        silent frames until the source-frame counter passes the lead-in
+        mark. Positive values seek the PV directly.
+        """
         if not self.ready:
             return
+        chart_t = float(chart_t)
+        if chart_t < 0.0:
+            lead_in_seconds = -chart_t
+            audio_t = 0.0
+        else:
+            lead_in_seconds = 0.0
+            audio_t = chart_t
         with self._pv_lock:
             with self._lock:
-                self._debug_log_locked('audio_seek_enter', {
-                    'requested_t': float(t),
-                    'playing': bool(self._playing),
-                    'rate': float(self._rate),
-                    'chart_time': float(self._chart_time),
-                    'scheduled_chart_pos': float(self._scheduled_chart_pos),
-                    'hw_pos': float(self._hw_pos),
-                    'hw_wall': float(self._hw_wall),
-                    'anchor_valid': bool(self._dac_anchor_valid),
-                    'stream_time': self._safe_stream_time_locked(),
-                })
                 pv = self._pv
+                self._debug_log_locked('audio_seek_to_chart_time_enter', {
+                    'chart_t': chart_t,
+                    'audio_t': audio_t,
+                    'lead_in_seconds': lead_in_seconds,
+                })
             if pv is not None:
-                pv.seek(float(t))
+                pv.seek(audio_t)
             with self._lock:
-                self._chart_time = float(t)
-                self._ended = False
-                self._scheduled_chart_pos = float(t)
+                self._chart_time = audio_t
+                self._scheduled_chart_pos = audio_t
+                self._lead_in_seconds = lead_in_seconds
                 self._dac_anchor_valid = False
-                self._debug_log_locked('audio_seek_exit', {
+                self._ended = False
+                self._debug_log_locked('audio_seek_to_chart_time_exit', {
                     'chart_time': float(self._chart_time),
                     'scheduled_chart_pos': float(self._scheduled_chart_pos),
-                    'hw_pos': float(self._hw_pos),
-                    'hw_wall': float(self._hw_wall),
-                    'anchor_valid': bool(self._dac_anchor_valid),
-                    'stream_time': self._safe_stream_time_locked(),
+                    'lead_in_seconds': float(self._lead_in_seconds),
                 })
+
+    # --- back-compat wrappers for existing GUI / tests ----------------
+
+    def set_state(self, t: float, rate: float, playing: bool) -> None:
+        """Back-compat wrapper. New callers should use set_silent +
+        set_rate + seek_to_chart_time directly. Maps the legacy
+        (t, rate, playing) tuple onto the new orthogonal mutators:
+
+          - playing=False  ->  silence requested.
+          - playing=True   ->  no silence (lead-in still applies if
+                               chart-time hasn't reached 0).
+          - rate           ->  set_rate.
+
+        Does NOT seek -- preserves the old semantic that per-tick
+        set_state propagates pause/rate without flushing the PV. End-of-
+        chart detection (t >= base_duration) still latches `_ended`.
+        """
+        if not self.ready:
+            return
+        self.set_rate(rate)
+        if t >= self._base_duration:
+            with self._lock:
+                self._ended = True
+                self._silent = True
+        else:
+            self.set_silent(not bool(playing))
+            with self._lock:
+                self._ended = False
+
+    def seek(self, t: float) -> None:
+        """Back-compat alias for seek_to_chart_time. New callers should
+        use seek_to_chart_time directly."""
+        self.seek_to_chart_time(t)
 
     def stop(self) -> None:
         with self._lock:
-            self._playing = False
+            self._silent = True
         try:
             if self._stream is not None:
                 self._stream.stop()

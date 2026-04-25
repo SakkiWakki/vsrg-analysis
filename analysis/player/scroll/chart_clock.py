@@ -200,6 +200,7 @@ class ChartClock:
     `set_audio_source`) lock; reads (`now`) lock briefly to pick the
     active source. Callers from any thread are fine.
     """
+    # TODO: Check if this impl introduces a small delta as a timing error
 
     def __init__(self, *, initial: float = 0.0,
                  t_min: float = -2.0, t_max: float | None = None) -> None:
@@ -356,13 +357,11 @@ class ChartClock:
             return self._wall_anchor
         if self._audio_getter is not None:
             try:
-                raw = float(self._audio_getter())
+                return float(self._audio_getter())
             except Exception:
                 # Audio getter blew up: fall through to wall-clock so the
                 # clock keeps advancing. Better to render stale than stall.
                 pass
-            else:
-                return raw
         return self._wall_anchor + \
             (time.monotonic() - self._wall_mono) * self._rate
 
