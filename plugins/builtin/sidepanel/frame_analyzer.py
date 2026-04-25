@@ -102,17 +102,16 @@ def _fps(v: float) -> str:
 def _audio_line(count: int, last: str) -> str:
     """Format the audio-callback status line.
 
-    `count` is the number of PortAudio status events seen (output
-    underflow / overflow / priming) since the engine started; `last`
-    is the most recent flag string. We render `audio: ok` when nothing
-    has fired so the line stays compact in the common case, and surface
-    the last flag string when something has fired so the user can
-    distinguish underflow (we missed a deadline) from overflow (input
-    overrun, irrelevant for us) at a glance."""
+    `count` is the total of PortAudio status events plus ring-empty
+    events seen since the engine started. `last` is a free-form string
+    carrying the most recent flag plus a `fill=NN%` gauge of the
+    producer ring. The gauge is shown even when count is zero so a
+    chronically-near-empty ring (producer barely keeping up) is
+    visible before it actually causes an underflow."""
+    extra = last.strip()
     if count <= 0:
-        return 'audio:        ok'
-    short = last.split(' ')[-1] if last else 'event'
-    return f'audio:    {count} ({short})'
+        return f'audio: ok    {extra}' if extra else 'audio: ok'
+    return f'audio:  {count}  {extra}'
 
 
 def _draw(ctx):

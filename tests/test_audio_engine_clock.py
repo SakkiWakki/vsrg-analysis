@@ -57,8 +57,12 @@ def test_current_chart_time_is_continuous_across_callback_anchors():
 
 
 def test_current_chart_time_scales_with_play_rate():
+    """The DAC anchor extrapolation rate is `_hw_rate` (the rate the
+    block-being-played was rendered at), NOT the live engine `_rate`.
+    With the producer ring, the engine's live rate can be up to one
+    ring depth ahead of what's audibly playing."""
     engine, stream = _engine_with_stream(20.000)
-    engine._rate = 1.5
+    engine._hw_rate = 1.5
     engine._hw_pos = 30.150
     engine._hw_wall = 20.100
     engine._dac_anchor_valid = True

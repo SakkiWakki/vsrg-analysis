@@ -73,6 +73,25 @@ class AudioEngine:
 
     def __init__(self, audio_path: str | None, volume: float = 0.5,
                  pitch_correct: bool = True):
+        # Audio runs in a child process by default. The child has its
+        # own GIL, so Qt paints in this (parent) process can't starve
+        # the producer thread -- the in-process path was vulnerable to
+        # ~47 ms paints during SV-heavy charts, producing audible
+        # ring underflows.
+        #
+        # Set `VSRG_AUDIO_BACKEND=inprocess` to fall back to the
+        # legacy in-process path -- useful for tests that poke engine
+        # internals (`_pv`, `_source`, `_callback`) directly.
+        self._proc_client = None
+        backend = os.environ.get('VSRG_AUDIO_BACKEND', '').lower()
+        if backend != 'inprocess':
+            self._init_process_backend(audio_path, volume, pitch_correct)
+            if self._proc_client is not None:
+                return
+            # Process backend failed to start (e.g. sounddevice missing
+            # in the child or the audio file couldn't be decoded). Fall
+            # through to the in-process path so the user still gets
+            # whatever audio works.
         self.ready = False
         self._volume = float(volume)
         self._pitch_correct = bool(pitch_correct)
@@ -111,6 +130,15 @@ class AudioEngine:
         # clock.
         self._hw_pos = 0.0
         self._hw_wall = 0.0
+        # Rate of the block whose end-position the DAC anchor pins.
+        # Used for extrapolation in `_current_source_position_locked`.
+        # MUST come from the producer's per-block stamp, not from the
+        # engine's live `_rate`: with the ring decoupling, the live
+        # rate can be ~186 ms ahead of what's audibly playing, so
+        # extrapolating with the live rate during a rate change
+        # introduces a transient position error that compounds with
+        # frame drops.
+        self._hw_rate = 1.0
         self._scheduled_chart_pos = 0.0
         self._dac_anchor_valid = False
         # Lead-in: the engine emits silent frames until source frames
@@ -125,6 +153,21 @@ class AudioEngine:
         # see which flag fired most recently without grepping the log.
         self._cb_status_count = 0
         self._cb_last_status = ''
+        # Distinct from PortAudio's status-flag count: the number of
+        # times the callback found the ring empty and had to emit
+        # silence. Should be near-zero in steady state; non-zero means
+        # the producer can't keep up (rare under XMOD with the producer
+        # decoupled from the GUI thread).
+        self._cb_ring_underflow_count = 0
+        # Producer-thread + decoupling ring. Keeps `pv.generate()` off
+        # the PortAudio callback's deadline. Created in `_open_stream`
+        # once we know `sr` and the source channel count.
+        self._ring: AudioRing | None = None
+        self._producer: AudioProducer | None = None
+        # Scratch buffer the callback writes into when popping a block
+        # from the ring. Allocated once at stream-open so the callback
+        # never allocates (which would risk GIL contention).
+        self._cb_scratch: np.ndarray | None = None
 
         if not audio_path or not os.path.exists(audio_path):
             return
@@ -142,17 +185,106 @@ class AudioEngine:
                                           pitch_correct=self._pitch_correct)
         self._open_stream()
 
+    def _init_process_backend(self, audio_path: str | None, volume: float,
+                              pitch_correct: bool) -> None:
+        """Out-of-process audio path. The child owns PortAudio and the
+        phase vocoder; this engine is a thin shim that forwards
+        commands and reads chart-time / status from shared memory.
+
+        Process-backed engines do NOT populate the in-process state
+        (`_pv`, `_source`, `_stream`, locks) -- those exist only in
+        the child. Tests that poke those internals must use the
+        default in-process backend.
+        """
+        from .audio_process import AudioProcessClient
+
+        # Defaults matching the in-process surface so callers that
+        # `getattr` these don't trip up.
+        self.ready = False
+        self._silent = True
+        self._rate = 1.0
+        self._volume = float(volume)
+        self._pitch_correct = bool(pitch_correct)
+        self._sr = 44100
+        self._base_duration = 0.0
+        self._ended = False
+        self._chart_time = 0.0
+        self._lead_in_seconds = 0.0
+        self._cb_status_count = 0
+        self._cb_last_status = ''
+        self._cb_ring_underflow_count = 0
+        # Stub the in-process state so tests/back-compat that read
+        # them don't AttributeError. None of these are functional under
+        # the process backend.
+        self._lock = threading.Lock()
+        self._pv_lock = threading.Lock()
+        self._source = None
+        self._pv = None
+        self._stream = None
+        self._stream_worker = StreamWorker()
+        self._ring = None
+        self._producer = None
+        self._cb_scratch = None
+        self._dac_anchor_valid = False
+        self._hw_pos = 0.0
+        self._hw_wall = 0.0
+        self._hw_rate = 1.0
+        self._scheduled_chart_pos = 0.0
+
+        if not audio_path or not os.path.exists(audio_path):
+            return
+        try:
+            self._proc_client = AudioProcessClient(
+                audio_path, pitch_correct=pitch_correct, volume=volume,
+            )
+        except Exception as e:
+            print(f'audio: process backend failed to start: {e}')
+            self._proc_client = None
+            return
+        self.ready = bool(self._proc_client.ready)
+        if self.ready:
+            self._base_duration = float(self._proc_client.base_duration)
+
     def _open_stream(self) -> None:
         """Create + start the PortAudio OutputStream on a dedicated
         worker thread so it doesn't share affinity / GIL pressure with
         the Qt main thread that constructed the engine. See
-        `stream_worker.StreamWorker` for the lifecycle contract."""
+        `stream_worker.StreamWorker` for the lifecycle contract.
+
+        Also spins up the producer thread + audio ring so the callback
+        can be a pure memcpy. Capacity is 32768 frames (~743 ms at
+        44.1 kHz / 64 blocks of 512). That's deliberately deep: the
+        producer thread shares the GIL with the GUI thread, so a 47 ms
+        Qt paint completely starves the producer for that window. With
+        743 ms of pre-rendered audio in the ring, the consumer can
+        survive multi-frame paint hitches without underrunning. Memory
+        cost is `32768 * channels * 4` bytes (~256 KB stereo) -- a
+        cheap insurance policy.
+
+        The ring-depth-vs-rate-change trade: a deeper ring means the
+        audible audio can lag the engine's live `_rate` by up to one
+        ring depth. The `_hw_rate` field on the engine carries each
+        block's rate-at-render-time so DAC-anchor extrapolation
+        remains correct.
+        """
+        block_size = 512
+        capacity = 32768  # power of two, multiple of block_size
+        channels = self._source.src_channels
+        self._ring = AudioRing(capacity, channels, block_size=block_size)
+        self._cb_scratch = np.zeros((block_size, channels), dtype=np.float32)
+        self._producer = AudioProducer(self._pv, self._ring, self._sr)
+        # Mirror current engine state into the producer before starting,
+        # so the first generated block carries the right rate/silent.
+        self._producer.set_silent(self._silent)
+        self._producer.set_rate(self._rate)
+        self._producer.start()
+
         def make_stream():
             stream = _sd.OutputStream(
                 samplerate=self._sr,
-                channels=self._source.src_channels,
+                channels=channels,
                 dtype='float32',
-                blocksize=512,
+                blocksize=block_size,
                 callback=self._callback,
             )
             stream.start()
@@ -162,6 +294,9 @@ class AudioEngine:
         if err is not None:
             print(f'audio: failed to open output stream: {err}')
             self._stream = None
+            self._producer.stop()
+            self._producer = None
+            self._ring = None
         else:
             self._stream = stream
             self.ready = True
@@ -237,16 +372,17 @@ class AudioEngine:
 
     # --- the PortAudio callback ---
     def _callback(self, outdata, frames, time_info, status):
-        # Runs on the audio thread. Must be real-time-safe-ish: no I/O, no
-        # allocations beyond what the PV does internally.
+        # Runs on PortAudio's audio thread. Hard real-time deadline:
+        # `frames / sr` seconds (~11.6 ms at 512/44.1k). The producer
+        # thread does all `pv.generate()` work ahead of time and stamps
+        # blocks into `self._ring`; this callback's job is to:
+        #   1. memcpy one block of ring frames into `outdata`
+        #   2. update the DAC-clock anchor from PortAudio's `time_info`
+        #      and the producer's chart-end stamp
+        #   3. emit silence + count an underflow if the ring drained
+        # Steps 1+3 are a few microseconds of numpy. No PV, no locks
+        # held during compute.
         if status:
-            # PortAudio is telling us about an underflow / overflow /
-            # priming / etc. for THIS block. Almost always a sign that
-            # the previous callback returned late (output_underflow) or
-            # we couldn't keep up with the requested rate. Log under the
-            # engine lock so the timeline is consistent with everything
-            # else, and keep an in-process counter so callers can read
-            # the rate without parsing the debug log.
             with self._lock:
                 self._cb_status_count += 1
                 self._cb_last_status = str(status)
@@ -257,126 +393,129 @@ class AudioEngine:
                     'silent': bool(self._silent),
                     'count': int(self._cb_status_count),
                 })
-        with self._pv_lock:
+
+        ring = self._ring
+        producer = self._producer
+        scratch = self._cb_scratch
+        # Pre-ring construction (very early init / failure paths) -- be
+        # safe and emit silence.
+        if ring is None or producer is None or scratch is None:
+            outdata.fill(0.0)
+            return
+
+        with self._lock:
+            volume = self._volume
+
+        stamp = ring.read_block(scratch)
+        if stamp is None:
+            # Producer fell behind. Emit silence; the DAC anchor still
+            # advances by one block at the engine's current rate so
+            # chart-time keeps ticking (otherwise the playhead would
+            # freeze for one frame and the renderer would see a jump).
+            outdata.fill(0.0)
             with self._lock:
-                pv = self._pv
-                gui_silent = self._silent
-                volume = self._volume
-                rate = self._rate
-                block_chart_start = self._scheduled_chart_pos
-                lead_in_seconds = self._lead_in_seconds
-                prev_hw_pos = self._hw_pos
-                prev_hw_wall = self._hw_wall
-                prev_anchor_valid = self._dac_anchor_valid
-            # Two sources of silence:
-            #   1) GUI request (paused / scrubbing)        -> _silent=True
-            #   2) Lead-in: source position hasn't reached the lead-in
-            #      mark yet (block_chart_start < _lead_in_seconds).
-            # Either way we emit zeros AND advance the source-frame
-            # counter at `rate * frames` so chart-time stays accurate.
-            in_lead_in = block_chart_start < lead_in_seconds
-            silent = gui_silent or in_lead_in or pv is None
-            cont = True
-            if silent:
-                outdata.fill(0.0)
-                samples = None
-            else:
-                try:
-                    samples, cont = pv.generate(frames)
-                except Exception as e:
-                    outdata.fill(0.0)
-                    print(f'audio callback: {e}')
-                    samples = None
-        if samples is not None:
-            if samples.shape[0] < frames:
-                pad = np.zeros((frames - samples.shape[0], samples.shape[1]),
-                               dtype=np.float32)
-                samples = np.concatenate([samples, pad], axis=0)
-            np.multiply(samples, volume, out=outdata)
-        # Anchor the render clock to the PortAudio stream clock, not to
-        # callback-invocation wall time. `outputBufferDacTime` is when the
-        # FIRST sample of this block reaches the DAC; the end-of-block DAC
-        # time is one output-block duration later. Pairing that with the chart
-        # time represented by the end of this block yields a continuous clock
-        # even though callbacks arrive only once per block.
+                self._cb_ring_underflow_count += 1
+                rate_est = self._rate
+                anchor_chart_end = self._scheduled_chart_pos \
+                    + (frames / self._sr) * rate_est
+        else:
+            np.multiply(scratch, volume, out=outdata)
+            rate_est = stamp.rate
+            anchor_chart_end = stamp.chart_end
+        # Wake the producer in case it was sleeping on the high-water
+        # mark. Cheap; just sets an Event.
+        producer.signal_drain()
+
+        # DAC anchor: pair the chart-end of the just-played block with
+        # the DAC time of its last sample. Same math as before, but the
+        # chart-end now comes from the producer's stamp instead of
+        # being recomputed locally from rate.
         callback_now = float(getattr(time_info, 'currentTime',
                                      time_info.outputBufferDacTime))
-        stream_time_now = self._safe_stream_time_locked()
-        # Source-domain advance per block: `rate * frames / sr`. Same for
-        # silent and non-silent blocks, so chart-time keeps ticking during
-        # silence and the user resumes at the right place.
-        block_chart_end = block_chart_start + (frames / self._sr) * rate
         dac_end = float(time_info.outputBufferDacTime) + (frames / self._sr)
-        jump_at_callback_now = None
-        if prev_anchor_valid:
-            prev_now_t = prev_hw_pos + (callback_now - prev_hw_wall) * rate
-            next_now_t = block_chart_end + (callback_now - dac_end) * rate
-            jump_at_callback_now = next_now_t - prev_now_t
+
         with self._lock:
-            self._scheduled_chart_pos = block_chart_end
-            self._hw_pos = block_chart_end
+            self._scheduled_chart_pos = anchor_chart_end
+            self._hw_pos = anchor_chart_end
             self._hw_wall = dac_end
+            self._hw_rate = rate_est
             self._dac_anchor_valid = True
+            # Audible chart-time at the START of this block is anchor
+            # minus the block's duration in source-time at the rate the
+            # block was rendered with.
+            block_dt = (frames / self._sr) * rate_est
+            block_chart_start = anchor_chart_end - block_dt
             self._chart_time = max(self._chart_time, block_chart_start)
-            if not cont:
+            if stamp is not None and stamp.ended:
                 self._ended = True
-                self._chart_time = max(self._chart_time, block_chart_end)
+                self._chart_time = max(self._chart_time, anchor_chart_end)
             self._debug_log_locked('audio_callback', {
                 'frames': int(frames),
-                'block_chart_start': float(block_chart_start),
-                'block_chart_end': float(block_chart_end),
+                'block_chart_end': float(anchor_chart_end),
                 'callback_current_time': float(callback_now),
                 'output_dac_time': float(time_info.outputBufferDacTime),
                 'dac_end': float(dac_end),
-                'stream_time': stream_time_now,
-                'callback_to_dac_start': (
-                    float(time_info.outputBufferDacTime) - float(callback_now)
-                ),
-                'callback_to_dac_end': float(dac_end - callback_now),
-                'anchor_jump_at_callback_now': (
-                    None if jump_at_callback_now is None
-                    else float(jump_at_callback_now)
-                ),
-                'prev_hw_pos': float(prev_hw_pos),
-                'prev_hw_wall': float(prev_hw_wall),
-                'prev_anchor_valid': bool(prev_anchor_valid),
-                'rate': float(rate),
-                'silent': bool(silent),
-                'gui_silent': bool(gui_silent),
-                'in_lead_in': bool(in_lead_in),
-                'cont': bool(cont),
+                'rate': float(rate_est),
+                'ring_underflow': stamp is None,
+                'stamp_silent': bool(stamp.silent) if stamp else None,
                 'hw_pos': float(self._hw_pos),
                 'hw_wall': float(self._hw_wall),
-                'anchor_valid': bool(self._dac_anchor_valid),
                 'chart_time': float(self._chart_time),
             })
 
     # --- public API (matches the old engine) ---
     def set_volume(self, v: float) -> None:
+        if self._proc_client is not None:
+            self._proc_client.set_volume(v)
+            self._volume = float(v)
+            return
         with self._lock:
             self._volume = float(v)
 
     def callback_status_snapshot(self) -> tuple[int, str]:
         """Return `(count, last_status)` of PortAudio status flags seen
-        in `_callback`. `count > 0` means we've been missing the audio
-        deadline; `last_status` is e.g. `'output underflow'`. Callers
-        can poll this from the GUI thread (read-only), no lock needed
-        because both fields are independent reads of plain Python
-        objects."""
-        return self._cb_status_count, self._cb_last_status
+        in `_callback`, summed with ring-underflow events. The string
+        annotates which side reported -- `'underflow'` (PortAudio) or
+        `'ring underflow'` (producer fell behind). Callers can poll
+        this from the GUI thread (read-only), no lock needed because
+        both fields are independent reads of plain Python objects.
+
+        The string also carries a rough ring-fill gauge so we can
+        diagnose at a glance: even when the totals are zero, a ring
+        that's chronically near-empty means the producer is barely
+        keeping up and the next GIL hitch will cause a fresh underflow."""
+        if self._proc_client is not None:
+            return self._proc_client.callback_status_snapshot()
+        pa_n = self._cb_status_count
+        ring_n = self._cb_ring_underflow_count
+        ring = self._ring
+        gauge = ''
+        if ring is not None and ring._cap:
+            fill_pct = int(100 * ring.readable_frames() / ring._cap)
+            gauge = f' fill={fill_pct}%'
+        if ring_n and not pa_n:
+            return ring_n, f'ring underflow{gauge}'
+        if pa_n and not ring_n:
+            return pa_n, f'{self._cb_last_status}{gauge}'
+        if pa_n or ring_n:
+            total = pa_n + ring_n
+            label = 'ring underflow' if ring_n else self._cb_last_status
+            return total, f'{label}{gauge}'
+        return 0, gauge.lstrip()
 
     def set_pitch_correct(self, on: bool) -> None:
-        # Lock-free: `pv.set_pitch_correct` is a single bool write into a
-        # PV attribute. Concurrent with `pv.generate()`, the worst case
-        # is the in-flight block uses the old or new mode -- both are
-        # legal output. Holding `_pv_lock` here makes the GUI thread wait
-        # up to one full block of pv.generate() (~5-15 ms), which is the
-        # entire reason rate / pitch nudges glitch the audio.
+        # Routed through the producer (which owns the PV). The producer
+        # writes the bool directly into the PV without waiting for its
+        # next tick, so the change takes effect on the very next
+        # `pv.generate()` call.
+        if self._proc_client is not None:
+            self._proc_client.set_pitch_correct(on)
+            self._pitch_correct = bool(on)
+            return
         with self._lock:
             self._pitch_correct = bool(on)
-            pv = self._pv
-        if pv is not None:
-            pv.set_pitch_correct(on)
+        if self._producer is not None:
+            self._producer.set_pitch_correct(on)
 
     @property
     def _pitch_correct_public(self) -> bool:
@@ -390,6 +529,8 @@ class AudioEngine:
         chart-time crosses 0 at an exact source-frame boundary). DAC-anchor
         refinement gives sub-frame accuracy when the stream is rolling.
         """
+        if self._proc_client is not None:
+            return self._proc_client.current_chart_time()
         with self._lock:
             audible = self._current_source_position_locked()
             t = audible - self._lead_in_seconds
@@ -418,13 +559,20 @@ class AudioEngine:
         absorbs sub-ms stream-clock jitter on its side, and `_chart_time`
         is the contract surface that downstream consumers (timing maps,
         seek logic) rely on being monotone.
+
+        Extrapolation uses `_hw_rate` (the rate of the block whose end
+        the anchor pins) NOT the engine's live `_rate`. With the
+        producer ring decoupled, `_rate` can run up to one ring depth
+        (~186 ms) ahead of what's audibly playing, so extrapolating
+        with the live rate during a rate change introduces a position
+        error that compounds when frames drop.
         """
         if not self._dac_anchor_valid:
             return self._chart_time
         now = self._safe_stream_time_locked()
         if now is None:
             return self._chart_time
-        t = float(self._hw_pos + (now - self._hw_wall) * self._rate)
+        t = float(self._hw_pos + (now - self._hw_wall) * self._hw_rate)
         if t > self._chart_time:
             self._chart_time = t
         return self._chart_time
@@ -462,11 +610,17 @@ class AudioEngine:
         """GUI-requested silence (paused, scrubbing). Independent of
         lead-in. While silent, the source-frame counter still advances
         so chart-time stays correct when the GUI un-silences."""
+        if self._proc_client is not None:
+            self._silent = bool(silent)
+            self._proc_client.set_silent(silent)
+            return
         with self._lock:
             self._silent = bool(silent)
             self._debug_log_locked('audio_set_silent', {
                 'silent': bool(self._silent),
             })
+        if self._producer is not None:
+            self._producer.set_silent(silent)
 
     def set_rate(self, rate: float) -> None:
         """Update playback rate. Propagated to the PV so source frames
@@ -481,16 +635,23 @@ class AudioEngine:
         hears as choppiness on rate nudges.
         """
         rate = max(0.05, float(rate))
+        if self._proc_client is not None:
+            if abs(rate - self._rate) > 1e-3:
+                self._rate = rate
+                self._proc_client.set_rate(rate)
+            return
         with self._lock:
             rate_changed = abs(rate - self._rate) > 1e-3
-            pv = self._pv
             if rate_changed:
                 self._rate = rate
             self._debug_log_locked('audio_set_rate', {
                 'rate': float(self._rate),
             })
-        if rate_changed and pv is not None:
-            pv.set_rate(rate)
+        # Producer owns the PV exclusively; route the rate change
+        # through it so the next-block render uses the new rate AND
+        # the stamp the callback sees carries the right value.
+        if rate_changed and self._producer is not None:
+            self._producer.set_rate(rate)
 
     def seek_to_chart_time(self, chart_t: float) -> None:
         """Jump to chart-time `chart_t`. Negative values become a lead-in
@@ -501,33 +662,41 @@ class AudioEngine:
         if not self.ready:
             return
         chart_t = float(chart_t)
+        if self._proc_client is not None:
+            self._proc_client.seek_to_chart_time(chart_t)
+            # Mirror lead-in / chart-time so engine-side getters that
+            # don't go through the proc client (e.g. tests) read
+            # something sensible.
+            if chart_t < 0.0:
+                self._lead_in_seconds = -chart_t
+                self._chart_time = 0.0
+            else:
+                self._lead_in_seconds = 0.0
+                self._chart_time = chart_t
+            self._ended = False
+            return
         if chart_t < 0.0:
             lead_in_seconds = -chart_t
             audio_t = 0.0
         else:
             lead_in_seconds = 0.0
             audio_t = chart_t
-        with self._pv_lock:
-            with self._lock:
-                pv = self._pv
-                self._debug_log_locked('audio_seek_to_chart_time_enter', {
-                    'chart_t': chart_t,
-                    'audio_t': audio_t,
-                    'lead_in_seconds': lead_in_seconds,
-                })
-            if pv is not None:
-                pv.seek(audio_t)
-            with self._lock:
-                self._chart_time = audio_t
-                self._scheduled_chart_pos = audio_t
-                self._lead_in_seconds = lead_in_seconds
-                self._dac_anchor_valid = False
-                self._ended = False
-                self._debug_log_locked('audio_seek_to_chart_time_exit', {
-                    'chart_time': float(self._chart_time),
-                    'scheduled_chart_pos': float(self._scheduled_chart_pos),
-                    'lead_in_seconds': float(self._lead_in_seconds),
-                })
+        with self._lock:
+            self._chart_time = audio_t
+            self._scheduled_chart_pos = audio_t
+            self._lead_in_seconds = lead_in_seconds
+            self._dac_anchor_valid = False
+            self._ended = False
+            self._debug_log_locked('audio_seek_to_chart_time', {
+                'chart_t': chart_t,
+                'audio_t': audio_t,
+                'lead_in_seconds': lead_in_seconds,
+            })
+        # Producer owns the PV; queue the seek there. The producer
+        # resets the ring (so the consumer sees silence until refill)
+        # and calls `pv.seek(audio_t)` on its next tick.
+        if self._producer is not None:
+            self._producer.request_seek(audio_t, lead_in_seconds)
 
     # --- back-compat wrappers for existing GUI / tests ----------------
 
@@ -565,8 +734,16 @@ class AudioEngine:
     def stop(self) -> None:
         with self._lock:
             self._silent = True
+        if self._proc_client is not None:
+            self._proc_client.stop()
+            self._proc_client = None
+            return
         self._stream_worker.close(self._stream)
         self._stream = None
+        if self._producer is not None:
+            self._producer.stop()
+            self._producer = None
+        self._ring = None
 
     def prewarm_rates(self, rates) -> None:
         """No-op ; the streaming PV has no per-rate precompute."""
