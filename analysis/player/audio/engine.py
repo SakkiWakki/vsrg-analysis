@@ -40,6 +40,7 @@ from analysis.player.sv.debug import LOGGER as _SV_DEBUG_LOGGER
 
 from .phase_vocoder import StreamingPhaseVocoder
 from .source import WaveSource
+from .stream_worker import StreamWorker
 
 # sounddevice is the PortAudio binding we drive the output stream with.
 # Imported lazily so the module still imports in test environments that
@@ -88,6 +89,11 @@ class AudioEngine:
         self._source: WaveSource | None = None
         self._pv: StreamingPhaseVocoder | None = None
         self._stream = None
+        # Stream-owner: holds the OutputStream's lifecycle on its own
+        # thread to keep audio off the Qt main thread. Always present so
+        # `stop()` can be called unconditionally even when no audio file
+        # is loaded.
+        self._stream_worker = StreamWorker()
         # GUI-requested silence (paused / scrubbing). Independent of
         # lead-in: either source makes the callback emit zeros.
         self._silent = True
@@ -127,19 +133,31 @@ class AudioEngine:
         self._base_duration = self._source.duration
         self._pv = StreamingPhaseVocoder(self._source, rate=1.0,
                                           pitch_correct=self._pitch_correct)
-        try:
-            self._stream = _sd.OutputStream(
+        self._open_stream()
+
+    def _open_stream(self) -> None:
+        """Create + start the PortAudio OutputStream on a dedicated
+        worker thread so it doesn't share affinity / GIL pressure with
+        the Qt main thread that constructed the engine. See
+        `stream_worker.StreamWorker` for the lifecycle contract."""
+        def make_stream():
+            stream = _sd.OutputStream(
                 samplerate=self._sr,
                 channels=self._source.src_channels,
                 dtype='float32',
                 blocksize=512,
                 callback=self._callback,
             )
-            self._stream.start()
-            self.ready = True
-        except Exception as e:
-            print(f'audio: failed to open output stream: {e}')
+            stream.start()
+            return stream
+
+        stream, err = self._stream_worker.open(make_stream)
+        if err is not None:
+            print(f'audio: failed to open output stream: {err}')
             self._stream = None
+        else:
+            self._stream = stream
+            self.ready = True
 
     # --- decoding: soundfile first (fast, float-native for wav/flac/ogg),
     # audioread fallback (ffmpeg, handles mp3/m4a/webm/...). Both return
@@ -314,12 +332,17 @@ class AudioEngine:
             self._volume = float(v)
 
     def set_pitch_correct(self, on: bool) -> None:
-        with self._pv_lock:
-            with self._lock:
-                self._pitch_correct = bool(on)
-                pv = self._pv
-            if pv is not None:
-                pv.set_pitch_correct(on)
+        # Lock-free: `pv.set_pitch_correct` is a single bool write into a
+        # PV attribute. Concurrent with `pv.generate()`, the worst case
+        # is the in-flight block uses the old or new mode -- both are
+        # legal output. Holding `_pv_lock` here makes the GUI thread wait
+        # up to one full block of pv.generate() (~5-15 ms), which is the
+        # entire reason rate / pitch nudges glitch the audio.
+        with self._lock:
+            self._pitch_correct = bool(on)
+            pv = self._pv
+        if pv is not None:
+            pv.set_pitch_correct(on)
 
     @property
     def _pitch_correct_public(self) -> bool:
@@ -413,20 +436,27 @@ class AudioEngine:
 
     def set_rate(self, rate: float) -> None:
         """Update playback rate. Propagated to the PV so source frames
-        per output frame stays in sync."""
+        per output frame stays in sync.
+
+        Lock-free: `pv.set_rate` is a single float write. Concurrent with
+        `pv.generate()`, the in-flight block reads either the old or new
+        rate -- both are legal because `_step` recomputes the analysis
+        hop from `self.rate` each iteration, so a mid-block transition
+        is harmless. Holding `_pv_lock` here would serialize against
+        `pv.generate()` (~5-15 ms per block), exactly the stall the user
+        hears as choppiness on rate nudges.
+        """
         rate = max(0.05, float(rate))
-        with self._pv_lock:
-            with self._lock:
-                rate_changed = abs(rate - self._rate) > 1e-3
-                pv = self._pv
-            if rate_changed and pv is not None:
-                pv.set_rate(rate)
-            with self._lock:
-                if rate_changed:
-                    self._rate = rate
-                self._debug_log_locked('audio_set_rate', {
-                    'rate': float(self._rate),
-                })
+        with self._lock:
+            rate_changed = abs(rate - self._rate) > 1e-3
+            pv = self._pv
+            if rate_changed:
+                self._rate = rate
+            self._debug_log_locked('audio_set_rate', {
+                'rate': float(self._rate),
+            })
+        if rate_changed and pv is not None:
+            pv.set_rate(rate)
 
     def seek_to_chart_time(self, chart_t: float) -> None:
         """Jump to chart-time `chart_t`. Negative values become a lead-in
@@ -501,12 +531,7 @@ class AudioEngine:
     def stop(self) -> None:
         with self._lock:
             self._silent = True
-        try:
-            if self._stream is not None:
-                self._stream.stop()
-                self._stream.close()
-        except Exception:
-            pass
+        self._stream_worker.close(self._stream)
         self._stream = None
 
     def prewarm_rates(self, rates) -> None:
