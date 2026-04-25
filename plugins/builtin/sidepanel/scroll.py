@@ -75,6 +75,14 @@ def _draw_flyout(sctx):
                      enabled=len(games) > 1)
     sctx.y += theme.ROW_TALL_H - theme.ROW_BUTTON_H
 
+    sv = getattr(p, 'sv_render', None)
+    if sv is not None and hasattr(sv, 'available_engine_keys'):
+        engine_keys = sv.available_engine_keys()
+        if len(engine_keys) > 1:
+            sctx.draw_button(f'engine: {sv.active_engine_label()}',
+                             'cycle_sv_engine')
+            sctx.y += theme.ROW_TALL_H - theme.ROW_BUTTON_H
+
 
 def register_sidebar(add):
     add('Scroll', _collapsed_header, priority=800, key=_KEY,

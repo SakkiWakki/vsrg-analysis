@@ -14,27 +14,134 @@ class SvRenderController:
 
     def init(self, sv_sections, replay):
         from analysis.player.playback.timeline import RenderTimeline
-        from analysis.player.sv.engine import IdentitySVEngine, TimeSpaceSVEngine
 
         p = self.p
 
-        if sv_sections is not None:
-            p._sv_engine = (
-                TimeSpaceSVEngine(list(sv_sections))
-                if sv_sections
-                else IdentitySVEngine()
-            )
-        else:
-            engine = p._adapter.build_sv_engine(replay)
-            p._sv_engine = engine or IdentitySVEngine()
+        # Build the per-chart engine registry. Each slot is a lazy factory;
+        # the native slot is eagerly instantiated to drive the first frame.
+        # Engine swap goes through swap_engine() which invalidates the
+        # caches that derived from the prior engine.
+        self._registry = self._build_registry(sv_sections, replay)
+        p._sv_engine = self._registry.active()
 
         p.sv_enabled = bool(getattr(p._sv_engine, 'enabled', False))
         p._clock.set_sv_engine(p._sv_engine)
         p._render_timeline = RenderTimeline(p._sv_engine)
 
+        _SV_DEBUG_LOGGER.log({
+            'type': 'engine_init',
+            'native': self._registry.native_key(),
+            'available': self._registry.keys(),
+            'engine': type(p._sv_engine).__name__,
+        })
+
         mode_desc = scroll_registry.get(p.scroll_mode)
         if mode_desc and mode_desc.on_enter:
             mode_desc.on_enter(p, p._mode_state[p.scroll_mode])
+
+    def _build_registry(self, sv_sections, replay):
+        """Construct the per-chart SVEngineRegistry.
+
+        Native engine is determined by whether the replay carries Etterna
+        beat-space inputs or osu-style time-space sections. Identity is
+        always available. Cross-game engines are registered when the
+        chart's data can be translated to that engine's measure -- e.g.,
+        Etterna charts can be approximated under a time-space engine via
+        the beat engine's as_sections() projection.
+        """
+        from analysis.player.sv.engine import (BeatSpaceSVEngine,
+                                                IdentitySVEngine,
+                                                TimeSpaceSVEngine)
+        from analysis.player.sv.registry import (ENGINE_LABELS,
+                                                  KEY_ETTERNA_BEAT,
+                                                  KEY_IDENTITY, KEY_OSU_TIME,
+                                                  SVEngineRegistry)
+
+        # When VSRG_MEASURE_ENGINE=1 is set, factories produce measure-based
+        # engines instead of reference engines. Either way identity is
+        # unchanged.
+        use_measure = os.environ.get('VSRG_MEASURE_ENGINE') == '1'
+
+        registry = SVEngineRegistry()
+
+        # --- osu-style replay: time-space sections from the chart parser.
+        if sv_sections is not None:
+            sections = list(sv_sections) if sv_sections else []
+
+            def make_osu_time():
+                if use_measure:
+                    from analysis.player.sv.measure_engine import \
+                        time_space_engine
+                    return time_space_engine(sections) if sections \
+                        else IdentitySVEngine()
+                return TimeSpaceSVEngine(sections) if sections \
+                    else IdentitySVEngine()
+
+            registry.register(KEY_OSU_TIME, ENGINE_LABELS[KEY_OSU_TIME],
+                              make_osu_time, native=True, eager=True)
+            registry.register(KEY_IDENTITY, ENGINE_LABELS[KEY_IDENTITY],
+                              IdentitySVEngine)
+            return registry
+
+        # --- Etterna-style replay: beat-space inputs.
+        scrolls = replay.get('_etterna_scrolls')
+        bpms = replay.get('_etterna_bpms')
+        if scrolls is not None or bpms:
+            speeds = replay.get('_etterna_speeds') or []
+            stops = replay.get('_etterna_stops') or []
+            delays = replay.get('_etterna_delays') or []
+            warps = replay.get('_etterna_warps') or []
+            scrolls = scrolls or []
+            bpms = bpms or []
+            sm_offset = replay.get('_etterna_offset') or 0.0
+
+            has_sv = bool(scrolls or speeds or len(bpms) > 1
+                          or stops or delays or warps)
+
+            def make_etterna_beat():
+                if not has_sv:
+                    return IdentitySVEngine()
+                if use_measure:
+                    from analysis.player.sv.measure_engine import \
+                        beat_space_engine
+                    return beat_space_engine(scrolls, speeds, bpms, sm_offset,
+                                             stops=stops, delays=delays,
+                                             warps=warps)
+                return BeatSpaceSVEngine(scrolls, speeds, bpms, sm_offset,
+                                         stops=stops, delays=delays,
+                                         warps=warps)
+
+            registry.register(KEY_ETTERNA_BEAT,
+                              ENGINE_LABELS[KEY_ETTERNA_BEAT],
+                              make_etterna_beat, native=True, eager=True)
+
+            # Cross-game time-space engine: feed the beat engine's
+            # time-space approximation through TimeSpaceSVEngine. Lossy
+            # for SPEEDS / cross-BPM scrolls (DESIGN.tex §4 caveat) but
+            # the right thing for "show me this chart under osu's model."
+            def make_osu_time():
+                if not has_sv:
+                    return IdentitySVEngine()
+                native = registry.get(KEY_ETTERNA_BEAT)
+                sections = native.as_sections()
+                if not sections:
+                    return IdentitySVEngine()
+                if use_measure:
+                    from analysis.player.sv.measure_engine import \
+                        time_space_engine
+                    return time_space_engine(sections)
+                return TimeSpaceSVEngine(sections)
+
+            registry.register(KEY_OSU_TIME, ENGINE_LABELS[KEY_OSU_TIME],
+                              make_osu_time)
+            registry.register(KEY_IDENTITY, ENGINE_LABELS[KEY_IDENTITY],
+                              IdentitySVEngine)
+            return registry
+
+        # --- Unknown replay shape: identity only.
+        registry.register(KEY_IDENTITY, ENGINE_LABELS[KEY_IDENTITY],
+                          IdentitySVEngine, native=True, eager=True)
+        return registry
 
     @property
     def sv_sections(self):
@@ -188,6 +295,100 @@ class SvRenderController:
     def reset_render_playhead(self, raw_t=None):
         del raw_t
         self.reset_render_timeline()
+
+    # -- engine swap ---------------------------------------------------
+
+    @property
+    def registry(self):
+        return getattr(self, '_registry', None)
+
+    def available_engine_keys(self):
+        reg = self.registry
+        return reg.keys() if reg else []
+
+    def active_engine_key(self):
+        reg = self.registry
+        return reg.active_key() if reg else None
+
+    def active_engine_label(self):
+        reg = self.registry
+        if not reg:
+            return ''
+        key = reg.active_key()
+        return reg.label(key) if key else ''
+
+    def swap_engine(self, key: str) -> bool:
+        """Swap the active SV engine to `key`. Rebuilds the cumulative
+        cache, the RenderTimeline, and the clock's engine reference; also
+        refreshes sv_enabled and any CMOD-suspended state.
+
+        Returns True on success, False if the key is unknown.
+        """
+        from analysis.player.playback.timeline import RenderTimeline
+        reg = self.registry
+        if reg is None or key not in reg.keys():
+            return False
+        if reg.active_key() == key:
+            return True
+        prev_key = reg.active_key()
+        engine = reg.set_active(key)
+        p = self.p
+        p._sv_engine = engine
+
+        # Refresh sv_enabled. CMOD (and any other scroll mode that stashes
+        # sv_enabled in p._state()['sv_enabled_saved']) holds the prior
+        # engine's enabled flag; update it to the new engine so on_exit
+        # restores the right value.
+        new_enabled = bool(getattr(engine, 'enabled', False))
+        state = p._state()
+        if 'sv_enabled_saved' in state:
+            # Suspended by a scroll mode (e.g. CMOD): the user-visible
+            # sv_enabled stays whatever the mode forced it to. The saved
+            # value is what gets restored on mode exit; sync it.
+            state['sv_enabled_saved'] = new_enabled
+        else:
+            p.sv_enabled = new_enabled
+
+        # Rebuild caches that derived from the prior engine.
+        p._clock.set_sv_engine(engine)
+        p._render_timeline = RenderTimeline(engine)
+        if hasattr(p, 'times'):
+            self.build_cumulative_sv()
+
+        _SV_DEBUG_LOGGER.log({
+            'type': 'engine_swap',
+            'from': prev_key,
+            'to': key,
+            'engine': type(engine).__name__,
+            'enabled': new_enabled,
+        })
+        return True
+
+    def cycle_engine(self) -> str | None:
+        reg = self.registry
+        if reg is None:
+            return None
+        new_key = reg.next_key()
+        if new_key is None or new_key == reg.active_key():
+            return reg.active_key()
+
+        # If the new engine has a primary game, route through set_game so
+        # the scroll mode (cmod/xmod/osu) follows. set_game internally calls
+        # swap_engine for us. Otherwise (identity), just swap directly.
+        from analysis.player.sv.registry import ENGINE_PRIMARY_GAME
+        primary = ENGINE_PRIMARY_GAME.get(new_key)
+        p = self.p
+        if primary and primary != getattr(p, 'game', None) \
+                and hasattr(p, 'set_game'):
+            p.set_game(primary)
+            # set_game may have rejected the swap if the primary engine
+            # isn't available for the current chart; force the engine swap
+            # here regardless so cycle_engine always advances.
+            if reg.active_key() != new_key:
+                self.swap_engine(new_key)
+        else:
+            self.swap_engine(new_key)
+        return new_key
 
     def toggle_sv(self):
         p = self.p

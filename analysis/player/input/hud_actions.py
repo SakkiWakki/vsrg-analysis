@@ -55,6 +55,12 @@ class HudActionController:
                 self.p.cycle_game()
                 self.notify_scroll_change()
 
+            case 'cycle_sv_engine':
+                sv = getattr(self.p, 'sv_render', None)
+                if sv is not None and hasattr(sv, 'cycle_engine'):
+                    sv.cycle_engine()
+                    self.notify_scroll_change()
+
             case 'toggle_layer':
                 self.p.plugins.layers.toggle(payload)
 

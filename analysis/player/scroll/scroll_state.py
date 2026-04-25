@@ -177,6 +177,22 @@ class ScrollStateController:
             if new_mode in p._mode_state:
                 self.set_scroll_mode(new_mode)
 
+        # Swap the SV engine to the one that game uses, if available.
+        # Cross-game engines are registered when the chart's data can be
+        # translated; if not (e.g. osu chart asked to play under Etterna's
+        # beat engine), the swap is a no-op.
+        sv = getattr(p, 'sv_render', None)
+        if sv is not None and hasattr(sv, 'swap_engine'):
+            from analysis.player.sv.registry import (KEY_ETTERNA_BEAT,
+                                                      KEY_OSU_TIME)
+            game_to_engine = {
+                'etterna': KEY_ETTERNA_BEAT,
+                'osu': KEY_OSU_TIME,
+            }
+            target = game_to_engine.get(game)
+            if target and target in sv.available_engine_keys():
+                sv.swap_engine(target)
+
     def cycle_game(self):
         try:
             names = list(game_mod.all_games().keys())

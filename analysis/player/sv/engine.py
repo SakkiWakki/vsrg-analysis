@@ -24,6 +24,8 @@ from typing import Protocol
 
 import numpy as np
 
+from analysis.player.sv.timing import TimingMap as _TimingMap
+
 
 class SVEngine(Protocol):
     """What the Player needs from any SV implementation.
@@ -231,233 +233,6 @@ class TimeSpaceSVEngine:
 # `CMod / (bpm_goal * rate)` pattern that's `your_cmod / (bpm_goal * rate)`.
 
 
-class _TimingMap:
-    """Pre-walked BPMs + STOPS + DELAYS + WARPS event stream, with monotonic
-    bisect-indexable checkpoints for O(log n) beat<->time conversion.
-
-    Walking the event stream on every `_beat_to_time` / `_time_to_beat` call
-    was the render-hot-path bottleneck on Etterna charts with many BPM/stop
-    segments (Undiscovered Colors has 310 BPMs + 591 stops ; a linear walk
-    costs ~34us per call, and `distance()` does two of those per visible
-    note per frame). Walking once into checkpoint arrays drops the per-call
-    cost to a bisect + constant-time arithmetic."""
-
-    def __init__(self, bpms, sm_offset, stops, delays, warps):
-        bpms = sorted(bpms or [(0.0, 120.0)])
-        stops = sorted(stops or [])
-        delays = sorted(delays or [])
-        warps = sorted(warps or [])
-        sm_offset = float(sm_offset)
-
-        # Single unified event stream. Etterna's FindEvent same-row
-        # precedence is BPM -> DELAY -> target marker -> STOP -> WARP.
-        # There is no marker in this prewalk, so STOP must still precede WARP;
-        # otherwise stop+warp gimmicks lose the warp collapse in lookups.
-        events = []
-        for b, v in bpms:   events.append((b, 0, v))
-        for b, v in delays: events.append((b, 1, v))
-        for b, v in stops:  events.append((b, 2, v))
-        for b, v in warps:  events.append((b, 3, v))
-        events.sort(key=lambda e: (e[0], e[1]))
-
-        # Checkpoints: after processing each event, record
-        #   beat_enter:   cur_beat at moment this event starts (pre-event)
-        #   time_enter:   time at that moment
-        #   beat_exit:    cur_beat after applying the event (==beat_enter for
-        #                 BPM/DELAY/STOP; beat_enter+warp_len for WARP)
-        #   time_exit:    time after event (adds delay/stop duration)
-        #   bps_after:    sec-per-beat-inverse that applies from this event
-        #                 to the next
-        # The segment between events[i] and events[i+1] advances at bps_after
-        # from beat_exit to events[i+1]'s beat.
-        self._beat_enter: list[float] = []
-        self._time_enter: list[float] = []
-        self._beat_exit: list[float] = []
-        self._time_exit: list[float] = []
-        self._bps_after: list[float] = []
-        self._event_kind: list[int] = []
-
-        t = -sm_offset
-        cur_beat = 0.0
-        bps = bpms[0][1] / 60.0
-        warp_end = None
-
-        # TODO: Generalize this to non-Etterna
-        for (eb, kind, val) in events:
-            if eb < 0:
-                continue
-            # Advance from cur_beat to eb along current bps.
-            if warp_end is not None and eb <= warp_end:
-                cur_beat = eb
-            elif warp_end is not None and cur_beat < warp_end <= eb:
-                cur_beat = warp_end
-                warp_end = None
-                t += (eb - cur_beat) / bps
-                cur_beat = eb
-            else:
-                t += (eb - cur_beat) / bps
-                cur_beat = eb
-
-            beat_enter = cur_beat
-            time_enter = t
-
-            if kind == 0:       # BPM change
-                bps = float(val) / 60.0
-            elif kind == 1:     # DELAY: pause before the row's notes
-                t += float(val)
-            elif kind == 2:     # STOP: pause after the row's notes
-                t += float(val)
-            elif kind == 3:     # WARP ; beat teleports forward, time doesn't
-                warp_end = cur_beat + float(val)
-
-            # beat_exit reflects the post-event beat cursor for bisect
-            # lookups ; for WARP, that's the warp landing; for others,
-            # unchanged from beat_enter. The event loop's own cur_beat
-            # stays at beat_enter for warps so subsequent in-warp events
-            # still get skipped correctly by the warp_end state check.
-            if kind == 3:
-                beat_exit = warp_end
-            else:
-                beat_exit = cur_beat
-            time_exit = t
-
-            self._beat_enter.append(beat_enter)
-            self._time_enter.append(time_enter)
-            self._beat_exit.append(beat_exit)
-            self._time_exit.append(time_exit)
-            self._bps_after.append(bps)
-            self._event_kind.append(kind)
-
-        # Initial bps for beat lookups at time < first event.
-        self._bps_initial = bpms[0][1] / 60.0
-        self._t_at_beat_zero = -sm_offset
-        self._trailing_warp_end = warp_end
-
-        # Numpy mirrors for batched lookup paths (project_times). Kept
-        # in sync with the list fields; rebuild would require recomputing
-        # both if we ever mutated them, but _TimingMap is constructed once
-        # per engine and never edited.
-        self._beat_enter_np = np.asarray(self._beat_enter, dtype=np.float64)
-        self._time_enter_np = np.asarray(self._time_enter, dtype=np.float64)
-        self._beat_exit_np = np.asarray(self._beat_exit, dtype=np.float64)
-        self._time_exit_np = np.asarray(self._time_exit, dtype=np.float64)
-        self._bps_after_np = np.asarray(self._bps_after, dtype=np.float64)
-
-    def time_to_beat_array(self, times: np.ndarray) -> np.ndarray:
-        """Vectorized `time_to_beat`. Same rules as the scalar path
-        (frozen beats inside STOP/DELAY pauses, extrapolation before the
-        first event and past the last), applied over an entire array at
-        once."""
-        t = np.asarray(times, dtype=np.float64)
-        if not t.size:
-            return np.empty(0, dtype=np.float64)
-        if self._beat_enter_np.size == 0:
-            return (t - self._t_at_beat_zero) * self._bps_initial
-
-        out = np.empty_like(t)
-        # Pre-first-event branch: extrapolate from beat 0 at initial bps.
-        before = t < self._time_enter_np[0]
-        if before.any():
-            out[before] = (t[before] - self._t_at_beat_zero) * self._bps_initial
-        remaining = ~before
-        if not remaining.any():
-            return out
-
-        tr = t[remaining]
-        # Pause window test: t lies between time_enter[idx] and time_exit[idx]
-        # at the same idx ; beat is frozen to beat_exit[idx].
-        pause_idx = np.searchsorted(self._time_enter_np, tr, side='right') - 1
-        pause_valid = pause_idx >= 0
-        pause_in = np.zeros_like(tr, dtype=bool)
-        if pause_valid.any():
-            safe_p = np.clip(pause_idx, 0, self._time_exit_np.size - 1)
-            pause_in = pause_valid & (tr < self._time_exit_np[safe_p])
-        out_r = np.empty_like(tr)
-        if pause_in.any():
-            out_r[pause_in] = self._beat_exit_np[pause_idx[pause_in]]
-        not_pause = ~pause_in
-        if not_pause.any():
-            tr2 = tr[not_pause]
-            idx = np.searchsorted(self._time_exit_np, tr2, side='right') - 1
-            idx = np.clip(idx, 0, self._time_exit_np.size - 1)
-            out_r[not_pause] = (self._beat_exit_np[idx]
-                                + (tr2 - self._time_exit_np[idx])
-                                * self._bps_after_np[idx])
-        out[remaining] = out_r
-        return out
-
-    def beat_to_time(self, beat: float) -> float:
-        """Time at `beat`. Bisect the event list, then advance at
-        post-event bps from that event to `beat`."""
-        import bisect as _b
-        if not self._beat_enter:
-            return self._t_at_beat_zero + beat / self._bps_initial
-        # Find last event whose beat_enter <= target beat. (If target beat
-        # lies in the event's own span [beat_enter, beat_exit], time is
-        # mid-transition ; return time_enter for beats before event
-        # completion, time_exit for after. Effectively: if target_beat ==
-        # beat_enter, the PRE-event time is correct.)
-        idx = _b.bisect_right(self._beat_enter, beat) - 1
-        if idx < 0:
-            # Before the first event: advance from beat 0 at initial bps.
-            return self._t_at_beat_zero + beat / self._bps_initial
-        # If the target is exactly on an event row, Etterna's marker
-        # precedence is after BPM/DELAY and before STOP/WARP. The prewalk has
-        # no marker event, so recover that boundary explicitly.
-        left = _b.bisect_left(self._beat_enter, beat)
-        if left <= idx and self._beat_enter[left] == beat:
-            marker_time = self._time_enter[left]
-            for j in range(left, idx + 1):
-                if self._event_kind[j] <= 1:  # BPM or DELAY happen before marker
-                    marker_time = self._time_exit[j]
-                else:                         # STOP/WARP happen after marker
-                    break
-            return marker_time
-        # Is the target beat inside a WARP span that this event opened?
-        # A WARP event has beat_exit > beat_enter; beats strictly between
-        # land at time_exit (no time passes).
-        bx = self._beat_exit[idx]
-        if beat < bx:
-            return self._time_exit[idx]
-        # Past this event ; advance at bps_after to `beat`.
-        return self._time_exit[idx] + (beat - bx) / self._bps_after[idx]
-
-    def time_to_beat(self, t: float) -> float:
-        """Inverse of beat_to_time. Bisect on time_exit (the post-event
-        times are monotonically non-decreasing)."""
-        import bisect as _b
-        if not self._time_exit:
-            return (t - self._t_at_beat_zero) * self._bps_initial
-        if t < self._time_enter[0]:
-            # Before the first event: walk back at initial bps.
-            return (t - self._t_at_beat_zero) * self._bps_initial
-        # If we're inside a STOP/DELAY window, chart beat is frozen at that
-        # event's beat until the pause finishes.
-        pause_idx = _b.bisect_right(self._time_enter, t) - 1
-        if pause_idx >= 0 and t < self._time_exit[pause_idx]:
-            return self._beat_exit[pause_idx]
-        # Find last event whose time_exit <= t, then advance from its
-        # post-event state.
-        idx = _b.bisect_right(self._time_exit, t) - 1
-        if idx < 0:
-            return self._beat_exit[0]
-        # Past all events ; use the last event's post-event state.
-        return self._beat_exit[idx] + (t - self._time_exit[idx]) * self._bps_after[idx]
-
-    def bps_at_time(self, t: float) -> float:
-        """Instantaneous beats-per-second at time t.
-
-        Returns 0 inside STOP/DELAY windows where chart beat is frozen."""
-        import bisect as _b
-        if not self._time_enter:
-            return self._bps_initial
-        pause_idx = _b.bisect_right(self._time_enter, t) - 1
-        if pause_idx >= 0 and t < self._time_exit[pause_idx]:
-            return 0.0
-        idx = _b.bisect_right(self._time_exit, t) - 1
-        if idx < 0:
-            return self._bps_initial
-        return self._bps_after[idx]
 
 
 class BeatSpaceSVEngine:
@@ -474,8 +249,11 @@ class BeatSpaceSVEngine:
 
     def __init__(self, scrolls, speeds, bpms, sm_offset,
                  stops=None, delays=None, warps=None):
+        from analysis.player.sv.scrolls import ScrollsCache
+        from analysis.player.sv.speeds import (SpeedsEvaluator,
+                                                normalize_speed_segment)
         self._scrolls = list(scrolls or [])
-        self._speeds = [self._normalize_speed_segment(s) for s in (speeds or [])]
+        self._speeds = [normalize_speed_segment(s) for s in (speeds or [])]
         self._speed_beats = [s[0] for s in self._speeds]
         self._bpms = list(bpms or [(0.0, 120.0)])
         self._sm_offset = float(sm_offset)
@@ -494,41 +272,12 @@ class BeatSpaceSVEngine:
         # BPM changes and stops (e.g. Undiscovered Colors).
         self._timing = _TimingMap(self._bpms, self._sm_offset,
                                    self._stops, self._delays, self._warps)
+        self._speeds_eval = SpeedsEvaluator(speeds, self._timing,
+                                             delay_at_beats=self._delay_at_beats)
 
-        # DisplayedBeat cache: (beat, displayed_beat, ratio). At any real beat
-        # b in [segment_i.beat, segment_{i+1}.beat], displayed_beat =
-        #   segment_i.displayed_beat + (b - segment_i.beat) * segment_i.ratio
-        # If the first #SCROLLS doesn't start at beat 0, we prepend an
-        # implicit ratio=1 segment matching Etterna's ResetCacheInfo.
-        self._cache: list[tuple[float, float, float]] = []
-        if self._scrolls:
-            if self._scrolls[0][0] > 0.0:
-                self._cache.append((0.0, 0.0, 1.0))
-            displayed = 0.0
-            last_beat = 0.0
-            last_ratio = 1.0
-            for (b, r) in self._scrolls:
-                displayed += (b - last_beat) * last_ratio
-                self._cache.append((b, displayed, r))
-                last_beat = b
-                last_ratio = r
-        self._cache_beats = [c[0] for c in self._cache]
-        # Numpy mirrors for vectorized displayed_beat over arrays ; kept in
-        # sync with `_cache`; `_cache` stays Python-list for scalar hits.
-        self._cache_beats_np = np.asarray(self._cache_beats, dtype=np.float64)
-        self._cache_db_np = np.asarray([c[1] for c in self._cache], dtype=np.float64)
-        self._cache_ratio_np = np.asarray([c[2] for c in self._cache], dtype=np.float64)
-        # Sorted-by-displayed-beat table for inverse_cumulative_at bisects.
-        # SCROLLS with negative or zero ratios make displayed_beat
-        # non-monotonic, so we skip those segments during inverse lookup.
-        self._cache_dbs_monotonic: list[tuple[float, int]] = []
-        last_db = -float('inf')
-        for i, c in enumerate(self._cache):
-            db = c[1]
-            if db >= last_db:
-                self._cache_dbs_monotonic.append((db, i))
-                last_db = db
-        self._cache_dbs_only = [x[0] for x in self._cache_dbs_monotonic]
+        # Pre-integrated displayed-beat curve from #SCROLLS, with a sorted
+        # inverse table for the cull-space clock smoother. See scrolls.py.
+        self._scrolls_cache = ScrollsCache(self._scrolls)
 
         self.enabled = bool(self._scrolls or self._speeds
                             or len(self._bpms) > 1
@@ -542,68 +291,18 @@ class BeatSpaceSVEngine:
     def _time_to_beat(self, t: float) -> float:
         return self._timing.time_to_beat(t)
 
-    @staticmethod
-    def _normalize_speed_segment(seg) -> tuple[float, float, float, int]:
-        if len(seg) >= 4:
-            beat, ratio, delay, unit = seg[:4]
-            return (float(beat), float(ratio), float(delay),
-                    0 if int(unit) == 0 else 1)
-        if len(seg) == 3:
-            beat, ratio, delay = seg
-            return float(beat), float(ratio), float(delay), 0
-        beat, ratio = seg[:2]
-        return float(beat), float(ratio), 0.0, 0
-
     # --- SCROLLS integral ----------------------------------------------
 
     def _displayed_beat(self, beat: float) -> float:
-        if not self._cache:
-            return beat
-        idx = bisect.bisect_right(self._cache_beats, beat) - 1
-        if idx < 0:
-            # Before first segment: ratio=1 extrapolation (matches Etterna's
-            # GetDisplayedBeat fallthrough `return beat`).
-            return beat
-        b, db, r = self._cache[idx]
-        return db + (beat - b) * r
+        return self._scrolls_cache.displayed_beat(beat)
 
     def _scroll_ratio_at_beat(self, beat: float) -> float:
-        if not self._cache:
-            return 1.0
-        idx = bisect.bisect_right(self._cache_beats, beat) - 1
-        if idx < 0:
-            return 1.0
-        return float(self._cache[idx][2])
+        return self._scrolls_cache.ratio_at_beat(beat)
 
     # --- SPEEDS evaluator (position-dependent!) -------------------------
 
-    def _delay_at_beat(self, beat: float) -> float:
-        return self._delay_at_beats.get(float(beat), 0.0)
-
     def _speed_percent_at(self, beat: float, music_seconds: float) -> float:
-        """Evaluate Etterna's GetDisplayedSpeedPercent(songBeat, songSec)."""
-        if not self._speeds:
-            return 1.0
-        idx = bisect.bisect_right(self._speed_beats, beat) - 1
-        if idx < 0:
-            return 1.0
-        seg_beat, seg_ratio, seg_delay, seg_unit = self._speeds[idx]
-        start_time = self._beat_to_time(seg_beat) - self._delay_at_beat(seg_beat)
-        if seg_unit == 1:
-            end_time = start_time + seg_delay
-        else:
-            end_beat = seg_beat + seg_delay
-            end_time = self._beat_to_time(end_beat) - self._delay_at_beat(end_beat)
-
-        first = self._speeds[0]
-        if idx == 0 and first[2] > 0.0 and music_seconds < start_time:
-            return 1.0
-        if end_time >= music_seconds and (idx > 0 or first[2] > 0.0):
-            prior_ratio = 1.0 if idx == 0 else self._speeds[idx - 1][1]
-            duration = end_time - start_time
-            ratio_used = 1.0 if duration == 0.0 else (music_seconds - start_time) / duration
-            return prior_ratio + (seg_ratio - prior_ratio) * ratio_used
-        return seg_ratio
+        return self._speeds_eval.percent_at(beat, music_seconds)
 
     # --- SVEngine interface ---------------------------------------------
 
@@ -621,27 +320,13 @@ class BeatSpaceSVEngine:
 
     def inverse_cumulative_at(self, sv: float) -> float:
         """Chart-time t such that cumulative_at(t) == sv. Used by the
-        cull-space clock smoother. The inverse is only well-defined where
-        displayed_beat is strictly increasing (SCROLLS ratio > 0); regions
-        of ratio <= 0 collapse many beats to the same sv-value, so we
-        return the earliest matching chart-time there."""
-        if not self._cache:
+        cull-space clock smoother. In scroll<=0 plateaus the inverse is
+        not well-defined; ScrollsCache.inverse_displayed_beat returns the
+        earliest matching chart-time there."""
+        if not self._scrolls_cache:
             return float(sv)
         db_target = sv / self._sec_per_base_beat
-        arr = self._cache_dbs_only
-        if not arr:
-            return float(sv)
-        idx = bisect.bisect_right(arr, db_target) - 1
-        if idx < 0:
-            # Before first cache entry: ratio=1 extrapolation from beat 0
-            return self._timing.beat_to_time(db_target)
-        cache_idx = self._cache_dbs_monotonic[idx][1]
-        b, db, r = self._cache[cache_idx]
-        if r > 0:
-            beat = b + (db_target - db) / r
-        else:
-            beat = b  # zero/negative ratio segment: collapse to its start
-        return self._timing.beat_to_time(beat)
+        return self._scrolls_cache.inverse_displayed_beat(db_target, self._timing)
 
     def distance(self, t_from: float, t_to: float) -> float:
         """Render-space distance. SCROLLS cumulative difference, zoomed
@@ -670,21 +355,7 @@ class BeatSpaceSVEngine:
         Chart-only sprites inside old negative-BPM warp aliases need this:
         their elapsed time collapses to the warp endpoint, but Etterna still
         positions the sprite from its chart beat until the playhead jumps."""
-        beats = np.asarray(beats, dtype=np.float64)
-        if not beats.size:
-            return np.empty(0, dtype=np.float64)
-        if self._cache_beats_np.size == 0:
-            return beats * self._sec_per_base_beat
-        # displayed_beat(beat) vectorized.
-        idx = np.searchsorted(self._cache_beats_np, beats, side='right') - 1
-        pre_mask = idx < 0
-        safe = np.clip(idx, 0, self._cache_beats_np.size - 1)
-        db_out = (self._cache_db_np[safe]
-                  + (beats - self._cache_beats_np[safe]) * self._cache_ratio_np[safe])
-        if pre_mask.any():
-            # Etterna GetDisplayedBeat fallthrough: `return beat`.
-            db_out[pre_mask] = beats[pre_mask]
-        return db_out * self._sec_per_base_beat
+        return self._scrolls_cache.displayed_beat_array(beats) * self._sec_per_base_beat
 
     def as_sections(self) -> list[tuple[float, float]]:
         """Back-compat projection for sidebar/components readers. Samples the
