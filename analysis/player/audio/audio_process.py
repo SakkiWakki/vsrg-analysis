@@ -89,7 +89,9 @@ class AudioProcessConfig:
     pitch_correct: bool = True
     volume: float = 0.5
     block_size: int = 512
-    ring_capacity: int = 32768  # ~743 ms at 44.1 kHz, power of two
+    # 512 frames minimal block size and overflows in the single 
+    # digits on stress tests. So use 1024 for some headroom.
+    ring_capacity: int = 1024
 
 
 # ── child entry point ──────────────────────────────────────────────
