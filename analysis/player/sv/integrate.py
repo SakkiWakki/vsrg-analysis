@@ -142,7 +142,15 @@ class CumulativeIntegrator:
     # -------------------------------------------------------------------
 
     def cumulative_at(self, t: float) -> float:
-        """Scalar C_mu(t)."""
+        """Scalar C_mu(t).
+
+        # PORT BOUNDARY (hot path).
+        # Native port:
+        #     idx = bsearch(grid, t)              # ~20 ns branchless
+        #     dt  = t - grid[idx]
+        #     return cum[idx] + (v_s + (v_e - v_s) * dt/width) * rho * dt * 0.5
+        # ~30-40 ns total. The Python branchy version is ~1 us.
+        """
         if self._grid.size == 0:
             return 0.0
         if t <= self._grid[0]:

@@ -95,6 +95,12 @@ class SVEngine(Protocol):
         huge SV-equal runs that all pass cull-space bisection."""
         return float('inf')
 
+    def breakpoints(self) -> np.ndarray:
+        """Sorted chart-times where dC/dt is discontinuous. Used by
+        CullSpacePredictor to split extrapolation across SV/BPM/warp
+        boundaries exactly. Default: empty (= no breakpoints; the
+        predictor falls back to single-segment extrapolation)."""
+
 
 def _empty_engine_sections(_engine) -> list[tuple[float, float]]:
     return []
@@ -198,6 +204,11 @@ class TimeSpaceSVEngine:
 
     def max_visible_t_from(self, song_t: float) -> float:
         return float('inf')
+
+    def breakpoints(self) -> np.ndarray:
+        """Time-space dC/dt is constant on each section; section start
+        times are the breakpoints."""
+        return self._times.copy()
 
 
 # ----------------------------------------------------------------------
@@ -415,6 +426,19 @@ class BeatSpaceSVEngine:
         song_beat = self._time_to_beat(song_t)
         return self._beat_to_time(song_beat + self._MAX_LOOKAHEAD_BEATS)
 
+    def breakpoints(self) -> np.ndarray:
+        """All chart-times where dC/dt is discontinuous: BPM-segment
+        boundaries (incl. STOP/DELAY enter/exit), warp atoms, and SCROLLS
+        change points. Used by CullSpacePredictor."""
+        timing = self._timing
+        # Timing-map events: BPM changes + STOP/DELAY entries/exits + warp times.
+        bpm_times = list(timing._time_enter) + list(timing._time_exit)
+        # SCROLLS change points (in beat-space, convert to chart-time).
+        scroll_times = [self._beat_to_time(b)
+                        for (b, _) in self._scrolls]
+        return np.asarray(sorted(set(bpm_times + scroll_times)),
+                          dtype=np.float64)
+
 
 # ----------------------------------------------------------------------
 # Identity fallback ; used when the adapter returns None or the chart has
@@ -460,3 +484,6 @@ class IdentitySVEngine:
 
     def max_visible_t_from(self, song_t: float) -> float:
         return float('inf')
+
+    def breakpoints(self) -> np.ndarray:
+        return np.zeros(0, dtype=np.float64)

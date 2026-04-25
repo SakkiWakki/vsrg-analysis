@@ -240,6 +240,7 @@ class SvRenderController:
             raw_t=float(raw_t),
             scroll_speed=float(p.scroll_speed),
             use_sv=bool(p.sv_enabled and p._sv_engine.enabled),
+            play_rate=float(getattr(p, 'play_rate', 1.0)),
         )
 
     def render_at(self, raw_t):
@@ -337,10 +338,24 @@ class SvRenderController:
         return judge_y - dist * scroll_speed
 
     def reset_render_timeline(self):
-        return
+        """Re-anchor the cull-space predictor at the current playhead.
+        Called by the player on seek/pause/rate-change/restart so the
+        next cumulative_now() snaps to the engine's exact reading."""
+        timeline = getattr(self.p, '_render_timeline', None)
+        if timeline is None:
+            return
+        try:
+            raw_t = float(self.p._clock.now())
+        except Exception:
+            return
+        timeline.reset(raw_t)
 
     def reset_render_playhead(self, raw_t=None):
-        del raw_t
+        if raw_t is not None:
+            timeline = getattr(self.p, '_render_timeline', None)
+            if timeline is not None:
+                timeline.reset(float(raw_t))
+            return
         self.reset_render_timeline()
 
     # -- engine swap ---------------------------------------------------

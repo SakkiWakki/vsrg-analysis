@@ -103,6 +103,12 @@ class MeasureSVEngine:
     def max_visible_t_from(self, song_t: float) -> float:
         return float('inf')
 
+    def breakpoints(self) -> np.ndarray:
+        """Sorted chart-times where dC/dt is discontinuous: SV change
+        points, BPM-segment boundaries, and warps. Returned as a copy
+        so callers can't mutate the integrator's grid."""
+        return self._integrator._grid.copy()
+
 
 # ---------------------------------------------------------------------------
 # Time-space construction (osu!mania, Quaver-without-coupling)

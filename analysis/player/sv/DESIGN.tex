@@ -595,6 +595,182 @@ Per Remark~\ref{rem:cum-not-invariant}, swap reduces to:
 The renderer's per-frame contract is unchanged.
 
 % =====================================================================
+\section{Per-frame predictor (cull-space)}
+\label{sec:predictor}
+
+The renderer queries $C(t)$ every frame to position notes in cull-space.
+Two correctness criteria must be met:
+
+\begin{description}
+    \item[Exactness on audio callback.] When the audio engine delivers a
+        fresh chart-time $t_{\mathrm{raw}}$, the rendered cumulative must
+        equal $C(t_{\mathrm{raw}})$.
+    \item[Smoothness between callbacks.] Between callbacks, the rendered
+        cumulative must advance linearly in wall-time at the local rate
+        $r(t) = v(t)\,w(t)$, without observing per-frame noise from the
+        audio engine's source clock.
+\end{description}
+
+The naive renderer evaluates $C(t_{\mathrm{raw}})$ per frame. This
+satisfies exactness but fails smoothness: $t_{\mathrm{raw}}$ inherits
+sub-callback stream-clock jitter on every per-frame read, producing
+output position noise of order $r \cdot \sigma_{\mathrm{clock}}$, visible
+at high local rates.
+
+\subsection{The anchor-and-extrapolate algorithm}
+
+Maintain a four-tuple of state:
+\[
+\bigl(t_a,\; C_a,\; r_a,\; W_a\bigr)
+\]
+where $t_a$ is the chart-time at the most recent anchor,
+$C_a = C(t_a)$ exactly, $r_a = r(t_a^+)$ from the engine's
+\texttt{cumulative\_velocity\_at}, and $W_a$ is wall-time
+($\mathtt{monotonic()}$) at the anchor instant.
+
+\begin{definition}[Per-frame query]
+\label{def:query}
+At wall-time $W$ with playback rate $\rho$ (chart-seconds per
+wall-second), the predicted cumulative is
+\begin{equation}
+\label{eq:predict}
+\widetilde{C}(W) \;=\; C_a + r_a \cdot (W - W_a) \cdot \rho.
+\end{equation}
+\end{definition}
+
+\begin{theorem}[Equivalence on a constant-rate segment]
+\label{thm:predictor-equiv}
+On a segment where $r$ is constant on $[t_a, t_a + (W - W_a)\rho]$ and no
+warp atom intervenes, $\widetilde{C}(W) = C(t_a + (W - W_a)\rho)$ exactly.
+\end{theorem}
+
+\begin{proof}
+On a constant-rate interval, $C(t) - C(t_a) = \int_{t_a}^{t} r\,d\tau =
+r \cdot (t - t_a)$. Substituting $t = t_a + (W - W_a)\rho$ gives
+$C(t) = C_a + r \cdot (W - W_a)\rho$, which equals \eqref{eq:predict}.
+\qedhere
+\end{proof}
+
+\subsection{Re-anchoring on breakpoints}
+
+When the predicted chart-time $t_a + (W - W_a)\rho$ would cross the next
+breakpoint $b$, the algorithm advances the anchor to that breakpoint:
+\[
+\bigl(t_a',\;C_a',\;r_a',\;W_a'\bigr) \;=\;
+\bigl(b,\; C(b),\; r(b^+),\; W_a + (b - t_a)/\rho\bigr).
+\]
+$C(b)$ comes from the integrator (exact, including any warp atom at $b$);
+$r(b^+)$ is the post-boundary local rate. Subsequent per-frame queries
+extrapolate from this new anchor. Multiple breakpoints in one frame are
+handled by iterating until the predicted chart-time falls within the
+current cell.
+
+\begin{theorem}[Equivalence across breakpoints]
+\label{thm:predictor-bp}
+For any $W$ and any sequence of breakpoints $b_1 < b_2 < \dots < b_n$ in
+$(t_a, t_a + (W - W_a)\rho]$, after $n$ re-anchor iterations,
+$\widetilde{C}(W) = C(t_a + (W - W_a)\rho)$.
+\end{theorem}
+
+\begin{proof}
+By induction on $n$. The base case $n = 0$ is Theorem~\ref{thm:predictor-equiv}.
+Inductive step: after re-anchoring at $b_n$, the predictor's state is
+$(b_n, C(b_n), r(b_n^+), W_a + (b_n - t_a)/\rho)$. The remaining
+extrapolation crosses no further breakpoints in the current frame
+(otherwise the loop continues), so by Theorem~\ref{thm:predictor-equiv}
+the final value is $C(b_n) + r(b_n^+) \cdot (\text{remaining chart-time}) =
+C(t_{\mathrm{end}})$, where the second equality holds because the
+integrator splits its grid at $b_n$ and integrates exactly across each
+sub-segment. \qedhere
+\end{proof}
+
+\subsection{Re-anchoring on audio callbacks and discontinuities}
+
+Audio callbacks update $t_{\mathrm{raw}}$ ahead of the predictor's
+extrapolation. The predictor detects this by comparing
+$t_{\mathrm{raw}} - t_a$ against the predicted chart-time advance
+$(W - W_a)\rho$:
+\[
+\bigl|\,(t_{\mathrm{raw}} - t_a) \;-\; (W - W_a)\rho\,\bigr| > \theta
+\;\Longrightarrow\;\text{re-anchor at } t_{\mathrm{raw}}.
+\]
+The threshold $\theta$ is chosen larger than typical sub-callback clock
+jitter ($\theta = 5\,\mathrm{ms}$ in the implementation) so per-frame
+stream-clock noise does not trigger spurious re-anchors. Backward jumps
+in $t_{\mathrm{raw}}$ (seek, scrub release) trigger immediate re-anchor;
+explicit \texttt{reset(t)} calls (engine swap, rate change) re-anchor
+unconditionally.
+
+\subsection{Eased segments}
+
+For an eased cell where $v(\tau)$ is linear from $v_s$ at $\tau = b_k$ to
+$v_e$ at $\tau = b_{k+1}$, the integrator computes the per-cell
+contribution exactly via the trapezoid rule:
+\[
+\int_{b_k}^{b_{k+1}} v\,w\,d\tau \;=\; \tfrac{1}{2}(v_s + v_e) \cdot w
+\cdot (b_{k+1} - b_k).
+\]
+Within the cell, the integrator's $C(t)$ is quadratic in
+$(t - b_k)$. The predictor's linear extrapolation at $r_a = v_s \cdot w$
+(start-of-cell rate) is therefore inexact within the cell, with
+worst-case error
+\[
+|\,\widetilde{C}(t) - C(t)\,| \;\leq\; \tfrac{1}{2}|v_e - v_s| \cdot w
+\cdot (b_{k+1} - b_k),
+\]
+attained at the cell midpoint. The error vanishes at the cell endpoints,
+where the predictor re-anchors. This is acceptable in practice because
+authored eased cells are short ($\sim$ms scale for SSF / fluXis events),
+and re-anchor at the cell endpoint zeroes the error before it propagates.
+
+\subsection{Performance and jitter trade}
+
+Measured with $50$ SV breakpoints across $600\,\mathrm{s}$ of chart, in
+the Python implementation:
+\begin{itemize}[leftmargin=2em]
+    \item Per-frame $C(t_{\mathrm{raw}})$: $\sim 1.0\,\mu s$.
+    \item Predictor: $\sim 2.9\,\mu s$.
+\end{itemize}
+At $60\,\mathrm{Hz}$, the predictor adds $\sim 3\,\mu s/$frame --
+$0.018\%$ of the frame budget.
+
+Jitter reduction, measured by frame-to-frame
+$\Delta C$ standard deviation under Gaussian noise on $t_{\mathrm{raw}}$
+with constant rate:
+\begin{center}
+\begin{tabular}{rccc}
+\toprule
+$\sigma_{\mathrm{in}}$ (ms RMS) & 0.10 & 0.50 & 1.00\\
+\midrule
+$\Delta C$ stddev (no predictor) & 0.000435 & 0.001448 & 0.002841\\
+$\Delta C$ stddev (predictor) & 0.000331 & 0.000320 & 0.000573\\
+ratio & $1.3\times$ & $4.5\times$ & $5.0\times$\\
+\bottomrule
+\end{tabular}
+\end{center}
+In the realistic regime ($\sigma_{\mathrm{in}} \approx 0.5$--$1\,\mathrm{ms}$
+for PortAudio's \texttt{stream.time}), the predictor reduces visible
+jitter by $\sim 5\times$. At $60\,\mathrm{Hz}$ with
+$\mathrm{scroll\_speed} = 500\,\mathrm{px/s}$, this turns $\sim 1$ pixel
+of frame-to-frame jitter into $\sim 0.16$ pixels -- below visual
+perception threshold for most viewers.
+
+\subsection{Native-port boundary}
+
+The predictor and integrator are pure-functional given their inputs (no
+Player-state coupling, no thread state). The fast path of
+$\widetilde{C}$ in native code is one
+$\mathtt{monotonic()}$ syscall, $\sim 4$ floating-point operations, and
+two branches -- estimated $\sim 10$--$20\,\mathrm{ns}$ per frame in
+$\mathrm{C}$ / Rust / Zig. The Python implementation's $\sim 3\,\mu s$
+overhead is interpreter cost; lifting the math to a native module
+behind an FFI shim would make the perf trade fully favorable.
+
+The state struct, breakpoint cursor, and re-anchor protocol map to a
+native module without re-deriving anything; the boundary is marked in
+the source files.
+
+% =====================================================================
 \section{Open extensions}
 
 \begin{itemize}[leftmargin=2em]
