@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from analysis.components.api import GameMemoryState
-from plugins.unsafe.osu_live.client import (
+from analysis.games.osu.live_client import (
     OsuLiveClient,
     _raw_to_game_memory,
     get_client,

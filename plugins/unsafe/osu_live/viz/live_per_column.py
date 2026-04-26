@@ -12,13 +12,9 @@ from __future__ import annotations
 
 
 def build(replay=None, game='osu', **_):
-    from plugins.unsafe.osu_live.live_viz import LiveFigureWidget
+    from analysis.viz.live_figure import build_live_figure
     from plugins.builtin.viz.per_column import build as build_static
-
-    def _rebuild(rep):
-        return build_static(rep, game='osu')
-
-    return LiveFigureWidget(_rebuild)
+    return build_live_figure(build_static, game='osu')
 
 
 def register(add):

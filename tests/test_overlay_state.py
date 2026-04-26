@@ -13,7 +13,7 @@ from analysis.overlay.api import (
     OverlayStateTracker,
 )
 from analysis.components.api import GameMemoryState
-from plugins.unsafe.osu_live.state import snapshot_to_overlay_state
+from analysis.games.osu.live_client import snapshot_to_overlay_state
 
 
 def test_tracker_emits_song_start_and_end():

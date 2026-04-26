@@ -202,6 +202,17 @@ class OsuAdapter(GameAdapter):
         _build_ghost_taps(model, replay)
         _build_miss_holds(model, replay)
 
+    # --- launching the game -----------------------------------------------
+    def launch(self, *, with_overlay: bool = True):
+        from analysis.games.osu.launch import launch_osu
+        from analysis.games.osu.live_client import start_polling
+        # Live polling is host-owned; spinning it up here means overlay
+        # components on any surface read fresh memory the moment the
+        # game starts. Idempotent, so re-launches are fine.
+        if with_overlay:
+            start_polling()
+        return launch_osu(with_overlay=with_overlay)
+
 
 def _build_ghost_taps(m, replay):
     """Populate ghost-tap arrays from replay['ghost_taps'] (osu only).

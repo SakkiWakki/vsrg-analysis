@@ -428,6 +428,38 @@ class DataAnalysis(Protocol):
     """Timing split by chord size (single, jump, hand, quad)."""
 
 
+# ── Active-game proxy ──────────────────────────────────────────────
+
+
+@runtime_checkable
+class LaunchableGame(Protocol):
+    """Narrow proxy over the host's active :class:`GameAdapter`,
+    exposing the operations a sandboxed plugin is allowed to trigger.
+
+    The underlying adapter is host code with full Python access; this
+    proxy is what sandboxed plugins receive on ``ctx.game`` so they can
+    e.g. ask the host to launch the game without importing
+    ``subprocess``. Methods return frozen dataclasses (``LaunchResult``)
+    rather than raw process handles.
+
+    Surfaces without an active adapter (e.g. a viz tab opened before any
+    replay is loaded) populate ``ctx.game`` with ``None``; plugins must
+    branch on that.
+    """
+
+    name: str
+
+    def launch(self, *, with_overlay: bool = True) -> 'Any':
+        """Trigger the host's launch path for this game. Returns a
+        :class:`~analysis.core.game.LaunchResult`.
+
+        ``with_overlay=False`` is reserved for a future "launch raw"
+        path; today's adapters may refuse it via
+        ``LaunchResult(ok=False, ...)``.
+        """
+        ...
+
+
 # ── Drawing primitives ─────────────────────────────────────────────
 
 # All coordinates passed to :class:`Context` are *component-local
@@ -458,6 +490,10 @@ class Context(Protocol):
     analysis: DataAnalysis
     hud_flags: HudFlags
     config: Config
+    # Narrow proxy over the host's active :class:`GameAdapter`.
+    # ``None`` on surfaces without an active game (e.g. a viz tab
+    # opened with no replay loaded). Plugins MUST branch on None.
+    game: 'LaunchableGame | None'
 
     # ── Geometry helpers ──
     def split_row(self, n: int = 2, gap: int = 4) -> list[tuple[int, int]]:

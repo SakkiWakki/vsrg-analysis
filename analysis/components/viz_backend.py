@@ -223,7 +223,9 @@ class VizContext:
         self.analysis = PlayerDataAnalysis()
         self.hud_flags = None
         self.config = PluginConfig(self._key)
-        self.game = str(game)
+        self._game_name = str(game)
+        from analysis.components._game_proxy import proxy_for
+        self.game = proxy_for(self._game_name)
         self.entry = entry
         self.on_play = on_play
         self._result = None
@@ -251,7 +253,7 @@ class VizContext:
             kwargs['od'] = od
         if judge is not None:
             kwargs['judge'] = judge
-        widget = note_viz_tab(self.replay._replay, game=self.game,
+        widget = note_viz_tab(self.replay._replay, game=self._game_name,
                               on_play=self.on_play, **kwargs)
         widget._has_play_btn = self.on_play is not None
         return widget

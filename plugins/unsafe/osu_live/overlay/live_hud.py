@@ -3,10 +3,9 @@ from __future__ import annotations
 
 import numpy as np
 
+from analysis.components.provider import current_game_state
 from analysis.overlay.api import (ANCHOR_TL, BLACK_DIM, BLUE_ACCENT, HIST_BAR,
                                   WHITE, OverlayGameState, rgba)
-from plugins.unsafe.osu_live.client import get_client
-from plugins.unsafe.osu_live.state import snapshot_to_overlay_state
 
 
 _HIST_BINS = 41            # +/-100 ms, 5 ms per bin
@@ -53,9 +52,8 @@ def draw(frame) -> None:
     The registry owns ``OverlayPublisher.frame()`` and commits after this
     returns. Emitting no widgets clears the overlay on the next frame.
     """
-    state = snapshot_to_overlay_state(get_client().snapshot())
-
-    if not state.is_playing:
+    state = current_game_state()
+    if state is None or not state.is_playing:
         return
 
     draw_state(frame, state)
@@ -110,50 +108,14 @@ def draw_state(frame, state: OverlayGameState) -> None:
                    color=rgba(255, 255, 255, 100), anchor=ANCHOR_TL)
 
 
-_PROVIDER_DIAG = {'last_present': None, 'last_phase': None}
-
-
-def _live_state_provider():
-    """Provider for unified overlay components (see analysis.components.provider).
-
-    Unified components ; e.g. the ported judgments plugin ; read live
-    game state through ``current_game_state()`` on the overlay render
-    thread. They're surface-agnostic, so they can't reach into osu!'s
-    client directly. We install this shim once at registration time.
-    """
-    from analysis import diag
-    try:
-        snap = get_client().snapshot()
-    except Exception as exc:
-        if _PROVIDER_DIAG['last_present'] is not False:
-            _PROVIDER_DIAG['last_present'] = False
-            diag.log('osu_live.provider', f'client snapshot raised: {exc}')
-        return None
-    state = snapshot_to_overlay_state(snap)
-    phase = getattr(state, 'phase', '?')
-    if not state.is_playing:
-        if _PROVIDER_DIAG['last_present'] is not False \
-                or _PROVIDER_DIAG['last_phase'] != phase:
-            _PROVIDER_DIAG['last_present'] = False
-            _PROVIDER_DIAG['last_phase'] = phase
-            diag.log('osu_live.provider',
-                     f'not playing ; phase={phase} '
-                     f'connected={snap.connected}')
-        return None
-    if _PROVIDER_DIAG['last_present'] is not True \
-            or _PROVIDER_DIAG['last_phase'] != phase:
-        _PROVIDER_DIAG['last_present'] = True
-        _PROVIDER_DIAG['last_phase'] = phase
-        diag.log('osu_live.provider',
-                 f'state available ; phase={phase} '
-                 f'keycount={state.keycount} '
-                 f'judgments={state.judgments}')
-    return state
-
-
 def register_overlay(add):
+    # Ask the host to start its osu memory polling. This installs both
+    # the memory and overlay-state providers on
+    # `analysis.components.provider`, so `current_game_state()` /
+    # `current_game_memory()` return live data once osu! is up.
+    # Idempotent: safe to call multiple times across registrations.
     from analysis import diag
-    from analysis.components.provider import set_game_state_provider
-    set_game_state_provider(_live_state_provider)
-    diag.log('osu_live.live_hud', 'register_overlay: provider installed')
+    from analysis.games.osu.live_client import start_polling
+    start_polling()
+    diag.log('osu_live.live_hud', 'register_overlay: polling started')
     add('osu! live HUD', draw, key=OVERLAY_KEY, hz=PUBLISH_HZ)

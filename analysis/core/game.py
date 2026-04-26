@@ -12,7 +12,30 @@ from __future__ import annotations
 
 import importlib
 import pkgutil
+from dataclasses import dataclass, field
 from pathlib import Path
+
+
+@dataclass(frozen=True)
+class LaunchResult:
+    """Outcome of an attempted game launch.
+
+    ``ok=True`` means the game subprocess started; the overlay-injection
+    side-effect happens later (e.g. Windows DLL injection runs after a
+    delay) so a True result doesn't guarantee the overlay is visible
+    yet, only that the launch path didn't refuse upfront. Callers
+    surface ``message`` to the user when ``ok`` is false.
+
+    ``path_label`` names the launch strategy that was picked
+    ('gl-layer' / 'vulkan-layer' / 'gamescope' / 'win-gl-layer'); useful
+    for diagnostic logging. ``extra`` is for adapter-specific bookkeeping
+    callers shouldn't need to interpret.
+    """
+    ok: bool
+    message: str = ''
+    pid: int | None = None
+    path_label: str = ''
+    extra: dict = field(default_factory=dict)
 
 
 def _game_packages():
@@ -193,6 +216,20 @@ class GameAdapter:
         spans off the replay; Etterna copies mines/lifts/fakes/rolls from
         the matched chart. Default: nothing extra."""
         return None
+
+    # --- launching the game ----------------------------------------------
+    def launch(self, *, with_overlay: bool = True):
+        """Start the game with the host's overlay attached, if supported.
+
+        Returns a :class:`LaunchResult` describing the outcome.
+        Adapters that don't support being launched from the host
+        (e.g. Etterna) raise :class:`NotImplementedError`. Callers
+        branch on ``LaunchResult.ok`` and surface ``message`` to the
+        user when false; this base does not show dialogs or otherwise
+        touch UI.
+        """
+        raise NotImplementedError(
+            f'{self.name!r} does not support launching from the host')
 
     def judgment_colors(self) -> dict:
         """RGB tuples for each judgment-window name this adapter produces.

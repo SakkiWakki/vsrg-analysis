@@ -206,6 +206,11 @@ class OverlayContext:
         self.data = data_source
         self.replay = _OverlayNoReplay()
         self.analysis = _OverlayNoAnalysis()
+        from analysis.components._game_proxy import proxy_for
+        try:
+            self.game = proxy_for(data_source.game())
+        except Exception:
+            self.game = None
         self.y = 0
         self._id_counter = 0
         self._input = bool(supports_input)

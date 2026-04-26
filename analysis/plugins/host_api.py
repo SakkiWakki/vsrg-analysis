@@ -38,6 +38,20 @@ def monotonic_seconds() -> float:
     return float(time.perf_counter())
 
 
+def game_proxy(game_name: str):
+    """Return a sandbox-safe proxy for the named game adapter, or
+    ``None`` if no adapter is registered. Same shape as ``ctx.game``.
+
+    Used by surfaces that don't deliver a full ``Context`` -- e.g.
+    library-action callbacks, which only get ``(label, callback)``.
+    Sandboxed plugins receive the same narrow proxy here that they'd
+    see on ``ctx.game``, so they can ask the host to launch the game
+    without importing ``subprocess``/``os``.
+    """
+    from analysis.components._game_proxy import proxy_for
+    return proxy_for(game_name)
+
+
 # ── Network permission dialog hook ────────────────────────────────────────
 #
 # The Qt host sets this at startup. Signature:

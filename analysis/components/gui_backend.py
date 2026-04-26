@@ -613,6 +613,8 @@ class SidebarContext:
         self.analysis = _SHARED_ANALYSIS
         self.hud_flags = _hud_flags_from_player(sctx.player)
         self.config = PluginConfig(manifest_key) if manifest_key else _NullConfig()
+        from analysis.components._game_proxy import proxy_for
+        self.game = proxy_for(getattr(sctx.player, 'game', None))
         # Local cursor starts at 0. We mirror sctx.y so advancing either
         # keeps them in lockstep.
         self.y = 0
