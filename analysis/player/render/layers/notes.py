@@ -65,46 +65,69 @@ class _NoteView:
 
 
 def _ln_body_y_extent(ctx, i, p):
-    """Screen-y bounds of an LN body's convex-hull span in cum-space.
+    """Screen-y bounds of an LN body, reconstructed each frame.
 
-    Quaver lets SV reverse inside an LN, so the body's visible extent is
-    the convex hull of cumulative positions over [t_head, t_end] -- not
-    just `[head_y, tail_y]`. The hull endpoints come from
-    `p._ln_body_min_cum[i]` / `_ln_body_max_cum[i]`, precomputed in the
-    note's own group's stream. Both are projected to screen-y with the
-    same per-frame transform `batch_time_to_y` uses, then ordered as
-    `(min_y, max_y)` -- which under a down-scroll renderer means
-    `(top_y, bot_y)`.
+    Mirrors Quaver's `UpdateLongNoteSize`:
+        start_cum = playhead_cum if t_now >= t_head else head_cum
+        earliest = min(start_cum, tail_cum)
+        latest   = max(start_cum, tail_cum)
+        for (t_change, c_change) in waypoints:
+            if t_change > max(t_now, t_head):
+                earliest = min(earliest, c_change)
+                latest   = max(latest,   c_change)
 
-    Returns `(NaN, NaN)` when no precomputed values exist (non-Quaver
-    games, or charts that don't reverse SV inside any LN); the caller
-    falls back to the head/tail span."""
-    body_min = getattr(p, '_ln_body_min_cum', None)
-    body_max = getattr(p, '_ln_body_max_cum', None)
-    if body_min is None or body_max is None:
+    Past sign-change points fall out of the body, so the bar shrinks
+    live as the playhead crosses each reversal. Legacy-LN charts have
+    empty waypoint arrays so the loop is a no-op and the body just
+    spans `[head, tail]`.
+
+    Returns `(NaN, NaN)` when the engine isn't in SV mode or this
+    isn't a Quaver-cached LN ; the caller falls back to the simpler
+    head/tail rect."""
+    head_cum_arr = getattr(p, '_ln_head_cum', None)
+    tail_cum_arr = getattr(p, '_ln_tail_cum', None)
+    if head_cum_arr is None or tail_cum_arr is None:
         return float('nan'), float('nan')
-    if i >= len(body_min) or not math.isfinite(body_min[i]):
+    if i >= len(head_cum_arr) or not math.isfinite(head_cum_arr[i]):
         return float('nan'), float('nan')
     frame = ctx.frame
     if not getattr(frame, 'use_sv', False):
         return float('nan'), float('nan')
+
     engine = p._sv_engine
     groups = getattr(p, '_note_sv_groups', None)
     if groups is not None and hasattr(engine, 'cumulative_at_groups'):
         gid = str(groups[i])
-        playhead_cum = engine.cumulative_at_groups(
-            float(frame.raw_t), [gid])[0]
-        mult = engine.render_multiplier_at_groups(
-            float(frame.raw_t), [gid])[0]
+        playhead_cum = float(engine.cumulative_at_groups(
+            float(frame.raw_t), [gid])[0])
+        mult = float(engine.render_multiplier_at_groups(
+            float(frame.raw_t), [gid])[0])
     else:
         playhead_cum = float(frame.visual_cum_now)
         mult = float(frame.render_multiplier)
+
+    head_t = float(p.times[i])
+    t_now = ctx.t_now
+    held = t_now >= head_t
+    start_cum = playhead_cum if held else float(head_cum_arr[i])
+    tail_cum = float(tail_cum_arr[i])
+    earliest = min(start_cum, tail_cum)
+    latest = max(start_cum, tail_cum)
+
+    change_times = p._ln_change_times[i]
+    change_cums = p._ln_change_cums[i]
+    if change_times is not None and change_times.size:
+        future_after = max(t_now, head_t)
+        future = change_times > future_after
+        if future.any():
+            future_cums = change_cums[future]
+            earliest = min(earliest, float(future_cums.min()))
+            latest = max(latest, float(future_cums.max()))
+
     judge_y = ctx.judge_y
     scroll_speed = float(ctx.player.scroll_speed)
-    y_lo = judge_y - (float(body_min[i]) - playhead_cum) * mult * scroll_speed
-    y_hi = judge_y - (float(body_max[i]) - playhead_cum) * mult * scroll_speed
-    # `min_cum -> max_y` (further from playhead = lower y) when scroll
-    # is down. Order endpoints so caller gets `(top_y, bot_y)` semantics.
+    y_lo = judge_y - (earliest - playhead_cum) * mult * scroll_speed
+    y_hi = judge_y - (latest - playhead_cum) * mult * scroll_speed
     return min(y_lo, y_hi), max(y_lo, y_hi)
 
 
@@ -153,6 +176,17 @@ def _build(ctx, i, pos) -> _NoteView | None:
         if ln_flip is not None and i < len(ln_flip):
             flip_tail = bool(ln_flip[i])
         body_min_y, body_max_y = _ln_body_y_extent(ctx, i, p)
+        # Quaver anchors the tail sprite at LatestHeldPosition (the
+        # body's max-y boundary in down-scroll), not at the note's
+        # end_time projection. When SV reverses near the LN end the two
+        # diverge ; the body grows past end_t in cum-space and the tail
+        # rides that boundary. `y_end` becomes whichever side of the
+        # body is "deeper" along the scroll direction.
+        if math.isfinite(body_max_y):
+            head_y = float(ctx.candidate_head_y[pos])
+            # Down-scroll: tail farther from judge_y = larger y. We pick
+            # whichever extreme is on the opposite side from the head.
+            y_end = body_max_y if head_y <= body_max_y else body_min_y
 
     return _NoteView(
         i=i, col=col,
@@ -239,31 +273,27 @@ def _draw_ln(ctx, painter, n):
 
 
 def _ln_body_span(ctx, n, hide) -> tuple | None:
-    """Return `(top_y, bot_y, sprite_state)` where sprite_state drives
-    the ln_body cache key. None means no body draws.
+    """Return `(top_y, bot_y, sprite_state)` for an LN body. None means
+    no body draws.
 
-    Quaver SV-reversing LNs override the head/tail bounds with the
-    precomputed convex-hull extent (`body_min_y`/`body_max_y`). The
-    hull already contains both head and tail, so we only swap it in for
-    the upcoming + held states ; the other states (missed, released)
-    extend toward the judge line and need the standard endpoints."""
-    use_hull = (math.isfinite(n.body_min_y) and math.isfinite(n.body_max_y)
-                and n.state in ('upcoming', 'held'))
+    For Quaver, `n.body_min_y` / `n.body_max_y` already reflect Quaver's
+    `EarliestHeldPosition` / `LatestHeldPosition`: when held, the start
+    side is the playhead's cum (not the head's), and future sign-change
+    points extend the body. So both upcoming and held states just read
+    those bounds directly. Other games leave them NaN ; the legacy
+    head/tail span path handles them."""
+    use_dyn = (math.isfinite(n.body_min_y) and math.isfinite(n.body_max_y)
+               and n.state in ('upcoming', 'held'))
     if n.state == 'missed':
         return n.y_end, n.y, 'miss_ln'
     match n.state:
         case 'upcoming':
-            if use_hull:
+            if use_dyn:
                 return n.body_min_y, n.body_max_y, 'normal'
             return n.y_end, n.y, 'normal'
         case 'held':
-            if use_hull:
-                # Held: the head has already passed the judge line, so
-                # the visible body starts at min(judge_y, body_max_y) on
-                # the bottom side. Hull's top still drives the upper
-                # bound.
-                bot = ctx.judge_y if hide else max(n.body_max_y, ctx.judge_y)
-                return n.body_min_y, bot, 'normal'
+            if use_dyn:
+                return n.body_min_y, n.body_max_y, 'normal'
             return n.y_end, (ctx.judge_y if hide else n.y), 'normal'
         case 'released' if not hide:
             return n.y_end, ctx.judge_y, 'released'

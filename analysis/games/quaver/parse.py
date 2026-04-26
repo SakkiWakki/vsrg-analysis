@@ -54,6 +54,11 @@ def parse_replay(qr_path, qua_path=None, songs_dir=None, judge='Standard'):
         # `$Default` for the chart-level SV). Consumed by the engine
         # factory in `analysis/player/sv/render.py`.
         '_quaver_groups': chart['groups'],
+        # When the chart sets `LegacyLNRendering: true` the body should
+        # span [head, tail] with no convex-hull extension across SV
+        # reversals. Stored on the replay so the player's LN-cache
+        # builder can short-circuit per-LN sign-change collection.
+        '_quaver_legacy_ln': chart.get('legacy_ln_rendering', False),
         # Matching the cross-engine fields: `_osu_bpms` is what
         # `_build_registry` looks for to expose Etterna's beat-space
         # engine on osu charts. Quaver charts can do the same -- BPM

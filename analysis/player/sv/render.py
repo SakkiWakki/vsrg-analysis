@@ -241,24 +241,39 @@ class SvRenderController:
             self._build_quaver_ln_caches()
 
     def _build_quaver_ln_caches(self):
-        """Per-LN auxiliary arrays Quaver needs for correct rendering
-        under SV reversals: (a) `_ln_tail_flip[i]` -> True when the tail
-        sprite should be drawn upside down (Quaver's `ShouldFlipLongNoteEnd`),
-        (b) `_ln_body_min_cum[i]` / `_ln_body_max_cum[i]` -> the convex
-        hull of cumulative positions over the LN's chart-time interval
-        in its own group's stream. Both default to NaN/False for taps."""
+        """Per-LN auxiliary arrays Quaver needs for correct rendering:
+
+        - `_ln_tail_flip[i]` : True when the tail sprite is drawn upside
+          down (Quaver's `ShouldFlipLongNoteEnd`). False for taps.
+        - `_ln_head_cum[i]`, `_ln_tail_cum[i]` : cumulative positions of
+          the LN's head + tail in its own group's stream. NaN for taps.
+        - `_ln_change_times[i]`, `_ln_change_cums[i]` : sign-change
+          waypoints inside the LN's interval (numpy arrays, one entry
+          per direction reversal). Empty for legacy-rendered charts and
+          for LNs whose SV doesn't reverse inside the body.
+
+        The renderer reconstructs `EarliestHeldPosition` /
+        `LatestHeldPosition` per frame from these by filtering the
+        waypoints to the still-future ones, matching Quaver's dynamic
+        body-shrink as the playhead crosses each reversal."""
         p = self.p
         n = len(p.times)
         flip = np.zeros(n, dtype=bool)
-        body_min = np.full(n, np.nan, dtype=np.float64)
-        body_max = np.full(n, np.nan, dtype=np.float64)
+        head_cum = np.full(n, np.nan, dtype=np.float64)
+        tail_cum = np.full(n, np.nan, dtype=np.float64)
+        change_times = [None] * n
+        change_cums = [None] * n
+        legacy = bool((p.replay or {}).get('_quaver_legacy_ln', False))
         groups = getattr(p, '_note_sv_groups', None)
         ln_tail_times = getattr(getattr(p, 'notes', None),
                                  'ln_tail_times', None)
         if ln_tail_times is None:
             p._ln_tail_flip = flip
-            p._ln_body_min_cum = body_min
-            p._ln_body_max_cum = body_max
+            p._ln_head_cum = head_cum
+            p._ln_tail_cum = tail_cum
+            p._ln_change_times = change_times
+            p._ln_change_cums = change_cums
+            p._ln_legacy_rendering = legacy
             return
         engine = p._sv_engine
         for i in range(n):
@@ -268,12 +283,24 @@ class SvRenderController:
             gid = groups[i] if groups is not None else None
             head_t = float(p.times[i])
             flip[i] = engine.is_sv_negative_at(end_t, group_id=gid)
-            lo, hi = engine.body_extent(head_t, end_t, group_id=gid)
-            body_min[i] = lo
-            body_max[i] = hi
+            h_cum, t_cum, ts, cs = engine.body_waypoints(
+                head_t, end_t, group_id=gid)
+            head_cum[i] = h_cum
+            tail_cum[i] = t_cum
+            # Legacy LNs ignore sign changes -- store empty arrays so
+            # the renderer's filter loop is a no-op.
+            if legacy:
+                change_times[i] = np.zeros(0, dtype=np.float64)
+                change_cums[i] = np.zeros(0, dtype=np.float64)
+            else:
+                change_times[i] = ts
+                change_cums[i] = cs
         p._ln_tail_flip = flip
-        p._ln_body_min_cum = body_min
-        p._ln_body_max_cum = body_max
+        p._ln_head_cum = head_cum
+        p._ln_tail_cum = tail_cum
+        p._ln_change_times = change_times
+        p._ln_change_cums = change_cums
+        p._ln_legacy_rendering = legacy
 
     def times_to_sv(self, times, groups=None):
         engine = self.p._sv_engine

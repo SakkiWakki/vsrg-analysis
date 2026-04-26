@@ -243,6 +243,8 @@ def _post_process(raw):
         raw.get('BPMDoesNotAffectScrollVelocity', 'false'))
     initial_velocity = _coerce_float(raw.get('InitialScrollVelocity', '1.0'),
                                       default=1.0)
+    legacy_ln_rendering = _coerce_bool(
+        raw.get('LegacyLNRendering', 'false'))
 
     base_bpm = _common_bpm(timing_points, hitobjects)
     sv_sections, normalized_initial = _normalize_svs(
@@ -309,6 +311,7 @@ def _post_process(raw):
         'sv_sections': sv_sections,
         'initial_velocity': initial_velocity,
         'bpm_does_not_affect_sv': bpm_does_not_affect_sv,
+        'legacy_ln_rendering': legacy_ln_rendering,
         'base_bpm': base_bpm,
         'groups': groups,
         'length_ms': length_ms,

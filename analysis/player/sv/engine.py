@@ -415,7 +415,11 @@ class QuaverSVEngine:
         [t_head, t_end] in this LN's group's cumulative space. Used by
         LN body sizing under SV reversal: C is piecewise-linear, so its
         extrema on the interval are at endpoints union sign-change
-        breakpoints (DESIGN.tex Prop 6.1)."""
+        breakpoints (DESIGN.tex Prop 6.1).
+
+        This is the static / chart-load form ; for the per-frame
+        dynamic-shrinking behaviour Quaver actually ships, callers use
+        `body_waypoints` and filter to future-only sign changes."""
         stream = (self._streams.get(group_id)
                   if group_id else None) or self._default_stream
         c_head = stream.cumulative_at(t_head)
@@ -429,6 +433,29 @@ class QuaverSVEngine:
             elif cv > hi:
                 hi = cv
         return (lo, hi)
+
+    def body_waypoints(self, t_head: float, t_end: float,
+                       group_id: str | None = None
+                       ) -> tuple[float, float, np.ndarray, np.ndarray]:
+        """`(head_cum, end_cum, sign_change_times, sign_change_cums)`
+        for the LN at `[t_head, t_end]` in its group's stream.
+
+        The renderer rebuilds the body extent each frame: it starts
+        with `[head_cum, end_cum]` (or `[playhead_cum, end_cum]` once
+        held), then folds in sign-change points whose time is still
+        *ahead* of the playhead. Past sign-changes drop off the body --
+        Quaver's LN body shrinks live as you progress through it. We
+        precompute waypoints once per LN and let the renderer scan
+        them per frame ; the typical LN has 0-2 entries."""
+        stream = (self._streams.get(group_id)
+                  if group_id else None) or self._default_stream
+        head_cum = stream.cumulative_at(t_head)
+        end_cum = stream.cumulative_at(t_end)
+        change_times = stream.sign_change_times(t_head, t_end)
+        change_cums = np.asarray(
+            [stream.cumulative_at(float(tc)) for tc in change_times],
+            dtype=np.float64)
+        return head_cum, end_cum, change_times, change_cums
 
     def inverse_cumulative_at(self, sv: float) -> float:
         return self._default_stream.inverse_cumulative_at(sv)

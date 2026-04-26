@@ -297,6 +297,28 @@ def test_quaver_body_extent_per_group():
     assert hi_r == pytest.approx(10.0)
 
 
+def test_quaver_body_waypoints_returns_endpoints_and_changes():
+    Q = _quaver()
+    e = Q([(0.0, 1.0), (10.0, -1.0)])
+    head_cum, tail_cum, ts, cs = e.body_waypoints(5.0, 15.0)
+    # head_cum: at t=5 cum = 5 ; tail_cum: t=15 with reversal at 10 -> 5.
+    assert head_cum == pytest.approx(5.0)
+    assert tail_cum == pytest.approx(5.0)
+    # One sign change at t=10 (positive -> negative), cum value 10.
+    assert ts.tolist() == [10.0]
+    assert cs.tolist() == pytest.approx([10.0])
+
+
+def test_quaver_body_waypoints_empty_when_monotonic():
+    Q = _quaver()
+    e = Q([(0.0, 1.0)])
+    head_cum, tail_cum, ts, cs = e.body_waypoints(2.0, 8.0)
+    assert head_cum == pytest.approx(2.0)
+    assert tail_cum == pytest.approx(8.0)
+    assert ts.size == 0
+    assert cs.size == 0
+
+
 # ---------------------------------------------------------------------------
 # QuaverSVEngine: ScrollSpeedFactor (render_multiplier_at)
 # ---------------------------------------------------------------------------
