@@ -268,8 +268,9 @@ class EtternaAdapter(GameAdapter):
             replay['keycount'] = stepstype_keycount(stepstype)
         # Stash raw timing data for beat-space positioning and STOPS/DELAYS/
         # WARPS-aware row->time conversion in prepare_replay_times. SCROLLS
-        # and SPEEDS are consumed by build_sv_engine; STOPS/DELAYS/WARPS are
-        # consumed by row_to_time for the replay's own note timing.
+        # and SPEEDS are consumed by SvRenderController.build_engine_registry
+        # via these `_etterna_*` keys; STOPS/DELAYS/WARPS are consumed by
+        # row_to_time for the replay's own note timing.
         replay['_etterna_scrolls'] = chart.get('scrolls') or []
         replay['_etterna_speeds'] = chart.get('speeds') or []
         replay['_etterna_stops'] = chart.get('stops') or []
