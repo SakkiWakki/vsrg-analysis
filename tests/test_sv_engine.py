@@ -449,3 +449,39 @@ def test_qua_parser_extracts_timing_groups():
     by_lane = {h['column']: h['group'] for h in c['hitobjects']}
     assert by_lane[0] == 'SG_A'
     assert by_lane[1] == DEFAULT_GROUP_ID
+
+
+def test_qua_parser_missing_sv_multiplier_defaults_to_zero():
+    from analysis.games.quaver.qua_chart import (parse_qua_file,
+                                                  DEFAULT_GROUP_ID)
+    import os
+    import tempfile
+    import textwrap
+
+    src = textwrap.dedent("""\
+        Mode: Keys4
+        BPMDoesNotAffectScrollVelocity: true
+        InitialScrollVelocity: 1
+        TimingPoints:
+        - StartTime: 0
+          Bpm: 120
+        SliderVelocities:
+        - StartTime: 1000
+        HitObjects: []
+        TimingGroups:
+          SG_A: !ScrollGroup
+            InitialScrollVelocity: 1
+            ScrollVelocities:
+            - StartTime: 2000
+        """)
+    with tempfile.NamedTemporaryFile(suffix='.qua', mode='w',
+                                     delete=False) as f:
+        f.write(src)
+        path = f.name
+    try:
+        c = parse_qua_file(path)
+    finally:
+        os.unlink(path)
+
+    assert c['groups'][DEFAULT_GROUP_ID]['sections'] == [(1.0, 0.0)]
+    assert c['groups']['SG_A']['sections'] == [(2.0, 0.0)]

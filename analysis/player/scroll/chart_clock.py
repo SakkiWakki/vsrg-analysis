@@ -307,17 +307,8 @@ class ChartClock:
     def now(self) -> float:
         """Current chart time in seconds. Clamped to [t_min, t_max].
         Safe to call from any thread."""
-        import os as _os, threading as _th
-        _stall = _os.environ.get('VSRG_STALL_DEBUG', '0') not in ('', '0', 'false')
-        _t = _th.current_thread().name if _stall else ''
-        if _stall:
-            print(f'[stall                  {_t}] clock.now: -> acquire lock', flush=True)
         with self._lock:
-            if _stall:
-                print(f'[stall                  {_t}] clock.now: lock held, has_audio={bool(self._audio_getter is not None)}', flush=True)
             t = self._clamp_locked(self._now_locked())
-            if _stall:
-                print(f'[stall                  {_t}] clock.now: _now_locked returned {t:.3f}', flush=True)
             self._debug_log_locked('chart_now', {
                 't': float(t),
                 'paused': bool(self._paused),
@@ -362,24 +353,12 @@ class ChartClock:
     # -- internal (all require self._lock held) --------------------------
 
     def _now_locked(self) -> float:
-        import os as _os, threading as _th
-        _stall = _os.environ.get('VSRG_STALL_DEBUG', '0') not in ('', '0', 'false')
-        _t = _th.current_thread().name if _stall else ''
         if self._paused:
-            if _stall:
-                print(f'[stall                  {_t}] _now_locked: paused -> {self._wall_anchor:.3f}', flush=True)
             return self._wall_anchor
         if self._audio_getter is not None:
             try:
-                if _stall:
-                    print(f'[stall                  {_t}] _now_locked: -> audio_getter() (under lock)', flush=True)
-                v = float(self._audio_getter())
-                if _stall:
-                    print(f'[stall                  {_t}] _now_locked: <- audio_getter() = {v:.3f}', flush=True)
-                return v
-            except Exception as e:
-                if _stall:
-                    print(f'[stall                  {_t}] _now_locked: audio_getter raised {e!r}', flush=True)
+                return float(self._audio_getter())
+            except Exception:
                 # Audio getter blew up: fall through to wall-clock so the
                 # clock keeps advancing. Better to render stale than stall.
                 pass

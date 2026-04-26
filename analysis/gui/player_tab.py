@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import os
-import threading
-import time
 from dataclasses import dataclass
 
 from PySide6.QtCore import Qt, QTimer
@@ -19,20 +17,6 @@ from PySide6.QtWidgets import (
 from analysis.gui.player_canvas import PlayerCanvas
 from analysis.gui.settings import load_player_settings, save_player_setting
 from analysis.gui.widgets import JumpSlider
-
-
-# Stall debug: stderr-print elapsed-since-tab-construction so we can
-# see which step blocks the UI thread. Off by default ; flip via env.
-_STALL_DEBUG = os.environ.get('VSRG_STALL_DEBUG', '0') not in ('', '0', 'false')
-_stall_t0 = time.monotonic()
-
-
-def _stall_log(msg: str) -> None:
-    if not _STALL_DEBUG:
-        return
-    elapsed = (time.monotonic() - _stall_t0) * 1000.0
-    tname = threading.current_thread().name
-    print(f'[stall +{elapsed:8.1f}ms {tname}] {msg}', flush=True)
 
 
 @dataclass
@@ -75,12 +59,8 @@ class PlayerTab(QWidget):
         xml_judgments=None,
         keycount=None,
     ):
-        global _stall_t0
-        _stall_t0 = time.monotonic()
-        _stall_log(f'PlayerTab.__init__ enter (game={game}, audio={bool(audio_path)})')
         super().__init__()
 
-        _stall_log('  -> _create_player start')
         self.player = self._create_player(
             replay,
             game=game,
@@ -98,8 +78,6 @@ class PlayerTab(QWidget):
             keycount=keycount,
         )
 
-        _stall_log('  <- _create_player done')
-
         self._set_initial_play_rate(play_rate)
         self._audio_chart_offset_s = float(audio_chart_offset_s or 0.0)
         self._audio_chart_offset_scales_with_rate = bool(
@@ -113,21 +91,13 @@ class PlayerTab(QWidget):
         self._audio = None
         self._audio_worker = None
 
-        _stall_log('  -> _build_ui')
         self._build_ui()
-        _stall_log('  <- _build_ui')
-        _stall_log('  -> _build_timer')
         self._build_timer()
-        _stall_log('  <- _build_timer')
-        _stall_log('  -> _build_audio')
         self._build_audio(audio_path)
-        _stall_log('  <- _build_audio (worker started)')
         self._connect_player_events()
         self._build_input_router()
 
-        _stall_log('  -> _start_playing')
         self._start_playing()
-        _stall_log('PlayerTab.__init__ exit')
 
     # ------------------------------------------------------------------
     # Construction
@@ -238,7 +208,6 @@ class PlayerTab(QWidget):
 
     def _build_audio(self, audio_path) -> None:
         if not audio_path:
-            _stall_log('    _build_audio: no audio_path; skipping')
             return
 
         prefs = load_player_settings(self.player.game)
@@ -247,12 +216,8 @@ class PlayerTab(QWidget):
         from analysis.gui.loaders import Worker
 
         def job(_progress):
-            _stall_log('    [audio worker] importing AudioEngine')
             from analysis.player.audio import AudioEngine
-            _stall_log('    [audio worker] constructing AudioEngine')
-            engine = AudioEngine(audio_path, pitch_correct=pitch_correct)
-            _stall_log('    [audio worker] AudioEngine ready')
-            return engine
+            return AudioEngine(audio_path, pitch_correct=pitch_correct)
 
         worker = Worker(job)
         self._audio_worker = worker
@@ -261,16 +226,12 @@ class PlayerTab(QWidget):
         worker.start()
 
     def _on_audio_built(self, engine) -> None:
-        _stall_log('  _on_audio_built enter')
         self._audio_worker = None
         self._audio = engine
         self.audio_state.ready = bool(self._audio.ready)
-        _stall_log(f'    audio.ready={self.audio_state.ready}')
 
         if self.audio_state.ready:
-            _stall_log('    -> prewarm_rates')
             self._audio.prewarm_rates([0.8, 0.9, 1.1, 1.2, 1.3, 1.5])
-            _stall_log('    <- prewarm_rates')
 
         if self.audio_state.ready and self._audio._base_duration:
             self._refresh_audio_chart_offset_rate()
@@ -278,19 +239,10 @@ class PlayerTab(QWidget):
                 self.player.t_max,
                 self._audio_to_chart_time(float(self._audio._base_duration)),
             )
-            _stall_log('    -> initial seek')
             self._audio.seek(self._chart_to_audio_time(self.player.t_intended))
-            _stall_log('    <- initial seek')
-            _stall_log('    -> attach_audio_clock')
             self.player.attach_audio_clock(self._audio_current_chart_time)
-            _stall_log('    <- attach_audio_clock')
-            _stall_log('    -> attach_audio_status')
             self.player.attach_audio_status(self._audio.callback_status_snapshot)
-            _stall_log('    <- attach_audio_status')
-            _stall_log('    -> _sync_audio(force=True)')
             self._sync_audio(force=True)
-            _stall_log('    <- _sync_audio')
-        _stall_log('  _on_audio_built exit')
 
     def _on_audio_failed(self, tb) -> None:
         self._audio_worker = None
@@ -395,29 +347,17 @@ class PlayerTab(QWidget):
         )
 
     def _sync_audio(self, *, force: bool = False) -> None:
-        if force:
-            _stall_log('      _sync_audio: building _ui_status')
         self.player._ui_status = {
             'audio_ready': self._audio_is_ready(),
             'pitch_correct': bool(getattr(self._audio, '_pitch_correct', True)),
         }
 
         if not self._audio_is_ready():
-            if force:
-                _stall_log('      _sync_audio: not ready -> return')
             return
 
-        if force:
-            _stall_log('      _sync_audio: computing state')
         state = self._audio_playing_state()
-        if force:
-            _stall_log(f'      _sync_audio: state={state}')
         if force or state != self.audio_state.last_sync_state:
-            if force:
-                _stall_log('      _sync_audio: -> set_state')
             self._audio.set_state(*state)
-            if force:
-                _stall_log('      _sync_audio: <- set_state')
             self.audio_state.last_sync_state = state
 
     def _toggle(self) -> None:
@@ -670,24 +610,11 @@ class PlayerTab(QWidget):
             self.player.paused = True
             self.play_btn.setText('▶')
 
-    _tick_count = 0
-
     def _tick(self) -> None:
-        type(self)._tick_count += 1
-        n = type(self)._tick_count
-        verbose = _STALL_DEBUG and n <= 5
-        t_start = time.monotonic() if _STALL_DEBUG else 0.0
-        if verbose:
-            _stall_log(f'_tick #{n} enter')
-
         self._sync_settings_toggles()
-        if verbose:
-            _stall_log(f'_tick #{n}   after _sync_settings_toggles')
         self._finish_playback_if_needed()
 
         self.view.update()
-        if verbose:
-            _stall_log(f'_tick #{n}   after view.update')
         self._update_playbar()
 
         self.time_lbl.setText(self._fmt_time(self.player.t))
@@ -695,13 +622,6 @@ class PlayerTab(QWidget):
 
         if not self.scrub.active:
             self._sync_audio()
-        if verbose:
-            _stall_log(f'_tick #{n} exit')
-
-        if _STALL_DEBUG:
-            dt_ms = (time.monotonic() - t_start) * 1000.0
-            if dt_ms > 50.0:
-                _stall_log(f'_tick #{n} SLOW: {dt_ms:.1f}ms')
 
     # ------------------------------------------------------------------
     # Input events

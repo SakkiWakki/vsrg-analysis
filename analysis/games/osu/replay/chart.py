@@ -138,10 +138,6 @@ def find_osu_by_hash(md5_hash, songs_dir):
     single play-action on hashing thousands of charts. The library scan
     is the one place that grows the index ; `songs_dir` is unused but
     kept for signature stability with callers that don't know that yet."""
-    import os as _os
-    import threading as _threading
-    import time as _time
-    _stall = _os.environ.get('VSRG_STALL_DEBUG', '0') not in ('', '0', 'false')
     del songs_dir
     if not md5_hash:
         return None
@@ -149,14 +145,7 @@ def find_osu_by_hash(md5_hash, songs_dir):
         from analysis.games.osu.adapter import _CHART_INDEX_CACHE
     except ImportError:
         return None
-    if _stall:
-        t0 = _time.monotonic()
-        tname = _threading.current_thread().name
-        print(f'[stall                  {tname}] find_osu_by_hash: load cache', flush=True)
     cached = _CHART_INDEX_CACHE.load() or {}
-    if _stall:
-        dt = (_time.monotonic() - t0) * 1000.0
-        print(f'[stall                  {tname}] find_osu_by_hash: cache loaded ({len(cached)} entries, {dt:.1f}ms)', flush=True)
     for path_str, (_m, _s, md5, _meta) in cached.items():
         if md5 == md5_hash:
             return path_str

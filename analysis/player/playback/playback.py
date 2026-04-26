@@ -58,18 +58,8 @@ class PlaybackController:
         self.p._clock.set_bounds(self.p._clock.t_min, float(value))
 
     def attach_audio_clock(self, getter):
-        import os, sys, threading, time
-        _stall = os.environ.get('VSRG_STALL_DEBUG', '0') not in ('', '0', 'false')
-        if _stall:
-            t = threading.current_thread().name
-            print(f'[stall                  {t}] playback.attach_audio_clock: -> set_audio_source', flush=True); sys.stdout.flush()
         self.p._clock.set_audio_source(getter)
-        if _stall:
-            print(f'[stall                  {t}] playback.attach_audio_clock: <- set_audio_source', flush=True); sys.stdout.flush()
-            print(f'[stall                  {t}] playback.attach_audio_clock: -> _reset_render_timeline', flush=True); sys.stdout.flush()
         self.p._reset_render_timeline()
-        if _stall:
-            print(f'[stall                  {t}] playback.attach_audio_clock: <- _reset_render_timeline', flush=True); sys.stdout.flush()
 
     @property
     def t_intended(self):

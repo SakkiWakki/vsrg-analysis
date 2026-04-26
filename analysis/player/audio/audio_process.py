@@ -457,20 +457,11 @@ class AudioProcessClient:
         ring depth, which is well below the predictor's jitter
         tolerance.
         """
-        import os as _os, threading as _th
-        _stall = _os.environ.get('VSRG_STALL_DEBUG', '0') not in ('', '0', 'false')
-        _t = _th.current_thread().name if _stall else ''
-        if _stall:
-            print(f'[stall                  {_t}] proc.current_chart_time: -> read _F_HW_POS', flush=True)
         hw_pos = self._status[_F_HW_POS]
-        if _stall:
-            print(f'[stall                  {_t}] proc.current_chart_time: hw_pos={hw_pos}', flush=True)
         hw_wall = self._status[_F_HW_WALL]
         hw_rate = self._status[_F_HW_RATE]
         anchor_valid = self._status[_F_DAC_ANCHOR_VALID]
         lead_in = self._status[_F_LEAD_IN_SECONDS]
-        if _stall:
-            print(f'[stall                  {_t}] proc.current_chart_time: anchor_valid={anchor_valid} lead_in={lead_in}', flush=True)
         if not anchor_valid:
             return -lead_in if lead_in else 0.0
         # We don't have the child's stream clock. Use the most recent
