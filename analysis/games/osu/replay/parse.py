@@ -12,6 +12,7 @@ from analysis.games.osu.replay.osr import (parse_osr_events,
 from analysis.games.osu.replay.judge import (stable_hit_windows,
                                               simulate_mania)
 from analysis.games.osu.replay.random_mod import _random_column_permutation
+from analysis.player.sv.replay_doc import SvReplayDoc, KIND_TIME_SPACE
 
 
 def _group_notes_by_col(hitobjects, keycount, col_perm):
@@ -220,8 +221,17 @@ def parse_replay(osr_path, osu_path=None, songs_dir=None, hit_window_ms=None):
     sim = simulate_mania(by_col_notes, key_events_by_col, windows)
 
     arrays = _build_arrays(sim)
+    sv_sections = chart.get('sv_sections', [])
+    bpms = _osu_bpms_from_timing_points(chart.get('timing_points', []))
+    sv_doc = SvReplayDoc(
+        engine_kind=KIND_TIME_SPACE,
+        engine_key='osu_time',
+        sections=list(sv_sections),
+        bpms=bpms,
+    )
     return {
         **arrays,
+        'sv': sv_doc,
         'holds': holds_meta,
         'ghost_taps': _ghost_taps(sim, key_events_by_col, keycount),
         'miss_holds': _miss_holds(sim, key_events_by_col, keycount),
@@ -231,12 +241,11 @@ def parse_replay(osr_path, osu_path=None, songs_dir=None, hit_window_ms=None):
         'meta': meta,
         'chart_meta': {k: chart[k] for k in
                        ('title', 'artist', 'creator', 'version', 'keycount')},
-        'sv_sections': chart.get('sv_sections', []),
-        # Uninherited timing points as (beat, bpm) for cross-engine
-        # beat-space rendering. osu native engine is time-space and
-        # consumes only `sv_sections`, but switching to beat-space needs
-        # the raw BPM map.
-        '_osu_bpms': _osu_bpms_from_timing_points(chart.get('timing_points', [])),
+        # --- legacy SV keys (dual-write, phase 1 of the SV-doc port) ---
+        # Removed once SvRenderController._build_registry switches to
+        # read `replay['sv']`.
+        'sv_sections': sv_sections,
+        '_osu_bpms': bpms,
         'od': float(chart.get('od', 8.0)),
         'mods': int(meta.get('mods', 0)),
     }

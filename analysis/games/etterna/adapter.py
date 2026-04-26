@@ -273,13 +273,46 @@ class EtternaAdapter(GameAdapter):
         # and SPEEDS are consumed by SvRenderController.build_engine_registry
         # via these `_etterna_*` keys; STOPS/DELAYS/WARPS are consumed by
         # row_to_time for the replay's own note timing.
-        replay['_etterna_scrolls'] = chart.get('scrolls') or []
-        replay['_etterna_speeds'] = chart.get('speeds') or []
-        replay['_etterna_stops'] = chart.get('stops') or []
-        replay['_etterna_delays'] = chart.get('delays') or []
-        replay['_etterna_warps'] = chart.get('warps') or []
-        replay['_etterna_bpms'] = chart.get('bpms') or data.get('bpms') or []
-        replay['_etterna_offset'] = chart.get('offset') or data.get('offset') or 0.0
+        scrolls = chart.get('scrolls') or []
+        speeds = chart.get('speeds') or []
+        stops = chart.get('stops') or []
+        delays = chart.get('delays') or []
+        warps = chart.get('warps') or []
+        bpms = chart.get('bpms') or data.get('bpms') or []
+        sm_offset = chart.get('offset') or data.get('offset') or 0.0
+        # --- legacy SV keys (dual-write, phase 1 of the SV-doc port) ---
+        # Removed once SvRenderController._build_registry switches to read
+        # `replay['sv']`.
+        replay['_etterna_scrolls'] = scrolls
+        replay['_etterna_speeds'] = speeds
+        replay['_etterna_stops'] = stops
+        replay['_etterna_delays'] = delays
+        replay['_etterna_warps'] = warps
+        replay['_etterna_bpms'] = bpms
+        replay['_etterna_offset'] = sm_offset
+        # Canonical SV doc -- written even when only `bpms` is non-empty
+        # so the cross-engine matrix sees the chart's BPM map. Identity
+        # fallback when nothing usable is on the chart.
+        from analysis.player.sv.replay_doc import (SvReplayDoc,
+                                                    KIND_BEAT_SPACE,
+                                                    KIND_IDENTITY)
+        has_sv = bool(scrolls or speeds or len(bpms) > 1
+                      or stops or delays or warps)
+        if has_sv:
+            replay['sv'] = SvReplayDoc(
+                engine_kind=KIND_BEAT_SPACE,
+                engine_key='etterna_beat',
+                scrolls=list(scrolls),
+                speeds=list(speeds),
+                stops=list(stops),
+                delays=list(delays),
+                warps=list(warps),
+                bpms=list(bpms),
+                sm_offset=float(sm_offset),
+            )
+        else:
+            replay['sv'] = SvReplayDoc(
+                engine_kind=KIND_IDENTITY, engine_key='identity')
         if not notedata:
             return
         if 'chart_mines' in replay:

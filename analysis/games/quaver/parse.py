@@ -16,6 +16,7 @@ from analysis.games.quaver.qr_replay import (parse_qr_events,
 from analysis.games.quaver.qua_chart import (parse_qua_file,
                                               find_qua_by_hash)
 from analysis.games.quaver.judge_sim import simulate_mania, windows_ms
+from analysis.player.sv.replay_doc import SvReplayDoc, KIND_TIME_SPACE
 
 
 def parse_replay(qr_path, qua_path=None, songs_dir=None, judge='Standard'):
@@ -38,8 +39,20 @@ def parse_replay(qr_path, qua_path=None, songs_dir=None, judge='Standard'):
     note_group_map = {(int(h['time']), int(h['column'])): h['group']
                       for h in chart['hitobjects']}
     arrays = _build_arrays(sim, note_group_map)
+    bpms = _quaver_bpms_to_beat_space(chart['timing_points'])
+    sv_doc = SvReplayDoc(
+        engine_kind=KIND_TIME_SPACE,
+        engine_key='quaver_time',
+        sections=list(chart['sv_sections']),
+        initial_velocity=float(chart['initial_velocity']),
+        groups=chart['groups'],
+        bpms=bpms,
+        note_groups=arrays['_quaver_note_groups'],
+        flags={'legacy_ln': bool(chart.get('legacy_ln_rendering', False))},
+    )
     return {
         **arrays,
+        'sv': sv_doc,
         'holds': holds_meta,
         'keycount': keycount,
         'filepath': str(qr_path),
@@ -49,22 +62,14 @@ def parse_replay(qr_path, qua_path=None, songs_dir=None, judge='Standard'):
                        for k in ('title', 'artist', 'creator', 'version',
                                  'keycount')},
         '_quaver_audio_file': chart.get('audio', ''),
+        # --- legacy SV keys (dual-write, phase 1 of the SV-doc port) ---
+        # Kept until SvRenderController._build_registry switches to read
+        # `replay['sv']` ; once it does, these go away in one sweep.
         '_quaver_sv_sections': chart['sv_sections'],
         '_quaver_initial_velocity': chart['initial_velocity'],
-        # Per-group SV streams (one per Quaver TimingGroup, plus
-        # `$Default` for the chart-level SV). Consumed by the engine
-        # factory in `analysis/player/sv/render.py`.
         '_quaver_groups': chart['groups'],
-        # When the chart sets `LegacyLNRendering: true` the body should
-        # span [head, tail] with no convex-hull extension across SV
-        # reversals. Stored on the replay so the player's LN-cache
-        # builder can short-circuit per-LN sign-change collection.
         '_quaver_legacy_ln': chart.get('legacy_ln_rendering', False),
-        # Matching the cross-engine fields: `_osu_bpms` is what
-        # `_build_registry` looks for to expose Etterna's beat-space
-        # engine on osu charts. Quaver charts can do the same -- BPM
-        # data is right there in the timing points.
-        '_osu_bpms': _quaver_bpms_to_beat_space(chart['timing_points']),
+        '_osu_bpms': bpms,
         'judge': judge,
         'mods': int(meta.get('mods', 0)),
     }
