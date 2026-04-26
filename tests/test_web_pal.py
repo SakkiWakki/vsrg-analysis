@@ -1,6 +1,6 @@
 """Tests for the web-texture PAL: dispatcher selection policy + the
 qpixmap backend, stopping short of anything that actually launches a
-QWebEngineView (that path is exercised by ``/tmp/test_tosu_headless.py``).
+QWebEngineView.
 """
 from __future__ import annotations
 

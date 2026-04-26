@@ -75,11 +75,9 @@ class QPixmapWebTexture:
     a frame at 30 Hz; letting WebEngine paint freely and pulling on
     demand keeps CPU cost bounded by the consumer's cadence.
 
-    Shim injection (``shim.js`` + QWebChannel) is owned by the
-    :mod:`plugins.unsafe.tosu_overlay.view` layer's ``TosuOverlayView``
-    class today; this texture-level wrapper is protocol-agnostic and
-    doesn't know about tosu specifically. ``push_js_state`` / filter
-    tracking are wired via an optional ``OverlayBridge`` the caller can
+    This texture-level wrapper is protocol-agnostic. Shim injection
+    + ``QWebChannel`` setup are owned by callers; ``push_js_state`` /
+    filter tracking are wired via an optional bridge the caller can
     attach after construction.
     """
 
@@ -101,10 +99,9 @@ class QPixmapWebTexture:
         self._bridge = None
 
     # ── Widget hooks for plugin wiring ─────────────────────────────
-    # The texture is protocol-agnostic. Callers (e.g. the tosu
-    # plugin) attach their own shim and QWebChannel bridge to the
-    # underlying view and tell us where to route state pushes by
-    # calling ``attach_bridge``.
+    # The texture is protocol-agnostic. Callers attach their own shim
+    # and QWebChannel bridge to the underlying view and tell us where
+    # to route state pushes by calling ``attach_bridge``.
 
     @property
     def view(self):
@@ -135,13 +132,6 @@ class QPixmapWebTexture:
     def push_js_state(self, json_str: str) -> None:
         if self._bridge is not None:
             self._bridge.push(json_str)
-
-    def push_precise_state(self, json_str: str) -> None:
-        # The precise channel is pushed via a direct runJavaScript call
-        # on the page -- the bridge only owns the v1+v2 main channel.
-        safe = json_str.replace('\\', '\\\\').replace('`', '\\`')
-        self._view.page().runJavaScript(
-            f'window._tosuPushPrecise && window._tosuPushPrecise(`{safe}`);')
 
     def active_filters(self) -> frozenset[str]:
         if self._bridge is None:

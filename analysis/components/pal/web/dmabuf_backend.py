@@ -175,11 +175,6 @@ class DmabufWebTexture:
         if self._bridge is not None:
             self._bridge.push(json_str)
 
-    def push_precise_state(self, json_str: str) -> None:
-        safe = json_str.replace('\\', '\\\\').replace('`', '\\`')
-        self._view.page().runJavaScript(
-            f'window._tosuPushPrecise && window._tosuPushPrecise(`{safe}`);')
-
     def active_filters(self) -> frozenset[str]:
         if self._bridge is None:
             return frozenset()

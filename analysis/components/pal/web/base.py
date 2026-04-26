@@ -122,15 +122,13 @@ class WebTexture(Protocol):
     re-upload on the next ``latest_frame`` call."""
 
     def push_js_state(self, json_str: str) -> None: ...
-    """Forward a tosu state push (v1+v2 merged JSON) to the page. The
-    backend routes this through whatever shim/channel it set up on
+    """Forward a JSON state push to the page. The backend routes this
+    through whatever shim/channel the caller wired up after
     ``create``."""
 
-    def push_precise_state(self, json_str: str) -> None: ...
-
     def active_filters(self) -> frozenset[str]:
-        """Filter set the page requested via ``applyFilters:``. Used
-        by the component to prune state pushes."""
+        """Filter set the page requested via the bridge. Used by the
+        caller to prune state pushes."""
         ...
 
     def latest_frame(self) -> 'WebTextureFrame | None': ...
