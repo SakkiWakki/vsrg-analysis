@@ -165,14 +165,8 @@ def _resolve_root():
 
 
 def _qsettings_quaver_root():
-    """Read the persisted GUI override without taking a hard dep on Qt
-    in CLI/test paths -- if the GUI hasn't been imported (no QSettings
-    available), we silently skip the override layer."""
-    try:
-        from analysis.gui.settings import get_quaver_root_override
-    except Exception:
-        return None
-    try:
-        return get_quaver_root_override()
-    except Exception:
-        return None
+    """Read the persisted user override from the path_overrides shopkeeper.
+    Returns None when no GUI backend is installed (CLI/tests) or no
+    override has been saved."""
+    from analysis.core import path_overrides
+    return path_overrides.get('paths/quaver_root')

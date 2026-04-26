@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMessageBox, QProgressDialog
 
 from analysis.core import game as game_mod
-from analysis.core import gui_adapter as gui_mod
+from analysis.core import manifest as manifest_mod
 from analysis.gui.loaders import Worker
 
 from analysis.core.search import build_library
@@ -135,9 +135,11 @@ class LibraryJobRunner:
         self.tab.on_library_loaded(library)
 
         counts = Counter(e['game'] for e in library)
+        # Display label is derived from the manifest's first path field
+        # (e.g. "Etterna install folder" -> "Etterna").
         parts = [
-            f'{counts.get(name, 0)} {adapter.label.split()[0]}'
-            for name, adapter in gui_mod.all_games().items()
+            f'{counts.get(name, 0)} {manifest.path_fields[0].label.split()[0]}'
+            for name, manifest in manifest_mod.all_manifests().items()
         ]
         self.tab.status_lbl.setText(
             f'{len(library)} entries ({", ".join(parts)})'

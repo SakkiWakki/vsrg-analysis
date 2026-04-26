@@ -13,9 +13,6 @@ factory in `analysis/player/sv/render.py` consumes.
 """
 from __future__ import annotations
 
-import hashlib
-from pathlib import Path
-
 import numpy as np
 
 
@@ -495,14 +492,34 @@ def _normalize_svs(slider_velocities, timing_points, bpm_does_not_affect_sv,
 
 
 def find_qua_by_hash(md5_hash, songs_dir):
-    """Scan `songs_dir` for a `.qua` whose MD5 matches `md5_hash`."""
+    """Look up the `.qua` whose MD5 matches `md5_hash` against the
+    persistent chart-hash index that the library scan maintains.
+
+    Read-only on the hot path: a miss returns None instead of triggering
+    a full Songs-folder rebuild, since rebuilding here would block a
+    single play-action on hashing thousands of charts. The library scan
+    is the one place that grows the index ; `songs_dir` is unused but
+    kept for signature stability with callers that don't know that yet."""
+    import os as _os
+    import threading as _threading
+    import time as _time
+    _stall = _os.environ.get('VSRG_STALL_DEBUG', '0') not in ('', '0', 'false')
+    del songs_dir
     if not md5_hash:
         return None
-    for p in Path(songs_dir).rglob('*.qua'):
-        try:
-            with open(p, 'rb') as f:
-                if hashlib.md5(f.read()).hexdigest() == md5_hash:
-                    return str(p)
-        except OSError:
-            continue
+    try:
+        from analysis.games.quaver.adapter import _CHART_INDEX_CACHE
+    except ImportError:
+        return None
+    if _stall:
+        t0 = _time.monotonic()
+        tname = _threading.current_thread().name
+        print(f'[stall                  {tname}] find_qua_by_hash: load cache', flush=True)
+    cached = _CHART_INDEX_CACHE.load() or {}
+    if _stall:
+        dt = (_time.monotonic() - t0) * 1000.0
+        print(f'[stall                  {tname}] find_qua_by_hash: cache loaded ({len(cached)} entries, {dt:.1f}ms)', flush=True)
+    for path_str, (_m, _s, md5, _meta) in cached.items():
+        if md5 == md5_hash:
+            return path_str
     return None

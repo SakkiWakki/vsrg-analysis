@@ -36,7 +36,6 @@ def migrate_legacy(store) -> None:
         store, base / 'player_plugins.json', 'replay')
     mutated |= _migrate_disabled_list(
         store, base / 'sidebar_sections.json', 'sidebar')
-    mutated |= _migrate_qsettings(store)
 
     store.set('_schema_version', _SCHEMA_VERSION)
     if mutated:
@@ -77,33 +76,6 @@ def _migrate_disabled_list(store, path: Path, kind: str) -> bool:
         path.unlink()
     except OSError:
         pass
-    return changed
-
-
-def _migrate_qsettings(store) -> bool:
-    """Fold Qt-side paths + first-run flag into the config tree. Only
-    reads ; QSettings entries stay where they are. Safe if PySide6
-    isn't importable (headless tests)."""
-    try:
-        from analysis.gui import settings as qs
-    except ImportError:
-        return False
-    except Exception as exc:
-        print(f'QSettings read skipped: {exc}')
-        return False
-
-    changed = False
-    try:
-        et = qs.get_etterna_save_override()
-        if et:
-            changed |= store.set('paths.etterna_save', et)
-        osu = qs.get_osu_songs_override()
-        if osu:
-            changed |= store.set('paths.osu_songs', osu)
-        if qs.is_first_run_done():
-            changed |= store.set('paths.first_run_done', True)
-    except Exception as exc:
-        print(f'QSettings migration partial: {exc}')
     return changed
 
 

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from dataclasses import dataclass
 
 from PySide6.QtCore import Qt, QTimer
@@ -17,6 +19,20 @@ from PySide6.QtWidgets import (
 from analysis.gui.player_canvas import PlayerCanvas
 from analysis.gui.settings import load_player_settings, save_player_setting
 from analysis.gui.widgets import JumpSlider
+
+
+# Stall debug: stderr-print elapsed-since-tab-construction so we can
+# see which step blocks the UI thread. Off by default ; flip via env.
+_STALL_DEBUG = os.environ.get('VSRG_STALL_DEBUG', '0') not in ('', '0', 'false')
+_stall_t0 = time.monotonic()
+
+
+def _stall_log(msg: str) -> None:
+    if not _STALL_DEBUG:
+        return
+    elapsed = (time.monotonic() - _stall_t0) * 1000.0
+    tname = threading.current_thread().name
+    print(f'[stall +{elapsed:8.1f}ms {tname}] {msg}', flush=True)
 
 
 @dataclass
@@ -51,14 +67,20 @@ class PlayerTab(QWidget):
         scroll_ms=400.0,
         scroll_mode=None,
         play_rate=1.0,
+        audio_chart_offset_s=0.0,
+        audio_chart_offset_scales_with_rate=False,
         cmod_bpm=600.0,
         xmod_value=1.0,
         osu_speed=20,
         xml_judgments=None,
         keycount=None,
     ):
+        global _stall_t0
+        _stall_t0 = time.monotonic()
+        _stall_log(f'PlayerTab.__init__ enter (game={game}, audio={bool(audio_path)})')
         super().__init__()
 
+        _stall_log('  -> _create_player start')
         self.player = self._create_player(
             replay,
             game=game,
@@ -76,19 +98,36 @@ class PlayerTab(QWidget):
             keycount=keycount,
         )
 
+        _stall_log('  <- _create_player done')
+
         self._set_initial_play_rate(play_rate)
+        self._audio_chart_offset_s = float(audio_chart_offset_s or 0.0)
+        self._audio_chart_offset_scales_with_rate = bool(
+            audio_chart_offset_scales_with_rate
+        )
+        self._audio_chart_offset_rate = float(self.player.play_rate)
 
         self.audio_state = AudioState(path=audio_path)
         self.scrub = ScrubState()
         self.scroll_edit: QLineEdit | None = None
+        self._audio = None
+        self._audio_worker = None
 
+        _stall_log('  -> _build_ui')
         self._build_ui()
+        _stall_log('  <- _build_ui')
+        _stall_log('  -> _build_timer')
         self._build_timer()
+        _stall_log('  <- _build_timer')
+        _stall_log('  -> _build_audio')
         self._build_audio(audio_path)
+        _stall_log('  <- _build_audio (worker started)')
         self._connect_player_events()
         self._build_input_router()
 
+        _stall_log('  -> _start_playing')
         self._start_playing()
+        _stall_log('PlayerTab.__init__ exit')
 
     # ------------------------------------------------------------------
     # Construction
@@ -198,26 +237,66 @@ class PlayerTab(QWidget):
         self.timer.start()
 
     def _build_audio(self, audio_path) -> None:
-        from analysis.player.audio import AudioEngine
+        if not audio_path:
+            _stall_log('    _build_audio: no audio_path; skipping')
+            return
 
         prefs = load_player_settings(self.player.game)
-        self._audio = AudioEngine(
-            audio_path,
-            pitch_correct=prefs['pitch_correct'],
-        )
+        pitch_correct = prefs['pitch_correct']
 
+        from analysis.gui.loaders import Worker
+
+        def job(_progress):
+            _stall_log('    [audio worker] importing AudioEngine')
+            from analysis.player.audio import AudioEngine
+            _stall_log('    [audio worker] constructing AudioEngine')
+            engine = AudioEngine(audio_path, pitch_correct=pitch_correct)
+            _stall_log('    [audio worker] AudioEngine ready')
+            return engine
+
+        worker = Worker(job)
+        self._audio_worker = worker
+        worker.done.connect(self._on_audio_built)
+        worker.failed.connect(self._on_audio_failed)
+        worker.start()
+
+    def _on_audio_built(self, engine) -> None:
+        _stall_log('  _on_audio_built enter')
+        self._audio_worker = None
+        self._audio = engine
         self.audio_state.ready = bool(self._audio.ready)
+        _stall_log(f'    audio.ready={self.audio_state.ready}')
 
         if self.audio_state.ready:
+            _stall_log('    -> prewarm_rates')
             self._audio.prewarm_rates([0.8, 0.9, 1.1, 1.2, 1.3, 1.5])
+            _stall_log('    <- prewarm_rates')
 
         if self.audio_state.ready and self._audio._base_duration:
+            self._refresh_audio_chart_offset_rate()
             self.player.t_max = max(
                 self.player.t_max,
-                float(self._audio._base_duration),
+                self._audio_to_chart_time(float(self._audio._base_duration)),
             )
-            self.player.attach_audio_clock(self._audio.current_chart_time)
+            _stall_log('    -> initial seek')
+            self._audio.seek(self._chart_to_audio_time(self.player.t_intended))
+            _stall_log('    <- initial seek')
+            _stall_log('    -> attach_audio_clock')
+            self.player.attach_audio_clock(self._audio_current_chart_time)
+            _stall_log('    <- attach_audio_clock')
+            _stall_log('    -> attach_audio_status')
             self.player.attach_audio_status(self._audio.callback_status_snapshot)
+            _stall_log('    <- attach_audio_status')
+            _stall_log('    -> _sync_audio(force=True)')
+            self._sync_audio(force=True)
+            _stall_log('    <- _sync_audio')
+        _stall_log('  _on_audio_built exit')
+
+    def _on_audio_failed(self, tb) -> None:
+        self._audio_worker = None
+        self.audio_state.ready = False
+        self._audio = None
+        print(f'audio: failed to initialize\n{tb}')
 
     def _connect_player_events(self) -> None:
         self.player.events.on('scroll_changed', self._on_scroll_change)
@@ -288,25 +367,57 @@ class PlayerTab(QWidget):
     def _audio_is_ready(self) -> bool:
         return bool(self.audio_state.ready)
 
+    def _current_audio_chart_offset(self) -> float:
+        offset = self._audio_chart_offset_s
+        if self._audio_chart_offset_scales_with_rate:
+            offset *= self._audio_chart_offset_rate
+        return offset
+
+    def _refresh_audio_chart_offset_rate(self) -> float:
+        self._audio_chart_offset_rate = float(self.player.play_rate)
+        return self._audio_chart_offset_rate
+
+    def _chart_to_audio_time(self, chart_t: float) -> float:
+        return float(chart_t) - self._current_audio_chart_offset()
+
+    def _audio_to_chart_time(self, audio_t: float) -> float:
+        return float(audio_t) + self._current_audio_chart_offset()
+
+    def _audio_current_chart_time(self) -> float:
+        return self._audio_to_chart_time(self._audio.current_chart_time())
+
     def _audio_playing_state(self) -> tuple[float, float, bool]:
+        rate = self._refresh_audio_chart_offset_rate()
         return (
-            float(self.player.t_intended),
-            float(self.player.play_rate),
+            self._chart_to_audio_time(self.player.t_intended),
+            rate,
             bool(not self.player.paused),
         )
 
     def _sync_audio(self, *, force: bool = False) -> None:
+        if force:
+            _stall_log('      _sync_audio: building _ui_status')
         self.player._ui_status = {
             'audio_ready': self._audio_is_ready(),
             'pitch_correct': bool(getattr(self._audio, '_pitch_correct', True)),
         }
 
         if not self._audio_is_ready():
+            if force:
+                _stall_log('      _sync_audio: not ready -> return')
             return
 
+        if force:
+            _stall_log('      _sync_audio: computing state')
         state = self._audio_playing_state()
+        if force:
+            _stall_log(f'      _sync_audio: state={state}')
         if force or state != self.audio_state.last_sync_state:
+            if force:
+                _stall_log('      _sync_audio: -> set_state')
             self._audio.set_state(*state)
+            if force:
+                _stall_log('      _sync_audio: <- set_state')
             self.audio_state.last_sync_state = state
 
     def _toggle(self) -> None:
@@ -316,7 +427,7 @@ class PlayerTab(QWidget):
         self.play_btn.setText('▶' if self.player.paused else '⏸')
 
         if self._audio_is_ready() and seeked_to_start:
-            self._audio.seek(self.player.t_intended)
+            self._audio.seek(self._chart_to_audio_time(self.player.t_intended))
 
         self._sync_audio(force=True)
 
@@ -339,7 +450,7 @@ class PlayerTab(QWidget):
         self.player.seek_rel(ds)
 
         if self._audio_is_ready():
-            self._audio.seek(self.player.t_intended)
+            self._audio.seek(self._chart_to_audio_time(self.player.t_intended))
 
         self._sync_audio(force=True)
 
@@ -481,15 +592,17 @@ class PlayerTab(QWidget):
         if not self._audio_is_ready():
             return
 
+        rate = self._refresh_audio_chart_offset_rate()
+        audio_t = self._chart_to_audio_time(self.player.t_intended)
         self.player.attach_audio_clock(None)
         self._audio.set_state(
-            self.player.t_intended,
-            self.player.play_rate,
+            audio_t,
+            rate,
             False,
         )
         self.audio_state.last_sync_state = (
-            float(self.player.t_intended),
-            float(self.player.play_rate),
+            audio_t,
+            rate,
             False,
         )
 
@@ -500,18 +613,20 @@ class PlayerTab(QWidget):
         if not self._audio_is_ready():
             return
 
-        self._audio.seek(self.player.t_intended)
+        rate = self._refresh_audio_chart_offset_rate()
+        audio_t = self._chart_to_audio_time(self.player.t_intended)
+        self._audio.seek(audio_t)
         self._audio.set_state(
-            self.player.t_intended,
-            self.player.play_rate,
+            audio_t,
+            rate,
             self.scrub.resume_after_release,
         )
         self.audio_state.last_sync_state = (
-            float(self.player.t_intended),
-            float(self.player.play_rate),
+            audio_t,
+            rate,
             bool(self.scrub.resume_after_release),
         )
-        self.player.attach_audio_clock(self._audio.current_chart_time)
+        self.player.attach_audio_clock(self._audio_current_chart_time)
 
     def _on_playbar_changed(self, value) -> None:
         if self.scrub.suppress_slider:
@@ -555,11 +670,24 @@ class PlayerTab(QWidget):
             self.player.paused = True
             self.play_btn.setText('▶')
 
+    _tick_count = 0
+
     def _tick(self) -> None:
+        type(self)._tick_count += 1
+        n = type(self)._tick_count
+        verbose = _STALL_DEBUG and n <= 5
+        t_start = time.monotonic() if _STALL_DEBUG else 0.0
+        if verbose:
+            _stall_log(f'_tick #{n} enter')
+
         self._sync_settings_toggles()
+        if verbose:
+            _stall_log(f'_tick #{n}   after _sync_settings_toggles')
         self._finish_playback_if_needed()
 
         self.view.update()
+        if verbose:
+            _stall_log(f'_tick #{n}   after view.update')
         self._update_playbar()
 
         self.time_lbl.setText(self._fmt_time(self.player.t))
@@ -567,6 +695,13 @@ class PlayerTab(QWidget):
 
         if not self.scrub.active:
             self._sync_audio()
+        if verbose:
+            _stall_log(f'_tick #{n} exit')
+
+        if _STALL_DEBUG:
+            dt_ms = (time.monotonic() - t_start) * 1000.0
+            if dt_ms > 50.0:
+                _stall_log(f'_tick #{n} SLOW: {dt_ms:.1f}ms')
 
     # ------------------------------------------------------------------
     # Input events
@@ -709,6 +844,11 @@ class PlayerTab(QWidget):
 
     def cleanup(self) -> None:
         self.timer.stop()
+
+        worker = getattr(self, '_audio_worker', None)
+        if worker is not None and worker.isRunning():
+            worker.quit()
+            worker.wait(2000)
 
         if not self._audio_is_ready():
             return

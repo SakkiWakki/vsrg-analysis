@@ -23,14 +23,17 @@ class QuaverAdapter(GameAdapter):
                             songs_dir=_quaver_songs_dir())
 
     def resolve_audio(self, replay, entry=None, progress=None):
-        from analysis.games.quaver.qua_chart import parse_qua_file
-        if not replay.get('chart_path'):
+        chart_path = replay.get('chart_path')
+        if not chart_path:
             return None
-        chart = parse_qua_file(replay['chart_path'])
-        audio = chart.get('audio')
+        audio = replay.get('_quaver_audio_file')
+        if audio is None:
+            from analysis.games.quaver.qua_chart import parse_qua_file
+            chart = parse_qua_file(chart_path)
+            audio = chart.get('audio')
         if not audio:
             return None
-        cand = Path(replay['chart_path']).parent / audio
+        cand = Path(chart_path).parent / audio
         return str(cand) if cand.exists() else None
 
     def resolve_chart_timing(self, replay, entry=None, progress=None):
@@ -158,6 +161,13 @@ class QuaverAdapter(GameAdapter):
         return merged
 
     # --- cross-game mod display (PlayerDataSource) -----------------------
+    def player_tab_kwargs(self, replay, entry, chart_ctx):
+        return {
+            'audio_chart_offset_s': _quaver_global_audio_offset_s(
+                root=_quaver_root_for_replay(replay)),
+            'audio_chart_offset_scales_with_rate': True,
+        }
+
     def mods_short(self, replay) -> str:
         from analysis.games.quaver.qr_replay import rate_for_mods
         meta = (replay or {}).get('meta') or {}
@@ -205,6 +215,69 @@ _DEFAULT_COLORS = {
 def _quaver_songs_dir():
     from analysis.games.quaver.paths import find_quaver_dirs
     return find_quaver_dirs().get('songs_dir')
+
+
+def _quaver_root_for_replay(replay) -> str | None:
+    chart_path = (replay or {}).get('chart_path')
+    if not chart_path:
+        return None
+    try:
+        chart = Path(chart_path).resolve()
+    except OSError:
+        chart = Path(chart_path)
+    for parent in chart.parents:
+        if (parent / 'quaver.cfg').is_file():
+            return str(parent)
+        if parent.name == 'Songs':
+            return str(parent.parent)
+    return None
+
+
+def _quaver_global_audio_offset_s(root: str | None = None) -> float:
+    """GlobalAudioOffset from Quaver's own `quaver.cfg`, in seconds.
+
+    Quaver's replay frame timestamps are captured in `CurrentAudioOffset`,
+    which upstream computes as audio time plus this global offset multiplied
+    by the active rate. The player renders in that chart-time domain, so the
+    audio layer needs the inverse mapping when seeking.
+    """
+    import configparser
+    import os
+    import re
+    from pathlib import Path
+
+    env = os.environ.get('QUAVER_GLOBAL_AUDIO_OFFSET_MS')
+    if env is not None:
+        try:
+            return float(env) / 1000.0
+        except ValueError:
+            pass
+
+    if root is None:
+        from analysis.games.quaver.paths import find_quaver_dirs
+        root = find_quaver_dirs().get('root')
+    if not root:
+        return 0.0
+    cfg_path = Path(root) / 'quaver.cfg'
+    try:
+        text = cfg_path.read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return 0.0
+
+    parser = configparser.ConfigParser(strict=False, interpolation=None)
+    try:
+        parser.read_string(text)
+        raw = parser.get('Config', 'GlobalAudioOffset', fallback=None)
+    except configparser.Error:
+        raw = None
+
+    if raw is None:
+        m = re.search(r'(?im)^\s*GlobalAudioOffset\s*=\s*([-+]?\d+)', text)
+        raw = m.group(1) if m else None
+    try:
+        return float(raw) / 1000.0
+    except (TypeError, ValueError):
+        return 0.0
 
 
 # --- library scan helpers (module-level so ThreadPoolExecutor can pickle) -----

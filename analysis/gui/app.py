@@ -136,6 +136,11 @@ def main():
 
     app = QApplication(sys.argv)
     apply_dark_palette(app)
+    # Install the QSettings-backed path-overrides shopkeeper so headless
+    # core modules (find_etterna_dirs, find_osu_dirs, ...) read user
+    # overrides without importing Qt themselves.
+    from analysis.gui.path_overrides_qt import install as _install_overrides
+    _install_overrides()
     # First-run: prompt for install paths before building the main window so
     # the library scan that kicks off on window open sees the user's choices.
     from analysis.gui.paths_dialog import prompt_if_first_run

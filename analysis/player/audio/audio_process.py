@@ -32,12 +32,10 @@ plain strings/ints; the child does its own decode + PortAudio open.
 
 # Status surface
 
-The parent reads chart-time via a small ``Array('d', N)`` of shared
-doubles. CPython's GIL doesn't apply across processes, but Python-int
-and Python-float reads/writes on a ``multiprocessing.Array`` are
-serialized internally (the Array uses an OS-level lock that's
-extremely fast: ~50 ns on Linux). We snapshot all status fields
-together under that lock so the GUI never sees a half-updated state.
+The parent reads chart-time via a small lock-free shared double array.
+The GUI polls this every frame, so reads must never wait on the audio
+child. A snapshot can see fields from adjacent callback writes; that is
+acceptable for HUD/playhead display because the next frame corrects it.
 """
 from __future__ import annotations
 
@@ -411,9 +409,9 @@ class AudioProcessClient:
                  volume: float = 0.5) -> None:
         self._ctx = multiprocessing.get_context('spawn')
         self._cmd_queue = self._ctx.Queue(maxsize=64)
-        self._status = self._ctx.Array('d', _NUM_STATUS_FIELDS, lock=True)
+        self._status = self._ctx.Array('d', _NUM_STATUS_FIELDS, lock=False)
         self._last_status_str = self._ctx.Array('b', _STATUS_STR_LEN,
-                                                 lock=True)
+                                                 lock=False)
         config = AudioProcessConfig(
             audio_path=audio_path,
             pitch_correct=pitch_correct,
@@ -431,9 +429,8 @@ class AudioProcessClient:
         # generous: spawn + decode + open stream rarely exceeds 2 s.
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
-            with self._status.get_lock():
-                if self._status[_F_READY]:
-                    break
+            if self._status[_F_READY]:
+                break
             if not self._proc.is_alive():
                 break
             time.sleep(0.02)
@@ -442,13 +439,11 @@ class AudioProcessClient:
 
     @property
     def ready(self) -> bool:
-        with self._status.get_lock():
-            return bool(self._status[_F_READY])
+        return bool(self._status[_F_READY])
 
     @property
     def base_duration(self) -> float:
-        with self._status.get_lock():
-            return float(self._status[_F_BASE_DURATION])
+        return float(self._status[_F_BASE_DURATION])
 
     def current_chart_time(self) -> float:
         """Chart-time of the audible playhead. Mirrors the in-process
@@ -462,12 +457,20 @@ class AudioProcessClient:
         ring depth, which is well below the predictor's jitter
         tolerance.
         """
-        with self._status.get_lock():
-            hw_pos = self._status[_F_HW_POS]
-            hw_wall = self._status[_F_HW_WALL]
-            hw_rate = self._status[_F_HW_RATE]
-            anchor_valid = self._status[_F_DAC_ANCHOR_VALID]
-            lead_in = self._status[_F_LEAD_IN_SECONDS]
+        import os as _os, threading as _th
+        _stall = _os.environ.get('VSRG_STALL_DEBUG', '0') not in ('', '0', 'false')
+        _t = _th.current_thread().name if _stall else ''
+        if _stall:
+            print(f'[stall                  {_t}] proc.current_chart_time: -> read _F_HW_POS', flush=True)
+        hw_pos = self._status[_F_HW_POS]
+        if _stall:
+            print(f'[stall                  {_t}] proc.current_chart_time: hw_pos={hw_pos}', flush=True)
+        hw_wall = self._status[_F_HW_WALL]
+        hw_rate = self._status[_F_HW_RATE]
+        anchor_valid = self._status[_F_DAC_ANCHOR_VALID]
+        lead_in = self._status[_F_LEAD_IN_SECONDS]
+        if _stall:
+            print(f'[stall                  {_t}] proc.current_chart_time: anchor_valid={anchor_valid} lead_in={lead_in}', flush=True)
         if not anchor_valid:
             return -lead_in if lead_in else 0.0
         # We don't have the child's stream clock. Use the most recent
@@ -476,11 +479,10 @@ class AudioProcessClient:
         return hw_pos - lead_in
 
     def callback_status_snapshot(self) -> tuple[int, str]:
-        with self._status.get_lock():
-            pa_n = int(self._status[_F_CB_STATUS_COUNT])
-            ring_n = int(self._status[_F_CB_RING_UNDERFLOW])
-            fill = int(self._status[_F_RING_FILL_FRAMES])
-            cap = int(self._status[_F_RING_CAPACITY_FRAMES])
+        pa_n = int(self._status[_F_CB_STATUS_COUNT])
+        ring_n = int(self._status[_F_CB_RING_UNDERFLOW])
+        fill = int(self._status[_F_RING_FILL_FRAMES])
+        cap = int(self._status[_F_RING_CAPACITY_FRAMES])
         text = _read_status_str(self._last_status_str)
         gauge = ''
         if cap:

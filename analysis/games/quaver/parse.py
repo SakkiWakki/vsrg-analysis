@@ -48,6 +48,7 @@ def parse_replay(qr_path, qua_path=None, songs_dir=None, judge='Standard'):
         'chart_meta': {k: chart[k]
                        for k in ('title', 'artist', 'creator', 'version',
                                  'keycount')},
+        '_quaver_audio_file': chart.get('audio', ''),
         '_quaver_sv_sections': chart['sv_sections'],
         '_quaver_initial_velocity': chart['initial_velocity'],
         # Per-group SV streams (one per Quaver TimingGroup, plus

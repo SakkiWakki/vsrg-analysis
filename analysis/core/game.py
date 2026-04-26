@@ -17,8 +17,8 @@ from pathlib import Path
 
 def _game_packages():
     """Names of every package under `analysis.games/` (one per game).
-    Shared by GameAdapter and GuiAdapter discovery so adding a game means
-    one new directory, not two parallel scanners."""
+    Shared by `GameAdapter` and `GameManifest` discovery so adding a game
+    means one new directory, not two parallel scanners."""
     import analysis.games as games_pkg
     games_dir = Path(games_pkg.__file__).parent
     return [info.name for info in pkgutil.iter_modules([str(games_dir)])
@@ -28,7 +28,7 @@ def _game_packages():
 def _load_adapters(submodule: str, attr: str, base_cls) -> dict:
     """Import `analysis.games.<pkg>.<submodule>` for each game package and
     collect its `<attr>` attribute when it's an instance of `base_cls`.
-    Used by both the GameAdapter and GuiAdapter registries."""
+    Used by both the `GameAdapter` and `GameManifest` registries."""
     out: dict = {}
     for pkg in _game_packages():
         try:

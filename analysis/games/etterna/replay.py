@@ -248,16 +248,11 @@ def find_replay_for_score(scorekey, replays_dir):
 
 
 def _etterna_root_override():
-    """Read a user-set install-root override from the GUI settings layer, if
-    any. Done via lazy import so the core module stays importable without Qt."""
-    try:
-        from analysis.gui.settings import get_etterna_root_override
-    except Exception:
-        return None
-    try:
-        return get_etterna_root_override()
-    except Exception:
-        return None
+    """Read the user's install-root override from the path_overrides
+    shopkeeper. Returns None when no GUI backend is installed (CLI/tests)
+    or no override has been saved."""
+    from analysis.core import path_overrides
+    return path_overrides.get('paths/etterna_root')
 
 
 def _parse_additional_song_folders(save):

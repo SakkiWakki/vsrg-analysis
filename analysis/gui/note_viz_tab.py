@@ -9,7 +9,7 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavToolbar
 
-from analysis.core import gui_adapter as gui_mod
+from analysis.core import manifest as manifest_mod
 from analysis.gui.widgets import _viz_toolbar
 from analysis.viz.note_visualizer import (
     render_chart,
@@ -24,7 +24,7 @@ class NoteVizTab(QWidget):
         super().__init__()
         self.replay = replay
         self.game = game
-        cfg = gui_mod.get(game).note_viz_config(replay, judge=judge, od=od)
+        cfg = manifest_mod.get(game).note_viz_config(replay, judge=judge, od=od)
         self.windows = cfg['windows']
         self.unit_label = cfg['unit_label']
         self.rpm = cfg['rows_per_ms']

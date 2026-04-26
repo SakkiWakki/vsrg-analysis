@@ -68,7 +68,15 @@ def _isolated_qsettings(tmp_path, monkeypatch, _qapp):
     s.clear()
     s.sync()
     settings_mod._cached = None
+    # Install the Qt-backed path-overrides shopkeeper for every test so
+    # find_*_dirs honors saved overrides exactly as the live app would.
+    # Cleared in teardown so headless tests that don't use it see no
+    # stale backend across test runs.
+    from analysis.core import path_overrides
+    from analysis.gui.path_overrides_qt import QtSettingsBackend
+    path_overrides.set_backend(QtSettingsBackend())
     yield
+    path_overrides.set_backend(None)
     s = QSettings(settings_mod._ORG, settings_mod._APP)
     s.clear()
     s.sync()

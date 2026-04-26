@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from analysis.core import gui_adapter as gui_adapter_mod
+from analysis.core import manifest as manifest_mod
 from analysis.viz.plugins import discover
 from analysis.components import viz_backend
 
@@ -53,9 +53,9 @@ def test_note_viz_config_works_for_all_gui_games():
         'etterna': {},
         'osu': {'od': 8.0, 'mods': 0},
     }
-    for name, adapter in gui_adapter_mod.all_games().items():
+    for name, manifest in manifest_mod.all_manifests().items():
         replay = replays.get(name, {})
-        cfg = adapter.note_viz_config(replay)
+        cfg = manifest.note_viz_config(replay)
         assert 'windows' in cfg
         assert 'unit_label' in cfg
         assert 'rows_per_ms' in cfg

@@ -1,24 +1,18 @@
 """QSettings wrapper for persistent app state (scroll speed, mode,
 last-used library filters, window geometry, etc.).
 
-Also owns the install-path overrides for Etterna and osu!. Core modules
-call `find_etterna_dirs` / `find_osu_dirs`, which consult these overrides
-before falling back to autodetection ; so a user-configured path wins
-even though the core modules don't depend on Qt.
+Install-path overrides live in `analysis.core.path_overrides` (the
+"shopkeeper") instead of here ; the Qt backend in
+`analysis.gui.path_overrides_qt` is what writes them through this same
+QSettings instance. That keeps `analysis.core` and the per-game `replay`
+modules Qt-free.
 
-The overrides now store **install roots** (e.g. `~/etterna/`, not
-`~/etterna/Save/`). Resolution into Save/Songs/Replays/XML happens in the
-game-specific replay modules, which also read `Preferences.ini` and
-`osu!.<user>.cfg` to honor user-configured subpaths (AdditionalSongFolders,
-BeatmapDirectory, picked profile).
-
-Player-settings validators live at the bottom: every persisted player
-preference declares whether it's game-agnostic or game-dependent and
-provides a validator. `load_player_settings(game)` returns a dict with
-every value already coerced and game-checked, so caller sites can't
-accidentally carry an incompatible value across a game switch."""
+Player-settings validators live below: every persisted player preference
+declares whether it's game-agnostic or game-dependent and provides a
+validator. `load_player_settings(game)` returns a dict with every value
+already coerced and game-checked, so caller sites can't accidentally
+carry an incompatible value across a game switch."""
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Callable
 
 from PySide6.QtCore import QSettings
@@ -36,99 +30,7 @@ def get_settings():
     return _cached
 
 
-# ---- install-path overrides ------------------------------------------------
-# Stored as strings under paths/etterna_root, paths/osu_root. Empty/None means
-# "fall back to autodetect". Legacy keys paths/etterna_save and paths/osu_songs
-# are migrated transparently on read: if the old value pointed at Save/ or
-# Songs/, we fold it up to the install root.
-#
-# osu! profiles: a single install can have multiple per-user configs
-# (osu!.<USER>.cfg). If the user has >1 we persist the chosen one under
-# paths/osu_profile so later launches remember the selection.
-
-ETTERNA_ROOT_KEY = 'paths/etterna_root'
-OSU_ROOT_KEY = 'paths/osu_root'
-OSU_PROFILE_KEY = 'paths/osu_profile'
-QUAVER_ROOT_KEY = 'paths/quaver_root'
 FIRST_RUN_KEY = 'paths/first_run_done'
-
-def _str_or_none(v):
-    if v is None:
-        return None
-    s = str(v).strip()
-    return s or None
-
-
-def _fold_to_install_root(path, subdir_names):
-    """If `path` ends in one of `subdir_names` (case-insensitive), return its
-    parent ; otherwise return `path` unchanged. Used to migrate legacy
-    Save/Songs paths to install roots."""
-    p = Path(path)
-    if p.name.lower() in {s.lower() for s in subdir_names}:
-        return str(p.parent)
-    return str(p)
-
-def get_etterna_root_override():
-    return _str_or_none(get_settings().value(ETTERNA_ROOT_KEY))
-
-
-def set_etterna_root_override(path):
-    s = get_settings()
-    p = _str_or_none(path)
-    if p is None:
-        s.remove(ETTERNA_ROOT_KEY)
-    else:
-        s.setValue(ETTERNA_ROOT_KEY, p)
-
-
-def get_osu_root_override():
-    return _str_or_none(get_settings().value(OSU_ROOT_KEY))
-
-
-def set_osu_root_override(path):
-    s = get_settings()
-    p = _str_or_none(path)
-    if p is None:
-        s.remove(OSU_ROOT_KEY)
-    else:
-        s.setValue(OSU_ROOT_KEY, p)
-
-
-def get_osu_profile_override():
-    """The selected osu!.<user>.cfg filename (not a path). None means 'pick
-    automatically' ; resolver falls back to newest-mtime cfg."""
-    return _str_or_none(get_settings().value(OSU_PROFILE_KEY))
-
-
-def set_osu_profile_override(name):
-    s = get_settings()
-    p = _str_or_none(name)
-    if p is None:
-        s.remove(OSU_PROFILE_KEY)
-    else:
-        s.setValue(OSU_PROFILE_KEY, p)
-
-
-def get_quaver_root_override():
-    return _str_or_none(get_settings().value(QUAVER_ROOT_KEY))
-
-
-def set_quaver_root_override(path):
-    s = get_settings()
-    p = _str_or_none(path)
-    if p is None:
-        s.remove(QUAVER_ROOT_KEY)
-    else:
-        s.setValue(QUAVER_ROOT_KEY, p)
-
-
-# Back-compat shims ; migrate.py and any external callers still refer to these
-# names. They now return/accept install roots, which is what callers want
-# anyway (migrate.py just echoes the value into the config tree).
-get_etterna_save_override = get_etterna_root_override
-set_etterna_save_override = set_etterna_root_override
-get_osu_songs_override = get_osu_root_override
-set_osu_songs_override = set_osu_root_override
 
 
 def is_first_run_done():
@@ -137,27 +39,6 @@ def is_first_run_done():
 
 def mark_first_run_done():
     get_settings().setValue(FIRST_RUN_KEY, True)
-
-
-# Validators live on the per-game GuiAdapter; these are thin wrappers so
-# pre-existing callers / tests keep working.
-def validate_etterna_root(path):
-    from analysis.core import gui_adapter as gui_mod
-    return gui_mod.get('etterna').validate_root(path)
-
-
-def validate_osu_root(path):
-    from analysis.core import gui_adapter as gui_mod
-    return gui_mod.get('osu').validate_root(path)
-
-
-def validate_quaver_root(path):
-    from analysis.core import gui_adapter as gui_mod
-    return gui_mod.get('quaver').validate_root(path)
-
-
-validate_etterna_save = validate_etterna_root
-validate_osu_songs = validate_osu_root
 
 
 # ---- player settings: typed, optionally game-scoped ------------------------

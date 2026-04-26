@@ -526,14 +526,31 @@ class SvRenderController:
         """Re-anchor the cull-space predictor at the current playhead.
         Called by the player on seek/pause/rate-change/restart so the
         next cumulative_now() snaps to the engine's exact reading."""
+        import os as _os, threading as _th
+        _stall = _os.environ.get('VSRG_STALL_DEBUG', '0') not in ('', '0', 'false')
+        _t = _th.current_thread().name if _stall else ''
+        if _stall:
+            print(f'[stall                  {_t}] reset_render_timeline: enter', flush=True)
         timeline = getattr(self.p, '_render_timeline', None)
         if timeline is None:
+            if _stall:
+                print(f'[stall                  {_t}] reset_render_timeline: no timeline', flush=True)
             return
         try:
+            if _stall:
+                print(f'[stall                  {_t}] reset_render_timeline: -> clock.now()', flush=True)
             raw_t = float(self.p._clock.now())
-        except Exception:
+            if _stall:
+                print(f'[stall                  {_t}] reset_render_timeline: <- clock.now()={raw_t:.3f}', flush=True)
+        except Exception as e:
+            if _stall:
+                print(f'[stall                  {_t}] reset_render_timeline: clock.now raised {e!r}', flush=True)
             return
+        if _stall:
+            print(f'[stall                  {_t}] reset_render_timeline: -> timeline.reset', flush=True)
         timeline.reset(raw_t)
+        if _stall:
+            print(f'[stall                  {_t}] reset_render_timeline: <- timeline.reset', flush=True)
 
     def reset_render_playhead(self, raw_t=None):
         if raw_t is not None:

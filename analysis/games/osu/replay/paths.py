@@ -1,29 +1,14 @@
 """Install-root + Songs + replays-dir discovery for osu!.
 
-User override (from GUI settings) wins. Otherwise we walk a list of
-common install locations and pick the first that has at least one
-`osu!.<user>.cfg` ; then read `BeatmapDirectory` from that cfg to
-resolve the real Songs path."""
+User override (from the path_overrides shopkeeper) wins. Otherwise we
+walk a list of common install locations and pick the first that has at
+least one `osu!.<user>.cfg` ; then read `BeatmapDirectory` from that cfg
+to resolve the real Songs path."""
 import os
 import sys
 from pathlib import Path
 
-
-def _get_gui_override(attr):
-    """Read an override from `analysis.gui.settings` if it's importable.
-    Returns None when Qt isn't installed or the setter isn't present so
-    the core module stays headless-usable."""
-    try:
-        from analysis.gui import settings as _s
-        getter = getattr(_s, attr, None)
-    except Exception:
-        return None
-    if getter is None:
-        return None
-    try:
-        return getter()
-    except Exception:
-        return None
+from analysis.core import path_overrides
 
 
 def list_osu_profiles(root):
@@ -50,7 +35,7 @@ def _pick_osu_cfg(root):
     profiles = list_osu_profiles(root)
     if not profiles:
         return None
-    want = _get_gui_override('get_osu_profile_override')
+    want = path_overrides.get('paths/osu_profile')
     if want and want in profiles:
         return str(Path(root) / want)
     return str(Path(root) / profiles[0])
@@ -150,7 +135,7 @@ def find_osu_dirs():
     """Return `{'root', 'songs_dir', 'replays_dirs'}`. User override
     wins; `songs_dir` is resolved from the selected profile's
     `BeatmapDirectory`."""
-    override = _get_gui_override('get_osu_root_override')
+    override = path_overrides.get('paths/osu_root')
     if override and Path(override).exists():
         songs = _resolve_songs_from_root(override)
         return {'root': str(override), 'songs_dir': songs,

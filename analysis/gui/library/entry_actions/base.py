@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from analysis.core import game as game_mod
-from analysis.core import gui_adapter as gui_mod
+from analysis.core import manifest as manifest_mod
 
 
 class EntryActionBase:
@@ -21,7 +21,7 @@ class EntryActionBase:
         if replay.get('chart_path') and not entry.get('chart_path'):
             entry['chart_path'] = replay['chart_path']
 
-        if gui_mod.get(entry['game']).enrich_entry(entry):
+        if manifest_mod.get(entry['game']).enrich_entry(entry):
             self.persist_library()
             self.tab.refresh_tree()
 
