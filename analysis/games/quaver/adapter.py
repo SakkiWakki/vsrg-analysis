@@ -133,7 +133,6 @@ class QuaverAdapter(GameAdapter):
         _CHART_INDEX_CACHE.clear()
         paths = _qr_paths()
         entries = _parse_qr_batch(paths, progress=progress)
-        _enrich_entries(entries, progress=progress)
         # Persist only when we found something so the next click retries
         # cleanly when the install folder isn't configured yet.
         if entries:
@@ -154,9 +153,6 @@ class QuaverAdapter(GameAdapter):
         if progress:
             progress(f'quaver: {len(new_paths)} new replay(s)…')
         new_entries = _parse_qr_batch(new_paths, progress=progress)
-        if new_entries:
-            _enrich_entries(new_entries, progress=progress)
-
         merged = cached + new_entries
         _LIBRARY_CACHE.save(merged)
         return merged
@@ -230,12 +226,18 @@ def _parse_qr_batch(paths, progress=None):
     once `Data/r/` accumulates thousands of autosaves."""
     import os
     from concurrent.futures import ThreadPoolExecutor
+    from functools import partial
     if not paths:
         return []
+    # Build the chart-hash lookup once; each worker stamps its replay
+    # with song/steps/keycount/chart_path inline. Empty when no songs
+    # dir is configured ; entries fall back to the `[hash[:8]]` placeholder.
+    hash_to_chart = _build_chart_hash_lookup(progress=progress)
+    worker = partial(_parse_one_qr, hash_to_chart=hash_to_chart)
     out = []
     max_workers = min(32, (os.cpu_count() or 4) * 4)
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for i, res in enumerate(ex.map(_parse_one_qr, paths, chunksize=8)):
+        for i, res in enumerate(ex.map(worker, paths, chunksize=8)):
             if res is not None:
                 out.append(res)
             if progress and i % 200 == 0:
@@ -243,25 +245,56 @@ def _parse_qr_batch(paths, progress=None):
     return out
 
 
-def _parse_one_qr(p):
+def _build_chart_hash_lookup(progress=None):
+    """`md5 -> (chart_path_str, meta)` for every parseable .qua in the
+    user's songs dir. Empty when no songs dir is configured."""
+    songs_dir = _quaver_songs_dir()
+    if not songs_dir:
+        return {}
+    index = _build_chart_index(songs_dir, progress=progress)
+    return {md5: (path_str, meta)
+            for path_str, (_m, _s, md5, meta) in index.items()
+            if md5 and meta is not None}
+
+
+def _parse_one_qr(p, hash_to_chart=None):
     """Build a single library entry from a `.qr` header. The caller
     runs us in a worker pool, so this stays import-light and never
-    raises ; failed reads return None and get filtered out."""
+    raises ; failed reads return None and get filtered out.
+    `hash_to_chart` is `md5 -> (chart_path, meta)` ; when the replay's
+    map_md5 hits, song/steps/keycount/chart_path get filled inline."""
     from analysis.games.quaver.qr_replay import parse_qr_events
     try:
         keycount, _events, meta = parse_qr_events(str(p))
+        md5 = meta['map_md5']
+        hit = (hash_to_chart or {}).get(md5)
+        if hit is not None:
+            chart_path, chart_meta = hit
+            song = chart_meta['song']
+            steps = chart_meta['steps']
+            # Prefer the chart's creator over the replay's player_name for
+            # `pack`, matching how osu/etterna populate it (mapper / pack).
+            pack = chart_meta['creator'] or meta.get('player_name', '')
+            keycount_out = chart_meta['keycount'] or keycount
+        else:
+            chart_path = None
+            # Placeholder song label when no chart match; the prefix
+            # matches osu's "[<hash>]" convention so the generic
+            # `needs_enrichment` check (`song.startswith('[')`) works.
+            song = f"[{(md5 or '')[:8]}]"
+            steps = ''
+            pack = meta.get('player_name', '')
+            keycount_out = keycount
+
         return {
             'game': 'quaver',
             'replay_path': str(p),
-            'beatmap_hash': meta['map_md5'],
-            # Placeholder song label until enrichment finds the .qua;
-            # the prefix matches osu's "[<hash>]" convention so the
-            # generic `needs_enrichment` check (`song.startswith('[')`)
-            # works the same way.
-            'song': f"[{(meta['map_md5'] or '')[:8]}]",
-            'pack': meta.get('player_name', ''),
-            'steps': '',
-            'keycount': keycount,
+            'beatmap_hash': md5,
+            'song': song,
+            'pack': pack,
+            'steps': steps,
+            'keycount': keycount_out,
+            'chart_path': chart_path,
             'rate': meta.get('rate', 1.0),
             'mods': int(meta.get('mods', 0)),
             'wife': float(meta.get('accuracy', 0.0)) / 100.0,
@@ -378,48 +411,6 @@ def _build_chart_index(songs_dir, progress=None):
 
     _CHART_INDEX_CACHE.save(fresh)
     return fresh
-
-
-def _enrich_entries(entries, progress=None):
-    """Fill song/steps/pack/keycount/chart_path on Quaver entries from
-    the chart-hash index. Mirrors `analysis.games.osu.adapter._enrich_entries`."""
-    targets = {}
-    for e in entries:
-        if e.get('game') == 'quaver' and e.get('beatmap_hash'):
-            targets.setdefault(e['beatmap_hash'], []).append(e)
-    if not targets:
-        return
-    songs_dir = _quaver_songs_dir()
-    if not songs_dir:
-        return
-
-    index = _build_chart_index(songs_dir, progress=progress)
-    hash_to_entry = {}
-    for path_str, (_m, _s, md5, meta) in index.items():
-        if md5 and md5 in targets and meta is not None:
-            hash_to_entry[md5] = (path_str, meta)
-
-    matched_hashes = 0
-    matched_entries = 0
-    for md5, group in targets.items():
-        hit = hash_to_entry.get(md5)
-        if not hit:
-            continue
-        path_str, meta = hit
-        matched_hashes += 1
-        for e in group:
-            e['song'] = meta['song']
-            e['steps'] = meta['steps']
-            # The replay's `pack` field came from the player name ; once
-            # we know the chart's creator, prefer that for parity with
-            # how osu/etterna populate `pack` (mapper / pack name).
-            e['pack'] = meta['creator'] or e.get('pack', '')
-            e['keycount'] = meta['keycount']
-            e['chart_path'] = path_str
-            matched_entries += 1
-    if progress:
-        progress(f'quaver enrichment: {matched_hashes}/{len(targets)} charts '
-                 f'({matched_entries} replays)')
 
 
 # --- Quaver scroll mode -----------------------------------------------------

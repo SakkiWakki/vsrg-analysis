@@ -4,6 +4,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import numpy as np
+
 from analysis.core.cache import Cache
 from analysis.core.game import GameAdapter
 from analysis.player import scroll
@@ -722,6 +724,30 @@ class EtternaAdapter(GameAdapter):
         from analysis.viz.note_visualizer import etterna_windows
         j = judge or 'J4'
         return etterna_windows(j), 'noterow', 0.37
+
+    def populate_notes_model(self, replay, model) -> None:
+        _build_chart_extras(model, replay)
+
+
+def _build_chart_extras(m, replay):
+    """Copy Etterna chart-only streams (mines, lifts, fakes, rolls) from
+    the replay dict. The adapter populates these during prepare_replay_times
+    when a chart match was found; they're absent for osu."""
+    for key in ('mine', 'lift', 'fake'):
+        ts = replay.get(f'{key}_times')
+        cs = replay.get(f'{key}_cols')
+        if ts is not None and cs is not None:
+            setattr(m, f'{key}_times', np.asarray(ts, dtype=np.float64))
+            setattr(m, f'{key}_cols', np.asarray(cs, dtype=np.int32))
+        rs = replay.get(f'{key}_rows')
+        if rs is not None:
+            setattr(m, f'{key}_rows', np.asarray(rs, dtype=np.int64))
+        until = replay.get(f'{key}_until')
+        if until is not None:
+            setattr(m, f'{key}_until', np.asarray(until, dtype=np.float64))
+    roll_heads = replay.get('roll_heads')
+    if roll_heads:
+        m.roll_head_keys = set(roll_heads)
 
 
 # --- Etterna scroll modes ----------------------------------------------------

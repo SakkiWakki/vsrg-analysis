@@ -15,6 +15,32 @@ import pkgutil
 from pathlib import Path
 
 
+def _game_packages():
+    """Names of every package under `analysis.games/` (one per game).
+    Shared by GameAdapter and GuiAdapter discovery so adding a game means
+    one new directory, not two parallel scanners."""
+    import analysis.games as games_pkg
+    games_dir = Path(games_pkg.__file__).parent
+    return [info.name for info in pkgutil.iter_modules([str(games_dir)])
+            if info.ispkg]
+
+
+def _load_adapters(submodule: str, attr: str, base_cls) -> dict:
+    """Import `analysis.games.<pkg>.<submodule>` for each game package and
+    collect its `<attr>` attribute when it's an instance of `base_cls`.
+    Used by both the GameAdapter and GuiAdapter registries."""
+    out: dict = {}
+    for pkg in _game_packages():
+        try:
+            mod = importlib.import_module(f'analysis.games.{pkg}.{submodule}')
+        except ModuleNotFoundError:
+            continue
+        adapter = getattr(mod, attr, None)
+        if isinstance(adapter, base_cls):
+            out[adapter.name or pkg] = adapter
+    return out
+
+
 class GameAdapter:
     name: str = ''
 
@@ -161,6 +187,13 @@ class GameAdapter:
         ms-axis games override since 2400 ms is too narrow."""
         return 2400
 
+    def populate_notes_model(self, replay, model) -> None:
+        """Fill any per-game extras on the NotesModel beyond the shared
+        noterow/column/LN bookkeeping. osu pulls ghost-tap and miss-hold
+        spans off the replay; Etterna copies mines/lifts/fakes/rolls from
+        the matched chart. Default: nothing extra."""
+        return None
+
     def judgment_colors(self) -> dict:
         """RGB tuples for each judgment-window name this adapter produces.
         The renderer indexes into this by the label `judge()` returns, so a
@@ -194,18 +227,7 @@ def discover_games() -> None:
     if _discovered:
         return
     _discovered = True
-    import analysis.games as games_pkg
-    games_dir = Path(games_pkg.__file__).parent
-    for info in pkgutil.iter_modules([str(games_dir)]):
-        if not info.ispkg:
-            continue
-        try:
-            mod = importlib.import_module(f'analysis.games.{info.name}.adapter')
-        except ModuleNotFoundError:
-            continue
-        adapter = getattr(mod, 'ADAPTER', None)
-        if isinstance(adapter, GameAdapter):
-            _REGISTRY[adapter.name or info.name] = adapter
+    _REGISTRY.update(_load_adapters('adapter', 'ADAPTER', GameAdapter))
 
 
 def get(name: str) -> GameAdapter:

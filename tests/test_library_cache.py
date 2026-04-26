@@ -226,8 +226,8 @@ def test_osu_incremental_no_new_replays(tmp_path, monkeypatch):
     from analysis.games.osu import adapter as oa
     _patch_osu(monkeypatch, tmp_path / 'cache')
     monkeypatch.setattr(oa, '_osr_paths', lambda: [])
-    monkeypatch.setattr(oa, '_enrich_entries',
-                        lambda entries, progress=None: None)
+    monkeypatch.setattr(oa, '_build_chart_hash_lookup',
+                        lambda progress=None: {})
 
     a = oa.OsuAdapter()
     first = a.rebuild()
@@ -245,29 +245,30 @@ def test_osu_incremental_picks_up_new_replay(tmp_path, monkeypatch):
     # Stub replay paths: rebuild sees one, incremental sees two.
     state = {'paths': [Path('/fake/replay1.osr')]}
     monkeypatch.setattr(oa, '_osr_paths', lambda: list(state['paths']))
-    monkeypatch.setattr(oa, '_parse_osr_batch',
-                        lambda paths, progress=None: [
-                            {'game': 'osu',
-                             'replay_path': str(p),
-                             'beatmap_hash': f'h-{p.name}',
-                             'song': f'[placeholder-{p.name}]',
-                             'mtime': 0.0}
-                            for p in paths])
-    enrich_calls = []
-    monkeypatch.setattr(oa, '_enrich_entries',
-                        lambda entries, progress=None:
-                            enrich_calls.append(list(entries)))
+    parse_calls = []
+
+    def stub_parse(paths, progress=None):
+        parse_calls.append(list(paths))
+        return [{'game': 'osu',
+                 'replay_path': str(p),
+                 'beatmap_hash': f'h-{p.name}',
+                 'song': f'[placeholder-{p.name}]',
+                 'mtime': 0.0}
+                for p in paths]
+
+    monkeypatch.setattr(oa, '_parse_osr_batch', stub_parse)
 
     a = oa.OsuAdapter()
     a.rebuild()
     state['paths'].append(Path('/fake/replay2.osr'))
     merged = a.incremental_update()
     assert len(merged) == 2
-    # Enrichment should have been called on *just* the new entries the
-    # second time, not the full library.
-    assert len(enrich_calls) == 2
-    assert len(enrich_calls[1]) == 1
-    assert enrich_calls[1][0]['replay_path'].endswith('replay2.osr')
+    # Parse (which now does inline enrichment via the chart-hash lookup)
+    # should have been called on *just* the new entries the second time,
+    # not the full library.
+    assert len(parse_calls) == 2
+    assert len(parse_calls[1]) == 1
+    assert str(parse_calls[1][0]).endswith('replay2.osr')
 
 
 def test_osu_chart_index_reuses_cached_hashes(tmp_path, monkeypatch):
@@ -314,8 +315,8 @@ def test_rebuild_one_game_does_not_touch_other_game_cache(tmp_path, monkeypatch)
                              'replay_path': '/tmp/e.bin'}])
 
     monkeypatch.setattr(oa, '_osr_paths', lambda: [])
-    monkeypatch.setattr(oa, '_enrich_entries',
-                        lambda entries, progress=None: None)
+    monkeypatch.setattr(oa, '_build_chart_hash_lookup',
+                        lambda progress=None: {})
 
     oa.OsuAdapter().rebuild()
     # Etterna's cache file on disk must be untouched.

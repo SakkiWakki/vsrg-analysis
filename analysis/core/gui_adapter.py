@@ -9,9 +9,7 @@ Each game package is expected to expose `GUI_ADAPTER` (an instance of a
 """
 from __future__ import annotations
 
-import importlib
-import pkgutil
-from pathlib import Path
+from analysis.core.game import _load_adapters
 
 
 class GuiAdapter:
@@ -84,19 +82,7 @@ def discover_games() -> None:
     if _discovered:
         return
     _discovered = True
-    import analysis.games as games_pkg
-    games_dir = Path(games_pkg.__file__).parent
-    for info in pkgutil.iter_modules([str(games_dir)]):
-        if not info.ispkg:
-            continue
-        try:
-            mod = importlib.import_module(
-                f'analysis.games.{info.name}.gui_adapter')
-        except ModuleNotFoundError:
-            continue
-        adapter = getattr(mod, 'GUI_ADAPTER', None)
-        if isinstance(adapter, GuiAdapter):
-            _REGISTRY[adapter.name or info.name] = adapter
+    _REGISTRY.update(_load_adapters('gui_adapter', 'GUI_ADAPTER', GuiAdapter))
 
 
 def get(name: str) -> GuiAdapter:

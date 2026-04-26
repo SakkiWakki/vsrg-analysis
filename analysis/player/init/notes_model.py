@@ -102,20 +102,18 @@ class NotesModel:
 
 
 
-def build_notes_model(replay, times, hold_tails, game) -> NotesModel:
-    """Populate a NotesModel from a parsed replay. Ghost taps and miss
-    holds are osu-only; chart extras (mines/lifts/fakes/rolls) are
-    Etterna-only. Miss-to-hold linking happens later via link_miss_holds
-    once misses/offsets/miss_pressed are known."""
+def build_notes_model(replay, times, hold_tails, adapter) -> NotesModel:
+    """Populate a NotesModel from a parsed replay. The shared scaffolding
+    (per-note row/col arrays + LN tail times) is built here; per-game
+    extras (osu's ghost taps + miss-hold spans, Etterna's chart-only
+    mines/lifts/fakes/rolls) are filled by the adapter's
+    `populate_notes_model`. Miss-to-hold linking happens later via
+    `link_miss_holds` once misses/offsets/miss_pressed are known."""
     m = NotesModel()
     m.noterows_list = [int(r) for r in replay['noterows']]
     m.columns_list = [int(c) for c in replay['columns']]
     _build_ln_times(m, times, hold_tails)
-    if game == 'osu':
-        _build_ghost_taps(m, replay)
-        _build_miss_holds(m, replay)
-    else:
-        _build_chart_extras(m, replay)
+    adapter.populate_notes_model(replay, m)
     return m
 
 
@@ -128,58 +126,6 @@ def _build_ln_times(m, times, hold_tails):
         if end_t is not None:
             m.ln_tail_times[i] = end_t
             m.ln_indices.append(i)
-
-
-def _build_ghost_taps(m, replay):
-    """Populate ghost-tap arrays from replay['ghost_taps'] (osu only).
-    Ghost taps are raw key presses that missed every note window."""
-    raw = replay.get('ghost_taps') or []
-    if not raw:
-        return
-    ghost_ts = np.array([t / 1000.0 for t, _c in raw], dtype=np.float64)
-    ghost_cs = np.array([c for _t, c in raw], dtype=np.int32)
-    order = np.argsort(ghost_ts, kind='stable')
-    m.ghost_times = ghost_ts[order]
-    m.ghost_cols = ghost_cs[order]
-
-
-def _build_miss_holds(m, replay):
-    """Populate miss-hold span arrays from replay['miss_holds'] (osu only).
-    Each span is a key-hold that covered a missed LN from press to release.
-    Longest hold duration is cached for off-screen culling lookback."""
-    raw = replay.get('miss_holds') or []
-    if not raw:
-        return
-    heads, cols, presses, releases = zip(
-        *((lh, c, pt / 1000.0, rt / 1000.0) for lh, c, pt, rt in raw))
-    mh_press = np.array(presses, dtype=np.float64)
-    order = np.argsort(mh_press, kind='stable')
-    m.miss_hold_ln_heads_ms = np.array(heads, dtype=np.int64)[order]
-    m.miss_hold_press = mh_press[order]
-    m.miss_hold_release = np.array(releases, dtype=np.float64)[order]
-    m.miss_hold_cols = np.array(cols, dtype=np.int32)[order]
-    m.miss_hold_max_dur = float(np.max(m.miss_hold_release - m.miss_hold_press))
-
-
-def _build_chart_extras(m, replay):
-    """Copy Etterna chart-only streams (mines, lifts, fakes, rolls) from
-    the replay dict. The adapter populates these during prepare_replay_times
-    when a chart match was found; they're absent for osu."""
-    for key in ('mine', 'lift', 'fake'):
-        ts = replay.get(f'{key}_times')
-        cs = replay.get(f'{key}_cols')
-        if ts is not None and cs is not None:
-            setattr(m, f'{key}_times', np.asarray(ts, dtype=np.float64))
-            setattr(m, f'{key}_cols', np.asarray(cs, dtype=np.int32))
-        rs = replay.get(f'{key}_rows')
-        if rs is not None:
-            setattr(m, f'{key}_rows', np.asarray(rs, dtype=np.int64))
-        until = replay.get(f'{key}_until')
-        if until is not None:
-            setattr(m, f'{key}_until', np.asarray(until, dtype=np.float64))
-    roll_heads = replay.get('roll_heads')
-    if roll_heads:
-        m.roll_head_keys = set(roll_heads)
 
 
 

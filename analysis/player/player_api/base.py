@@ -64,7 +64,7 @@ class Player:
         )
         self._init_playback_state(skin=skin, press_hide=press_hide)
 
-        self.init_state.init_notes_model(replay, game)
+        self.init_state.init_notes_model(replay)
         self.max_draw_pad_sec = self._compute_max_draw_pad()
 
         self._init_sv(sv_sections, replay)

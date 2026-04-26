@@ -68,11 +68,11 @@ class PlayerInitState:
             for c in col_colors(p.keycount)
         ]
 
-    def init_notes_model(self, replay, game):
+    def init_notes_model(self, replay):
         from analysis.player.init.notes_model import build_notes_model, link_miss_holds
 
         p = self.p
-        p.notes = build_notes_model(replay, p.times, p.hold_tails, game)
+        p.notes = build_notes_model(replay, p.times, p.hold_tails, p._adapter)
         link_miss_holds(p.notes, p.offsets, p.misses, p.miss_pressed)
 
     def compute_max_draw_pad(self):

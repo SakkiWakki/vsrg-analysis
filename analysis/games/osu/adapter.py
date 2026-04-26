@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
+
 from analysis.core.cache import Cache
 from analysis.core.game import GameAdapter
 from analysis.player import scroll
@@ -134,7 +136,6 @@ class OsuAdapter(GameAdapter):
         _CHART_INDEX_CACHE.clear()
         paths = _osr_paths()
         entries = _parse_osr_batch(paths, progress=progress)
-        _enrich_entries(entries, progress=progress)
         # Same rationale as EtternaAdapter.rebuild: an empty result
         # typically means the replays dir isn't configured, not that
         # the user has zero replays. Leaving the cache absent means the
@@ -157,11 +158,6 @@ class OsuAdapter(GameAdapter):
         if progress:
             progress(f'osu: {len(new_paths)} new replay(s)…')
         new_entries = _parse_osr_batch(new_paths, progress=progress)
-        if new_entries:
-            # Warm chart index makes this near-instant on the common path
-            # (user played a chart that was already in the Songs folder).
-            _enrich_entries(new_entries, progress=progress)
-
         merged = cached + new_entries
         _LIBRARY_CACHE.save(merged)
         return merged
@@ -202,6 +198,41 @@ class OsuAdapter(GameAdapter):
     def viz_panel_units(self, replay) -> int:
         return 8000
 
+    def populate_notes_model(self, replay, model) -> None:
+        _build_ghost_taps(model, replay)
+        _build_miss_holds(model, replay)
+
+
+def _build_ghost_taps(m, replay):
+    """Populate ghost-tap arrays from replay['ghost_taps'] (osu only).
+    Ghost taps are raw key presses that missed every note window."""
+    raw = replay.get('ghost_taps') or []
+    if not raw:
+        return
+    ghost_ts = np.array([t / 1000.0 for t, _c in raw], dtype=np.float64)
+    ghost_cs = np.array([c for _t, c in raw], dtype=np.int32)
+    order = np.argsort(ghost_ts, kind='stable')
+    m.ghost_times = ghost_ts[order]
+    m.ghost_cols = ghost_cs[order]
+
+
+def _build_miss_holds(m, replay):
+    """Populate miss-hold span arrays from replay['miss_holds'] (osu only).
+    Each span is a key-hold that covered a missed LN from press to release.
+    Longest hold duration is cached for off-screen culling lookback."""
+    raw = replay.get('miss_holds') or []
+    if not raw:
+        return
+    heads, cols, presses, releases = zip(
+        *((lh, c, pt / 1000.0, rt / 1000.0) for lh, c, pt, rt in raw))
+    mh_press = np.array(presses, dtype=np.float64)
+    order = np.argsort(mh_press, kind='stable')
+    m.miss_hold_ln_heads_ms = np.array(heads, dtype=np.int64)[order]
+    m.miss_hold_press = mh_press[order]
+    m.miss_hold_release = np.array(releases, dtype=np.float64)[order]
+    m.miss_hold_cols = np.array(cols, dtype=np.int32)[order]
+    m.miss_hold_max_dur = float(np.max(m.miss_hold_release - m.miss_hold_press))
+
 
 def _osr_paths():
     from analysis.games.osu.replay import find_osu_dirs
@@ -215,17 +246,38 @@ def _osr_paths():
 def _parse_osr_batch(paths, progress=None):
     import os
     from concurrent.futures import ThreadPoolExecutor
+    from functools import partial
     if not paths:
         return []
+    # Build the chart-hash lookup once so each parse worker can stamp
+    # song/steps/keycount/chart_path inline. When the user has no songs
+    # dir configured, the lookup is empty and entries fall back to the
+    # `[hash[:8]]` placeholder.
+    hash_to_chart = _build_chart_hash_lookup(progress=progress)
+    worker = partial(_parse_one_osr, hash_to_chart=hash_to_chart)
     out = []
     max_workers = min(32, (os.cpu_count() or 4) * 4)
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for i, res in enumerate(ex.map(_parse_one_osr, paths, chunksize=8)):
+        for i, res in enumerate(ex.map(worker, paths, chunksize=8)):
             if res is not None:
                 out.append(res)
             if progress and i % 200 == 0:
                 progress(f'osu: parsed {i}/{len(paths)} replays…')
     return out
+
+
+def _build_chart_hash_lookup(progress=None):
+    """`md5 -> (chart_path_str, meta)` for every parseable .osu in the
+    user's songs dir. Empty when no songs dir is configured. Used by
+    `_parse_one_osr` to fill song metadata inline."""
+    from analysis.games.osu.replay import find_osu_dirs
+    songs_dir = find_osu_dirs().get('songs_dir')
+    if not songs_dir:
+        return {}
+    index = _build_chart_index(songs_dir, progress=progress)
+    return {md5: (path_str, meta)
+            for path_str, (_m, _s, md5, meta) in index.items()
+            if md5 and meta is not None}
 
 
 def _hash_chart(path):
@@ -304,48 +356,11 @@ def _build_chart_index(songs_dir, progress=None):
     return fresh
 
 
-def _enrich_entries(entries, progress=None):
-    """Fill song/steps/pack/keycount/chart_path in-place on osu entries,
-    using a persistent chart-hash index keyed on (path, mtime, size)."""
-    from analysis.games.osu.replay import find_osu_dirs
-    targets = {}
-    for e in entries:
-        if e.get('game') == 'osu' and e.get('beatmap_hash'):
-            targets.setdefault(e['beatmap_hash'], []).append(e)
-    if not targets:
-        return
-    songs_dir = find_osu_dirs().get('songs_dir')
-    if not songs_dir:
-        return
-
-    index = _build_chart_index(songs_dir, progress=progress)
-    hash_to_entry = {}
-    for path_str, (_m, _s, md5, meta) in index.items():
-        if md5 and md5 in targets and meta is not None:
-            hash_to_entry[md5] = (path_str, meta)
-
-    matched_hashes = 0
-    matched_entries = 0
-    for md5, group in targets.items():
-        hit = hash_to_entry.get(md5)
-        if not hit:
-            continue
-        path_str, meta = hit
-        matched_hashes += 1
-        for e in group:
-            e['song'] = meta['song']
-            e['steps'] = meta['steps']
-            e['pack'] = meta['creator'] or e.get('pack', '')
-            e['keycount'] = meta['keycount']
-            e['chart_path'] = path_str
-            matched_entries += 1
-    if progress:
-        progress(f'osu enrichment: {matched_hashes}/{len(targets)} charts '
-                 f'({matched_entries} replays)')
-
-
-def _parse_one_osr(p):
-    """Module-level helper so ThreadPoolExecutor can pickle the callable."""
+def _parse_one_osr(p, hash_to_chart=None):
+    """Module-level helper so ThreadPoolExecutor can pickle the callable.
+    `hash_to_chart` is `md5 -> (chart_path, meta)` ; when the replay's
+    beatmap_hash hits, the entry is filled with song/steps/keycount/
+    chart_path inline. Misses keep the `[hash[:8]]` placeholder."""
     import osrparse
     from analysis.games.osu.replay import rate_for_mods
     try:
@@ -366,13 +381,30 @@ def _parse_one_osr(p):
                    getattr(r, 'count_katu', 0) * 200 +
                    getattr(r, 'count_100', 0) * 100 +
                    getattr(r, 'count_50', 0) * 50) / (total * 300) * 100
+
+        hit = (hash_to_chart or {}).get(r.beatmap_hash)
+        if hit is not None:
+            chart_path, meta = hit
+            song = meta['song']
+            steps = meta['steps']
+            pack = meta['creator'] or r.username
+            keycount = meta['keycount']
+        else:
+            chart_path = None
+            song = f'[{r.beatmap_hash[:8]}]'
+            steps = ''
+            pack = r.username
+            keycount = None
+
         return {
             'game': 'osu',
             'replay_path': str(p),
             'beatmap_hash': r.beatmap_hash,
-            'song': f'[{r.beatmap_hash[:8]}]',
-            'pack': r.username,
-            'steps': '',
+            'song': song,
+            'pack': pack,
+            'steps': steps,
+            'keycount': keycount,
+            'chart_path': chart_path,
             'rate': rate,
             'mods': mods,
             'wife': acc / 100.0,
