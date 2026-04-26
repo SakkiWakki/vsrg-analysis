@@ -44,13 +44,21 @@ def _precompute_candidate_ys(ctx) -> None:
         return
     idx = np.asarray(cand, dtype=np.int64)
     head_times = p.times[idx]
-    ctx.candidate_head_y = p.batch_time_to_y(head_times, ctx.frame)
+    # Per-note groups: parallel to `p.times`, populated by Quaver
+    # replays only. Pass through to the SV engine so each note's
+    # `TimingGroup` selects the right SV stream. Other games leave the
+    # attr unset and the engine ignores it.
+    note_groups = getattr(p, '_note_sv_groups', None)
+    cand_groups = note_groups[idx] if note_groups is not None else None
+    ctx.candidate_head_y = p.batch_time_to_y(head_times, ctx.frame,
+                                              groups=cand_groups)
 
     # LN tails only ; for non-LN candidates the cached tail array holds
     # NaN, which the batched path happily propagates; `_build_note_view`
     # only reads tail_y when is_ln is True so those entries are ignored.
     tail_times = p.notes.ln_tail_times[idx]
-    ctx.candidate_tail_y = p.batch_time_to_y(tail_times, ctx.frame)
+    ctx.candidate_tail_y = p.batch_time_to_y(tail_times, ctx.frame,
+                                              groups=cand_groups)
 
     # Press-time y for the press-mark drawer. press_t = note_t + offset;
     # offsets is parallel to p.times so we can index it the same way.
@@ -59,7 +67,8 @@ def _precompute_candidate_ys(ctx) -> None:
     # `_draw_press_mark` skips them) but keeping the batch dense is much
     # faster than building a sub-array.
     press_times = head_times + p.offsets[idx]
-    ctx.candidate_press_y = p.batch_time_to_y(press_times, ctx.frame)
+    ctx.candidate_press_y = p.batch_time_to_y(press_times, ctx.frame,
+                                               groups=cand_groups)
 
 
 class QtPlayerRenderer:

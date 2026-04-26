@@ -129,7 +129,10 @@ class LibraryTab(QWidget):
 
         row.addWidget(QLabel('Game:'))
         self.game_cb = QComboBox()
-        self.game_cb.addItems(['all', 'etterna', 'osu'])
+        # Driven by the registered GameAdapter set so adding a new game
+        # (Quaver, etc.) doesn't require touching this widget.
+        from analysis.core import game as game_mod
+        self.game_cb.addItems(['all'] + sorted(game_mod.all_games().keys()))
         row.addWidget(self.game_cb)
 
         row.addWidget(QLabel('Sort:'))

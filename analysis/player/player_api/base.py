@@ -318,8 +318,8 @@ class Player:
     def _time_to_y(self, t, t_now, frame=None):
         return self.sv_render.time_to_y(t, t_now, frame)
 
-    def batch_time_to_y(self, times, frame):
-        return self.sv_render.batch_time_to_y(times, frame)
+    def batch_time_to_y(self, times, frame, groups=None):
+        return self.sv_render.batch_time_to_y(times, frame, groups=groups)
 
     def _reset_render_timeline(self):
         return self.sv_render.reset_render_timeline()

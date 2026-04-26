@@ -1,3 +1,5 @@
+TODO: Refactor game plugging and detection. Also standardized map format for mapkeeping
+
 # Games
 
 Each subdirectory here is a game the analyzer knows how to load replays

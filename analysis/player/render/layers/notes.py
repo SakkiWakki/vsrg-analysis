@@ -52,6 +52,60 @@ class _NoteView:
     state: str       # upcoming | tap | held | released | missed | missed_note
     note_color: tuple
     jcolor: tuple
+    # Quaver: tail sprite flips when SV at the LN's end_time is negative.
+    # Other games leave this False ; the renderer just skips the flip.
+    flip_tail: bool = False
+    # Quaver: under SV reversal an LN body covers a wider span than
+    # head->tail. `body_min_y` / `body_max_y` are screen-y bounds of the
+    # convex hull of cum positions over the LN's chart-time interval.
+    # NaN means "use the legacy head/tail span" (every non-LN, non-Quaver
+    # note, plus Quaver LNs whose SV doesn't reverse inside the body).
+    body_min_y: float = float('nan')
+    body_max_y: float = float('nan')
+
+
+def _ln_body_y_extent(ctx, i, p):
+    """Screen-y bounds of an LN body's convex-hull span in cum-space.
+
+    Quaver lets SV reverse inside an LN, so the body's visible extent is
+    the convex hull of cumulative positions over [t_head, t_end] -- not
+    just `[head_y, tail_y]`. The hull endpoints come from
+    `p._ln_body_min_cum[i]` / `_ln_body_max_cum[i]`, precomputed in the
+    note's own group's stream. Both are projected to screen-y with the
+    same per-frame transform `batch_time_to_y` uses, then ordered as
+    `(min_y, max_y)` -- which under a down-scroll renderer means
+    `(top_y, bot_y)`.
+
+    Returns `(NaN, NaN)` when no precomputed values exist (non-Quaver
+    games, or charts that don't reverse SV inside any LN); the caller
+    falls back to the head/tail span."""
+    body_min = getattr(p, '_ln_body_min_cum', None)
+    body_max = getattr(p, '_ln_body_max_cum', None)
+    if body_min is None or body_max is None:
+        return float('nan'), float('nan')
+    if i >= len(body_min) or not math.isfinite(body_min[i]):
+        return float('nan'), float('nan')
+    frame = ctx.frame
+    if not getattr(frame, 'use_sv', False):
+        return float('nan'), float('nan')
+    engine = p._sv_engine
+    groups = getattr(p, '_note_sv_groups', None)
+    if groups is not None and hasattr(engine, 'cumulative_at_groups'):
+        gid = str(groups[i])
+        playhead_cum = engine.cumulative_at_groups(
+            float(frame.raw_t), [gid])[0]
+        mult = engine.render_multiplier_at_groups(
+            float(frame.raw_t), [gid])[0]
+    else:
+        playhead_cum = float(frame.visual_cum_now)
+        mult = float(frame.render_multiplier)
+    judge_y = ctx.judge_y
+    scroll_speed = float(ctx.player.scroll_speed)
+    y_lo = judge_y - (float(body_min[i]) - playhead_cum) * mult * scroll_speed
+    y_hi = judge_y - (float(body_max[i]) - playhead_cum) * mult * scroll_speed
+    # `min_cum -> max_y` (further from playhead = lower y) when scroll
+    # is down. Order endpoints so caller gets `(top_y, bot_y)` semantics.
+    return min(y_lo, y_hi), max(y_lo, y_hi)
 
 
 def _classify(ctx, press_t, release_t, is_ln, miss) -> str:
@@ -91,6 +145,15 @@ def _build(ctx, i, pos) -> _NoteView | None:
     else:
         end_t = None
 
+    flip_tail = False
+    body_min_y = float('nan')
+    body_max_y = float('nan')
+    if is_ln:
+        ln_flip = getattr(p, '_ln_tail_flip', None)
+        if ln_flip is not None and i < len(ln_flip):
+            flip_tail = bool(ln_flip[i])
+        body_min_y, body_max_y = _ln_body_y_extent(ctx, i, p)
+
     return _NoteView(
         i=i, col=col,
         y=float(ctx.candidate_head_y[pos]), y_end=y_end,
@@ -105,6 +168,9 @@ def _build(ctx, i, pos) -> _NoteView | None:
         state=_classify(ctx, press_t, release_t, is_ln, p.misses[i]),
         note_color=p.palette[col],
         jcolor=p.judge_colors[p.note_judges[i]],
+        flip_tail=flip_tail,
+        body_min_y=body_min_y,
+        body_max_y=body_max_y,
     )
 
 
@@ -174,13 +240,30 @@ def _draw_ln(ctx, painter, n):
 
 def _ln_body_span(ctx, n, hide) -> tuple | None:
     """Return `(top_y, bot_y, sprite_state)` where sprite_state drives
-    the ln_body cache key. None means no body draws."""
+    the ln_body cache key. None means no body draws.
+
+    Quaver SV-reversing LNs override the head/tail bounds with the
+    precomputed convex-hull extent (`body_min_y`/`body_max_y`). The
+    hull already contains both head and tail, so we only swap it in for
+    the upcoming + held states ; the other states (missed, released)
+    extend toward the judge line and need the standard endpoints."""
+    use_hull = (math.isfinite(n.body_min_y) and math.isfinite(n.body_max_y)
+                and n.state in ('upcoming', 'held'))
     if n.state == 'missed':
         return n.y_end, n.y, 'miss_ln'
     match n.state:
         case 'upcoming':
+            if use_hull:
+                return n.body_min_y, n.body_max_y, 'normal'
             return n.y_end, n.y, 'normal'
         case 'held':
+            if use_hull:
+                # Held: the head has already passed the judge line, so
+                # the visible body starts at min(judge_y, body_max_y) on
+                # the bottom side. Hull's top still drives the upper
+                # bound.
+                bot = ctx.judge_y if hide else max(n.body_max_y, ctx.judge_y)
+                return n.body_min_y, bot, 'normal'
             return n.y_end, (ctx.judge_y if hide else n.y), 'normal'
         case 'released' if not hide:
             return n.y_end, ctx.judge_y, 'released'
@@ -201,8 +284,21 @@ def _draw_ln_tail_sprite(ctx, painter, n):
     from PySide6.QtCore import QPointF
     state = _tail_state(n)
     pm = ctx.sprite_cache.get('ln_tail', ctx, col=n.col, state=state)
-    painter.drawPixmap(
-        QPointF(float(n.lx), float(n.y_end - pm.height() / 2)), pm)
+    if n.flip_tail:
+        # Quaver tails flip vertically when the SV at end_time is
+        # negative (the LN is being drawn pointing the other way).
+        # Mirror around the tail's centerline by translating down then
+        # scaling Y by -1, draw, restore.
+        painter.save()
+        cx = float(n.lx)
+        cy = float(n.y_end)
+        painter.translate(cx, cy)
+        painter.scale(1.0, -1.0)
+        painter.drawPixmap(QPointF(0.0, -pm.height() / 2), pm)
+        painter.restore()
+    else:
+        painter.drawPixmap(
+            QPointF(float(n.lx), float(n.y_end - pm.height() / 2)), pm)
 
 
 def _tail_state(n) -> str:

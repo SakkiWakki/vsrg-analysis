@@ -49,6 +49,10 @@ class PlayerInitState:
             replay.get('miss_pressed'),
             len(p.misses),
         )
+        # Per-note SV group ids (Quaver TimingGroups, parallel to
+        # `p.times`). Other games leave it None ; the SV engine and
+        # batch-y pipeline both treat None as "every note uses default".
+        p._note_sv_groups = replay.get('_quaver_note_groups')
 
     def init_judge(self, od, ett_judge):
         p = self.p

@@ -8,6 +8,13 @@ from analysis.player import scroll as scroll_registry
 from analysis.player.sv.debug import LOGGER as _SV_DEBUG_LOGGER
 
 
+def _engine_supports_groups(engine):
+    """True when the engine's `project_times` accepts a per-element
+    `groups=` array. Currently only Quaver's ; everything else uses the
+    legacy single-stream signature."""
+    return type(engine).__name__ == 'QuaverSVEngine'
+
+
 class SvRenderController:
     def __init__(self, player):
         self.p = player
@@ -61,6 +68,64 @@ class SvRenderController:
 
         registry = SVEngineRegistry()
 
+        # --- Quaver-style replay: time-space SV with signed cumulative.
+        # Detected by `_quaver_sv_sections` on the replay; `initial_velocity`
+        # comes from the chart's `InitialScrollVelocity` field (default 1.0).
+        # Checked BEFORE the osu branch because Quaver replays carry
+        # `_osu_bpms` too (for the cross-engine etterna view), and that
+        # field would otherwise route them through the osu path.
+        quaver_sections = replay.get('_quaver_sv_sections')
+        if quaver_sections is not None:
+            sections = list(quaver_sections)
+            initial_v = float(replay.get('_quaver_initial_velocity', 1.0))
+            quaver_bpms = list(replay.get('_osu_bpms') or [])
+            # Per-group SV streams: `$Default` plus one per Quaver
+            # TimingGroup. When omitted, every note routes through the
+            # default stream -- back-compat with charts that don't use
+            # TimingGroups.
+            quaver_groups = replay.get('_quaver_groups')
+
+            def make_quaver_time():
+                if not sections and abs(initial_v - 1.0) < 1e-12 \
+                        and not quaver_groups:
+                    return IdentitySVEngine()
+                kwargs = {'groups': quaver_groups} if quaver_groups else {}
+                return QuaverSVEngine(sections, initial_velocity=initial_v,
+                                       **kwargs)
+
+            registry.register(KEY_QUAVER_TIME,
+                              ENGINE_LABELS[KEY_QUAVER_TIME],
+                              make_quaver_time, native=True, eager=True)
+
+            # Cross-engine osu (time): same time-space integrator without
+            # the InitialScrollVelocity / signed-cum semantics. Lossy when
+            # the chart uses negative SV but useful as an A/B view.
+            def make_osu_time_from_quaver():
+                if not sections:
+                    return IdentitySVEngine()
+                return time_space_engine(sections)
+
+            registry.register(KEY_OSU_TIME, ENGINE_LABELS[KEY_OSU_TIME],
+                              make_osu_time_from_quaver)
+
+            # Cross-engine beat-space using the chart's BPM map (same
+            # projection the osu branch uses below). Available when the
+            # parser populated `_osu_bpms` ; otherwise the slot is omitted
+            # and the Etterna view stays unselectable for that chart.
+            if quaver_bpms:
+                def make_etterna_beat():
+                    return beat_space_engine(
+                        scrolls=[], speeds=[], bpms=quaver_bpms,
+                        sm_offset=0.0,
+                    )
+                registry.register(KEY_ETTERNA_BEAT,
+                                  ENGINE_LABELS[KEY_ETTERNA_BEAT],
+                                  make_etterna_beat)
+
+            registry.register(KEY_IDENTITY, ENGINE_LABELS[KEY_IDENTITY],
+                              IdentitySVEngine)
+            return registry
+
         # --- osu-style replay: detect by the presence of replay['sv_sections']
         # or the BPM-map projection; the `sv_sections` argument is a legacy
         # explicit override and may be None even on real osu charts.
@@ -98,37 +163,6 @@ class SvRenderController:
                                   ENGINE_LABELS[KEY_ETTERNA_BEAT],
                                   make_etterna_beat)
 
-            registry.register(KEY_IDENTITY, ENGINE_LABELS[KEY_IDENTITY],
-                              IdentitySVEngine)
-            return registry
-
-        # --- Quaver-style replay: time-space SV with signed cumulative.
-        # Detected by `_quaver_sv_sections` on the replay; `initial_velocity`
-        # comes from the chart's `InitialScrollVelocity` field (default 1.0).
-        quaver_sections = replay.get('_quaver_sv_sections')
-        if quaver_sections is not None:
-            sections = list(quaver_sections)
-            initial_v = float(replay.get('_quaver_initial_velocity', 1.0))
-
-            def make_quaver_time():
-                if not sections and abs(initial_v - 1.0) < 1e-12:
-                    return IdentitySVEngine()
-                return QuaverSVEngine(sections, initial_velocity=initial_v)
-
-            registry.register(KEY_QUAVER_TIME,
-                              ENGINE_LABELS[KEY_QUAVER_TIME],
-                              make_quaver_time, native=True, eager=True)
-
-            # Cross-engine osu (time): same time-space integrator without
-            # the InitialScrollVelocity / signed-cum semantics. Lossy when
-            # the chart uses negative SV but useful as an A/B view.
-            def make_osu_time_from_quaver():
-                if not sections:
-                    return IdentitySVEngine()
-                return time_space_engine(sections)
-
-            registry.register(KEY_OSU_TIME, ENGINE_LABELS[KEY_OSU_TIME],
-                              make_osu_time_from_quaver)
             registry.register(KEY_IDENTITY, ENGINE_LABELS[KEY_IDENTITY],
                               IdentitySVEngine)
             return registry
@@ -201,10 +235,59 @@ class SvRenderController:
         return self.p._sv_engine.as_sections()
 
     def build_cumulative_sv(self):
-        self.p._note_sv_cum = self.p._sv_engine.project_times(self.p.times)
+        p = self.p
+        # Cull-space cumulative is built against the default stream
+        # (Quaver: `$Default`) rather than each note's own group, so all
+        # notes share one comparable cum-axis for the window bisect. Per-
+        # note groups still drive the per-frame y-projection in
+        # `batch_time_to_y`, so visual positions stay correct ; this just
+        # means culling is slightly over-conservative when a group's
+        # render multiplier diverges from the default.
+        p._note_sv_cum = p._sv_engine.project_times(p.times)
+        if _engine_supports_groups(p._sv_engine):
+            self._build_quaver_ln_caches()
 
-    def times_to_sv(self, times):
-        return self.p._sv_engine.project_times(np.asarray(times))
+    def _build_quaver_ln_caches(self):
+        """Per-LN auxiliary arrays Quaver needs for correct rendering
+        under SV reversals: (a) `_ln_tail_flip[i]` -> True when the tail
+        sprite should be drawn upside down (Quaver's `ShouldFlipLongNoteEnd`),
+        (b) `_ln_body_min_cum[i]` / `_ln_body_max_cum[i]` -> the convex
+        hull of cumulative positions over the LN's chart-time interval
+        in its own group's stream. Both default to NaN/False for taps."""
+        p = self.p
+        n = len(p.times)
+        flip = np.zeros(n, dtype=bool)
+        body_min = np.full(n, np.nan, dtype=np.float64)
+        body_max = np.full(n, np.nan, dtype=np.float64)
+        groups = getattr(p, '_note_sv_groups', None)
+        ln_tail_times = getattr(getattr(p, 'notes', None),
+                                 'ln_tail_times', None)
+        if ln_tail_times is None:
+            p._ln_tail_flip = flip
+            p._ln_body_min_cum = body_min
+            p._ln_body_max_cum = body_max
+            return
+        engine = p._sv_engine
+        for i in range(n):
+            end_t = float(ln_tail_times[i])
+            if not np.isfinite(end_t):
+                continue
+            gid = groups[i] if groups is not None else None
+            head_t = float(p.times[i])
+            flip[i] = engine.is_sv_negative_at(end_t, group_id=gid)
+            lo, hi = engine.body_extent(head_t, end_t, group_id=gid)
+            body_min[i] = lo
+            body_max[i] = hi
+        p._ln_tail_flip = flip
+        p._ln_body_min_cum = body_min
+        p._ln_body_max_cum = body_max
+
+    def times_to_sv(self, times, groups=None):
+        engine = self.p._sv_engine
+        arr = np.asarray(times)
+        if groups is not None and _engine_supports_groups(engine):
+            return engine.project_times(arr, groups=groups)
+        return engine.project_times(arr)
 
     def build_ghost_sv_caches(self):
         p = self.p
@@ -369,7 +452,18 @@ class SvRenderController:
 
         return judge_y - self.visual_sv_distance_from_frame(frame, t) * p.scroll_speed
 
-    def batch_time_to_y(self, times, frame):
+    def batch_time_to_y(self, times, frame, groups=None):
+        """Project an array of chart-times to screen-y at `frame`. The
+        optional `groups` array (parallel to `times`) routes each entry
+        through its Quaver TimingGroup ; everything else uses the
+        engine's default stream.
+
+        Per-note groups need a per-group playhead cum: a note's offset
+        from the playhead is `note_pos - playhead_pos_in_same_group`,
+        not `note_pos - playhead_pos_in_default_group`. Mixing the two
+        produces order-of-magnitude wrong y for any group whose stream
+        diverges from the default's (e.g. Quaver charts with negative
+        SV in some groups but not others)."""
         p = self.p
         arr = np.asarray(times, dtype=np.float64)
 
@@ -382,11 +476,30 @@ class SvRenderController:
         if not getattr(frame, 'use_sv', False):
             dist = arr - float(frame.raw_t)
         else:
-            cum = p._sv_engine.project_times(arr)
-            dist = (
-                (cum - float(frame.visual_cum_now))
-                * float(frame.render_multiplier)
-            )
+            engine = p._sv_engine
+            if groups is not None and _engine_supports_groups(engine) \
+                    and hasattr(engine, 'cumulative_at_groups'):
+                cum = engine.project_times(arr, groups=groups)
+                # Per-note playhead cum, evaluated in each note's own
+                # stream -- matches Quaver's `GetSpritePosition`.
+                playhead_cum = engine.cumulative_at_groups(
+                    float(frame.raw_t), groups)
+                # Per-note SSF zoom in the same group's stream
+                # (DESIGN.tex z(tau)). Falls back to frame's scalar
+                # render_multiplier when the engine doesn't know about
+                # per-group SSF.
+                if hasattr(engine, 'render_multiplier_at_groups'):
+                    mult = engine.render_multiplier_at_groups(
+                        float(frame.raw_t), groups)
+                else:
+                    mult = float(frame.render_multiplier)
+                dist = (cum - playhead_cum) * mult
+            else:
+                cum = engine.project_times(arr)
+                dist = (
+                    (cum - float(frame.visual_cum_now))
+                    * float(frame.render_multiplier)
+                )
 
         return judge_y - dist * scroll_speed
 

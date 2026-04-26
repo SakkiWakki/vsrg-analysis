@@ -116,8 +116,14 @@ class SVEngine(Protocol):
 # ----------------------------------------------------------------------
 
 
-class QuaverSVEngine:
-    """Quaver-style time-space SV with signed cumulative.
+class _QuaverStream:
+    """One Quaver SV stream: piecewise-constant time-space multiplier
+    with a separate `initial_velocity` for the pre-first-section pad.
+
+    Holds the integration state (`_times` / `_values` / `_cum`) plus all
+    the bisect math. `QuaverSVEngine` owns one stream per timing group
+    and dispatches single-time queries to the default group's stream;
+    batch queries can pick a different stream per element.
 
     sections: list[(start_time_sec, multiplier)] sorted by start_time
     initial_velocity: multiplier active for `t < sections[0].start_time`
@@ -129,7 +135,8 @@ class QuaverSVEngine:
     cumulative_monotonic = False
 
     def __init__(self, sections: list[tuple[float, float]],
-                 initial_velocity: float = 1.0):
+                 initial_velocity: float = 1.0,
+                 ssf: list[tuple[float, float]] | None = None):
         self._sections = list(sections)
         self._initial = float(initial_velocity)
         self._times = np.array([s[0] for s in self._sections], dtype=np.float64)
@@ -149,9 +156,62 @@ class QuaverSVEngine:
             for i in range(1, n):
                 dt = self._times[i] - self._times[i - 1]
                 self._cum[i] = self._cum[i - 1] + dt * float(self._values[i - 1])
+        # ScrollSpeedFactor: the playhead's render multiplier under
+        # Quaver's `CurrentScrollSpeedFactor`. Linearly lerped between
+        # adjacent entries; held flat past the last entry. In DESIGN.tex
+        # terms this is z(tau) -- the position-dependent zoom applied
+        # outside the integral.
+        self._ssf = list(ssf or [])
+        self._ssf_times = np.array([s[0] for s in self._ssf], dtype=np.float64)
+        self._ssf_mults = np.array([s[1] for s in self._ssf], dtype=np.float64)
         # The engine is "active" if it changes anything from identity:
-        # any sections at all, or a non-1 initial velocity.
-        self.enabled = bool(self._sections) or abs(self._initial - 1.0) > 1e-12
+        # any sections at all, or a non-1 initial velocity, or any SSF.
+        self.enabled = (bool(self._sections)
+                        or abs(self._initial - 1.0) > 1e-12
+                        or bool(self._ssf))
+
+    def is_sv_negative_at(self, t: float) -> bool:
+        """True when the playfield is scrolling backward at chart-time t.
+        Mirrors Quaver's `ScrollGroupController.IsSVNegative`: walk back
+        from the section index just before t to find the most recent
+        non-zero multiplier; if none, fall back to InitialScrollVelocity."""
+        if not self._sections:
+            return bool(self._initial < 0.0)
+        idx = int(np.searchsorted(self._times, t, side='right')) - 1
+        while idx >= 0 and self._values[idx] == 0.0:
+            idx -= 1
+        if idx < 0:
+            return bool(self._initial < 0.0)
+        return bool(self._values[idx] < 0.0)
+
+    def sign_change_times(self, t_lo: float, t_hi: float) -> np.ndarray:
+        """Section start times in (t_lo, t_hi] where the multiplier sign
+        flips relative to the previous non-zero multiplier. Used by LN
+        body sizing -- C(t) is piecewise-linear, so its extrema on
+        [t_lo, t_hi] live at the endpoints union these sign-change times."""
+        if not self._sections or t_hi <= t_lo:
+            return np.zeros(0, dtype=np.float64)
+        lo = int(np.searchsorted(self._times, t_lo, side='right'))
+        hi = int(np.searchsorted(self._times, t_hi, side='right'))
+        if lo >= hi:
+            return np.zeros(0, dtype=np.float64)
+        # Determine the active sign at t_lo so we can detect a flip on
+        # the first kept section.
+        prev_idx = lo - 1
+        while prev_idx >= 0 and self._values[prev_idx] == 0.0:
+            prev_idx -= 1
+        prev_pos = (self._values[prev_idx] > 0.0) if prev_idx >= 0 \
+            else (self._initial > 0.0)
+        out = []
+        for i in range(lo, hi):
+            v = self._values[i]
+            if v == 0.0:
+                continue
+            cur_pos = v > 0.0
+            if cur_pos != prev_pos:
+                out.append(float(self._times[i]))
+                prev_pos = cur_pos
+        return np.asarray(out, dtype=np.float64)
 
     def cumulative_at(self, t: float) -> float:
         if not self._sections:
@@ -241,8 +301,198 @@ class QuaverSVEngine:
         return out
 
     def render_multiplier_at(self, t: float) -> float:
-        del t
-        return 1.0
+        """Linear-eased ScrollSpeedFactor at time t. Returns 1.0 when no
+        SSF is configured (back-compat with all charts that don't use
+        the feature)."""
+        if not self._ssf:
+            return 1.0
+        idx = int(np.searchsorted(self._ssf_times, t, side='right')) - 1
+        if idx < 0:
+            return float(self._ssf_mults[0])
+        if idx >= len(self._ssf_mults) - 1:
+            return float(self._ssf_mults[-1])
+        # Lerp toward the next entry. Matches Quaver's
+        # `EasingFunctions.Linear(sf.Multiplier, nextSf.Multiplier, ...)`.
+        t0 = float(self._ssf_times[idx])
+        t1 = float(self._ssf_times[idx + 1])
+        m0 = float(self._ssf_mults[idx])
+        m1 = float(self._ssf_mults[idx + 1])
+        if t1 == t0:
+            return m1
+        return m0 + (m1 - m0) * ((float(t) - t0) / (t1 - t0))
+
+    def max_visible_t_from(self, song_t: float) -> float:
+        del song_t
+        return float('inf')
+
+    def breakpoints(self) -> np.ndarray:
+        return self._times.copy()
+
+
+class QuaverSVEngine:
+    """Public Quaver SV engine.
+
+    With no `groups` kwarg it behaves exactly like the original single-
+    stream engine: every query routes to one `_QuaverStream` built from
+    `sections` + `initial_velocity`. With `groups` provided it holds one
+    stream per timing group and dispatches batch queries per-note via
+    each note's group id.
+
+    Single-time methods (`cumulative_at`, `cumulative_velocity_at`,
+    `inverse_cumulative_at`, `render_multiplier_at`) always read the
+    default stream -- the playhead clock is group-agnostic.
+
+    groups: optional `{group_id: {'sections', 'initial_velocity'}}`.
+            If present, must contain `default_group_id` (errors out at
+            init if it doesn't, since downstream code unconditionally
+            asks for it).
+    """
+
+    cumulative_monotonic = False
+
+    def __init__(self, sections: list[tuple[float, float]],
+                 initial_velocity: float = 1.0,
+                 *,
+                 groups: dict | None = None,
+                 default_group_id: str = '$Default'):
+        self._default_id = default_group_id
+        if groups:
+            if default_group_id not in groups:
+                raise ValueError(
+                    f'groups missing default {default_group_id!r}; '
+                    f'have {sorted(groups.keys())!r}')
+            self._streams = {
+                gid: _QuaverStream(
+                    g['sections'],
+                    initial_velocity=g.get('initial_velocity', 1.0),
+                    ssf=g.get('ssf'))
+                for gid, g in groups.items()
+            }
+        else:
+            self._streams = {
+                default_group_id: _QuaverStream(sections,
+                                                 initial_velocity=initial_velocity),
+            }
+        self._default_stream = self._streams[default_group_id]
+        self.enabled = any(s.enabled for s in self._streams.values())
+
+    # ---- single-time queries (default stream) ----
+
+    def cumulative_at(self, t: float) -> float:
+        return self._default_stream.cumulative_at(t)
+
+    def cumulative_at_groups(self, t: float, group_ids) -> np.ndarray:
+        """Per-group playhead cumulative. Returns an array parallel to
+        `group_ids` where each entry is `group_stream.cumulative_at(t)`.
+        Used by `batch_time_to_y` to subtract each note's playhead-cum
+        in the same stream the note's own cum was computed in -- matches
+        Quaver's `GetSpritePosition` where the per-note offset is
+        `(note_pos - TimingGroupController.CurrentTrackPosition)` under
+        the note's *own* group's controller."""
+        out = np.empty(len(group_ids), dtype=np.float64)
+        # Bucket by unique group so we evaluate each stream once.
+        gids = np.asarray(group_ids)
+        for gid in np.unique(gids):
+            mask = gids == gid
+            stream = self._streams.get(str(gid)) or self._default_stream
+            out[mask] = stream.cumulative_at(t)
+        return out
+
+    def cumulative_velocity_at(self, t: float) -> float:
+        return self._default_stream.cumulative_velocity_at(t)
+
+    def is_sv_negative_at(self, t: float, group_id: str | None = None) -> bool:
+        """Per-group SV-direction probe. Defaults to the default stream
+        when `group_id` is omitted (matches the playhead). The renderer
+        passes a per-LN group id to flip tail sprites in that group's
+        local direction."""
+        stream = self._streams.get(group_id) if group_id else None
+        return (stream or self._default_stream).is_sv_negative_at(t)
+
+    def body_extent(self, t_head: float, t_end: float,
+                    group_id: str | None = None) -> tuple[float, float]:
+        """`(min_cum, max_cum)` covering chart-time interval
+        [t_head, t_end] in this LN's group's cumulative space. Used by
+        LN body sizing under SV reversal: C is piecewise-linear, so its
+        extrema on the interval are at endpoints union sign-change
+        breakpoints (DESIGN.tex Prop 6.1)."""
+        stream = (self._streams.get(group_id)
+                  if group_id else None) or self._default_stream
+        c_head = stream.cumulative_at(t_head)
+        c_end = stream.cumulative_at(t_end)
+        lo = min(c_head, c_end)
+        hi = max(c_head, c_end)
+        for tc in stream.sign_change_times(t_head, t_end):
+            cv = stream.cumulative_at(tc)
+            if cv < lo:
+                lo = cv
+            elif cv > hi:
+                hi = cv
+        return (lo, hi)
+
+    def inverse_cumulative_at(self, sv: float) -> float:
+        return self._default_stream.inverse_cumulative_at(sv)
+
+    def distance(self, t_from: float, t_to: float) -> float:
+        return self._default_stream.distance(t_from, t_to)
+
+    def render_multiplier_at(self, t: float) -> float:
+        return self._default_stream.render_multiplier_at(t)
+
+    def render_multiplier_at_groups(self, t: float, group_ids) -> np.ndarray:
+        """Per-group SSF zoom at time `t`. Bucketed by unique group so
+        each stream is queried once per call."""
+        out = np.empty(len(group_ids), dtype=np.float64)
+        gids = np.asarray(group_ids)
+        for gid in np.unique(gids):
+            mask = gids == gid
+            stream = self._streams.get(str(gid)) or self._default_stream
+            out[mask] = stream.render_multiplier_at(t)
+        return out
+
+    def max_visible_t_from(self, song_t: float) -> float:
+        return self._default_stream.max_visible_t_from(song_t)
+
+    # ---- batch queries (optionally per-note groups) ----
+
+    def project_times(self, times: np.ndarray,
+                      groups: np.ndarray | list | None = None) -> np.ndarray:
+        """Cumulative-space projection of `times`. With `groups` omitted
+        every entry uses the default stream -- back-compat with all
+        existing callers. With `groups` provided (parallel array of
+        group ids), each entry routes through its note's stream.
+
+        Per-group bisection: we sort indices by group, batch each
+        group's slice through `_QuaverStream.project_times`, then
+        scatter the results back. One numpy searchsorted per group, no
+        Python-level loop over notes."""
+        t = np.asarray(times, dtype=np.float64)
+        if not t.size:
+            return np.empty(0, dtype=np.float64)
+        if groups is None or len(self._streams) == 1:
+            return self._default_stream.project_times(t)
+        out = np.empty_like(t)
+        groups = np.asarray(groups)
+        # Per-group bucket dispatch. `np.unique` returns groups in sorted
+        # order; for each, we pull the matching slice and project once.
+        for gid in np.unique(groups):
+            mask = groups == gid
+            stream = self._streams.get(str(gid)) or self._default_stream
+            out[mask] = stream.project_times(t[mask])
+        return out
+
+    def as_sections(self) -> list[tuple[float, float]]:
+        return self._default_stream.as_sections()
+
+    def breakpoints(self) -> np.ndarray:
+        # Union of every group's break times: the predictor needs to
+        # split extrapolation across any boundary that any note's stream
+        # might cross.
+        if len(self._streams) == 1:
+            return self._default_stream.breakpoints()
+        all_bps = [s.breakpoints() for s in self._streams.values()]
+        return np.unique(np.concatenate(all_bps)) if all_bps \
+            else np.zeros(0, dtype=np.float64)
 
     def debug_snapshot_at(self, t: float) -> dict:
         t = float(t)
@@ -250,16 +500,11 @@ class QuaverSVEngine:
             'engine': 'quaver',
             't': t,
             'cumulative': self.cumulative_at(t),
-            'render_multiplier': 1.0,
+            'render_multiplier': self.render_multiplier_at(t),
             'cumulative_velocity': self.cumulative_velocity_at(t),
-            'initial_velocity': self._initial,
+            'initial_velocity': self._default_stream._initial,
+            'groups': len(self._streams),
         }
-
-    def max_visible_t_from(self, song_t: float) -> float:
-        return float('inf')
-
-    def breakpoints(self) -> np.ndarray:
-        return self._times.copy()
 
 
 # ----------------------------------------------------------------------

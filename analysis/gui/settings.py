@@ -49,6 +49,7 @@ def get_settings():
 ETTERNA_ROOT_KEY = 'paths/etterna_root'
 OSU_ROOT_KEY = 'paths/osu_root'
 OSU_PROFILE_KEY = 'paths/osu_profile'
+QUAVER_ROOT_KEY = 'paths/quaver_root'
 FIRST_RUN_KEY = 'paths/first_run_done'
 
 def _str_or_none(v):
@@ -108,6 +109,19 @@ def set_osu_profile_override(name):
         s.setValue(OSU_PROFILE_KEY, p)
 
 
+def get_quaver_root_override():
+    return _str_or_none(get_settings().value(QUAVER_ROOT_KEY))
+
+
+def set_quaver_root_override(path):
+    s = get_settings()
+    p = _str_or_none(path)
+    if p is None:
+        s.remove(QUAVER_ROOT_KEY)
+    else:
+        s.setValue(QUAVER_ROOT_KEY, p)
+
+
 # Back-compat shims ; migrate.py and any external callers still refer to these
 # names. They now return/accept install roots, which is what callers want
 # anyway (migrate.py just echoes the value into the config tree).
@@ -135,6 +149,11 @@ def validate_etterna_root(path):
 def validate_osu_root(path):
     from analysis.core import gui_adapter as gui_mod
     return gui_mod.get('osu').validate_root(path)
+
+
+def validate_quaver_root(path):
+    from analysis.core import gui_adapter as gui_mod
+    return gui_mod.get('quaver').validate_root(path)
 
 
 validate_etterna_save = validate_etterna_root
