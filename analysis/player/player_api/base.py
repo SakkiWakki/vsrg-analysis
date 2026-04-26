@@ -23,7 +23,6 @@ class Player:
         window_w=900,
         window_h=900,
         headless=False,
-        sv_sections=None,
         scroll_ms=400.0,
         scroll_mode=None,
         cmod_bpm=600.0,
@@ -67,7 +66,7 @@ class Player:
         self.init_state.init_notes_model(replay)
         self.max_draw_pad_sec = self._compute_max_draw_pad()
 
-        self._init_sv(sv_sections, replay)
+        self._init_sv(replay)
         self._build_cumulative_sv()
         self._build_ghost_sv_caches()
 
@@ -281,8 +280,8 @@ class Player:
 
     # ---------- SV / render projection ----------
 
-    def _init_sv(self, sv_sections, replay):
-        return self.sv_render.init(sv_sections, replay)
+    def _init_sv(self, replay):
+        return self.sv_render.init(replay)
 
     @property
     def sv_sections(self):

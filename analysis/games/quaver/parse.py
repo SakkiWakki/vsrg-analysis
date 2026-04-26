@@ -39,6 +39,7 @@ def parse_replay(qr_path, qua_path=None, songs_dir=None, judge='Standard'):
     note_group_map = {(int(h['time']), int(h['column'])): h['group']
                       for h in chart['hitobjects']}
     arrays = _build_arrays(sim, note_group_map)
+    note_groups = arrays.pop('_quaver_note_groups')
     bpms = _quaver_bpms_to_beat_space(chart['timing_points'])
     sv_doc = SvReplayDoc(
         engine_kind=KIND_TIME_SPACE,
@@ -47,7 +48,7 @@ def parse_replay(qr_path, qua_path=None, songs_dir=None, judge='Standard'):
         initial_velocity=float(chart['initial_velocity']),
         groups=chart['groups'],
         bpms=bpms,
-        note_groups=arrays['_quaver_note_groups'],
+        note_groups=note_groups,
         flags={'legacy_ln': bool(chart.get('legacy_ln_rendering', False))},
     )
     return {
@@ -62,14 +63,6 @@ def parse_replay(qr_path, qua_path=None, songs_dir=None, judge='Standard'):
                        for k in ('title', 'artist', 'creator', 'version',
                                  'keycount')},
         '_quaver_audio_file': chart.get('audio', ''),
-        # --- legacy SV keys (dual-write, phase 1 of the SV-doc port) ---
-        # Kept until SvRenderController._build_registry switches to read
-        # `replay['sv']` ; once it does, these go away in one sweep.
-        '_quaver_sv_sections': chart['sv_sections'],
-        '_quaver_initial_velocity': chart['initial_velocity'],
-        '_quaver_groups': chart['groups'],
-        '_quaver_legacy_ln': chart.get('legacy_ln_rendering', False),
-        '_osu_bpms': bpms,
         'judge': judge,
         'mods': int(meta.get('mods', 0)),
     }

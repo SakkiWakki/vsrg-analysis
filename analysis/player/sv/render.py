@@ -12,7 +12,7 @@ class SvRenderController:
     def __init__(self, player):
         self.p = player
 
-    def init(self, sv_sections, replay):
+    def init(self, replay):
         from analysis.player.playback.timeline import RenderTimeline
 
         p = self.p
@@ -21,7 +21,7 @@ class SvRenderController:
         # the native slot is eagerly instantiated to drive the first frame.
         # Engine swap goes through swap_engine() which invalidates the
         # caches that derived from the prior engine.
-        self._registry = self._build_registry(sv_sections, replay)
+        self._registry = self._build_registry(replay)
         p._sv_engine = self._registry.active()
 
         p.sv_enabled = bool(getattr(p._sv_engine, 'enabled', False))
@@ -39,188 +39,138 @@ class SvRenderController:
         if mode_desc and mode_desc.on_enter:
             mode_desc.on_enter(p, p._mode_state[p.scroll_mode])
 
-    def _build_registry(self, sv_sections, replay):
-        """Construct the per-chart SVEngineRegistry.
+    def _build_registry(self, replay):
+        """Construct the per-chart SVEngineRegistry from `replay['sv']`.
 
-        Native engine is determined by whether the replay carries Etterna
-        beat-space inputs or osu-style time-space sections. Identity is
-        always available. Cross-game engines are registered when the
-        chart's data can be translated to that engine's measure -- e.g.,
-        Etterna charts can be approximated under a time-space engine via
-        the beat engine's as_sections() projection.
-        """
+        Dispatch is purely by the doc's `engine_kind` + `engine_key`.
+        Cross-engine slots are derived from capability fields:
+          - any chart with a non-empty `bpms` map (and not already the
+            beat-space native) -> beat-space slot via `beat_space_engine`.
+          - any time-space chart (and not already the osu-time native)
+            -> osu-time slot via `time_space_engine` on the same sections.
+          - any beat-space chart -> osu-time slot via `project_beat_to_time`
+            (lazy, captures the registry so it can fetch the freshly-built
+            native engine when activated).
+        Identity is always registered last so users can always fall back."""
         from analysis.player.sv.engine import (IdentitySVEngine,
                                                 QuaverSVEngine)
         from analysis.player.sv.measure_engine import (beat_space_engine,
+                                                        project_beat_to_time,
                                                         time_space_engine)
         from analysis.player.sv.registry import (ENGINE_LABELS,
                                                   KEY_ETTERNA_BEAT,
                                                   KEY_IDENTITY, KEY_OSU_TIME,
                                                   KEY_QUAVER_TIME,
                                                   SVEngineRegistry)
+        from analysis.player.sv.replay_doc import (KIND_BEAT_SPACE,
+                                                    KIND_TIME_SPACE,
+                                                    replay_sv)
 
+        doc = replay_sv(replay)
         registry = SVEngineRegistry()
 
-        # --- Quaver-style replay: time-space SV with signed cumulative.
-        # Detected by `_quaver_sv_sections` on the replay; `initial_velocity`
-        # comes from the chart's `InitialScrollVelocity` field (default 1.0).
-        # Checked BEFORE the osu branch because Quaver replays carry
-        # `_osu_bpms` too (for the cross-engine etterna view), and that
-        # field would otherwise route them through the osu path.
-        quaver_sections = replay.get('_quaver_sv_sections')
-        if quaver_sections is not None:
-            sections = list(quaver_sections)
-            initial_v = float(replay.get('_quaver_initial_velocity', 1.0))
-            quaver_bpms = list(replay.get('_osu_bpms') or [])
-            # Per-group SV streams: `$Default` plus one per Quaver
-            # TimingGroup. When omitted, every note routes through the
-            # default stream -- back-compat with charts that don't use
-            # TimingGroups.
-            quaver_groups = replay.get('_quaver_groups')
+        # --- native --------------------------------------------------------
+        match doc.engine_kind:
+            case _kind if _kind == KIND_TIME_SPACE \
+                    and doc.engine_key == KEY_QUAVER_TIME:
+                sections = list(doc.sections)
+                initial_v = float(doc.initial_velocity)
+                groups = doc.groups
 
-            def make_quaver_time():
-                if not sections and abs(initial_v - 1.0) < 1e-12 \
-                        and not quaver_groups:
-                    return IdentitySVEngine()
-                kwargs = {'groups': quaver_groups} if quaver_groups else {}
-                return QuaverSVEngine(sections, initial_velocity=initial_v,
-                                       **kwargs)
+                def make_quaver_time():
+                    if not sections and abs(initial_v - 1.0) < 1e-12 \
+                            and not groups:
+                        return IdentitySVEngine()
+                    kwargs = {'groups': groups} if groups else {}
+                    return QuaverSVEngine(sections, initial_velocity=initial_v,
+                                           **kwargs)
 
-            registry.register(KEY_QUAVER_TIME,
-                              ENGINE_LABELS[KEY_QUAVER_TIME],
-                              make_quaver_time, native=True, eager=True)
+                registry.register(KEY_QUAVER_TIME,
+                                  ENGINE_LABELS[KEY_QUAVER_TIME],
+                                  make_quaver_time, native=True, eager=True)
 
-            # Cross-engine osu (time): same time-space integrator without
-            # the InitialScrollVelocity / signed-cum semantics. Lossy when
-            # the chart uses negative SV but useful as an A/B view.
-            def make_osu_time_from_quaver():
-                if not sections:
-                    return IdentitySVEngine()
-                return time_space_engine(sections)
+            case _kind if _kind == KIND_TIME_SPACE \
+                    and doc.engine_key == KEY_OSU_TIME:
+                sections = list(doc.sections)
 
-            registry.register(KEY_OSU_TIME, ENGINE_LABELS[KEY_OSU_TIME],
-                              make_osu_time_from_quaver)
+                def make_osu_time_native():
+                    return time_space_engine(sections) if sections \
+                        else IdentitySVEngine()
 
-            # Cross-engine beat-space using the chart's BPM map (same
-            # projection the osu branch uses below). Available when the
-            # parser populated `_osu_bpms` ; otherwise the slot is omitted
-            # and the Etterna view stays unselectable for that chart.
-            if quaver_bpms:
-                def make_etterna_beat():
-                    return beat_space_engine(
-                        scrolls=[], speeds=[], bpms=quaver_bpms,
-                        sm_offset=0.0,
-                    )
+                registry.register(KEY_OSU_TIME, ENGINE_LABELS[KEY_OSU_TIME],
+                                  make_osu_time_native,
+                                  native=True, eager=True)
+
+            case _kind if _kind == KIND_BEAT_SPACE:
+                scrolls = list(doc.scrolls)
+                speeds = list(doc.speeds)
+                stops = list(doc.stops)
+                delays = list(doc.delays)
+                warps = list(doc.warps)
+                bpms = list(doc.bpms)
+                sm_offset = float(doc.sm_offset)
+
+                def make_etterna_beat_native():
+                    return beat_space_engine(scrolls, speeds, bpms, sm_offset,
+                                             stops=stops, delays=delays,
+                                             warps=warps)
+
                 registry.register(KEY_ETTERNA_BEAT,
                                   ENGINE_LABELS[KEY_ETTERNA_BEAT],
-                                  make_etterna_beat)
+                                  make_etterna_beat_native,
+                                  native=True, eager=True)
 
-            registry.register(KEY_IDENTITY, ENGINE_LABELS[KEY_IDENTITY],
-                              IdentitySVEngine)
-            return registry
+            case _:
+                # Unknown / identity replay shape: identity is the only slot.
+                registry.register(KEY_IDENTITY, ENGINE_LABELS[KEY_IDENTITY],
+                                  IdentitySVEngine, native=True, eager=True)
+                return registry
 
-        # --- osu-style replay: detect by the presence of replay['sv_sections']
-        # or the BPM-map projection; the `sv_sections` argument is a legacy
-        # explicit override and may be None even on real osu charts.
-        replay_sections = replay.get('sv_sections')
-        replay_osu_bpms = replay.get('_osu_bpms')
-        if sv_sections is not None or replay_sections is not None \
-                or replay_osu_bpms is not None:
-            if sv_sections is not None:
-                sections = list(sv_sections)
-            else:
-                sections = list(replay_sections or [])
-            osu_bpms = list(replay_osu_bpms or [])
+        # --- cross-engine slots derived from capabilities -----------------
+        # Time-space charts also expose the *other* time-space engine as
+        # an A/B view: a Quaver chart gets osu-time (no signed-cum), and
+        # an osu chart gets quaver-time only when the chart's signed-cum
+        # semantics actually differ. We expose osu-time only here; quaver-
+        # time on an osu chart is meaningless without InitialScrollVelocity.
+        if doc.engine_kind == KIND_TIME_SPACE \
+                and doc.engine_key != KEY_OSU_TIME and doc.sections:
+            cross_sections = list(doc.sections)
 
-            def make_osu_time():
-                return time_space_engine(sections) if sections \
-                    else IdentitySVEngine()
+            def make_osu_time_cross():
+                return time_space_engine(cross_sections)
 
             registry.register(KEY_OSU_TIME, ENGINE_LABELS[KEY_OSU_TIME],
-                              make_osu_time, native=True, eager=True)
+                              make_osu_time_cross)
 
-            # Cross-engine beat-space: feed the chart's BPM map into a
-            # beat-space engine with empty SCROLLS, so notes scroll at
-            # `bpm/60` cull-units per second -- the Etterna XMOD model
-            # applied to an osu chart. Lossy for chart-side SV (osu's
-            # inherited timing points are time-space-native and don't
-            # round-trip through SCROLLS); the BPM behavior is the part
-            # that's meaningful cross-engine.
-            if osu_bpms:
-                def make_etterna_beat():
-                    return beat_space_engine(
-                        scrolls=[], speeds=[], bpms=osu_bpms,
-                        sm_offset=0.0,
-                    )
-                registry.register(KEY_ETTERNA_BEAT,
-                                  ENGINE_LABELS[KEY_ETTERNA_BEAT],
-                                  make_etterna_beat)
+        # Any chart with a BPM map can be projected into beat-space (the
+        # Etterna XMOD model). Skipped when beat-space is already native.
+        if doc.engine_kind != KIND_BEAT_SPACE and doc.bpms:
+            cross_bpms = list(doc.bpms)
 
-            registry.register(KEY_IDENTITY, ENGINE_LABELS[KEY_IDENTITY],
-                              IdentitySVEngine)
-            return registry
-
-        # --- Etterna-style replay: beat-space inputs.
-        scrolls = replay.get('_etterna_scrolls')
-        bpms = replay.get('_etterna_bpms')
-        if scrolls is not None or bpms:
-            speeds = replay.get('_etterna_speeds') or []
-            stops = replay.get('_etterna_stops') or []
-            delays = replay.get('_etterna_delays') or []
-            warps = replay.get('_etterna_warps') or []
-            scrolls = scrolls or []
-            bpms = bpms or []
-            sm_offset = replay.get('_etterna_offset') or 0.0
-
-            has_sv = bool(scrolls or speeds or len(bpms) > 1
-                          or stops or delays or warps)
-
-            def make_etterna_beat():
-                if not has_sv:
-                    return IdentitySVEngine()
-                return beat_space_engine(scrolls, speeds, bpms, sm_offset,
-                                         stops=stops, delays=delays,
-                                         warps=warps)
+            def make_etterna_beat_cross():
+                return beat_space_engine(
+                    scrolls=[], speeds=[], bpms=cross_bpms, sm_offset=0.0,
+                )
 
             registry.register(KEY_ETTERNA_BEAT,
                               ENGINE_LABELS[KEY_ETTERNA_BEAT],
-                              make_etterna_beat, native=True, eager=True)
+                              make_etterna_beat_cross)
 
-            # Cross-game time-space engine: project the beat engine to
-            # `as_sections()` and feed that into the time-space integrator.
-            # Lossy for SPEEDS / cross-BPM scrolls (DESIGN.tex §4 caveat)
-            # but the right thing for "show me this chart under osu's model."
-            def make_osu_time():
-                if not has_sv:
-                    return IdentitySVEngine()
+        # Beat-space charts can be projected to time-space via the native
+        # engine's `as_sections()`. Lazy: the closure fetches the native
+        # engine from the registry when the slot is activated, so the
+        # projection sees whatever shape `as_sections()` produces at that
+        # point in time.
+        if doc.engine_kind == KIND_BEAT_SPACE:
+            def make_osu_time_from_beat():
                 native = registry.get(KEY_ETTERNA_BEAT)
-                sections = list(native.as_sections())
-                if not sections:
-                    return IdentitySVEngine()
-                # Beat-space extrapolates with ratio=1.0 for t<0 (matching
-                # Etterna's GetDisplayedBeat fallthrough). Time-space, by
-                # contrast, extrapolates with the FIRST section's
-                # multiplier -- which can flip the sign of cumulative_at
-                # in the lead-in region if the chart starts with negative
-                # or non-1 scroll. If the chart's first SCROLLS rate is
-                # not 1.0, prepend a synthetic (t=0, 1.0) section so the
-                # time-space engine's pre-first-segment extrapolation
-                # uses ratio 1.0 too. This keeps cumulative continuous
-                # at t=0 across an engine swap.
-                first_t, first_m = sections[0]
-                if first_t > 0.0 or abs(first_m - 1.0) > 1e-12:
-                    sections = [(0.0, 1.0)] + sections
-                return time_space_engine(sections)
+                return project_beat_to_time(native)
 
             registry.register(KEY_OSU_TIME, ENGINE_LABELS[KEY_OSU_TIME],
-                              make_osu_time)
-            registry.register(KEY_IDENTITY, ENGINE_LABELS[KEY_IDENTITY],
-                              IdentitySVEngine)
-            return registry
+                              make_osu_time_from_beat)
 
-        # --- Unknown replay shape: identity only.
         registry.register(KEY_IDENTITY, ENGINE_LABELS[KEY_IDENTITY],
-                          IdentitySVEngine, native=True, eager=True)
+                          IdentitySVEngine)
         return registry
 
     @property
@@ -263,7 +213,8 @@ class SvRenderController:
         tail_cum = np.full(n, np.nan, dtype=np.float64)
         change_times = [None] * n
         change_cums = [None] * n
-        legacy = bool((p.replay or {}).get('_quaver_legacy_ln', False))
+        from analysis.player.sv.replay_doc import replay_sv
+        legacy = bool(replay_sv(p.replay or {}).flags.get('legacy_ln', False))
         groups = getattr(p, '_note_sv_groups', None)
         ln_tail_times = getattr(getattr(p, 'notes', None),
                                  'ln_tail_times', None)

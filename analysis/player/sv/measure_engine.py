@@ -251,3 +251,35 @@ def beat_space_engine(scrolls, speeds, bpms, sm_offset,
                            sec_per_base_beat=sec_per_base_beat,
                            inverse_t_from_cum=inverse_override,
                            scrolls_cache=scrolls_cache)
+
+
+# ---------------------------------------------------------------------------
+# Cross-engine projection: beat-space -> time-space
+# ---------------------------------------------------------------------------
+
+
+def project_beat_to_time(beat_engine) -> MeasureSVEngine:
+    """Build a time-space engine from a beat-space engine's current
+    `as_sections()` projection.
+
+    Lossy for SPEEDS / cross-BPM scrolls (DESIGN.tex Section 4 caveat) but the
+    right thing for "show me this Etterna chart under osu's model".
+
+    Lead-in continuity fix: beat-space extrapolates with ratio=1.0 for
+    t<0 (matching Etterna's `GetDisplayedBeat` fallthrough). Time-space,
+    by contrast, extrapolates with the FIRST section's multiplier --
+    which can flip the sign of `cumulative_at` in the lead-in region if
+    the chart starts with negative or non-1 scroll. Prepend a synthetic
+    `(0, 1.0)` section when the first projected section's time is > 0
+    or its multiplier isn't 1.0, so the time-space engine's pre-first-
+    segment extrapolation also uses ratio 1.0. This keeps cumulative
+    continuous at t=0 across an engine swap.
+    """
+    sections = list(beat_engine.as_sections())
+    if not sections:
+        from analysis.player.sv.engine import IdentitySVEngine
+        return IdentitySVEngine()
+    first_t, first_m = sections[0]
+    if first_t > 0.0 or abs(first_m - 1.0) > 1e-12:
+        sections = [(0.0, 1.0)] + sections
+    return time_space_engine(sections)

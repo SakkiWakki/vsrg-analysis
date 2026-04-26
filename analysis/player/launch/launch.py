@@ -10,7 +10,6 @@ def launch_from_replay(
     bpms=None,
     sm_offset=0,
     audio_path=None,
-    sv_sections=None,
     scroll_ms=400.0,
     scroll_mode=None,
     cmod_bpm=600.0,

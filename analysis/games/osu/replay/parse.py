@@ -241,11 +241,6 @@ def parse_replay(osr_path, osu_path=None, songs_dir=None, hit_window_ms=None):
         'meta': meta,
         'chart_meta': {k: chart[k] for k in
                        ('title', 'artist', 'creator', 'version', 'keycount')},
-        # --- legacy SV keys (dual-write, phase 1 of the SV-doc port) ---
-        # Removed once SvRenderController._build_registry switches to
-        # read `replay['sv']`.
-        'sv_sections': sv_sections,
-        '_osu_bpms': bpms,
         'od': float(chart.get('od', 8.0)),
         'mods': int(meta.get('mods', 0)),
     }

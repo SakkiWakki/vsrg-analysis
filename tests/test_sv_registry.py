@@ -109,6 +109,7 @@ def _make_controller_with_etterna_chart():
     """Build an SvRenderController on a fake player loaded with Etterna
     timing data that the registry's native_key path recognizes."""
     from analysis.player.sv.render import SvRenderController
+    from analysis.player.sv.replay_doc import SvReplayDoc, KIND_BEAT_SPACE
 
     p = _FakePlayer()
     ctrl = SvRenderController(p)
@@ -118,19 +119,18 @@ def _make_controller_with_etterna_chart():
     # weight `B'(tau) = bpm/60` changes mid-region while time-space treats
     # the SCROLLS multiplier as constant on chart-time.
     replay = {
-        '_etterna_scrolls': [(0.0, 1.0), (8.0, 2.0)],
-        '_etterna_speeds': [],
-        '_etterna_bpms': [(0.0, 120.0), (4.0, 240.0)],
-        '_etterna_stops': [],
-        '_etterna_delays': [],
-        '_etterna_warps': [],
-        '_etterna_offset': 0.0,
+        'sv': SvReplayDoc(
+            engine_kind=KIND_BEAT_SPACE,
+            engine_key='etterna_beat',
+            scrolls=[(0.0, 1.0), (8.0, 2.0)],
+            bpms=[(0.0, 120.0), (4.0, 240.0)],
+        ),
     }
 
     # Skip mode_desc.on_enter by stubbing the lookup result. init() expects
     # scroll_registry.get(p.scroll_mode); use a benign mode that exists.
     p.scroll_mode = 'linear_ms'
-    ctrl.init(sv_sections=None, replay=replay)
+    ctrl.init(replay=replay)
     return ctrl, p
 
 
@@ -138,15 +138,20 @@ def _make_controller_with_osu_chart():
     """Build an SvRenderController on an osu replay (sv_sections + the
     BPM map exposed for the cross-engine beat-space slot)."""
     from analysis.player.sv.render import SvRenderController
+    from analysis.player.sv.replay_doc import SvReplayDoc, KIND_TIME_SPACE
 
     p = _FakePlayer()
     p.game = 'osu'
     ctrl = SvRenderController(p)
     p.scroll_mode = 'linear_ms'
-    ctrl.init(
-        sv_sections=[(0.0, 1.0), (4.0, 2.0)],
-        replay={'_osu_bpms': [(0.0, 120.0), (16.0, 240.0)]},
-    )
+    ctrl.init(replay={
+        'sv': SvReplayDoc(
+            engine_kind=KIND_TIME_SPACE,
+            engine_key='osu_time',
+            sections=[(0.0, 1.0), (4.0, 2.0)],
+            bpms=[(0.0, 120.0), (16.0, 240.0)],
+        ),
+    })
     return ctrl, p
 
 

@@ -1,9 +1,8 @@
-"""Round-trip tests for `replay['sv']` dual-write.
+"""Tests for the canonical `replay['sv']` SvReplayDoc.
 
-Phase 1 of the SV-doc port: every parser writes BOTH the legacy
-`_<game>_*` keys AND a canonical `SvReplayDoc` on `replay['sv']`. These
-tests pin the two against each other so phase 2 (when the legacy keys
-disappear) can land without a behavior change.
+Each parser projects its game-specific chart shape into an SvReplayDoc.
+These tests pin the projection against the input chart values so the
+parser doesn't silently drop a field across refactors.
 """
 from __future__ import annotations
 
@@ -38,7 +37,9 @@ def _etterna_chart_dict(**overrides):
     return base
 
 
-def test_etterna_dual_write_beat_space_doc():
+def test_etterna_doc_carries_chart_inputs():
+    """Beat-space chart with non-trivial SCROLLS + BPM map yields a
+    beat-space doc whose fields equal the chart's own values."""
     from analysis.games.etterna.adapter import EtternaAdapter
     replay = {
         'noterows': np.array([], dtype=np.int64),
@@ -47,24 +48,24 @@ def test_etterna_dual_write_beat_space_doc():
         'notetypes': np.array([], dtype=np.int32),
         'misses': np.array([], dtype=bool),
     }
-    EtternaAdapter._attach_chart_extras(
-        replay, _etterna_chart_dict(scrolls=[(0.0, 2.0)],
-                                     bpms=[(0.0, 120.0), (4.0, 240.0)]))
+    found = _etterna_chart_dict(scrolls=[(0.0, 2.0)],
+                                 bpms=[(0.0, 120.0), (4.0, 240.0)])
+    EtternaAdapter._attach_chart_extras(replay, found)
     doc = replay['sv']
     assert isinstance(doc, SvReplayDoc)
     assert doc.engine_kind == KIND_BEAT_SPACE
     assert doc.engine_key == 'etterna_beat'
-    # Every legacy key must equal the corresponding doc field.
-    assert list(doc.scrolls) == replay['_etterna_scrolls']
-    assert list(doc.speeds) == replay['_etterna_speeds']
-    assert list(doc.stops) == replay['_etterna_stops']
-    assert list(doc.delays) == replay['_etterna_delays']
-    assert list(doc.warps) == replay['_etterna_warps']
-    assert list(doc.bpms) == replay['_etterna_bpms']
-    assert doc.sm_offset == replay['_etterna_offset']
+    chart = found['chart']
+    assert list(doc.scrolls) == list(chart['scrolls'])
+    assert list(doc.speeds) == list(chart['speeds'])
+    assert list(doc.stops) == list(chart['stops'])
+    assert list(doc.delays) == list(chart['delays'])
+    assert list(doc.warps) == list(chart['warps'])
+    assert list(doc.bpms) == list(chart['bpms'])
+    assert doc.sm_offset == float(chart['offset'])
 
 
-def test_etterna_dual_write_identity_when_chart_has_no_sv():
+def test_etterna_doc_is_identity_when_chart_has_no_sv():
     """Single-segment 120-BPM chart with no SCROLLS / SPEEDS / STOPS /
     DELAYS / WARPS yields an identity doc (renderer skips beat-space
     integration since there's nothing to integrate)."""
@@ -82,9 +83,6 @@ def test_etterna_dual_write_identity_when_chart_has_no_sv():
     doc = replay['sv']
     assert doc.engine_kind == KIND_IDENTITY
     assert doc.engine_key == 'identity'
-    # Legacy keys still get populated even in the identity case ; the
-    # renderer reads them for its existing branch.
-    assert replay['_etterna_bpms'] == [(0.0, 120.0)]
 
 
 # ---- osu -------------------------------------------------------------------

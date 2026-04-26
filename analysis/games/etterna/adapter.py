@@ -268,11 +268,10 @@ class EtternaAdapter(GameAdapter):
         stepstype = chart.get('stepstype', '')
         if stepstype and 'keycount' not in replay:
             replay['keycount'] = stepstype_keycount(stepstype)
-        # Stash raw timing data for beat-space positioning and STOPS/DELAYS/
-        # WARPS-aware row->time conversion in prepare_replay_times. SCROLLS
-        # and SPEEDS are consumed by SvRenderController.build_engine_registry
-        # via these `_etterna_*` keys; STOPS/DELAYS/WARPS are consumed by
-        # row_to_time for the replay's own note timing.
+        # Pull raw timing data off the matched chart and project it into
+        # the canonical SV doc. The renderer reads `replay['sv']` only ;
+        # `prepare_replay_times` and the chart-extras logic below also
+        # consume STOPS/DELAYS/WARPS via the same doc when needed.
         scrolls = chart.get('scrolls') or []
         speeds = chart.get('speeds') or []
         stops = chart.get('stops') or []
@@ -280,19 +279,6 @@ class EtternaAdapter(GameAdapter):
         warps = chart.get('warps') or []
         bpms = chart.get('bpms') or data.get('bpms') or []
         sm_offset = chart.get('offset') or data.get('offset') or 0.0
-        # --- legacy SV keys (dual-write, phase 1 of the SV-doc port) ---
-        # Removed once SvRenderController._build_registry switches to read
-        # `replay['sv']`.
-        replay['_etterna_scrolls'] = scrolls
-        replay['_etterna_speeds'] = speeds
-        replay['_etterna_stops'] = stops
-        replay['_etterna_delays'] = delays
-        replay['_etterna_warps'] = warps
-        replay['_etterna_bpms'] = bpms
-        replay['_etterna_offset'] = sm_offset
-        # Canonical SV doc -- written even when only `bpms` is non-empty
-        # so the cross-engine matrix sees the chart's BPM map. Identity
-        # fallback when nothing usable is on the chart.
         from analysis.player.sv.replay_doc import (SvReplayDoc,
                                                     KIND_BEAT_SPACE,
                                                     KIND_IDENTITY)
@@ -430,9 +416,11 @@ class EtternaAdapter(GameAdapter):
         # pauses and beat-space teleports, so row->time has to use them for
         # anything better than constant-BPM charts. Absent when the chart
         # didn't resolve; in that case row_to_time falls back to BPM-only.
-        stops = replay.get('_etterna_stops') or []
-        delays = replay.get('_etterna_delays') or []
-        warps = replay.get('_etterna_warps') or []
+        from analysis.player.sv.replay_doc import replay_sv
+        sv_doc = replay_sv(replay)
+        stops = list(sv_doc.stops)
+        delays = list(sv_doc.delays)
+        warps = list(sv_doc.warps)
 
         def _r2t(row):
             if bpms is not None:
