@@ -1,30 +1,28 @@
 """Scroll-velocity engine abstraction.
 
-Each game adapter builds its own `SVEngine` (see `GameAdapter.build_sv_engine`),
-so game-specific positioning math doesn't leak into the Player. The engine
-converts between chart-time (what the replay stores) and SV-space (what the
-renderer uses for note Y positions and visible-window culling).
+The Player's renderer routes every note position through an `SVEngine` so
+game-specific positioning math doesn't leak in. The engine converts between
+chart-time (what the replay stores) and SV-space (what the renderer uses for
+note Y positions and visible-window culling). Per-replay engines are built by
+`SvRenderController.build_engine_registry`; classes here are the building
+blocks.
 
-Ex:
-- `TimeSpaceSVEngine`  ; piecewise-constant multiplier in time-space. osu!mania
-                         uses this (SV from timing points is a time-space curve).
-- `BeatSpaceSVEngine`  ; Etterna's #SCROLLS as a piecewise-constant velocity
-                         on *beats*, plus #SPEEDS as a uniform-field zoom
-                         sampled at the song position. Required for charts
-                         where #SCROLLS spans BPM changes ; integrating in
-                         time-space silently accumulates error.
+Implementations:
+- `IdentitySVEngine`  ; no-op. Distance(a, b) = b - a. Used for charts with
+                        no SV data and as the fallback during init.
+- `QuaverSVEngine`    ; piecewise-constant multiplier in time-space, signed
+                        cumulative (negative SV allowed). Quaver semantics.
+                        See `Quaver/Shared/.../ScrollGroupControllerKeys.cs`.
 
-Games that don't populate SV leave `adapter.build_sv_engine()` at the base
-`None` default; the Player then runs with identity SV (distance = t_to - t_from).
+The two heavy engines (osu time-space, Etterna beat-space) live in
+`measure_engine.py`; they're built by `time_space_engine` /
+`beat_space_engine` factory functions over a shared integrator.
 """
 from __future__ import annotations
 
-import bisect
 from typing import Protocol
 
 import numpy as np
-
-from analysis.player.sv.timing import TimingMap as _TimingMap
 
 
 class SVEngine(Protocol):
@@ -102,79 +100,119 @@ class SVEngine(Protocol):
         predictor falls back to single-segment extrapolation)."""
 
 
-def _empty_engine_sections(_engine) -> list[tuple[float, float]]:
-    return []
-
-
 # ----------------------------------------------------------------------
-# Time-space engine ; osu!mania, and any other game that models SV as a
-# piecewise-constant multiplier sampled on wall-clock time.
+# Quaver time-space engine ; piecewise-constant multiplier in time-space
+# with two Quaver-specific shifts:
+#   * pre-first-section uses the chart's `InitialScrollVelocity` (default
+#     1.0), not `sections[0].multiplier` (Quaver/Shared/.../
+#     ScrollGroupControllerKeys.cs::GetPositionFromTime, index==0 branch).
+#   * negative multipliers are valid ; cumulative is signed and not
+#     necessarily monotonic in chart-time. Notes can scroll back up the
+#     screen. Callers that bisect on cum-space (the renderer's culling)
+#     must check `cumulative_monotonic` and fall back to time-domain.
+# BPM is intentionally ignored: Quaver's positioning never reads
+# TimingPoint.Bpm. NaN multipliers coerce to 0, matching Quaver's
+# `if (float.IsNaN(multiplier)) multiplier = 0` guard.
 # ----------------------------------------------------------------------
 
 
-class TimeSpaceSVEngine:
-    """Integrates a piecewise-constant `(time_sec, multiplier)` curve.
+class QuaverSVEngine:
+    """Quaver-style time-space SV with signed cumulative.
 
-    This is the original SV model. Used by osu!mania verbatim ; its timing
-    points map to time-space SV ratios and nothing in the positioning
-    formula depends on the current song position."""
+    sections: list[(start_time_sec, multiplier)] sorted by start_time
+    initial_velocity: multiplier active for `t < sections[0].start_time`
+                      (Qua.InitialScrollVelocity, default 1.0). For times
+                      after the first section start this field plays no
+                      role -- matches Quaver, where it only sets the
+                      pre-first-section pad."""
 
-    def __init__(self, sections: list[tuple[float, float]]):
+    cumulative_monotonic = False
+
+    def __init__(self, sections: list[tuple[float, float]],
+                 initial_velocity: float = 1.0):
         self._sections = list(sections)
-        self.enabled = bool(self._sections)
+        self._initial = float(initial_velocity)
         self._times = np.array([s[0] for s in self._sections], dtype=np.float64)
-        self._values = np.array([s[1] for s in self._sections], dtype=np.float64)
+        # NaN multipliers -> 0 (Quaver coerces NaN at draw time; we coerce
+        # once here so cumulative integrates cleanly).
+        vals = np.array([s[1] for s in self._sections], dtype=np.float64)
+        if vals.size:
+            vals = np.where(np.isnan(vals), 0.0, vals)
+        self._values = vals
         n = len(self._sections)
+        # cum[i] = displayed-position at sections[i].start_time, building
+        # from cum[0] = first_t * initial_velocity (Quaver's index==0
+        # branch evaluated at first_t).
         self._cum = np.zeros(n, dtype=np.float64)
-        for i in range(1, n):
-            dt = self._times[i] - self._times[i - 1]
-            self._cum[i] = self._cum[i - 1] + dt * self._values[i - 1]
+        if n:
+            self._cum[0] = float(self._times[0]) * self._initial
+            for i in range(1, n):
+                dt = self._times[i] - self._times[i - 1]
+                self._cum[i] = self._cum[i - 1] + dt * float(self._values[i - 1])
+        # The engine is "active" if it changes anything from identity:
+        # any sections at all, or a non-1 initial velocity.
+        self.enabled = bool(self._sections) or abs(self._initial - 1.0) > 1e-12
 
     def cumulative_at(self, t: float) -> float:
         if not self._sections:
-            return float(t)
+            return float(t) * self._initial
         idx = int(np.searchsorted(self._times, t, side='right')) - 1
         if idx < 0:
-            return (t - float(self._times[0])) * float(self._values[0])
+            return t * self._initial
         return float(self._cum[idx]) + (t - float(self._times[idx])) * float(self._values[idx])
 
     def inverse_cumulative_at(self, sv: float) -> float:
-        """Chart-time t such that cumulative_at(t) == sv. Used by the
-        cull-space clock smoother to project back from a smoothed SV
-        value to a chart-time the player can render."""
+        """Best-effort inverse. With negative multipliers cumulative is
+        non-monotonic, so the inverse is multi-valued; we return the
+        earliest chart-time matching `sv` by scanning sections in order.
+        Production paths don't currently call this on the Quaver engine
+        -- the predictor and smoother are off in prod."""
         if not self._sections:
-            return float(sv)
-        idx = int(np.searchsorted(self._cum, sv, side='right')) - 1
-        if idx < 0:
-            v = float(self._values[0])
-            return float(self._times[0]) + (sv / v if v else 0.0)
-        v = float(self._values[idx])
-        return float(self._times[idx]) + (sv - float(self._cum[idx])) / v if v else float(self._times[idx])
+            v = self._initial
+            return float(sv) / v if v else 0.0
+        # Pre-first-section linear region.
+        first_t = float(self._times[0])
+        v0 = self._initial
+        if v0 != 0.0:
+            t_pre = sv / v0
+            if t_pre <= first_t:
+                return t_pre
+        # Walk sections forward; first one whose endpoint brackets `sv`.
+        for i in range(len(self._sections)):
+            seg_start_cum = float(self._cum[i])
+            seg_v = float(self._values[i])
+            seg_start_t = float(self._times[i])
+            seg_end_t = (float(self._times[i + 1]) if i + 1 < len(self._times)
+                         else float('inf'))
+            seg_end_cum = (float(self._cum[i + 1]) if i + 1 < len(self._cum)
+                           else seg_start_cum + (seg_end_t - seg_start_t) * seg_v)
+            lo, hi = sorted((seg_start_cum, seg_end_cum))
+            if lo <= sv <= hi and seg_v != 0.0:
+                return seg_start_t + (sv - seg_start_cum) / seg_v
+        # Fall back to extrapolating the last segment.
+        last_v = float(self._values[-1])
+        if last_v == 0.0:
+            return float(self._times[-1])
+        return float(self._times[-1]) + (sv - float(self._cum[-1])) / last_v
 
     def cumulative_velocity_at(self, t: float) -> float:
         if not self._sections:
-            return 1.0
+            return self._initial
         idx = int(np.searchsorted(self._times, t, side='right')) - 1
         if idx < 0:
-            return float(self._values[0])
+            return self._initial
         return float(self._values[idx])
 
     def distance(self, t_from: float, t_to: float) -> float:
         return self.cumulative_at(t_to) - self.cumulative_at(t_from)
 
     def project_times(self, times: np.ndarray) -> np.ndarray:
-        """Vectorized `cumulative_at` over an array ; one np.searchsorted
-        + fused numpy arithmetic replaces the N-iteration Python loop."""
         t = np.asarray(times, dtype=np.float64)
         if not t.size:
             return np.empty(0, dtype=np.float64)
         if not self._sections:
-            return t.copy()
-        # idx[j] = last i with self._times[i] <= t[j]
+            return t * self._initial
         idx = np.searchsorted(self._times, t, side='right') - 1
-        # Entries before the first timing point extrapolate with _values[0];
-        # use clip so we can index _cum / _times / _values safely, then
-        # override those entries with the extrapolation formula.
         safe_idx = np.clip(idx, 0, len(self._times) - 1)
         cum = self._cum[safe_idx]
         base_t = self._times[safe_idx]
@@ -182,11 +220,25 @@ class TimeSpaceSVEngine:
         out = cum + (t - base_t) * vals
         pre_mask = idx < 0
         if pre_mask.any():
-            out[pre_mask] = (t[pre_mask] - self._times[0]) * self._values[0]
+            out[pre_mask] = t[pre_mask] * self._initial
         return out
 
     def as_sections(self) -> list[tuple[float, float]]:
-        return list(self._sections)
+        # Surface initial_velocity as a synthetic (0, initial) head when
+        # it differs from the implicit ratio=1 expected by sidebar
+        # readers, so the readout reflects what's actually applied
+        # before the first SV point.
+        if not self._sections:
+            if abs(self._initial - 1.0) > 1e-12:
+                return [(0.0, self._initial)]
+            return []
+        out = []
+        first_t = float(self._times[0])
+        if first_t > 0.0 and abs(self._initial - 1.0) > 1e-12:
+            out.append((0.0, self._initial))
+        out.extend((float(t), float(v))
+                   for t, v in zip(self._times, self._values))
+        return out
 
     def render_multiplier_at(self, t: float) -> float:
         del t
@@ -195,259 +247,24 @@ class TimeSpaceSVEngine:
     def debug_snapshot_at(self, t: float) -> dict:
         t = float(t)
         return {
-            'engine': 'time',
+            'engine': 'quaver',
             't': t,
             'cumulative': self.cumulative_at(t),
             'render_multiplier': 1.0,
             'cumulative_velocity': self.cumulative_velocity_at(t),
+            'initial_velocity': self._initial,
         }
 
     def max_visible_t_from(self, song_t: float) -> float:
         return float('inf')
 
     def breakpoints(self) -> np.ndarray:
-        """Time-space dC/dt is constant on each section; section start
-        times are the breakpoints."""
         return self._times.copy()
 
 
 # ----------------------------------------------------------------------
-# Beat-space engine ; Etterna's XMOD positioning.
-# ----------------------------------------------------------------------
-#
-# Etterna (ArrowEffects.cpp::GetYOffset, XMOD branch):
-#
-#     YOffset_beats = DisplayedBeat(noteBeat) - DisplayedBeat(songBeat)
-#     YOffset      *= GetDisplayedSpeedPercent(songBeat, songSec)
-#     YOffset      *= ARROW_SPACING * ScrollSpeed
-#
-# DisplayedBeat is a piecewise-linear function of real beats, built by
-# integrating #SCROLLS ratios (PlayerState.cpp::ResetCacheInfo).
-# GetDisplayedSpeedPercent is evaluated at the CURRENT song position (not at
-# the note) ; it acts as a uniform zoom factor on the whole field. To fit
-# into the Player's px/sec contract, we convert beat distance to an
-# "effective-seconds" quantity using the chart's base BPM.
-#
-# SPEEDS is position-dependent: the field zoom at time t depends on t itself.
-# That means project_times (which builds a static cache) can only be an
-# approximation; we evaluate SPEEDS at each sampled time, which is exact when
-# SPEEDS is static (the common case) and off by one segment's worth during
-# SPEEDS transitions. The per-frame `distance(song_t, note_t)` uses SPEEDS at
-# song_t (matches Etterna exactly).
-#
-# Not modeled: Lua modscripts (.lua next to the .ssc). Some packs ship a
-# "Speedist"-style script that rewrites the player's XMOD at runtime based on
-# their CMOD preference (e.g. "Undiscovered Colors"'s script sets XMOD =
-# CMOD / (140 * rate)). We don't embed a Lua VM, so charts with these scripts
-# render at whatever XMOD the UI supplies. To match Etterna visually on such
-# charts, set XMOD manually to whatever the Lua would compute; for the common
-# `CMod / (bpm_goal * rate)` pattern that's `your_cmod / (bpm_goal * rate)`.
-
-
-
-
-class BeatSpaceSVEngine:
-    """Etterna #SCROLLS + #SPEEDS positioning.
-
-    scrolls: list[(beat, ratio)] in beat-space
-    speeds:  list[(beat, ratio)] or list[(beat, ratio, delay, unit)] in
-             beat-space, where unit is 0=beats or 1=seconds
-    bpms:    list[(beat, bpm)] used to convert beat-space distance to the
-             Player's time-space px/sec units
-    sm_offset: song OFFSET in seconds (positive = audio starts later)
-    stops/delays/warps: optional timing events ; passed to beat_to_time so
-             beat<->time conversion tracks Etterna's GetElapsedTimeInternal."""
-
-    def __init__(self, scrolls, speeds, bpms, sm_offset,
-                 stops=None, delays=None, warps=None):
-        from analysis.player.sv.scrolls import ScrollsCache
-        from analysis.player.sv.speeds import (SpeedsEvaluator,
-                                                normalize_speed_segment)
-        self._scrolls = list(scrolls or [])
-        self._speeds = [normalize_speed_segment(s) for s in (speeds or [])]
-        self._speed_beats = [s[0] for s in self._speeds]
-        self._bpms = list(bpms or [(0.0, 120.0)])
-        self._sm_offset = float(sm_offset)
-        self._stops = list(stops or [])
-        self._delays = list(delays or [])
-        self._delay_at_beats = {float(b): float(v) for b, v in self._delays}
-        self._warps = list(warps or [])
-        # Base BPM = first BPM segment, matching Etterna's m_fReadBPM seed.
-        # ArrowEffects divides by m_fReadBPM under MaxScrollBPM; our conversion
-        # from beat distance to seconds uses sec_per_beat at this rate so XMOD
-        # 1.0 keeps a constant px/beat regardless of BPM changes elsewhere.
-        self._base_bpm = float(self._bpms[0][1]) if self._bpms else 120.0
-        self._sec_per_base_beat = 60.0 / self._base_bpm
-        # Pre-walked timing map so _beat_to_time / _time_to_beat are O(log n)
-        # instead of O(segments) per call ; critical on charts with 100s of
-        # BPM changes and stops (e.g. Undiscovered Colors).
-        self._timing = _TimingMap(self._bpms, self._sm_offset,
-                                   self._stops, self._delays, self._warps)
-        self._speeds_eval = SpeedsEvaluator(speeds, self._timing,
-                                             delay_at_beats=self._delay_at_beats)
-
-        # Pre-integrated displayed-beat curve from #SCROLLS, with a sorted
-        # inverse table for the cull-space clock smoother. See scrolls.py.
-        self._scrolls_cache = ScrollsCache(self._scrolls)
-
-        self.enabled = bool(self._scrolls or self._speeds
-                            or len(self._bpms) > 1
-                            or self._stops or self._delays or self._warps)
-
-    # --- real-beat ↔ real-time helpers ----------------------------------
-
-    def _beat_to_time(self, beat: float) -> float:
-        return self._timing.beat_to_time(beat)
-
-    def _time_to_beat(self, t: float) -> float:
-        return self._timing.time_to_beat(t)
-
-    # --- SCROLLS integral ----------------------------------------------
-
-    def _displayed_beat(self, beat: float) -> float:
-        return self._scrolls_cache.displayed_beat(beat)
-
-    def _scroll_ratio_at_beat(self, beat: float) -> float:
-        return self._scrolls_cache.ratio_at_beat(beat)
-
-    # --- SPEEDS evaluator (position-dependent!) -------------------------
-
-    def _speed_percent_at(self, beat: float, music_seconds: float) -> float:
-        return self._speeds_eval.percent_at(beat, music_seconds)
-
-    # --- SVEngine interface ---------------------------------------------
-
-    def cumulative_at(self, t: float) -> float:
-        """Cull-space cumulative = displayed-beat integral (SCROLLS only),
-        converted to base-BPM seconds. Excludes SPEEDS so the cache stays
-        consistent as the playhead moves."""
-        b = self._time_to_beat(t)
-        return self._displayed_beat(b) * self._sec_per_base_beat
-
-    def cumulative_velocity_at(self, t: float) -> float:
-        beat = self._time_to_beat(t)
-        scroll = self._scroll_ratio_at_beat(beat)
-        return scroll * self._timing.bps_at_time(t) * self._sec_per_base_beat
-
-    def inverse_cumulative_at(self, sv: float) -> float:
-        """Chart-time t such that cumulative_at(t) == sv. Used by the
-        cull-space clock smoother. In scroll<=0 plateaus the inverse is
-        not well-defined; ScrollsCache.inverse_displayed_beat returns the
-        earliest matching chart-time there."""
-        # cumulative_at = displayed_beat(beat(t)) * sec_per_base_beat,
-        # so the inverse is beat_to_time(displayed_beat^-1(sv / spb)).
-        # With no #SCROLLS, displayed_beat is the identity so the inverse
-        # collapses to beat_to_time(sv / spb) -- NOT float(sv), which
-        # used to leak the cumulative value back as if it were chart-time.
-        db_target = sv / self._sec_per_base_beat
-        if not self._scrolls_cache:
-            return self._timing.beat_to_time(db_target)
-        return self._scrolls_cache.inverse_displayed_beat(db_target, self._timing)
-
-    def distance(self, t_from: float, t_to: float) -> float:
-        """Render-space distance. SCROLLS cumulative difference, zoomed
-        uniformly by SPEEDS at the playhead (Etterna's ArrowEffects.cpp
-        XMOD branch: GetDisplayedSpeedPercent evaluated at the current
-        song position, applied to the whole YOffset)."""
-        d = self.cumulative_at(t_to) - self.cumulative_at(t_from)
-        b_from = self._time_to_beat(t_from)
-        return d * self._speed_percent_at(b_from, t_from)
-
-    def project_times(self, times: np.ndarray) -> np.ndarray:
-        """Vectorized `cumulative_at` over an array. Calls the _TimingMap
-        and displayed-beat lookups in batch (one np.searchsorted each)
-        instead of two Python bisects per entry ; gives the renderer
-        O(log n) per note with a single numpy pass for the whole frame."""
-        t = np.asarray(times, dtype=np.float64)
-        if not t.size:
-            return np.empty(0, dtype=np.float64)
-        # beat = time_to_beat_array(t) ; STOPS/DELAYS/WARPS aware.
-        beats = self._timing.time_to_beat_array(t)
-        return self.project_beats(beats)
-
-    def project_beats(self, beats: np.ndarray) -> np.ndarray:
-        """Project chart beats directly into Etterna displayed-beat space.
-
-        Chart-only sprites inside old negative-BPM warp aliases need this:
-        their elapsed time collapses to the warp endpoint, but Etterna still
-        positions the sprite from its chart beat until the playhead jumps."""
-        return self._scrolls_cache.displayed_beat_array(beats) * self._sec_per_base_beat
-
-    def as_sections(self) -> list[tuple[float, float]]:
-        """Back-compat projection for sidebar/components readers. Samples the
-        combined scroll*speed curve at every change point and emits time-space
-        (time_sec, multiplier) pairs. Not faithful at SPEEDS transitions or
-        across BPM changes, but fine for display."""
-        if not (self._scrolls or self._speeds):
-            return []
-        beats = sorted({s[0] for s in self._scrolls} | {s[0] for s in self._speeds})
-
-        def last_value(pairs, target):
-            val = 1.0
-            for item in pairs:
-                b, v = item[0], item[1]
-                if b <= target:
-                    val = v
-                else:
-                    break
-            return val
-
-        out = []
-        for b in beats:
-            t = self._beat_to_time(b)
-            mult = last_value(self._scrolls, b) * last_value(self._speeds, b)
-            out.append((t, mult))
-        out.sort(key=lambda x: x[0])
-        return out
-
-    def render_multiplier_at(self, t: float) -> float:
-        t = float(t)
-        return self._speed_percent_at(self._time_to_beat(t), t)
-
-    def debug_snapshot_at(self, t: float) -> dict:
-        t = float(t)
-        beat = self._time_to_beat(t)
-        displayed_beat = self._displayed_beat(beat)
-        return {
-            'engine': 'beat',
-            't': t,
-            'beat': beat,
-            'displayed_beat': displayed_beat,
-            'scroll_ratio': self._scroll_ratio_at_beat(beat),
-            'speed_percent': self._speed_percent_at(beat, t),
-            'cumulative': displayed_beat * self._sec_per_base_beat,
-            'cumulative_velocity': self.cumulative_velocity_at(t),
-        }
-
-    # ArrowEffects::FindDisplayedBeats does a binary search for the first
-    # off-screen beat. When scroll=0 the search collapses because YOffset
-    # stays 0 regardless of how far ahead you look ; the 10/2/... halving
-    # sum caps out around songBeat + ~20. Without matching that cap, our
-    # SV-space bisect keeps every note with the same SV-cum value, so a
-    # scroll=0 region lets the entire pile pass culling.
-    _MAX_LOOKAHEAD_BEATS = 20.0
-
-    def max_visible_t_from(self, song_t: float) -> float:
-        song_beat = self._time_to_beat(song_t)
-        return self._beat_to_time(song_beat + self._MAX_LOOKAHEAD_BEATS)
-
-    def breakpoints(self) -> np.ndarray:
-        """All chart-times where dC/dt is discontinuous: BPM-segment
-        boundaries (incl. STOP/DELAY enter/exit), warp atoms, and SCROLLS
-        change points. Used by CullSpacePredictor."""
-        timing = self._timing
-        # Timing-map events: BPM changes + STOP/DELAY entries/exits + warp times.
-        bpm_times = list(timing._time_enter) + list(timing._time_exit)
-        # SCROLLS change points (in beat-space, convert to chart-time).
-        scroll_times = [self._beat_to_time(b)
-                        for (b, _) in self._scrolls]
-        return np.asarray(sorted(set(bpm_times + scroll_times)),
-                          dtype=np.float64)
-
-
-# ----------------------------------------------------------------------
-# Identity fallback ; used when the adapter returns None or the chart has
-# no SV data. Keeps the Player's code path uniform.
+# Identity fallback ; used when the chart has no SV data. Keeps the
+# Player's code path uniform.
 # ----------------------------------------------------------------------
 
 

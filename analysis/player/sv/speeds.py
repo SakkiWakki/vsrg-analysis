@@ -6,9 +6,7 @@ delta. It is NOT integrated into the cumulative cache, because doing so
 would break the invariant that `cumulative_at(b) - cumulative_at(a) ==
 distance(a, b)` outside transition windows.
 
-The evaluator matches the reference engine's `_speed_percent_at` exactly;
-both the reference `BeatSpaceSVEngine` and the new measure engine consume
-this class.
+Consumed by the measure-based beat-space engine.
 """
 from __future__ import annotations
 

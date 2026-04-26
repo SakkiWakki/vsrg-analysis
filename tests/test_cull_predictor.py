@@ -22,8 +22,9 @@ import pytest
 
 from analysis.player.playback import cull_predictor as cp_mod
 from analysis.player.playback.cull_predictor import CullSpacePredictor
-from analysis.player.sv.engine import (BeatSpaceSVEngine, IdentitySVEngine,
-                                        TimeSpaceSVEngine)
+from analysis.player.sv.engine import IdentitySVEngine
+from analysis.player.sv.measure_engine import (beat_space_engine,
+                                                time_space_engine)
 
 
 @pytest.fixture
@@ -48,7 +49,7 @@ def test_constant_rate_segment_matches_cumulative_at(fake_clock):
     """On a single time-space segment with no boundary, the predictor's
     output must equal cumulative_at(raw_t) for any (raw_t, wall_now)
     pair that's consistent with the anchor."""
-    engine = TimeSpaceSVEngine([(0.0, 2.0)])
+    engine = time_space_engine([(0.0, 2.0)])
     pred = CullSpacePredictor(engine, breakpoints=[])
 
     # Anchor at raw_t=0
@@ -65,7 +66,7 @@ def test_constant_rate_segment_matches_cumulative_at(fake_clock):
 
 def test_constant_rate_handles_play_rate_below_unity(fake_clock):
     """At play_rate=0.5, chart-time advances at half wall-time."""
-    engine = TimeSpaceSVEngine([(0.0, 3.0)])
+    engine = time_space_engine([(0.0, 3.0)])
     pred = CullSpacePredictor(engine, breakpoints=[])
 
     fake_clock['t'] = 0.0
@@ -89,7 +90,7 @@ def test_extrapolation_handles_single_breakpoint_crossing(fake_clock):
     """Two-segment chart: 1.0x on [0, 5), 2.0x on [5, inf). When the
     predictor extrapolates past t=5, it must roll the anchor forward to
     t=5 and apply the new rate. Result equals cumulative_at(t_pred)."""
-    engine = TimeSpaceSVEngine([(0.0, 1.0), (5.0, 2.0)])
+    engine = time_space_engine([(0.0, 1.0), (5.0, 2.0)])
     breakpoints = engine.breakpoints() if hasattr(engine, 'breakpoints') \
         else np.array([0.0, 5.0])
     pred = CullSpacePredictor(engine, breakpoints=breakpoints)
@@ -111,7 +112,7 @@ def test_extrapolation_handles_multiple_breakpoints_in_one_frame(fake_clock):
     """Chart with three rapid SV changes. A single frame's extrapolation
     advances past all three -- the loop must handle this iteratively."""
     sections = [(0.0, 1.0), (1.0, 4.0), (2.0, 0.25), (3.0, 1.0)]
-    engine = TimeSpaceSVEngine(sections)
+    engine = time_space_engine(sections)
     breakpoints = engine.breakpoints()
     pred = CullSpacePredictor(engine, breakpoints=breakpoints)
 
@@ -134,7 +135,7 @@ def test_extrapolation_at_bpm_change_in_beat_space(fake_clock):
     """Beat-space engine with a BPM change. The predictor's breakpoint
     list includes BPM-change times; extrapolation across them must use
     the new BPM-derived rate post-change."""
-    engine = BeatSpaceSVEngine(
+    engine = beat_space_engine(
         scrolls=[(0.0, 1.0)],
         speeds=[],
         bpms=[(0.0, 120.0), (4.0, 240.0)],   # BPM doubles at beat 4
@@ -144,10 +145,7 @@ def test_extrapolation_at_bpm_change_in_beat_space(fake_clock):
     # cumulative_at(3.0) should equal: 2*1.0 + 1*2.0 = 4.0 (in displayed-
     # beat seconds at base BPM=120 -> sec_per_base_beat=0.5).
     # Actually let me just rely on engine.cumulative_at as ground truth.
-    breakpoints = np.array(sorted(set(
-        list(engine._timing._time_enter)
-        + list(engine._timing._time_exit)
-    )))
+    breakpoints = engine.breakpoints()
     pred = CullSpacePredictor(engine, breakpoints=breakpoints)
 
     fake_clock['t'] = 0.0
@@ -162,17 +160,14 @@ def test_extrapolation_across_warp_atom(fake_clock):
     """Warps add a Dirac-mass jump to dB. Predictor must include the
     atom contribution exactly when extrapolating past the warp's
     chart-time."""
-    engine = BeatSpaceSVEngine(
+    engine = beat_space_engine(
         scrolls=[(0.0, 1.0)],
         speeds=[],
         bpms=[(0.0, 120.0)],
         sm_offset=0.0,
         warps=[(4.0, 4.0)],     # 4-beat warp at beat 4 (chart_t = 2.0s)
     )
-    breakpoints = np.array(sorted(set(
-        list(engine._timing._time_enter)
-        + list(engine._timing._time_exit)
-    )))
+    breakpoints = engine.breakpoints()
     pred = CullSpacePredictor(engine, breakpoints=breakpoints)
 
     fake_clock['t'] = 0.0
@@ -192,7 +187,7 @@ def test_extrapolation_across_warp_atom(fake_clock):
 def test_seek_backwards_snaps(fake_clock):
     """A backward jump in raw_t (user seeks back) must immediately
     re-anchor at the new raw_t."""
-    engine = TimeSpaceSVEngine([(0.0, 1.0)])
+    engine = time_space_engine([(0.0, 1.0)])
     pred = CullSpacePredictor(engine, breakpoints=[])
 
     fake_clock['t'] = 0.0
@@ -208,7 +203,7 @@ def test_audio_callback_re_anchors(fake_clock):
     """When raw_t jumps forward more than the predicted chart-time
     advance (i.e. an audio callback brought new exact data), the
     predictor must re-anchor at the new raw_t."""
-    engine = TimeSpaceSVEngine([(0.0, 1.0)])
+    engine = time_space_engine([(0.0, 1.0)])
     pred = CullSpacePredictor(engine, breakpoints=[])
 
     fake_clock['t'] = 0.0
@@ -226,7 +221,7 @@ def test_audio_callback_re_anchors(fake_clock):
 def test_rate_change_re_anchors(fake_clock):
     """A play_rate change without a raw_t discontinuity re-anchors so
     future extrapolation uses the new rate."""
-    engine = TimeSpaceSVEngine([(0.0, 1.0)])
+    engine = time_space_engine([(0.0, 1.0)])
     pred = CullSpacePredictor(engine, breakpoints=[])
 
     fake_clock['t'] = 0.0
@@ -287,7 +282,7 @@ def test_output_is_monotone_under_forward_playback(fake_clock):
     The cumulative function itself is monotone non-decreasing (Theorem,
     DESIGN.tex sec.4: dC/dt = v*w >= 0 a.e., warp atoms add positive
     mass), so this is the predictor honoring its target's contract."""
-    engine = TimeSpaceSVEngine([(0.0, 1.0), (2.5, 1.5), (4.0, 0.5)])
+    engine = time_space_engine([(0.0, 1.0), (2.5, 1.5), (4.0, 0.5)])
     pred = CullSpacePredictor(engine, breakpoints=engine.breakpoints())
 
     fake_clock['t'] = 0.0
@@ -313,7 +308,7 @@ def test_clamp_does_not_corrupt_correctness_on_clean_stream(fake_clock):
     a clean stream. After settling past any initial transient, the
     predictor + clamp should still hit cumulative_at within float
     epsilon."""
-    engine = TimeSpaceSVEngine([(0.0, 1.0), (2.5, 1.5), (4.0, 0.5)])
+    engine = time_space_engine([(0.0, 1.0), (2.5, 1.5), (4.0, 0.5)])
     pred = CullSpacePredictor(engine, breakpoints=engine.breakpoints())
 
     fake_clock['t'] = 0.0
@@ -331,7 +326,7 @@ def test_clamp_does_not_corrupt_correctness_on_clean_stream(fake_clock):
 def test_reset_clears_the_clamp(fake_clock):
     """An explicit reset (seek, rate change, engine swap) is a
     legitimate backward move; the clamp must release."""
-    engine = TimeSpaceSVEngine([(0.0, 1.0)])
+    engine = time_space_engine([(0.0, 1.0)])
     pred = CullSpacePredictor(engine, breakpoints=[])
 
     # Drive the clamp's high-water mark up to ~5.0 by anchoring there.
@@ -351,7 +346,7 @@ def test_predictor_matches_cumulative_at_on_dense_sample(fake_clock):
     advance is consistent with raw_t. This is the core mathematical
     claim: the predictor is the same function as cumulative_at, just
     sampled differently in time."""
-    engine = TimeSpaceSVEngine([(0.0, 1.0), (2.5, 1.5), (4.0, 0.5),
+    engine = time_space_engine([(0.0, 1.0), (2.5, 1.5), (4.0, 0.5),
                                 (6.0, 2.0)])
     pred = CullSpacePredictor(engine, breakpoints=engine.breakpoints())
 

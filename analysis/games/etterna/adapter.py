@@ -366,29 +366,6 @@ class EtternaAdapter(GameAdapter):
                      if is_hold and (r, c) in hold_ends]
         replay['holds'] = existing_holds + new_holds
 
-    def build_sv_engine(self, replay):
-        """Etterna positions notes in beat-space (see ArrowEffects.cpp::
-        GetYOffset, XMOD branch). #SCROLLS is a velocity on beats, not time,
-        and #SPEEDS is a uniform field zoom sampled at the current song
-        position. Integrating the combined curve in time-space accumulates
-        error whenever a SCROLLS segment straddles a BPM change ; noticeable
-        on charts like Undiscovered Colors, where the scroll ratio ramps
-        across the whole song."""
-        from analysis.player.sv.engine import BeatSpaceSVEngine
-        scrolls = replay.get('_etterna_scrolls') or []
-        speeds = replay.get('_etterna_speeds') or []
-        bpms = replay.get('_etterna_bpms') or []
-        stops = replay.get('_etterna_stops') or []
-        delays = replay.get('_etterna_delays') or []
-        warps = replay.get('_etterna_warps') or []
-        if not (scrolls or speeds or len(bpms) > 1 or stops or delays or warps):
-            return None
-        return BeatSpaceSVEngine(
-            scrolls, speeds, bpms,
-            replay.get('_etterna_offset') or 0.0,
-            stops=stops, delays=delays, warps=warps,
-        )
-
     def judgement_windows(self, replay, judge=None, **_):
         from analysis.games.etterna.judgment import windows_for
         return windows_for(judge or 'J4')

@@ -38,7 +38,8 @@ class MeasureSVEngine:
         # need to thread the inverse through the timing map / scroll-cache,
         # which the generic integrator can't do (its own inverse is exact
         # for time-space and good-enough for beat-space without scroll<=0
-        # plateaus, but the reference engine's plateau handling is better).
+        # plateaus; the override handles plateaus by collapsing to segment
+        # start, matching Etterna's ScrollsCache behavior).
         self._inverse_override = inverse_t_from_cum
         # Beat-space engines hand us their ScrollsCache so project_beats
         # can bypass beat->time->beat round-tripping for chart-stream
@@ -117,11 +118,11 @@ class MeasureSVEngine:
 
 def time_space_engine(sections, t_start: float = 0.0,
                       t_end: float = 1e9) -> MeasureSVEngine:
-    """Build a time-space engine from the legacy [(time, multiplier)] shape.
+    """Build a time-space engine from the [(time, multiplier)] shape.
 
     Encodes mu = Lebesgue measure on [t_start, t_end], v = the section
-    multipliers as a piecewise-constant integrand. Equivalent to
-    TimeSpaceSVEngine for purposes of cumulative_at / distance.
+    multipliers as a piecewise-constant integrand. Used as the osu!mania
+    SV integrator (uniform scroll multiplied by SV at each moment).
     """
     measure = TimingMeasure.lebesgue(t_start, t_end)
     data = SVData.from_sections(sections)
@@ -137,7 +138,7 @@ def time_space_engine(sections, t_start: float = 0.0,
 
 def beat_space_engine(scrolls, speeds, bpms, sm_offset,
                       stops=None, delays=None, warps=None) -> MeasureSVEngine:
-    """Build a beat-space engine matching BeatSpaceSVEngine's contract.
+    """Build a beat-space engine for Etterna XMOD positioning.
 
     The measure mu is dB:
       AC density rho(tau) = bpm(tau)/60, with rho = 0 inside STOP/DELAY

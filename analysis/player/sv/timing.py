@@ -7,8 +7,7 @@ offset, and produces O(log n) `beat_to_time` / `time_to_beat` /
 multiple historical bugs and is hardened by the existing test suite.
 
 The class is the canonical source of truth for beat<->time conversion in
-the player; the reference `BeatSpaceSVEngine` and the new measure-based
-engine both consume it.
+the player; the measure-based beat-space engine consumes it directly.
 """
 from __future__ import annotations
 

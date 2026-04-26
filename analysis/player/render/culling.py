@@ -64,13 +64,37 @@ def select_note_candidates(ctx):
     # screen stay in the candidate set.
     pad = _window_pad(ctx)
     lo_t, hi_t = ctx.target_lo - pad, ctx.target_hi + pad
-    if ctx.use_sv_space:
+    # Quaver-style engines allow negative SV; their _note_sv_cum is not
+    # sorted in chart-time order, so the bisect would silently miss
+    # notes. Fall back to a chart-time linear filter on the cumulative
+    # array in that regime -- still O(N) per frame but correct, and N is
+    # bounded by visible-window padding upstream.
+    sv_monotonic = getattr(getattr(p, '_sv_engine', None),
+                           'cumulative_monotonic', True)
+    if ctx.use_sv_space and sv_monotonic:
         lo = int(np.searchsorted(p._note_sv_cum, lo_t, side='left'))
         hi = int(np.searchsorted(p._note_sv_cum, hi_t, side='right'))
+        candidates = list(range(lo, hi))
+    elif ctx.use_sv_space:
+        # Non-monotonic cum: the visible set isn't a contiguous index
+        # range, so a linear mask over the whole array is the simplest
+        # correct fallback. Bounded by len(p.times); still O(N) per
+        # frame but the constant is one numpy mask + flatnonzero.
+        cum = p._note_sv_cum
+        mask = (cum >= lo_t) & (cum <= hi_t)
+        candidates = np.flatnonzero(mask).tolist()
+        # For the LN-extension scan below: bracket by the candidates'
+        # min/max chart-time so LN bodies starting before / ending after
+        # the visible set still get their on-screen intersection check.
+        if candidates:
+            lo = min(candidates)
+            hi = max(candidates) + 1
+        else:
+            lo = hi = 0
     else:
         lo = bisect.bisect_left(p.times, lo_t)
         hi = bisect.bisect_right(p.times, hi_t)
-    candidates = list(range(lo, hi))
+        candidates = list(range(lo, hi))
     seen = set(candidates)
 
     if p.notes.ln_indices:

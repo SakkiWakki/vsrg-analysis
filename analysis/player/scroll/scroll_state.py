@@ -132,6 +132,29 @@ class ScrollStateController:
         pxps = p._pxps_from_unit(p.SCROLL_MODE_MS, ms)
         p._set_current_mode_value(p._unit_from_pxps(p.scroll_mode, pxps))
 
+    def set_effective_scroll_ms(self, target_ms):
+        """Adjust the active scroll mode's value so the SV-folded
+        `effective_scroll_ms` reads `target_ms` at the current `t_now`.
+
+        `set_scroll_ms` parameterises *flat* time-to-judge (it ignores
+        SV); under SV the displayed ms diverges by render_multiplier and
+        any cumulative-curve curvature ahead of the playhead. This
+        method ratio-corrects: seed with the flat value, read the
+        SV-folded result, scale, repeat. Converges in 1-2 iterations
+        because effective_scroll_ms is locally proportional to 1 /
+        scroll_speed."""
+        target_ms = max(50.0, min(3000.0, float(target_ms)))
+        self.set_scroll_ms(target_ms)
+        for _ in range(3):
+            cur = float(self.effective_scroll_ms)
+            if cur <= 0.0 or abs(cur - target_ms) < 0.5:
+                return
+            # cur ∝ 1/sps. To make cur land on target, scale sps by
+            # (cur/target), i.e. scale flat ms by (target/cur).
+            flat_now = (self.p.H * self.p.hit_line_y_frac) / max(
+                0.001, self.scroll_speed) * 1000.0
+            self.set_scroll_ms(flat_now * target_ms / cur)
+
     def set_scroll_mode(self, mode):
         p = self.p
 
@@ -144,18 +167,24 @@ class ScrollStateController:
         if not scroll_registry.is_compatible(mode, p.game):
             return
 
-        pxps = p._pxps_from_unit(p.scroll_mode, p._current_mode_value())
+        # Preserve the visible ms-to-judge across the swap. Each scroll
+        # mode parameterises scroll differently (XMOD = beat-rate, CMOD =
+        # display BPM, MS = direct ms) so converting via raw pxps drops
+        # whatever SV-aware adjustment effective_scroll_ms applied. Re-
+        # solve the new mode's value from the captured ms instead.
+        prev_ms = float(self.effective_scroll_ms)
 
         prev_mode = self.mode(p.scroll_mode)
         if prev_mode and prev_mode.on_exit:
             prev_mode.on_exit(p, p._mode_state[p.scroll_mode])
 
         p.scroll_mode = mode
-        p._set_current_mode_value(p._unit_from_pxps(mode, pxps))
 
         new_mode = self.mode(mode)
         if new_mode and new_mode.on_enter:
             new_mode.on_enter(p, p._mode_state[mode])
+
+        self.set_effective_scroll_ms(prev_ms)
 
         p._reset_render_timeline()
 
@@ -194,10 +223,12 @@ class ScrollStateController:
         sv = getattr(p, 'sv_render', None)
         if sv is not None and hasattr(sv, 'swap_engine'):
             from analysis.player.sv.registry import (KEY_ETTERNA_BEAT,
-                                                      KEY_OSU_TIME)
+                                                      KEY_OSU_TIME,
+                                                      KEY_QUAVER_TIME)
             game_to_engine = {
                 'etterna': KEY_ETTERNA_BEAT,
                 'osu': KEY_OSU_TIME,
+                'quaver': KEY_QUAVER_TIME,
             }
             target = game_to_engine.get(game)
             if target and target in sv.available_engine_keys():

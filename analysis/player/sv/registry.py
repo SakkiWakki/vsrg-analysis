@@ -19,8 +19,9 @@ from typing import Callable, Optional
 
 
 # Engine key constants used as registry keys and in UI.
-KEY_ETTERNA_BEAT = 'etterna_beat'      # BeatSpaceSVEngine semantics
-KEY_OSU_TIME = 'osu_time'              # TimeSpaceSVEngine semantics
+KEY_ETTERNA_BEAT = 'etterna_beat'      # beat_space_engine (Etterna XMOD)
+KEY_OSU_TIME = 'osu_time'              # time_space_engine (osu!mania)
+KEY_QUAVER_TIME = 'quaver_time'        # QuaverSVEngine (signed cum, time-space)
 KEY_IDENTITY = 'identity'              # No-op
 
 
@@ -28,6 +29,7 @@ KEY_IDENTITY = 'identity'              # No-op
 ENGINE_LABELS = {
     KEY_ETTERNA_BEAT: 'etterna (beat)',
     KEY_OSU_TIME: 'osu (time)',
+    KEY_QUAVER_TIME: 'quaver (time)',
     KEY_IDENTITY: 'identity',
 }
 
@@ -37,6 +39,7 @@ ENGINE_LABELS = {
 ENGINE_PRIMARY_GAME = {
     KEY_ETTERNA_BEAT: 'etterna',
     KEY_OSU_TIME: 'osu',
+    KEY_QUAVER_TIME: 'quaver',
 }
 
 

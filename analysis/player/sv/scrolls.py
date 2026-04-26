@@ -7,10 +7,9 @@
 the cull-space clock smoother project an SV value back to a chart-time
 that hits it.
 
-Both the reference `BeatSpaceSVEngine` and the new measure engine consume
-this class. Inverse handling follows the reference engine: in scroll<=0
-plateaus, displayed-beat is non-monotonic, so we skip those segments and
-collapse plateau queries to the segment's start beat.
+Consumed by the measure-based beat-space engine. Inverse handling: in
+scroll<=0 plateaus, displayed-beat is non-monotonic, so we skip those
+segments and collapse plateau queries to the segment's start beat.
 """
 from __future__ import annotations
 

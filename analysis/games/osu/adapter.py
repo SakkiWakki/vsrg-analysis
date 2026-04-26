@@ -47,17 +47,6 @@ class OsuAdapter(GameAdapter):
                 hold_tails[(h[0], h[1])] = h[2] / 1000.0
         return times, hold_tails, int(replay['keycount'])
 
-    def build_sv_engine(self, replay):
-        """osu!mania SV comes from the .osu timing points, already flattened
-        to `[(time_sec, multiplier)]` by `_compute_sv_sections` during chart
-        parse. Time-space integration matches how osu! positions notes
-        (uniform scroll speed scaled by the SV multiplier at each moment)."""
-        from analysis.player.sv.engine import TimeSpaceSVEngine
-        sections = replay.get('sv_sections') or []
-        if not sections:
-            return None
-        return TimeSpaceSVEngine(sections)
-
     def effective_od(self, replay, od=None):
         from analysis.viz.note_visualizer import effective_osu_od
         base = od if od is not None else float(replay.get('od', 8.0))

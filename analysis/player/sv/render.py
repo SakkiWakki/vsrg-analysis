@@ -49,19 +49,15 @@ class SvRenderController:
         Etterna charts can be approximated under a time-space engine via
         the beat engine's as_sections() projection.
         """
-        from analysis.player.sv.engine import (BeatSpaceSVEngine,
-                                                IdentitySVEngine,
-                                                TimeSpaceSVEngine)
+        from analysis.player.sv.engine import (IdentitySVEngine,
+                                                QuaverSVEngine)
+        from analysis.player.sv.measure_engine import (beat_space_engine,
+                                                        time_space_engine)
         from analysis.player.sv.registry import (ENGINE_LABELS,
                                                   KEY_ETTERNA_BEAT,
                                                   KEY_IDENTITY, KEY_OSU_TIME,
+                                                  KEY_QUAVER_TIME,
                                                   SVEngineRegistry)
-
-        # The measure-based integrator (per DESIGN.tex) is the default.
-        # Set VSRG_LEGACY_SV_ENGINE=1 to fall back to the reference
-        # BeatSpaceSVEngine / TimeSpaceSVEngine implementations -- kept as
-        # an opt-out for regression debugging.
-        use_measure = os.environ.get('VSRG_LEGACY_SV_ENGINE') != '1'
 
         registry = SVEngineRegistry()
 
@@ -79,12 +75,7 @@ class SvRenderController:
             osu_bpms = list(replay_osu_bpms or [])
 
             def make_osu_time():
-                if use_measure:
-                    from analysis.player.sv.measure_engine import \
-                        time_space_engine
-                    return time_space_engine(sections) if sections \
-                        else IdentitySVEngine()
-                return TimeSpaceSVEngine(sections) if sections \
+                return time_space_engine(sections) if sections \
                     else IdentitySVEngine()
 
             registry.register(KEY_OSU_TIME, ENGINE_LABELS[KEY_OSU_TIME],
@@ -99,20 +90,45 @@ class SvRenderController:
             # that's meaningful cross-engine.
             if osu_bpms:
                 def make_etterna_beat():
-                    if use_measure:
-                        from analysis.player.sv.measure_engine import \
-                            beat_space_engine
-                        return beat_space_engine(
-                            scrolls=[], speeds=[], bpms=osu_bpms,
-                            sm_offset=0.0,
-                        )
-                    return BeatSpaceSVEngine(
-                        scrolls=[], speeds=[], bpms=osu_bpms, sm_offset=0.0,
+                    return beat_space_engine(
+                        scrolls=[], speeds=[], bpms=osu_bpms,
+                        sm_offset=0.0,
                     )
                 registry.register(KEY_ETTERNA_BEAT,
                                   ENGINE_LABELS[KEY_ETTERNA_BEAT],
                                   make_etterna_beat)
 
+            registry.register(KEY_IDENTITY, ENGINE_LABELS[KEY_IDENTITY],
+                              IdentitySVEngine)
+            return registry
+
+        # --- Quaver-style replay: time-space SV with signed cumulative.
+        # Detected by `_quaver_sv_sections` on the replay; `initial_velocity`
+        # comes from the chart's `InitialScrollVelocity` field (default 1.0).
+        quaver_sections = replay.get('_quaver_sv_sections')
+        if quaver_sections is not None:
+            sections = list(quaver_sections)
+            initial_v = float(replay.get('_quaver_initial_velocity', 1.0))
+
+            def make_quaver_time():
+                if not sections and abs(initial_v - 1.0) < 1e-12:
+                    return IdentitySVEngine()
+                return QuaverSVEngine(sections, initial_velocity=initial_v)
+
+            registry.register(KEY_QUAVER_TIME,
+                              ENGINE_LABELS[KEY_QUAVER_TIME],
+                              make_quaver_time, native=True, eager=True)
+
+            # Cross-engine osu (time): same time-space integrator without
+            # the InitialScrollVelocity / signed-cum semantics. Lossy when
+            # the chart uses negative SV but useful as an A/B view.
+            def make_osu_time_from_quaver():
+                if not sections:
+                    return IdentitySVEngine()
+                return time_space_engine(sections)
+
+            registry.register(KEY_OSU_TIME, ENGINE_LABELS[KEY_OSU_TIME],
+                              make_osu_time_from_quaver)
             registry.register(KEY_IDENTITY, ENGINE_LABELS[KEY_IDENTITY],
                               IdentitySVEngine)
             return registry
@@ -135,13 +151,7 @@ class SvRenderController:
             def make_etterna_beat():
                 if not has_sv:
                     return IdentitySVEngine()
-                if use_measure:
-                    from analysis.player.sv.measure_engine import \
-                        beat_space_engine
-                    return beat_space_engine(scrolls, speeds, bpms, sm_offset,
-                                             stops=stops, delays=delays,
-                                             warps=warps)
-                return BeatSpaceSVEngine(scrolls, speeds, bpms, sm_offset,
+                return beat_space_engine(scrolls, speeds, bpms, sm_offset,
                                          stops=stops, delays=delays,
                                          warps=warps)
 
@@ -149,10 +159,10 @@ class SvRenderController:
                               ENGINE_LABELS[KEY_ETTERNA_BEAT],
                               make_etterna_beat, native=True, eager=True)
 
-            # Cross-game time-space engine: feed the beat engine's
-            # time-space approximation through TimeSpaceSVEngine. Lossy
-            # for SPEEDS / cross-BPM scrolls (DESIGN.tex §4 caveat) but
-            # the right thing for "show me this chart under osu's model."
+            # Cross-game time-space engine: project the beat engine to
+            # `as_sections()` and feed that into the time-space integrator.
+            # Lossy for SPEEDS / cross-BPM scrolls (DESIGN.tex §4 caveat)
+            # but the right thing for "show me this chart under osu's model."
             def make_osu_time():
                 if not has_sv:
                     return IdentitySVEngine()
@@ -173,11 +183,7 @@ class SvRenderController:
                 first_t, first_m = sections[0]
                 if first_t > 0.0 or abs(first_m - 1.0) > 1e-12:
                     sections = [(0.0, 1.0)] + sections
-                if use_measure:
-                    from analysis.player.sv.measure_engine import \
-                        time_space_engine
-                    return time_space_engine(sections)
-                return TimeSpaceSVEngine(sections)
+                return time_space_engine(sections)
 
             registry.register(KEY_OSU_TIME, ENGINE_LABELS[KEY_OSU_TIME],
                               make_osu_time)
@@ -440,8 +446,21 @@ class SvRenderController:
         if reg.active_key() == key:
             return True
         prev_key = reg.active_key()
-        engine = reg.set_active(key)
         p = self.p
+
+        # Capture the SV-folded ms readout under the old engine. After
+        # the swap we ratio-correct the new engine's scroll value so the
+        # visible time-to-judge stays continuous; otherwise XMOD->osu and
+        # similar cross-engine swaps make the field jump scale.
+        prev_ms = None
+        scroll_state = getattr(p, 'scroll_state', None)
+        if scroll_state is not None:
+            try:
+                prev_ms = float(scroll_state.effective_scroll_ms)
+            except Exception:
+                prev_ms = None
+
+        engine = reg.set_active(key)
         p._sv_engine = engine
 
         # Refresh sv_enabled. CMOD (and any other scroll mode that stashes
@@ -474,6 +493,12 @@ class SvRenderController:
                 # Notes container not fully populated yet; live caches are
                 # rebuilt anyway when the chart finishes loading.
                 pass
+
+        # Restore the visible time-to-judge so the user doesn't see the
+        # field rescale on engine swap. Skipped when we couldn't sample
+        # the prior ms (e.g. early init before scroll_state exists).
+        if prev_ms is not None and scroll_state is not None:
+            scroll_state.set_effective_scroll_ms(prev_ms)
 
         _SV_DEBUG_LOGGER.log({
             'type': 'engine_swap',
