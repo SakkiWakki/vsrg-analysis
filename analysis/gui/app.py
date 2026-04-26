@@ -124,6 +124,33 @@ def _apply_default_gl_format():
     QSurfaceFormat.setDefaultFormat(fmt)
 
 
+def _prewarm_webengine():
+    """Boot Chromium's GPU process and establish the GL share group
+    before any ``QOpenGLWidget`` paints.
+
+    Constructing a ``QWebEngineView`` synchronously rewires the active
+    GL share group while it boots Chromium. If that happens during a
+    ``PlayerCanvas`` paint (e.g. lazily from a sidebar draw closure),
+    ``QPainter::drawText`` segfaults inside ``QOpenGLContext::format``.
+    Doing it once at startup, before the canvas is shown, lets all
+    future per-overlay views slot in without re-disturbing the share
+    group.
+    """
+    try:
+        from PySide6.QtCore import QEventLoop, QTimer, QUrl
+        from PySide6.QtWebEngineWidgets import QWebEngineView
+    except ImportError:
+        return
+    view = QWebEngineView()
+    view.resize(2, 2)
+    loop = QEventLoop()
+    view.loadFinished.connect(lambda _ok: loop.quit())
+    QTimer.singleShot(2000, loop.quit)
+    view.load(QUrl('about:blank'))
+    loop.exec()
+    view.deleteLater()
+
+
 def main():
     _apply_default_gl_format()
     # ``AA_ShareOpenGLContexts`` makes every QOpenGLWidget share its GL
@@ -145,6 +172,7 @@ def main():
     # the library scan that kicks off on window open sees the user's choices.
     from analysis.gui.paths_dialog import prompt_if_first_run
     prompt_if_first_run()
+    _prewarm_webengine()
     w = MainWindow()
     w.show()
     sys.exit(app.exec())

@@ -5,7 +5,6 @@ Scanned locations (in order):
   1. ``<repo>/plugins/overlays/``
   2. ``~/.config/vsrg-analysis/overlays/``
   3. any directory in ``$TOSU_OVERLAYS_DIRS`` (``:``-separated; dev hook)
-    4. ``/tmp/tosu-counters`` (fallback when env var is unset)
 """
 from __future__ import annotations
 
@@ -15,14 +14,12 @@ from pathlib import Path
 
 _BUILTIN_OVERLAYS = Path(__file__).parent.parent.parent / 'overlays'
 _USER_OVERLAYS = Path.home() / '.config' / 'vsrg-analysis' / 'overlays'
-_DEFAULT_DEV_OVERLAYS = Path('/tmp/tosu-counters')
 
 
 def _extra_dirs() -> list[Path]:
     raw = os.environ.get('TOSU_OVERLAYS_DIRS', '')
     if not raw.strip():
-        return ([_DEFAULT_DEV_OVERLAYS]
-                if _DEFAULT_DEV_OVERLAYS.is_dir() else [])
+        return []
     out: list[Path] = []
     for part in raw.split(os.pathsep):
         cleaned = part.strip()

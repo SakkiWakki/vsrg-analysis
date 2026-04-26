@@ -112,7 +112,7 @@ class _Mount:
             s1.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
             scripts.insert(s1)
 
-        shim_path = Path(__file__).parent / 'shim.js'
+        shim_path = Path(__file__).parent.parent / 'shim.js'
         s2 = QWebEngineScript()
         s2.setName('tosu:shim')
         s2.setSourceCode(shim_path.read_text(encoding='utf-8'))
