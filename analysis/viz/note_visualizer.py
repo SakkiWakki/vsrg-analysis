@@ -273,13 +273,13 @@ def render_chart_full(replay, save_path='chart.png', rows_per_panel=None,
         return
 
     from analysis.core import game as game_mod
-    windows, unit_label, rpm = game_mod.get(game).viz_windows(
-        replay, od=od)
+    adapter = game_mod.get(game)
+    windows, unit_label, rpm = adapter.viz_windows(replay, od=od)
     if rows_per_ms is not None:
         rpm = rows_per_ms
 
     if rows_per_panel is None:
-        rows_per_panel = 8000 if game == 'osu' else 2400
+        rows_per_panel = adapter.viz_panel_units(replay)
 
     total = int(noterows.max()) + 1
     n_panels = (total + rows_per_panel - 1) // rows_per_panel
@@ -320,10 +320,11 @@ def render_chart_full(replay, save_path='chart.png', rows_per_panel=None,
 def interactive(replay, game='etterna', od=8, window_units=None, rows_per_ms=None):
     """Interactive scrollable view."""
     from analysis.core import game as game_mod
-    windows, unit_label, rpm = game_mod.get(game).viz_windows(replay, od=od)
+    adapter = game_mod.get(game)
+    windows, unit_label, rpm = adapter.viz_windows(replay, od=od)
     if rows_per_ms is not None:
         rpm = rows_per_ms
-    win = window_units or (8000 if game == 'osu' else 2400)
+    win = window_units or adapter.viz_panel_units(replay)
 
     fig = plt.figure(figsize=(10, 11))
     gs = fig.add_gridspec(1, 4, width_ratios=[3, 0.05, 1, 0.05], wspace=0.1)
@@ -388,9 +389,9 @@ if __name__ == '__main__':
                           game=game, od=od, rows_per_ms=rpm, show=True,
                           title=title)
     else:
-        win = 8000 if game == 'osu' else 2400
-        windows, unit_label, rpm_default = get_adapter(game).viz_windows(
-            rep, od=od)
+        adapter = get_adapter(game)
+        win = adapter.viz_panel_units(rep)
+        windows, unit_label, rpm_default = adapter.viz_windows(rep, od=od)
         rpm_use = rpm if rpm is not None else rpm_default
 
         fig = plt.figure(figsize=(10, 11))

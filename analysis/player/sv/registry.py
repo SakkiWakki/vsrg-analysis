@@ -42,6 +42,9 @@ ENGINE_PRIMARY_GAME = {
     KEY_QUAVER_TIME: 'quaver',
 }
 
+# Inverse of ENGINE_PRIMARY_GAME: which engine is each game's native one.
+PRIMARY_ENGINE_FOR_GAME = {g: k for k, g in ENGINE_PRIMARY_GAME.items()}
+
 
 @dataclass
 class _EngineSlot:

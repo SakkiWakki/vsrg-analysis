@@ -14,8 +14,7 @@ def osu_mania_windows(od):
 
 
 def prepare_replay_times(replay, bpms=None, sm_offset=0.0):
-    name = 'osu' if replay.get('chart_path') else 'etterna'
-    return game_mod.get(name).prepare_replay_times(
+    return game_mod.get(replay['game']).prepare_replay_times(
         replay,
         bpms=bpms,
         sm_offset=sm_offset,

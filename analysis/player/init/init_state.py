@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from analysis.core import game as game_mod
-from analysis.player.init.judgment import JCLR, judge
+from analysis.player.init.judgment import judge
 from analysis.player.plugin.plugin_loader import PluginManager
 from analysis.viz.plots import col_colors
 
@@ -59,7 +59,7 @@ class PlayerInitState:
         judge_kw = p._adapter.judge_kwarg_name()
         p._active_judge = od if judge_kw == 'od' else ett_judge
         self.apply_judge()
-        p.judge_colors = JCLR
+        p.judge_colors = p._adapter.judgment_colors()
 
     def init_palette(self):
         p = self.p

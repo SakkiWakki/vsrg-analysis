@@ -222,15 +222,8 @@ class ScrollStateController:
         # beat engine), the swap is a no-op.
         sv = getattr(p, 'sv_render', None)
         if sv is not None and hasattr(sv, 'swap_engine'):
-            from analysis.player.sv.registry import (KEY_ETTERNA_BEAT,
-                                                      KEY_OSU_TIME,
-                                                      KEY_QUAVER_TIME)
-            game_to_engine = {
-                'etterna': KEY_ETTERNA_BEAT,
-                'osu': KEY_OSU_TIME,
-                'quaver': KEY_QUAVER_TIME,
-            }
-            target = game_to_engine.get(game)
+            from analysis.player.sv.registry import PRIMARY_ENGINE_FOR_GAME
+            target = PRIMARY_ENGINE_FOR_GAME.get(game)
             if target and target in sv.available_engine_keys():
                 sv.swap_engine(target)
 

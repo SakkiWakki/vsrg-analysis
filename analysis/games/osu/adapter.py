@@ -199,6 +199,9 @@ class OsuAdapter(GameAdapter):
         from analysis.viz.note_visualizer import osu_mania_windows
         return osu_mania_windows(od=od if od is not None else 8), 'time (ms)', None
 
+    def viz_panel_units(self, replay) -> int:
+        return 8000
+
 
 def _osr_paths():
     from analysis.games.osu.replay import find_osu_dirs

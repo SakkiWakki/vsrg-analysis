@@ -86,6 +86,9 @@ class QuaverAdapter(GameAdapter):
                        judge or replay.get('judge', 'Standard'))]
         return windows, 'time (ms)', None
 
+    def viz_panel_units(self, replay) -> int:
+        return 8000
+
     # --- library scan -----------------------------------------------------
     def scan_library(self, progress=None):
         """Parse every .qr on disk into a placeholder entry. Enrichment

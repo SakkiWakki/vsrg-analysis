@@ -8,13 +8,6 @@ from analysis.player import scroll as scroll_registry
 from analysis.player.sv.debug import LOGGER as _SV_DEBUG_LOGGER
 
 
-def _engine_supports_groups(engine):
-    """True when the engine's `project_times` accepts a per-element
-    `groups=` array. Currently only Quaver's ; everything else uses the
-    legacy single-stream signature."""
-    return type(engine).__name__ == 'QuaverSVEngine'
-
-
 class SvRenderController:
     def __init__(self, player):
         self.p = player
@@ -244,7 +237,7 @@ class SvRenderController:
         # means culling is slightly over-conservative when a group's
         # render multiplier diverges from the default.
         p._note_sv_cum = p._sv_engine.project_times(p.times)
-        if _engine_supports_groups(p._sv_engine):
+        if hasattr(p._sv_engine, 'cumulative_at_groups'):
             self._build_quaver_ln_caches()
 
     def _build_quaver_ln_caches(self):
@@ -285,7 +278,7 @@ class SvRenderController:
     def times_to_sv(self, times, groups=None):
         engine = self.p._sv_engine
         arr = np.asarray(times)
-        if groups is not None and _engine_supports_groups(engine):
+        if groups is not None and hasattr(engine, 'cumulative_at_groups'):
             return engine.project_times(arr, groups=groups)
         return engine.project_times(arr)
 
@@ -477,8 +470,7 @@ class SvRenderController:
             dist = arr - float(frame.raw_t)
         else:
             engine = p._sv_engine
-            if groups is not None and _engine_supports_groups(engine) \
-                    and hasattr(engine, 'cumulative_at_groups'):
+            if groups is not None and hasattr(engine, 'cumulative_at_groups'):
                 cum = engine.project_times(arr, groups=groups)
                 # Per-note playhead cum, evaluated in each note's own
                 # stream -- matches Quaver's `GetSpritePosition`.

@@ -208,12 +208,18 @@ This matches Etterna's ArrowEffects.cpp XMOD branch.
 
 \subsection{Time-space (osu!mania, Quaver)}
 
-$\mu = d\tau$, $z \equiv 1$:
+$\mu = d\tau$. For osu!mania $z \equiv 1$:
 \[
 d_{d\tau}(a, b) \;=\; \int_{(a,b]} v(\tau)\dtau.
 \]
 The timing map $B$ does not appear. Stops and warps are not natively
 expressible (\S\ref{sec:stops-warps}).
+
+For Quaver $z(a) = \mathrm{ssf}(a)$ is the chart-authored
+ScrollSpeedFactor, a piecewise-linear position-dependent zoom keyed at
+chart load and lerped at the playhead. Quaver also authors $v$
+per-group (\S\ref{sec:groups}); the per-group SSF means $z$ is per-group
+too: $z(a, g) = \mathrm{ssf}_g(a)$.
 
 \subsection{Beat-space (Etterna XMOD)}
 \label{sec:beat-instance}
@@ -477,6 +483,142 @@ $N \subseteq \mathcal{N}$) is type-compatible: the integrand becomes
 $v(\tau, n)$ indexed by note. Sparse storage is required for efficient
 $|\mathcal{N}|$-many cumulative arrays; the math (Theorem~\ref{thm:per-column})
 extends without change.
+\end{remark}
+
+\subsection{Group selectors (Quaver TimingGroups)}
+\label{sec:groups}
+
+A common selector pattern is partition by \emph{group}: the note set
+$\mathcal{N}$ is partitioned into disjoint groups $\{G_g\}_g$, each
+group $g$ owns a stream $v_g \in \Lone(T, \mu)$, and a note $n \in G_g$
+inherits $v(\tau, n) = v_g(\tau)$. Quaver authors this directly via the
+\texttt{TimingGroup} field on each hit object; the chart's top-level
+\texttt{SliderVelocities} populate a distinguished default group
+$g = \mathrm{def}$.
+
+The group partition collapses storage: instead of one cumulative cache
+per note, we keep one $C_g$ per group and dispatch by group at lookup.
+Each $C_g$ is built independently against the same shared $\mu$, so
+Theorem~\ref{thm:per-column} applies to each group in isolation
+(per-column independence is a special case of per-group independence
+under a column-set selector).
+
+\begin{remark}[Playhead is per-group]
+\label{rem:playhead-per-group}
+Render distance from a playhead $a$ to a note $n \in G_g$ is
+$d_g(a, t_n) = z(a, g) \cdot (C_g(t_n) - C_g(a))$. The playhead's
+``current cumulative'' is therefore \emph{per group}: $C_g(a)$ for the
+note's own group, not $C_{\mathrm{def}}(a)$. Mixing the two -- e.g.,
+subtracting the default-group playhead from a non-default-group note
+position -- produces the wrong distance whenever $v_g$ diverges from
+$v_{\mathrm{def}}$. The implementation must evaluate the playhead in
+each group's stream.
+\end{remark}
+
+% =====================================================================
+\section{Extended notes: long notes under reversal}
+\label{sec:long-notes}
+
+A long note (LN) covers a chart-time interval $[t_h, t_e]$. Its body
+must be drawn as a continuous bar in render-space; under signed
+integrands the cumulative function need not be monotonic, so head and
+tail cumulative values do not bound the body.
+
+\begin{definition}[LN body extent]
+\label{def:body-extent}
+For $n \in G_g$ a long note with head $t_h$ and end $t_e$, the
+\emph{body extent} of $n$ is the smallest interval enclosing $C_g$
+restricted to $[t_h, t_e]$:
+\begin{equation}
+\label{eq:body-extent}
+\mathcal{B}_g(t_h, t_e)
+\;=\; \Bigl[\, \min_{t \in [t_h, t_e]} C_g(t),\ \max_{t \in [t_h, t_e]} C_g(t)\,\Bigr].
+\end{equation}
+The body's screen-space rectangle is the image of $\mathcal{B}_g(t_h, t_e)$
+under $C_g \mapsto z(a, g) \cdot (C_g - C_g(a))$ at playhead $a$.
+\end{definition}
+
+\begin{proposition}[Extrema at sign changes]
+\label{prop:body-extrema}
+Let $v_g$ be piecewise-constant with breakpoints
+$t_h = \tau_0 < \tau_1 < \cdots < \tau_K = t_e$ on $[t_h, t_e]$, and
+let $\mu = d\tau$ on this interval (no atoms, time-space). Then
+\begin{equation}
+\label{eq:hull-vertices}
+\mathcal{B}_g(t_h, t_e)
+\;=\; \bigl[\min S,\ \max S\bigr],
+\end{equation}
+where
+\[
+S \;=\; \{C_g(t_h),\, C_g(t_e)\}
+\;\cup\; \{ C_g(\tau_k) : 1 \leq k < K,\ \mathrm{sign}(v_g(\tau_k^+)) \neq \mathrm{sign}(v_g(\tau_k^-)) \}.
+\]
+That is, the body extent is determined by the endpoints together with
+the cumulative values at sign-change breakpoints.
+\end{proposition}
+
+\begin{proof}
+On each subinterval $(\tau_k, \tau_{k+1})$ the integrand $v_g$ is
+constant, so $C_g$ is linear (slope $v_g(\tau_k^+) \cdot \rho_k$) and
+attains its extrema on this subinterval only at the endpoints.
+Therefore $\min$ and $\max$ of $C_g$ on $[t_h, t_e]$ occur at some
+$\tau_k$. Suppose $\mathrm{sign}(v_g(\tau_k^+)) = \mathrm{sign}(v_g(\tau_k^-))$,
+i.e., the slope sign does not change at $\tau_k$. Then $C_g$ is
+monotone on $(\tau_{k-1}, \tau_{k+1})$, so $\tau_k$ is not a local
+extremum of $C_g \restriction [\tau_{k-1}, \tau_{k+1}]$; in particular
+it is dominated by one of $C_g(\tau_{k-1})$, $C_g(\tau_{k+1})$ in the
+direction of the global extremum. Iterating eliminates every interior
+non-sign-change breakpoint, leaving only $S$ as candidate vertices.
+\qedhere
+\end{proof}
+
+\begin{remark}[Algorithm and storage]
+Proposition~\ref{prop:body-extrema} reduces body-extent computation to
+one $\Lone$-style scan: bisect $v_g$'s breakpoint array to locate
+$[t_h, t_e]$, walk the slice, and emit $C_g(\tau_k)$ at each sign flip.
+The cost per LN is $O(\#\text{breakpoints in } [t_h, t_e])$ at chart
+load, with body extents stored as two scalars per LN
+$(\mathcal{B}^{\min}_n, \mathcal{B}^{\max}_n)$. No per-frame work is
+needed beyond the $C_g(a) \mapsto y$ projection that draws every other
+note.
+\end{remark}
+
+\begin{remark}[Atom-supporting measures]
+\label{rem:body-atoms}
+Under $\mu = dB$ with warp atoms in $[t_h, t_e]$, $C_g$ has jump
+discontinuities at the warp times $\tau_w$. The set $S$ in
+Proposition~\ref{prop:body-extrema} extends to include
+$C_g(\tau_w^-)$ and $C_g(\tau_w^+)$ for each $\tau_w \in (t_h, t_e)$;
+the proof carries over because $C_g$ is monotone on each open
+subinterval between consecutive breakpoints (and a warp atom is, by
+the Lebesgue decomposition of \eqref{eq:dB-decomp}, a single jump
+between two AC pieces). No game currently authors warps inside an LN
+body, so the implementation handles only the $\mu = d\tau$ case.
+\end{remark}
+
+\subsection{Tail orientation}
+\label{sec:tail-flip}
+
+The LN tail sprite has a direction (head-side vs tail-side cap). Under
+signed $v_g$, the tail can render below the head (forward scroll),
+above it (reverse scroll at the tail), or anywhere in between. The
+correct sprite orientation is determined by the sign of the integrand
+at the tail.
+
+\begin{definition}[Tail flip]
+\label{def:tail-flip}
+For $n \in G_g$ with end time $t_e$, the tail orientation flips when
+$v_g(t_e^-) < 0$, where $v_g(t_e^-)$ is the most recent non-zero value
+of $v_g$ at or before $t_e$. (Zero-multiplier segments don't change
+the rendering direction; we walk backward through them.)
+\end{definition}
+
+\begin{remark}[Mirrors Quaver]
+Quaver implements this as
+\texttt{ScrollGroupController.IsSVNegative(EndTime)} and applies the
+flip at draw time via a vertical sprite mirror. In our framework the
+flip is a property of $v_g$ alone -- $z$ does not enter (it can scale
+the body but not invert direction in any game we model).
 \end{remark}
 
 % =====================================================================
@@ -774,15 +916,24 @@ the source files.
 \section{Open extensions}
 
 \begin{itemize}[leftmargin=2em]
-    \item \textbf{Per-note SV}: formally supported by
-          Theorem~\ref{thm:per-column}; deferred pending sparse cumulative
-          storage.
+    \item \textbf{Per-note SV}: implemented for Quaver via group
+          selectors (\S\ref{sec:groups}). Per-note selectors that don't
+          partition cleanly (one-off SV per note) are still
+          unimplemented; the math (Theorem~\ref{thm:per-column})
+          extends without change but storage layout would differ.
+    \item \textbf{LN body extent under reversal}: implemented per
+          Proposition~\ref{prop:body-extrema} for $\mu = d\tau$. The
+          $\mu = dB$ extension (warps inside an LN body,
+          Remark~\ref{rem:body-atoms}) is unimplemented; no game
+          authors this configuration.
     \item \textbf{Modscripting}: adds a per-frame mutation of $v$, $z$, and
           $\mathrm{sel}$. Out of scope; the framework's static-positioning
           subset is sufficient for non-modfile charts.
     \item \textbf{Eased SV segments}: Proposition~\ref{prop:exact} relaxes to
           per-segment closed-form antiderivatives; Remark on numerical
-          exactness applies.
+          exactness applies. Quaver SSF is implemented as an eased
+          \emph{zoom} curve $z$ (linear lerp between keyframes); no
+          eased \emph{integrand} segments yet.
     \item \textbf{Singular non-atomic measures}: the framework permits
           $\mu_{\mathrm{sing}}$ that is non-atomic (e.g.\ Cantor-like).
           No game uses these; the framework would handle them in principle

@@ -138,7 +138,7 @@ if __name__ == '__main__':
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument('query', nargs='?', default='')
-    p.add_argument('--game', choices=['etterna', 'osu'])
+    p.add_argument('--game', choices=sorted(game_mod.all_games().keys()))
     p.add_argument('--sort', default='recent',
                    choices=['recent', 'date', 'wife', 'song', 'pack', 'rate',
                             'overall_ssr', 'keys', 'game', 'grade', 'maxcombo'])

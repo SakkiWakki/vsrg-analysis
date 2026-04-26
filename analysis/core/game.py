@@ -154,6 +154,22 @@ class GameAdapter:
         `windows` is the list-of-tuples shape that viz expects (name, w_s, color)."""
         raise NotImplementedError
 
+    def viz_panel_units(self, replay) -> int:
+        """Default panel/window size for the note visualizer, in this
+        adapter's `viz_windows` units (noterows for Etterna, ms for the
+        time-space games). 2400 is the SM/Etterna 8-measure default;
+        ms-axis games override since 2400 ms is too narrow."""
+        return 2400
+
+    def judgment_colors(self) -> dict:
+        """RGB tuples for each judgment-window name this adapter produces.
+        The renderer indexes into this by the label `judge()` returns, so a
+        new window name needs an entry here or the renderer KeyErrors at
+        draw time. Default covers the union across builtin games; override
+        to add or recolor windows."""
+        from analysis.player.init.judgment import JCLR
+        return JCLR
+
 
 def resolve_standalone_replay(path, args=None):
     """Pick the adapter that claims `path`, run its standalone resolver.
