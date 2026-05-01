@@ -71,6 +71,12 @@ class PlayerCanvas(QOpenGLWidget):
         self._update_cursor(ev)
         super().mouseMoveEvent(ev)
 
+    @staticmethod
+    def _event_xy(ev) -> tuple[int, int]:
+        pos = ev.position() if hasattr(ev, 'position') else ev.pos()
+        return int(pos.x()), int(pos.y())
+
+    @staticmethod
     def _rect_contains(rect, x, y):
         rx, ry, rw, rh = rect
         return rx <= x <= rx + rw and ry <= y <= ry + rh
