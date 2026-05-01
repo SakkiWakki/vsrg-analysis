@@ -28,8 +28,6 @@ if TYPE_CHECKING:
 # Shared vector constant for LN release-guide + press-mark strokes.
 # Every other sprite color lives inside the sprite-cache rasterize
 # callbacks (see `layers/note_sprites.py`).
-_RELEASE_GUIDE = (220, 220, 220)
-
 
 # ── note state ───────────────────────────────────────────────────
 
@@ -268,7 +266,7 @@ def _draw_ln(ctx, painter, n):
     # ── release guide ──
     if n.rel_off is not None and n.state not in ('released', 'missed'):
         rel_y = ctx.time_to_y(float(n.release_t))
-        _draw_stroke_with_tick(ctx, painter, _RELEASE_GUIDE,
+        _draw_stroke_with_tick(ctx, painter, n.jcolor,
                                 n.lx, n.y_end, rel_y)
 
 

@@ -2,14 +2,13 @@
 
 Per column: walk the key-event stream, assign each press to the leftmost
 unjudged head, auto-expire heads whose late boundary has passed, and for
-LNs, judge the release against the tail window. Matches stable's
-`ManiaHitWindows` (non-convert Classic branch).
+LNs, judge the release against the tail window. Matches stable
+`ManiaHitWindows`.
 """
 
 TAIL_RELEASE_LENIENCE = 1.5  # osu!lazer TailNote.RELEASE_WINDOW_LENIENCE
 
 _JUDGEMENTS = ['MAX', '300', '200', '100', '50', 'miss']
-_RANK = {j: i for i, j in enumerate(_JUDGEMENTS)}
 
 
 def stable_hit_windows(od):
@@ -33,9 +32,28 @@ def _judgement_for(abs_diff, windows):
     return 'miss'
 
 
-def _combine_head_tail(head_j, tail_j):
-    """Stable combines head+tail by taking the worse of the two."""
-    return _JUDGEMENTS[max(_RANK[head_j], _RANK[tail_j])]
+# Per-tier multipliers for head and combined (head+tail) error.
+# Source: osu! wiki "osu!mania judgement system" - Hold notes table.
+# Index parallel to _JUDGEMENTS: MAX, 300, 200, 100, 50, miss.
+# MEH (50) and MISS have no multiplier -- MEH is "anything else not miss",
+# MISS is handled before this table is consulted.
+_HEAD_MULT   = [1.2, 1.1, 1.0, 1.0, None, None]
+_COMBINED_MULT = [2.4, 2.2, 2.0, 2.0, None, None]
+
+
+def _combine_head_tail(head_off_abs, tail_off_abs, windows):
+    """lazer-Classic LN judgment from absolute head and tail offsets.
+
+    Checks each tier from best to worst: the note earns the first tier
+    where both the head-only constraint and the combined constraint pass.
+    Falls through to MEH ('50') if nothing better qualifies."""
+    combined = head_off_abs + tail_off_abs
+    for j, w, hm, cm in zip(_JUDGEMENTS, windows, _HEAD_MULT, _COMBINED_MULT):
+        if hm is None:
+            break
+        if head_off_abs <= w * hm and combined <= w * cm:
+            return j
+    return '50'
 
 
 def _new_result(col, note):
@@ -46,26 +64,24 @@ def _new_result(col, note):
             'judgement': None, 'broken': False, 'missed': False}
 
 
-def _judge_tail(r, release_t, tail_windows):
+def _judge_tail(r, release_t, windows, tail_windows):
     if not r['is_hold']:
         return
     diff = release_t - r['end_time']
     r['release_t'] = release_t
     r['tail_off'] = diff
-    abs_diff = abs(diff)
     tail_miss_w = tail_windows[5]
-    if abs_diff > tail_miss_w:
+    head_j = r.get('_head_j', 'miss')
+    # Released too early (past the early miss boundary) or head missed.
+    if head_j == 'miss' or diff < -tail_miss_w:
+        r['broken'] = True
+        r['judgement'] = 'miss' if abs(diff) > tail_miss_w else '50'
+        return
+    if abs(diff) > tail_miss_w:
         r['broken'] = True
         r['judgement'] = 'miss'
         return
-    tail_j = _judgement_for(abs_diff, tail_windows)
-    head_j = r.get('_head_j', 'miss')
-    # Broken LN (head missed, or released too early) caps at 50.
-    if head_j == 'miss' or diff < -tail_miss_w:
-        r['broken'] = True
-        r['judgement'] = 'miss' if tail_j == 'miss' else '50'
-    else:
-        r['judgement'] = _combine_head_tail(head_j, tail_j)
+    r['judgement'] = _combine_head_tail(abs(r['head_off']), abs(diff), windows)
 
 
 def _advance_misses(per, next_unjudged, upto_t, late_expire_w):
@@ -110,7 +126,7 @@ def _simulate_column(col, notes, events, windows, tail_windows):
         next_unjudged = _advance_misses(per, next_unjudged, t, late_expire_w)
 
         if held_idx is not None:
-            _judge_tail(per[held_idx], t, tail_windows)
+            _judge_tail(per[held_idx], t, windows, tail_windows)
             held_idx = None
         if not is_press:
             continue
