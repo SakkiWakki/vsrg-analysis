@@ -266,7 +266,7 @@ def _draw_ln(ctx, painter, n):
         _draw_ln_tail_sprite(ctx, painter, n)
 
     # ── release guide ──
-    if n.rel_off is not None and n.state not in ('released', 'missed') and not hide:
+    if n.rel_off is not None and n.state not in ('released', 'missed'):
         rel_y = ctx.time_to_y(float(n.release_t))
         _draw_stroke_with_tick(ctx, painter, _RELEASE_GUIDE,
                                 n.lx, n.y_end, rel_y)
