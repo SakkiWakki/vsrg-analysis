@@ -100,12 +100,21 @@ class GameAdapter:
         raise NotImplementedError
 
     def lane_mask(self, replay):
-        """Active-lane timeline `[(t_start_s, mask_tuple)]` for charts
-        whose visible lane set changes mid-play (fluXis lane switches),
-        or None for static layouts. Masks are per-lane 0/1 tuples of
-        length keycount; note arrays stay full-width with absolute
-        columns, so only lane painting consults this."""
+        """Active-lane timeline `[(t_start_s, mask_tuple, dur_s, easing)]`
+        for charts whose visible lane set changes mid-play (fluXis lane
+        switches), or None for static layouts. Masks are per-lane 0/1
+        tuples of length keycount; note arrays stay full-width with
+        absolute columns, so only lane geometry consults this."""
         return None
+
+    def effects(self, replay) -> list:
+        """Column-space visual effects for this replay (playfield
+        transforms, storyboards, ...); see
+        `analysis.player.render.effects`. Default: none. The lane-mask
+        collapse is provided as an effect automatically when
+        `lane_mask()` is non-None, so adapters only override this for
+        extra effects."""
+        return []
 
     def judge_kwarg_name(self) -> str:
         """Name of the keyword the game's judge system takes in

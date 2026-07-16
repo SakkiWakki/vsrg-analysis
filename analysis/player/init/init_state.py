@@ -26,6 +26,19 @@ def normalize_miss_pressed(raw, n_misses):
     return np.zeros(n_misses, dtype=bool)
 
 
+def _build_render_effects(player, replay) -> list:
+    """Compose the player's column-space effect list: the lane-switch
+    collapse (when the chart has one) first, then any adapter-declared
+    effects (playfield transforms, storyboards). Order matters --
+    transforms compose over the collapsed field."""
+    effects = []
+    if player._lane_mask:
+        from analysis.player.render.effects.lane_switch import LaneSwitchEffect
+        effects.append(LaneSwitchEffect(player._lane_mask))
+    effects.extend(player._adapter.effects(replay) or [])
+    return [e for e in effects if e]
+
+
 class PlayerInitState:
     def __init__(self, player):
         self.p = player
@@ -43,6 +56,10 @@ class PlayerInitState:
         # mid-play (fluXis lane switches); None = static layout. The
         # lane layer reads this per frame.
         p._lane_mask = p._adapter.lane_mask(replay)
+        # Column-space visual effects (playfield transforms, storyboards).
+        # A lane switch becomes the LaneSwitchEffect so its column
+        # geometry composes with everything else through one pipeline.
+        p._render_effects = _build_render_effects(p, replay)
 
         p.columns = replay['columns']
         p.offsets = replay['offsets']

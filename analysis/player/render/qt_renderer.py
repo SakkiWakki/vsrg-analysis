@@ -110,6 +110,10 @@ class QtPlayerRenderer:
         # rasterized pixmaps via `ctx.sprite_cache.get(name, ctx, ...)`.
         ctx.sprite_cache = player._sprite_cache
         ctx.sprite_cache.check_geometry(ctx.lane_w, ctx.note_h)
+        # Composite effects up front: the lane-switch effect writes
+        # `ctx.lane_xs`/`lane_ws`, which the notes prepass reads via
+        # `ctx.lane_x`, so it must run before `_notes_layer.prepare`.
+        ctx.effect_frame = self._composite_effects(player, ctx)
         culling.prepare_time_window(ctx)
         ctx.candidates = culling.select_note_candidates(ctx)
         # Precompute Y positions for every candidate's head + LN tail in one
@@ -150,6 +154,7 @@ class QtPlayerRenderer:
         self._frame_stats.tick()
         if player is not None:
             player._render_frame_stats = self._frame_stats
+        effect_frame = getattr(ctx, 'effect_frame', None)
         hud = getattr(player, 'hud', None) if player is not None else None
         # Narrowly-mocked contexts (layer-gating tests) have no player
         # or painter; for those, HUD layers draw directly like any other
@@ -166,13 +171,22 @@ class QtPlayerRenderer:
         self.plugins.draw(Stage.PRE_FRAME, ctx)
         visibility = self._layer_visibility(ctx)
         hud_painter = None
+        # Effects transform + bracket only the chart layers; the HUD
+        # (sidebar, free panels) never moves with the playfield.
+        self._draw_effect_below(effect_frame, ctx, painter)
+        chart_wrapped = self._begin_effect_transform(effect_frame, painter)
         for name, fn, stage in self._layers:
-            if name in _HUD_LAYERS and cache_enabled:
+            is_hud = name in _HUD_LAYERS and cache_enabled
+            if is_hud:
                 # HUD layers render into a cached pixmap at most
                 # _HUD_REDRAW_HZ; chart layers stay per-frame. On dense
                 # charts the sidebar's measure+draw passes cost more
                 # than the notes, and its content changes far slower
-                # than the 500 Hz frame cadence.
+                # than the 500 Hz frame cadence. The HUD paints outside
+                # the effect transform, so lift it before drawing.
+                if chart_wrapped:
+                    self._end_effect_transform(painter)
+                    chart_wrapped = False
                 if not hud_due:
                     continue
                 if hud_painter is None:
@@ -188,6 +202,9 @@ class QtPlayerRenderer:
                 ctx.painter = target
                 self.plugins.draw(stage, ctx)
                 ctx.painter = prev_painter
+        if chart_wrapped:
+            self._end_effect_transform(painter)
+        self._draw_effect_above(effect_frame, ctx, painter)
         if hud_painter is not None:
             hud_painter.end()
         if cache_enabled and self._hud_pixmap is not None:
@@ -204,6 +221,44 @@ class QtPlayerRenderer:
             paint_profiler.record_frame(ctx)
         except ImportError:
             pass
+
+    def _composite_effects(self, player, ctx):
+        effects = getattr(player, '_render_effects', None) if player else None
+        if not effects:
+            return None
+        from analysis.player.render.effects import composite
+        frame = composite(effects, ctx)
+        return None if frame.is_identity else frame
+
+    @staticmethod
+    def _begin_effect_transform(frame, painter) -> bool:
+        """Push the composited transform + opacity for the chart-layer
+        group. Returns whether a save() was made (so the caller knows to
+        restore)."""
+        if frame is None or (frame.transform is None and frame.opacity >= 1.0):
+            return False
+        painter.save()
+        if frame.transform is not None:
+            painter.setTransform(frame.transform, True)
+        if frame.opacity < 1.0:
+            painter.setOpacity(frame.opacity)
+        return True
+
+    @staticmethod
+    def _end_effect_transform(painter) -> None:
+        painter.restore()
+
+    @staticmethod
+    def _draw_effect_below(frame, ctx, painter) -> None:
+        if frame is not None:
+            for _z, fn in frame.below:
+                fn(ctx, painter)
+
+    @staticmethod
+    def _draw_effect_above(frame, ctx, painter) -> None:
+        if frame is not None:
+            for _z, fn in frame.above:
+                fn(ctx, painter)
 
     def _hud_redraw_due(self, ctx, hud) -> bool:
         """The HUD pixmap re-renders when its content can actually have

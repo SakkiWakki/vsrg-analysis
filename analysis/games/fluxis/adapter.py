@@ -113,6 +113,16 @@ class FluxisAdapter(GameAdapter):
     def lane_mask(self, replay):
         return replay.get('_fluxis_lane_mask') or None
 
+    def effects(self, replay) -> list:
+        from analysis.player.render.effects.playfield_transform import (
+            PlayfieldTransformEffect)
+        streams = replay.get('_fluxis_effect_streams') or {}
+        transform = PlayfieldTransformEffect(
+            move=streams.get('playfieldmove'),
+            scale=streams.get('playfieldscale'),
+            rotate=streams.get('playfieldrotate'))
+        return [transform] if transform else []
+
     def populate_notes_model(self, replay, model) -> None:
         from analysis.player.init.notes_model import copy_chart_streams
         copy_chart_streams(model, replay)

@@ -186,19 +186,28 @@ def lane_mask_for(keymode: int, active_count: int, *, v2: bool = True):
     return tuple(int(x) for x in table[keymode - 2][active_count - 1])
 
 
+_DEFAULT_EASING = 13   # osu.Framework Easing.OutQuint (LaneSwitchEvent default)
+
+
 def build_lane_mask_timeline(lane_switches, keymode: int, *, v2: bool):
-    """`[(t_start_s, mask)]` from raw lane-switch events (ms), sorted,
-    deduplicated. Empty when the chart never changes lane count."""
+    """`[(t_start_s, mask, duration_s, easing_id)]` from raw lane-switch
+    events (ms), sorted and deduplicated by mask. `duration`/`easing`
+    drive the collapse animation (fluXis `speed`/`easing` fields).
+    Empty when the chart never changes lane count."""
     if not lane_switches:
         return []
     events = sorted(lane_switches, key=lambda e: float(e.get('time', 0.0)))
     timeline = []
     for e in events:
         mask = lane_mask_for(keymode, int(e.get('count', keymode)), v2=v2)
-        t = float(e.get('time', 0.0)) / 1000.0
         if timeline and timeline[-1][1] == mask:
             continue
-        timeline.append((t, mask))
+        timeline.append((
+            float(e.get('time', 0.0)) / 1000.0,
+            mask,
+            max(0.0, float(e.get('speed', 0.0))) / 1000.0,
+            int(e.get('easing', _DEFAULT_EASING)),
+        ))
     full = (1,) * keymode
     if len(timeline) == 1 and timeline[0][1] == full:
         return []

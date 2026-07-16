@@ -134,10 +134,35 @@ def test_lane_mask_generated_beyond_tables():
 
 
 def test_lane_mask_timeline_dedupes_and_converts():
-    events = [{'time': -2000, 'count': 4}, {'time': 5000, 'count': 2},
+    events = [{'time': -2000, 'count': 4},
+              {'time': 5000, 'count': 2, 'speed': 300, 'easing': 5},
               {'time': 6000, 'count': 2}]
     tl = build_lane_mask_timeline(events, 4, v2=True)
-    assert tl == [(-2.0, (1, 1, 1, 1)), (5.0, (0, 1, 1, 0))]
+    # (t_start_s, mask, duration_s, easing_id)
+    assert [(t, m) for t, m, _d, _e in tl] == [
+        (-2.0, (1, 1, 1, 1)), (5.0, (0, 1, 1, 0))]
+    assert tl[1][2] == pytest.approx(0.3)
+    assert tl[1][3] == 5
+
+
+def test_column_layout_recenters_and_animates():
+    from analysis.player.render.lane_layout import column_layout
+    # 4k -> show middle two, over 200ms starting at t=5.0.
+    tl = [(0.0, (1, 1, 1, 1), 0.0, 0),
+          (5.0, (0, 1, 1, 0), 0.2, 0)]   # linear easing (id 0 = None)
+    x0, lane_w = 100.0, 40.0
+
+    assert column_layout(tl, 4, 2.0, x0, lane_w) is None   # full = fast path
+
+    # Halfway through the collapse: outer lanes at width 20, inner at 40.
+    xs, ws = column_layout(tl, 4, 5.1, x0, lane_w)
+    assert ws == pytest.approx((20.0, 40.0, 40.0, 20.0))
+    center = x0 + 4 * lane_w / 2
+    assert xs[0] + sum(ws) / 2 == pytest.approx(center)   # stays centered
+
+    # After the duration: collapsed lanes at 0, packed active pair centered.
+    xs, ws = column_layout(tl, 4, 6.0, x0, lane_w)
+    assert ws == pytest.approx((0.0, 40.0, 40.0, 0.0))
 
 
 def test_static_chart_yields_empty_timeline():

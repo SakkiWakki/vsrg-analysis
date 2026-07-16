@@ -6,8 +6,6 @@ number of QPainter state changes and draw calls.
 """
 from __future__ import annotations
 
-from bisect import bisect_right
-
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QPen
 
@@ -62,44 +60,48 @@ def draw_lanes(ctx, painter):
     kc = p.keycount
     H = p.H
 
-    mask = _active_lane_mask(p, ctx.t_now)
-    if mask is None:
-        # One rect covers every lane
+    if ctx.lane_xs is None:
+        # Static layout: one rect covers every lane, uniform dividers.
         painter.fillRect(QRectF(x0, 0, lane_w * kc, H), _LANE_BG_BRUSH)
-    else:
-        for c, active in enumerate(mask[:kc]):
-            if active:
-                painter.fillRect(QRectF(x0 + c * lane_w, 0, lane_w, H),
-                                 _LANE_BG_BRUSH)
+        painter.setPen(_LANE_LINE_PEN)
+        x = x0
+        for _ in range(kc + 1):
+            painter.drawLine(QPointF(x, 0.0), QPointF(x, H))
+            x += lane_w
+        return
 
-    # Set pen once. Dividers stay put across lane switches; only the
-    # backgrounds hide, keeping the playfield geometry stable.
+    # Lane-switch layout: per-column animated x/width (collapsed lanes
+    # have width ~0, so their fill vanishes and their divider merges
+    # with the neighbor's).
+    xs, ws = ctx.lane_xs, ctx.lane_ws
+    for x, w in zip(xs, ws):
+        if w > 0.5:
+            painter.fillRect(QRectF(x, 0, w, H), _LANE_BG_BRUSH)
     painter.setPen(_LANE_LINE_PEN)
-    x = x0
-    for _ in range(kc + 1):
+    for x in xs:
         painter.drawLine(QPointF(x, 0.0), QPointF(x, H))
-        x += lane_w
+    right = xs[-1] + ws[-1]
+    painter.drawLine(QPointF(right, 0.0), QPointF(right, H))
 
 
-def _active_lane_mask(p, t_now):
-    """Current lane mask from the player's lane-switch timeline; None
-    when the chart has a static layout (every game but fluXis)."""
-    timeline = getattr(p, '_lane_mask', None)
-    if not timeline:
-        return None
-    idx = bisect_right(timeline, float(t_now), key=lambda e: e[0]) - 1
-    if idx < 0:
-        return timeline[0][1]
-    return timeline[idx][1]
+def _field_span(ctx):
+    """`(left_x, width)` of the visible playfield: the active-lane
+    extent under a lane switch, else the full uniform field."""
+    if ctx.lane_xs is None:
+        return ctx.x0, ctx.player.keycount * ctx.lane_w
+    left = min((x for x, w in zip(ctx.lane_xs, ctx.lane_ws) if w > 0.5),
+               default=ctx.x0)
+    right = max((x + w for x, w in zip(ctx.lane_xs, ctx.lane_ws) if w > 0.5),
+                default=ctx.x0)
+    return left, right - left
 
 
 def draw_judgment(ctx, painter):
     p = ctx.player
     t_now = ctx.t_now
     sps = ctx.scroll_speed
-    x0 = ctx.x0
     judge_y = ctx.judge_y
-    field_w = p.keycount * ctx.lane_w
+    x0, field_w = _field_span(ctx)
 
     # Window shading. Anchor both edges at judge_y and ask the SV engine
     # for the render-space distance across each half independently --

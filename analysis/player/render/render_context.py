@@ -25,6 +25,14 @@ class RenderContext:
     visible_ghost_taps: list[int] = field(default_factory=list)
     plugin_data: dict = field(default_factory=dict)
     _scroll_speed: float = 0.0
+    # Animated per-column geometry for lane-switch charts; None keeps
+    # the uniform layout. Filled by build_context from the player's
+    # lane-mask timeline (see analysis/player/render/lane_layout.py).
+    lane_xs: tuple | None = None
+    lane_ws: tuple | None = None
+    # Composited effect frame for this paint (transform + z-ordered
+    # overlay draws); None when no effect is active. Set by the renderer.
+    effect_frame: object | None = None
 
     @property
     def width(self):
@@ -51,6 +59,8 @@ class RenderContext:
         ) * self._scroll_speed
 
     def lane_x(self, col):
+        if self.lane_xs is not None:
+            return self.lane_xs[int(col)]
         return self.x0 + int(col) * self.lane_w
 
     def lane_center(self, col):
