@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from bisect import bisect_right
 
-from analysis.player.render.easing import ease
+from analysis.player.render.effects.easing import ease
 
 
 def column_layout(timeline, keycount, t_now, x0, lane_w):

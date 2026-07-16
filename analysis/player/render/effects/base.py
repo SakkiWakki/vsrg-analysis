@@ -18,10 +18,15 @@ class EffectFrame:
       z paints below the chart layers (storyboard backgrounds),
       positive above. Drawn outside the column transform.
     - `opacity`    multiplies the chart-layer group opacity (1 = opaque).
+    - `shaders`    fullscreen post-process passes as
+      `(shader_id, uniforms)` pairs, run in order over the finished
+      chart frame by the GL pipeline (see render/shaders/). Ignored
+      when no GL pipeline is attached (headless / raster fallback).
     """
     transform: QTransform | None = None
     draws: tuple = ()
     opacity: float = 1.0
+    shaders: tuple = ()
 
 
 @runtime_checkable
@@ -38,21 +43,25 @@ class CompositeFrame:
     below: tuple = ()      # (z, fn) sorted, z < 0
     above: tuple = ()      # (z, fn) sorted, z >= 0
     opacity: float = 1.0
+    shaders: tuple = ()    # (shader_id, uniforms) in effect order
 
     @property
     def is_identity(self) -> bool:
         return (self.transform is None and not self.below
-                and not self.above and self.opacity >= 1.0)
+                and not self.above and self.opacity >= 1.0
+                and not self.shaders)
 
 
 def composite(effects, ctx) -> CompositeFrame:
     """Fold every active effect into one transform + split draw lists.
 
     Transforms compose in effect order; `draws` merge and split around
-    z=0, each side stable-sorted by z so authoring order breaks ties."""
+    z=0, each side stable-sorted by z so authoring order breaks ties;
+    shader passes concatenate in effect order."""
     transform = None
     draws = []
     opacity = 1.0
+    shaders = []
     for effect in effects:
         frame = effect.at(ctx)
         if frame is None:
@@ -62,10 +71,12 @@ def composite(effects, ctx) -> CompositeFrame:
                          else frame.transform * transform)
         draws.extend(frame.draws)
         opacity *= frame.opacity
+        shaders.extend(frame.shaders)
 
     below = tuple(sorted((d for d in draws if d[0] < 0),
                          key=lambda d: d[0]))
     above = tuple(sorted((d for d in draws if d[0] >= 0),
                          key=lambda d: d[0]))
     return CompositeFrame(transform=transform, below=below, above=above,
-                          opacity=max(0.0, min(1.0, opacity)))
+                          opacity=max(0.0, min(1.0, opacity)),
+                          shaders=tuple(shaders))

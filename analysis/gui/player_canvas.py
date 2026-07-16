@@ -18,6 +18,7 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 from analysis.gui import paint_profiler
 from analysis.player.render.qt_renderer import QtPlayerRenderer
+from analysis.player.render.shaders.gl_pipeline import ShaderGLPipeline
 
 # Below this inter-swap interval the compositor clearly isn't
 # vsync-throttling us (broken driver, offscreen, VM); rescheduling
@@ -33,6 +34,7 @@ class PlayerCanvas(QOpenGLWidget):
         super().__init__(parent)
         self.player = player
         self.renderer = QtPlayerRenderer(player.plugins)
+        self.renderer.shader_pipeline = ShaderGLPipeline()
         self._last_swap = 0.0
         if swap_paced:
             # Presentation-driven render loop: schedule the next paint

@@ -11,7 +11,7 @@ from __future__ import annotations
 from bisect import bisect_right
 from dataclasses import dataclass
 
-from analysis.player.render.easing import ease
+from analysis.player.render.effects.easing import ease
 
 
 @dataclass(frozen=True)
@@ -20,12 +20,14 @@ class Keyframe:
     values: tuple     # target value(s) at t + duration
     duration: float   # seconds
     easing: int
+    start: tuple | None = None   # ease-from override (fluXis use-start)
 
 
 class EventTimeline:
     """Piecewise-eased sampler. Before the first keyframe returns
-    `rest`; between keyframes eases from the previous target toward the
-    current one over the current keyframe's duration, then holds."""
+    `rest`; between keyframes eases from the previous target (or the
+    keyframe's own `start` override) toward the current one over the
+    current keyframe's duration, then holds."""
 
     def __init__(self, keyframes, rest):
         self._kf = sorted(keyframes, key=lambda k: k.t)
@@ -40,8 +42,11 @@ class EventTimeline:
         if idx < 0:
             return self._rest
         kf = self._kf[idx]
-        prev = self._kf[idx - 1].values if idx > 0 else self._rest
         if kf.duration <= 0 or t_now >= kf.t + kf.duration:
             return kf.values
+        if kf.start is not None:
+            prev = kf.start
+        else:
+            prev = self._kf[idx - 1].values if idx > 0 else self._rest
         f = ease(kf.easing, (t_now - kf.t) / kf.duration)
         return tuple(a + (b - a) * f for a, b in zip(prev, kf.values))

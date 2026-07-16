@@ -116,12 +116,14 @@ class FluxisAdapter(GameAdapter):
     def effects(self, replay) -> list:
         from analysis.player.render.effects.playfield_transform import (
             PlayfieldTransformEffect)
+        from analysis.player.render.shaders import ShaderStackEffect
         streams = replay.get('_fluxis_effect_streams') or {}
         transform = PlayfieldTransformEffect(
             move=streams.get('playfieldmove'),
             scale=streams.get('playfieldscale'),
             rotate=streams.get('playfieldrotate'))
-        return [transform] if transform else []
+        shaders = ShaderStackEffect(streams.get('shader'))
+        return [e for e in (transform, shaders) if e]
 
     def populate_notes_model(self, replay, model) -> None:
         from analysis.player.init.notes_model import copy_chart_streams

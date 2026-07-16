@@ -209,6 +209,7 @@ def parse_sm(path):
         'title': tags.get('TITLE', ''),
         'artist': tags.get('ARTIST', ''),
         'music': tags.get('MUSIC', ''),
+        'background': tags.get('BACKGROUND', ''),
         'path': str(path),
     }
 
@@ -275,6 +276,7 @@ def parse_ssc(path):
         'title': h.get('TITLE', ''),
         'artist': h.get('ARTIST', ''),
         'music': h.get('MUSIC', ''),
+        'background': h.get('BACKGROUND', ''),
         'path': str(path),
     }
 

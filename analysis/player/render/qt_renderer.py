@@ -91,6 +91,10 @@ class QtPlayerRenderer:
         self._hud_rendered_at = 0.0
         self._hud_snapshot = None
         self._frame_stats = FrameStats()
+        # Set by GL hosts (PlayerCanvas); frames whose effects carry
+        # shader passes route chart painting through it. None = raster
+        # host, shaders skipped.
+        self.shader_pipeline = None
 
     def build_context(self, player, painter, t_now):
         player._render_t_now = float(t_now)
@@ -171,6 +175,16 @@ class QtPlayerRenderer:
         self.plugins.draw(Stage.PRE_FRAME, ctx)
         visibility = self._layer_visibility(ctx)
         hud_painter = None
+        # Shader passes post-process the chart as a whole: capture
+        # background + field layers into the GL pipeline's FBO and let
+        # it blit the shaded result back before the HUD (which never
+        # gets post-processed) goes on top. When no pipeline is
+        # attached or capture can't start, chart painting stays on the
+        # host painter and shaders are simply skipped.
+        chart_painter = self._begin_shader_capture(effect_frame, ctx, painter)
+        capturing = chart_painter is not None
+        if not capturing:
+            chart_painter = painter
         # Effects transform + bracket only the playfield layers. The
         # 'background' layer is the whole-canvas clear and must stay in
         # screen space (a transformed clear leaves stale pixels outside
@@ -183,13 +197,13 @@ class QtPlayerRenderer:
             is_hud = name in _HUD_LAYERS and cache_enabled
             in_field = not is_hud and name != 'background'
             if chart_wrapped and not in_field:
-                self._end_effect_transform(painter)
+                self._end_effect_transform(chart_painter)
                 chart_wrapped = False
             if in_field and not below_drawn:
-                self._draw_effect_below(effect_frame, ctx, painter)
+                self._draw_effect_below(effect_frame, ctx, chart_painter)
                 below_drawn = True
                 chart_wrapped = self._begin_effect_transform(
-                    effect_frame, painter, ctx)
+                    effect_frame, chart_painter, ctx)
             if is_hud:
                 # HUD layers render into a cached pixmap at most
                 # _HUD_REDRAW_HZ; chart layers stay per-frame. On dense
@@ -202,7 +216,7 @@ class QtPlayerRenderer:
                     hud_painter = self._begin_hud_pixmap(ctx, painter)
                 target = hud_painter
             else:
-                target = painter
+                target = chart_painter
             if visibility.get(name, True):
                 if fn is not None:
                     fn(ctx, target)
@@ -212,8 +226,10 @@ class QtPlayerRenderer:
                 self.plugins.draw(stage, ctx)
                 ctx.painter = prev_painter
         if chart_wrapped:
-            self._end_effect_transform(painter)
-        self._draw_effect_above(effect_frame, ctx, painter)
+            self._end_effect_transform(chart_painter)
+        self._draw_effect_above(effect_frame, ctx, chart_painter)
+        if capturing:
+            self.shader_pipeline.end_capture(effect_frame.shaders, ctx.t_now)
         if hud_painter is not None:
             hud_painter.end()
         if cache_enabled and self._hud_pixmap is not None:
@@ -238,6 +254,17 @@ class QtPlayerRenderer:
         from analysis.player.render.effects import composite
         frame = composite(effects, ctx)
         return None if frame.is_identity else frame
+
+    def _begin_shader_capture(self, effect_frame, ctx, painter):
+        """Start routing chart painting into the shader pipeline when
+        this frame carries shader passes. Returns the capture painter,
+        or None to paint direct (no passes, raster host, GL failure)."""
+        if (effect_frame is None or not effect_frame.shaders
+                or self.shader_pipeline is None or painter is None
+                or getattr(ctx, 'player', None) is None):
+            return None
+        p = ctx.player
+        return self.shader_pipeline.begin_capture(painter, p.W, p.H)
 
     @staticmethod
     def _begin_effect_transform(frame, painter, ctx) -> bool:
