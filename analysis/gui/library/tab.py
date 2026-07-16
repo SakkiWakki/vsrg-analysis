@@ -39,6 +39,7 @@ class LibraryTab(QWidget):
         self.tree_ctl = LibraryTreeController(self.tree, self)
 
         self._load_saved_settings()
+        self._connect_filter_signals()
         self.plugin_actions.rebuild()
 
         QTimer.singleShot(200, self.load_library)
@@ -167,7 +168,15 @@ class LibraryTab(QWidget):
 
         row.addStretch(1)
         return row
-    
+
+    def _connect_filter_signals(self):
+        """Re-render the tree whenever a filter/sort control changes."""
+        self.game_cb.currentIndexChanged.connect(self.refresh_tree)
+        self.sort_cb.currentIndexChanged.connect(self.refresh_tree)
+        self.desc_cbx.stateChanged.connect(self.refresh_tree)
+        self.group_cbx.stateChanged.connect(self.refresh_tree)
+        self.keys_cb.currentTextChanged.connect(self.refresh_tree)
+
     def _run_selected(self, action: str) -> None:
         entry = self.selected_entry()
         if entry:
