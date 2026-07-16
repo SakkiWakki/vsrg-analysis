@@ -58,6 +58,8 @@ class _NoteView:
     flip_tail: bool = False
     # fluXis tick notes; drawn bright yellow via the 'tick' sprite state.
     is_tick: bool = False
+    # Per-note mod alpha (NotITG stealth/hidden family); 1 = opaque.
+    alpha: float = 1.0
     # Quaver: under SV reversal an LN body covers a wider span than
     # head->tail. `body_min_y` / `body_max_y` are screen-y bounds of the
     # convex hull of cum positions over the LN's chart-time interval.
@@ -223,11 +225,15 @@ def _build(ctx, i, pos) -> _NoteView | None:
             # whichever extreme is on the opposite side from the head.
             y_end = body_max_y if head_y <= body_max_y else body_min_y
 
+    mod_dx = getattr(ctx, 'candidate_dx', None)
+    mod_alpha = getattr(ctx, 'candidate_alpha', None)
     return _NoteView(
         i=i, col=col,
         y=float(ctx.candidate_head_y[pos]), y_end=y_end,
         press_y=float(ctx.candidate_press_y[pos]),
-        lx=int(ctx.lane_x(col)),
+        lx=int(ctx.lane_x(col)
+               + (mod_dx[pos] if mod_dx is not None else 0.0)),
+        alpha=float(mod_alpha[pos]) if mod_alpha is not None else 1.0,
         off=off, press_t=press_t,
         release_t=release_t, rel_off=rel_off, end_t=end_t,
         is_ln=is_ln,
@@ -257,12 +263,27 @@ def prepare(ctx) -> None:
     ctx.note_views = views
 
 
+def _draw_view(ctx, painter, n, draw_fn) -> None:
+    """Run one view's drawer, honoring its per-note mod alpha. The
+    save/restore pair only exists for modded notes, so unmodded charts
+    pay nothing."""
+    if n.alpha >= 1.0:
+        draw_fn(ctx, painter, n)
+        return
+    if n.alpha < 1.0 / 255.0:
+        return
+    painter.save()
+    painter.setOpacity(painter.opacity() * n.alpha)
+    draw_fn(ctx, painter, n)
+    painter.restore()
+
+
 def draw_taps(ctx, painter) -> None:
     """Draw taps (non-LN notes) from the prebuilt views."""
     for n in ctx.note_views:
         if n is None or n.is_ln:
             continue
-        _draw_replay_note(ctx, painter, n)
+        _draw_view(ctx, painter, n, _draw_replay_note)
 
 
 def draw_lns(ctx, painter) -> None:
@@ -271,7 +292,7 @@ def draw_lns(ctx, painter) -> None:
     for n in ctx.note_views:
         if n is None or not n.is_ln:
             continue
-        _draw_ln(ctx, painter, n)
+        _draw_view(ctx, painter, n, _draw_ln)
         _draw_replay_note(ctx, painter, n)
 
 

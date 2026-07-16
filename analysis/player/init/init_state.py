@@ -89,6 +89,9 @@ class PlayerInitState:
         # an effect: it feeds the time->y mapping via
         # `effective_scroll_speed`, rescaling the whole field.
         p._scroll_mult_timeline = _build_scroll_mult_timeline(p, replay)
+        # Per-note mod consumer (NotITG ArrowEffects); applied by the
+        # renderer after the candidate y arrays exist each frame.
+        p._note_mods = p._adapter.note_mods(replay)
 
         p.columns = replay['columns']
         p.offsets = replay['offsets']

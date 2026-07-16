@@ -63,12 +63,12 @@ class NotitgNoteMods:
         judge_y = float(ctx.judge_y)
         y_offset = (judge_y - ctx.candidate_head_y) / scale
 
+        note_beats = (np.asarray(p.notes.noterows_list,
+                                 dtype=np.float64)[idx] / 48.0)
         offs = note_offsets(
             percents, cols, y_offset,
             t_now=t, beat_now=self._beat_at(t), keycount=p.keycount,
-            note_beats=p.noterows_array(idx) if hasattr(p, 'noterows_array')
-            else np.asarray(p.notes.noterows_list, dtype=np.float64)[idx]
-            / 48.0)
+            note_beats=note_beats)
 
         dy = offs.dy * scale
         ctx.candidate_head_y += dy

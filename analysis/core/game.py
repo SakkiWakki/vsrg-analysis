@@ -124,6 +124,13 @@ class GameAdapter:
         extra effects."""
         return []
 
+    def note_mods(self, replay):
+        """Per-frame note-offset consumer (an object with `apply(ctx)`)
+        driven by the game's compiled mod channels, or None. Runs after
+        the candidate y arrays are built each frame; see
+        analysis/games/notitg/note_mods.py for the contract."""
+        return None
+
     def upscroll(self) -> bool:
         """True when the game's native orientation is receptors-on-top
         (NotITG/ITG). The player mirrors the field vertically via a

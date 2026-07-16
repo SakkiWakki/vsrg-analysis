@@ -125,6 +125,11 @@ class QtPlayerRenderer:
         # on dense Etterna charts that's ~600 Python→SV-engine bisects per
         # frame collapsed to two numpy operations.
         _precompute_candidate_ys(ctx)
+        # Per-note mods (NotITG ArrowEffects): mutate the candidate y
+        # arrays + stash dx/alpha before the views are built.
+        note_mods = getattr(player, '_note_mods', None)
+        if note_mods is not None:
+            note_mods.apply(ctx)
         # Build every per-candidate `_NoteView` once, up front. The
         # split `taps` / `lns` layers read from the same list so we
         # don't pay two separate prepasses.

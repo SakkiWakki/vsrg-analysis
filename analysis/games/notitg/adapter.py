@@ -109,6 +109,18 @@ class NotitgAdapter(EtternaAdapter):
     def upscroll(self) -> bool:
         return True
 
+    def note_mods(self, replay):
+        from analysis.games.notitg.mod_channels import compile_mod_channels
+        from analysis.games.notitg.modfile import compile_modfile
+        from analysis.games.notitg.note_mods import NotitgNoteMods
+        sm_path, _index = split_chart_ref(replay.get('filepath', ''))
+        compiled = compile_modfile(sm_path)
+        if not compiled or not compiled.get('mod_events'):
+            return None
+        channels = compile_mod_channels(compiled['mod_events'])
+        bpms = parse_sm(sm_path)['bpms']
+        return NotitgNoteMods(channels, bpms)
+
     def judgment_colors(self) -> dict:
         return {
             'fantastic': (90, 220, 255), 'excellent': (255, 220, 90),
