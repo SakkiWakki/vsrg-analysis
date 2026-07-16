@@ -288,6 +288,18 @@ class SvRenderController:
     def cumulative_sv_at(self, t):
         return self.p._sv_engine.cumulative_at(float(t))
 
+    def effective_scroll_speed(self, t) -> float:
+        """User scroll speed times the chart's eased scroll-multiplier
+        at `t` (fluXis scroll-multiply; 1.0 when the chart has none).
+        The multiplier rescales the whole on-screen field at draw time,
+        so every px-per-distance consumer must route through here."""
+        speed = float(self.p.scroll_speed)
+        timeline = getattr(self.p, '_scroll_mult_timeline', None)
+        if timeline is not None:
+            (mult,) = timeline.sample(float(t))
+            speed *= max(0.0, mult)
+        return speed
+
     def render_frame_state(self, raw_t):
         p = self.p
         timeline = getattr(p, '_render_timeline', None)
@@ -298,7 +310,7 @@ class SvRenderController:
 
         return timeline.render_at(
             raw_t=float(raw_t),
-            scroll_speed=float(p.scroll_speed),
+            scroll_speed=self.effective_scroll_speed(raw_t),
             use_sv=bool(p.sv_enabled and p._sv_engine.enabled),
             play_rate=float(getattr(p, 'play_rate', 1.0)),
         )
@@ -374,7 +386,7 @@ class SvRenderController:
         identity. Falls back to the flat scroll-speed time when SV is
         off / no engine is loaded."""
         p = self.p
-        sps = max(0.001, float(p.scroll_speed))
+        sps = max(0.001, self.effective_scroll_speed(t_now))
         flat_dt = (p.H * p.hit_line_y_frac) / sps
         engine = p._sv_engine
         if not p.sv_enabled or engine is None or not engine.enabled:
@@ -421,7 +433,8 @@ class SvRenderController:
         if frame is None:
             frame = self.render_frame_state(t_now)
 
-        return judge_y - self.visual_sv_distance_from_frame(frame, t) * p.scroll_speed
+        return (judge_y - self.visual_sv_distance_from_frame(frame, t)
+                * self.effective_scroll_speed(t_now))
 
     def batch_time_to_y(self, times, frame, groups=None):
         """Project an array of chart-times to screen-y at `frame`. The
@@ -442,7 +455,7 @@ class SvRenderController:
             return np.empty(0, dtype=np.float64)
 
         judge_y = p.H * p.hit_line_y_frac
-        scroll_speed = float(p.scroll_speed)
+        scroll_speed = self.effective_scroll_speed(float(frame.raw_t))
 
         if not getattr(frame, 'use_sv', False):
             dist = arr - float(frame.raw_t)

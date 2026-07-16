@@ -14,6 +14,22 @@ from dataclasses import dataclass
 from analysis.player.render.effects.easing import ease
 
 
+def bloom(elapsed, total, in_frac, easing, rest, peak) -> float:
+    """One grow-then-shrink cycle: eases `rest` -> `peak` over the first
+    `in_frac` of `total`, then `peak` -> `rest` over the rest, holding
+    `rest` once `elapsed` reaches `total`. Shared by the pulse/beatpulse
+    effects (osu.Framework Then()-chained absolute transforms)."""
+    if elapsed < 0.0 or elapsed >= total:
+        return rest
+    in_dur = total * in_frac
+    if elapsed < in_dur:
+        u = elapsed / in_dur if in_dur > 0.0 else 1.0
+        return rest + (peak - rest) * ease(easing, u)
+    out_dur = total - in_dur
+    u = (elapsed - in_dur) / out_dur if out_dur > 0.0 else 1.0
+    return peak + (rest - peak) * ease(easing, u)
+
+
 @dataclass(frozen=True)
 class Keyframe:
     t: float          # seconds
@@ -21,6 +37,25 @@ class Keyframe:
     duration: float   # seconds
     easing: int
     start: tuple | None = None   # ease-from override (fluXis use-start)
+
+
+def keyframes_from_events(events, value_keys, rest) -> list:
+    """Keyframes from `.ffx`-shaped event dicts: each event carries
+    ms-keyed `time`/`duration`, an `ease` id, and one value per key in
+    `value_keys` (missing values fall back to `rest`)."""
+    out = []
+    for e in events or []:
+        if not isinstance(e, dict):
+            continue
+        values = tuple(float(e.get(k, r))
+                       for k, r in zip(value_keys, rest))
+        out.append(Keyframe(
+            t=float(e.get('time', 0.0)) / 1000.0,
+            values=values,
+            duration=max(0.0, float(e.get('duration', 0.0))) / 1000.0,
+            easing=int(e.get('ease', 0)),
+        ))
+    return out
 
 
 class EventTimeline:

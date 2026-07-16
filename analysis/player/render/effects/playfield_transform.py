@@ -22,7 +22,8 @@ from __future__ import annotations
 from PySide6.QtGui import QTransform
 
 from analysis.player.render.effects.base import EffectFrame
-from analysis.player.render.effects.timeline import EventTimeline, Keyframe
+from analysis.player.render.effects.timeline import (
+    EventTimeline, keyframes_from_events)
 
 # osu.Framework DrawSizePreservingFillContainer reference (fluXis's
 # gameplay draw space); event x/y are pixels in this space.
@@ -34,34 +35,19 @@ _CAM_Z = 100.0
 _MAX_OFFSET_FRAC = 0.5
 
 
-def _keyframes(events, value_keys, rest):
-    out = []
-    for e in events or []:
-        if not isinstance(e, dict):
-            continue
-        values = tuple(float(e.get(k, r))
-                       for k, r in zip(value_keys, rest))
-        out.append(Keyframe(
-            t=float(e.get('time', 0.0)) / 1000.0,
-            values=values,
-            duration=max(0.0, float(e.get('duration', 0.0))) / 1000.0,
-            easing=int(e.get('ease', 0)),
-        ))
-    return out
-
-
 class PlayfieldTransformEffect:
     """Composes move + scale + rotate streams into one QTransform about
     the field center. Any stream may be empty."""
 
     def __init__(self, *, move=None, scale=None, rotate=None):
         self._move = EventTimeline(
-            _keyframes(move, ('x', 'y', 'z'), (0.0, 0.0, 0.0)),
+            keyframes_from_events(move, ('x', 'y', 'z'), (0.0, 0.0, 0.0)),
             rest=(0.0, 0.0, 0.0))
         self._scale = EventTimeline(
-            _keyframes(scale, ('x', 'y'), (1.0, 1.0)), rest=(1.0, 1.0))
+            keyframes_from_events(scale, ('x', 'y'), (1.0, 1.0)),
+            rest=(1.0, 1.0))
         self._rotate = EventTimeline(
-            _keyframes(rotate, ('roll',), (0.0,)), rest=(0.0,))
+            keyframes_from_events(rotate, ('roll',), (0.0,)), rest=(0.0,))
 
     def __bool__(self):
         return bool(self._move or self._scale or self._rotate)

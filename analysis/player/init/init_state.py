@@ -41,7 +41,22 @@ def _build_render_effects(player, replay) -> list:
         from analysis.player.render.effects.lane_switch import LaneSwitchEffect
         effects.append(LaneSwitchEffect(player._lane_mask))
     effects.extend(player._adapter.effects(replay) or [])
+
+    storyboard = player._adapter.storyboard(replay)
+    if storyboard:
+        from analysis.player.render.storyboard import StoryboardEffect
+        effects.append(StoryboardEffect(storyboard))
     return [e for e in effects if e]
+
+
+def _build_scroll_mult_timeline(player, replay):
+    events = player._adapter.scroll_multipliers(replay)
+    if not events:
+        return None
+    from analysis.player.render.effects.timeline import (
+        EventTimeline, keyframes_from_events)
+    keyframes = keyframes_from_events(events, ('multiplier',), (1.0,))
+    return EventTimeline(keyframes, rest=(1.0,)) or None
 
 
 class PlayerInitState:
@@ -65,6 +80,10 @@ class PlayerInitState:
         # A lane switch becomes the LaneSwitchEffect so its column
         # geometry composes with everything else through one pipeline.
         p._render_effects = _build_render_effects(p, replay)
+        # Eased scroll-speed multiplier (fluXis scroll-multiply). Not
+        # an effect: it feeds the time->y mapping via
+        # `effective_scroll_speed`, rescaling the whole field.
+        p._scroll_mult_timeline = _build_scroll_mult_timeline(p, replay)
 
         p.columns = replay['columns']
         p.offsets = replay['offsets']

@@ -70,10 +70,22 @@ def parse_replay(frp_path, fsc_path, rate=1.0):
         },
         '_fluxis_audio_file': chart['audio'],
         '_fluxis_background_file': chart['background'],
+        '_fluxis_storyboard_file': chart['storyboard'],
         '_fluxis_lane_mask': build_lane_mask_timeline(
             chart['lane_switches'], keycount, v2=chart['ls_v2']),
         '_fluxis_effect_streams': chart['effect_streams'],
+        '_fluxis_timing_points': chart['timing_points'],
+        '_fluxis_end_time': _chart_end_ms(chart['hitobjects']),
     }
+
+
+def _chart_end_ms(hitobjects):
+    """Port MapInfo.EndTime: the last hit object's end time (its tail for
+    holds), or 1000ms when the chart is empty."""
+    if not hitobjects:
+        return 1000.0
+    return max(h['end_time'] if h['end_time'] is not None else h['time']
+               for h in hitobjects)
 
 
 def _split_hitobjects(hitobjects, keycount):

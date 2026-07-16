@@ -124,6 +124,22 @@ class GameAdapter:
         extra effects."""
         return []
 
+    def storyboard(self, replay):
+        """This replay's storyboard compiled to the game-agnostic IR
+        (`analysis.player.render.storyboard.Storyboard`), or None.
+        Adapters own the per-format compilation (fluXis `.fsb`, osu
+        `.osb`/[Events]); the player wires the returned storyboard into
+        the effects pipeline automatically."""
+        return None
+
+    def scroll_multipliers(self, replay):
+        """Eased scroll-speed multiplier events (`{time, duration,
+        multiplier, ease}`, ms-keyed, fluXis scroll-multiply shape) or
+        None. Unlike an SV point, the sampled multiplier rescales the
+        whole on-screen field at draw time (fluXis eases a live
+        `ScrollMultiplier` property on the scroll group)."""
+        return None
+
     def judge_kwarg_name(self) -> str:
         """Name of the keyword the game's judge system takes in
         `judgement_windows`/`judge_label`/`player_kwargs` ('judge' for

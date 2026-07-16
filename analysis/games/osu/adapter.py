@@ -46,6 +46,12 @@ class OsuAdapter(GameAdapter):
         cand = Path(replay['chart_path']).parent / bg
         return str(cand) if cand.exists() else None
 
+    def storyboard(self, replay):
+        from analysis.games.osu.storyboard_osb import parse_osu_storyboard
+        if not replay.get('chart_path'):
+            return None
+        return parse_osu_storyboard(replay['chart_path'])
+
     def resolve_chart_timing(self, replay, entry=None, progress=None):
         # osu! replays carry absolute ms timings; no sm-style offset needed.
         return None, 0.0

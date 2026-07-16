@@ -39,11 +39,72 @@ def _coerce_hitobject(h):
     }
 
 
+_LOOPS_KEY = 'loops'
+
+
+def _group_key(event) -> str:
+    group = event.get('group') if isinstance(event, dict) else None
+    return str(group).lower().strip() if group else ''
+
+
+def _grouped_events(streams):
+    """Map lowercased group name -> [(stream_name, event), ...] over every
+    stream. Mirrors MapEvents.GetGroups: events without a group are
+    skipped, and loop events (which cannot carry a JSON group) never join
+    a group so a loop can't target itself."""
+    groups = {}
+    for stream_name, events in streams.items():
+        if stream_name == _LOOPS_KEY or not isinstance(events, list):
+            continue
+        for event in events:
+            key = _group_key(event)
+            if key:
+                groups.setdefault(key, []).append((stream_name, event))
+    return groups
+
+
+def _apply_loop(loop, groups, streams):
+    """Clone one loop's target group per MapEvents.Compile: for i in
+    0..count-1 the clones land at `loop.time + distance * i`, each keeping
+    its event's delta above the group's earliest time. Clones append to
+    the stream they came from; originals are untouched."""
+    key = str(loop.get('target') or '').lower().strip()
+    members = groups.get(key)
+    if not members:
+        return
+    lowest = min(float(e.get('time', 0.0)) for _s, e in members)
+    loop_time = float(loop.get('time', 0.0))
+    distance = float(loop.get('distance', 0.0))
+    for i in range(int(loop.get('count', 0))):
+        start = loop_time + distance * i
+        for stream_name, event in members:
+            clone = dict(event)
+            clone['time'] = start + (float(event.get('time', 0.0)) - lowest)
+            streams[stream_name].append(clone)
+
+
+def _expand_loops(streams):
+    """Port MapEvents.Compile: expand every `loops` event into its target
+    group, then drop the `loops` stream so effects never see groups or
+    loops. Loop iteration starts at i = 0, so the first clone lands at
+    `loop.time + delta`, not at the original event's time; originals stay
+    wherever the author placed them."""
+    loops = streams.get(_LOOPS_KEY)
+    if isinstance(loops, list) and loops:
+        groups = _grouped_events(streams)
+        for loop in loops:
+            if isinstance(loop, dict):
+                _apply_loop(loop, groups, streams)
+    streams.pop(_LOOPS_KEY, None)
+    return streams
+
+
 def parse_ffx(ffx_path):
-    """Raw effect-stream dict; {} when the file is absent/unreadable."""
+    """Raw effect-stream dict with `loops` expanded; {} when the file is
+    absent/unreadable."""
     try:
         with open(ffx_path, encoding='utf-8') as f:
-            return json.load(f)
+            return _expand_loops(json.load(f))
     except (OSError, json.JSONDecodeError):
         return {}
 
@@ -98,6 +159,7 @@ def parse_fsc(fsc_path):
         'difficulty': str(meta.get('difficulty', '')),
         'audio': str(raw.get('AudioFile', '')),
         'background': str(raw.get('BackgroundFile', '')),
+        'storyboard': str(raw.get('StoryboardFile', '') or ''),
         'accuracy_difficulty': float(
             raw.get('AccuracyDifficulty') or DEFAULT_ACCURACY_DIFFICULTY),
         'keycount': keycount,

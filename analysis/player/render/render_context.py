@@ -30,6 +30,10 @@ class RenderContext:
     # lane-mask timeline (see analysis/player/render/lane_layout.py).
     lane_xs: tuple | None = None
     lane_ws: tuple | None = None
+    # Per-field-layer opacity (our-layer-name -> alpha) for layerfade
+    # effects; None keeps every layer opaque. Written by LayerFadeEffect
+    # in build_context (like lane_xs), applied per layer in the draw loop.
+    layer_opacities: dict | None = None
     # Composited effect frame for this paint (transform + z-ordered
     # overlay draws); None when no effect is active. Set by the renderer.
     effect_frame: object | None = None

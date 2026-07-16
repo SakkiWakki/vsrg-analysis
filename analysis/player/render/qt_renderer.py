@@ -107,7 +107,7 @@ class QtPlayerRenderer:
             lane_w=lane_w,
             judge_y=int(player.H * player.hit_line_y_frac),
             painter=painter,
-            _scroll_speed=float(player.scroll_speed),
+            _scroll_speed=player.sv_render.effective_scroll_speed(t_now),
         )
         # Bind the per-replay sprite cache and invalidate any pixmaps
         # that were rasterized at an old geometry. Draw sites pull
@@ -219,7 +219,7 @@ class QtPlayerRenderer:
                 target = chart_painter
             if visibility.get(name, True):
                 if fn is not None:
-                    fn(ctx, target)
+                    self._draw_layer(fn, ctx, target, name, is_hud)
             if stage is not None:
                 prev_painter = getattr(ctx, 'painter', None)
                 ctx.painter = target
@@ -284,6 +284,20 @@ class QtPlayerRenderer:
 
     @staticmethod
     def _end_effect_transform(painter) -> None:
+        painter.restore()
+
+    @staticmethod
+    def _draw_layer(fn, ctx, painter, name, is_hud) -> None:
+        """Draw one layer, applying its layerfade alpha when a field layer
+        (never the HUD) has one below 1."""
+        opacities = getattr(ctx, 'layer_opacities', None)
+        alpha = None if is_hud or not opacities else opacities.get(name)
+        if alpha is None or alpha >= 1.0:
+            fn(ctx, painter)
+            return
+        painter.save()
+        painter.setOpacity(alpha)
+        fn(ctx, painter)
         painter.restore()
 
     @staticmethod

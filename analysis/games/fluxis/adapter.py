@@ -114,16 +114,41 @@ class FluxisAdapter(GameAdapter):
         return replay.get('_fluxis_lane_mask') or None
 
     def effects(self, replay) -> list:
+        from analysis.player.render.effects.beat_pulse import BeatPulseEffect
+        from analysis.player.render.effects.flash import FlashEffect
+        from analysis.player.render.effects.layer_fade import LayerFadeEffect
         from analysis.player.render.effects.playfield_transform import (
             PlayfieldTransformEffect)
+        from analysis.player.render.effects.pulse import PulseEffect
+        from analysis.player.render.effects.shake import ShakeEffect
         from analysis.player.render.shaders import ShaderStackEffect
         streams = replay.get('_fluxis_effect_streams') or {}
         transform = PlayfieldTransformEffect(
             move=streams.get('playfieldmove'),
             scale=streams.get('playfieldscale'),
             rotate=streams.get('playfieldrotate'))
+        beat_pulse = BeatPulseEffect(
+            streams.get('beatpulse'),
+            replay.get('_fluxis_timing_points'),
+            replay.get('_fluxis_end_time') or 0.0)
+        shake = ShakeEffect(streams.get('shake'))
+        layer_fade = LayerFadeEffect(streams)
+        pulse = PulseEffect(streams.get('pulse'))
+        flash = FlashEffect(streams.get('flash'))
         shaders = ShaderStackEffect(streams.get('shader'))
-        return [e for e in (transform, shaders) if e]
+        return [e for e in (transform, beat_pulse, shake, layer_fade,
+                            pulse, flash, shaders) if e]
+
+    def scroll_multipliers(self, replay):
+        streams = replay.get('_fluxis_effect_streams') or {}
+        return streams.get('scroll-multiply') or None
+
+    def storyboard(self, replay):
+        from analysis.games.fluxis.fsb_storyboard import parse_fsb
+        path = self._sibling(replay, replay.get('_fluxis_storyboard_file'))
+        if not path:
+            return None
+        return parse_fsb(path)
 
     def populate_notes_model(self, replay, model) -> None:
         from analysis.player.init.notes_model import copy_chart_streams
