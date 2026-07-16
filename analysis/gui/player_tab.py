@@ -122,7 +122,14 @@ class PlayerTab(QWidget):
         self._connect_player_events()
         self._build_input_router()
 
-        self._start_playing()
+        # With audio, hold at t_min until the engine is fully built so
+        # playback never starts silent and has audio join mid-run; the
+        # audio worker's done/failed callbacks start playback. Cleared
+        # by _toggle so a user who starts/pauses manually during the
+        # load isn't overridden when the engine arrives.
+        self._autostart_pending = bool(audio_path)
+        if not self._autostart_pending:
+            self._start_playing()
 
     # ------------------------------------------------------------------
     # Construction
@@ -290,11 +297,18 @@ class PlayerTab(QWidget):
             self._sync_audio(force=True)
             self.view.update()
 
+        if self._autostart_pending:
+            self._autostart_pending = False
+            self._start_playing()
+
     def _on_audio_failed(self, tb) -> None:
         self._audio_worker = None
         self.audio_state.ready = False
         self._audio = None
         print(f'audio: failed to initialize\n{tb}')
+        if self._autostart_pending:
+            self._autostart_pending = False
+            self._start_playing()
 
     def _connect_player_events(self) -> None:
         self.player.events.on('scroll_changed', self._on_scroll_change)
@@ -400,6 +414,7 @@ class PlayerTab(QWidget):
             self.audio_state.last_sync_state = state
 
     def _toggle(self) -> None:
+        self._autostart_pending = False
         seeked_to_start = self._restart_if_resuming_after_end()
 
         self.player.toggle_pause()

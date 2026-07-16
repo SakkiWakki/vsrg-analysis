@@ -12,7 +12,9 @@ class PlaybackController:
         p._last_tick = None
 
         t_max = float(p.times[-1]) + 5.0 if len(p.times) else 10.0
-        p._clock = ChartClock(initial=0.0, t_min=-2.0, t_max=t_max)
+        # Playback begins at t_min
+        t_min = -2.0
+        p._clock = ChartClock(initial=t_min, t_min=t_min, t_max=t_max)
 
         p.hit_line_y_frac = 0.80
         self.set_skin(skin)
