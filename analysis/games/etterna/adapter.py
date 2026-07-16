@@ -38,16 +38,27 @@ class EtternaAdapter(GameAdapter):
                     progress('chartkey lookup…')
                 hit = find_chart_by_key(chartkey, songs, progress=progress)
                 if hit:
-                    return hit
+                    return self._remember_song(replay, hit)
             except Exception:
                 pass
         try:
             if progress:
                 progress('fingerprint chart match…')
-            return find_chart_for_replay(replay['noterows'],
-                                         replay['columns'], songs)
+            hit = find_chart_for_replay(replay['noterows'],
+                                        replay['columns'], songs)
+            return self._remember_song(replay, hit)
         except Exception:
             return None
+
+    @staticmethod
+    def _remember_song(replay, found):
+        """Stash the matched simfile on the replay so late lookups
+        (background_path runs at player init, with only the replay in
+        hand) don't repeat the chartkey/fingerprint search."""
+        if found:
+            replay['_song_file'] = found['file']
+            replay['_song_background'] = found['data'].get('background', '')
+        return found
 
     def resolve_audio(self, replay, entry=None, progress=None):
         found = self._find_chart(replay, entry=entry, progress=progress)
@@ -55,6 +66,25 @@ class EtternaAdapter(GameAdapter):
             return None
         music = found['data'].get('music', '')
         return self._resolve_music_asset(found['file'], music)
+
+    def background_path(self, replay) -> str | None:
+        """Resolve #BACKGROUND like Etterna: the tag path first, then
+        Song::TidyUpData's scan for an image named like a background."""
+        chart_file = replay.get('_song_file')
+        if not chart_file:
+            return None
+        resolved = self._resolve_song_asset(
+            chart_file, replay.get('_song_background', ''))
+        if resolved:
+            return resolved
+        for p in self._song_dir_files(chart_file):
+            name = p.name.casefold()
+            is_image = p.suffix[1:].casefold() in {'png', 'jpg', 'jpeg',
+                                                   'bmp', 'gif'}
+            if is_image and 'banner' not in name and (
+                    'bg' in name or 'background' in name):
+                return str(p)
+        return None
 
     def resolve_chart_timing(self, replay, entry=None, progress=None):
         found = self._find_chart(replay, entry=entry, progress=progress)
@@ -94,18 +124,23 @@ class EtternaAdapter(GameAdapter):
         resolved = EtternaAdapter._resolve_song_asset(chart_file, music)
         if resolved:
             return resolved
+        for p in EtternaAdapter._song_dir_files(chart_file):
+            if p.suffix[1:].casefold() in {'mp3', 'oga', 'ogg', 'wav'}:
+                return str(p)
+        return None
+
+    @staticmethod
+    def _song_dir_files(chart_file):
+        """Files in the simfile's folder, in Etterna's scan order
+        (case-insensitive name sort). Empty on I/O failure."""
         song_dir = Path(chart_file).parent
         try:
-            files = sorted(
+            return sorted(
                 (p for p in song_dir.iterdir() if p.is_file()),
                 key=lambda p: p.name.casefold(),
             )
         except OSError:
-            return None
-        for p in files:
-            if p.suffix[1:].casefold() in {'mp3', 'oga', 'ogg', 'wav'}:
-                return str(p)
-        return None
+            return []
 
     @staticmethod
     def _resolve_song_asset(chart_file, asset):
