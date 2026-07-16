@@ -124,6 +124,18 @@ class GameAdapter:
         extra effects."""
         return []
 
+    def upscroll(self) -> bool:
+        """True when the game's native orientation is receptors-on-top
+        (NotITG/ITG). The player mirrors the field vertically via a
+        standing effect; all y math stays downscroll internally."""
+        return False
+
+    def transparent_field(self) -> bool:
+        """True when the game's playfield has no opaque lane chrome:
+        notes float over the background/storyboard (NotITG-style).
+        The lanes layer skips its fills and dividers."""
+        return False
+
     def storyboard(self, replay):
         """This replay's storyboard compiled to the game-agnostic IR
         (`analysis.player.render.storyboard.Storyboard`), or None.

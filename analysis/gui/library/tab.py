@@ -55,6 +55,7 @@ class LibraryTab(QWidget):
         s.setValue('library/sort', self.sort_cb.currentText())
         s.setValue('library/desc', self.desc_cbx.isChecked())
         s.setValue('library/group', self.group_cbx.isChecked())
+        s.setValue('library/unplayed', self.unplayed_cbx.isChecked())
         s.setValue('library/keys', self.keys_cb.currentText())
         s.setValue('library/min_wife', self.min_wife_edit.text())
         s.setValue('library/viz', self.viz_cb.currentText())
@@ -154,6 +155,12 @@ class LibraryTab(QWidget):
         self.group_cbx.setChecked(True)
         row.addWidget(self.group_cbx)
 
+        # Chart-only entries (games without replays, e.g. NotITG, or
+        # future unplayed-chart scans) carry entry['unplayed'].
+        self.unplayed_cbx = QCheckBox('unplayed charts')
+        self.unplayed_cbx.setChecked(True)
+        row.addWidget(self.unplayed_cbx)
+
         row.addWidget(QLabel('K:'))
         self.keys_cb = QComboBox()
         self.keys_cb.setEditable(True)
@@ -175,6 +182,7 @@ class LibraryTab(QWidget):
         self.sort_cb.currentIndexChanged.connect(self.refresh_tree)
         self.desc_cbx.stateChanged.connect(self.refresh_tree)
         self.group_cbx.stateChanged.connect(self.refresh_tree)
+        self.unplayed_cbx.stateChanged.connect(self.refresh_tree)
         self.keys_cb.currentTextChanged.connect(self.refresh_tree)
 
     def _run_selected(self, action: str) -> None:
@@ -222,6 +230,8 @@ class LibraryTab(QWidget):
         self.sort_cb.setCurrentText(s.value('library/sort', 'recent'))
         self.desc_cbx.setChecked(s.value('library/desc', True, type=bool))
         self.group_cbx.setChecked(s.value('library/group', True, type=bool))
+        self.unplayed_cbx.setChecked(
+            s.value('library/unplayed', True, type=bool))
         self.keys_cb.setCurrentText(s.value('library/keys', 'any'))
         self.min_wife_edit.setText(s.value('library/min_wife', '0'))
         self.default_scroll_edit.setText(

@@ -46,6 +46,11 @@ def _build_render_effects(player, replay) -> list:
     if storyboard:
         from analysis.player.render.storyboard import StoryboardEffect
         effects.append(StoryboardEffect(storyboard))
+
+    if player._adapter.upscroll():
+        from analysis.player.render.effects.upscroll import UpscrollEffect
+        # Last, so the flip wraps every other field transform.
+        effects.append(UpscrollEffect())
     return [e for e in effects if e]
 
 

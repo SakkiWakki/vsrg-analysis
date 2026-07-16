@@ -163,6 +163,105 @@ def test_playfield_move_scales_with_chart_rect_width():
             > eff.at(narrow).transform.dx())
 
 
+# ── camera / scene bracket ----------------------------------------------
+
+def test_camera_move_is_negated_and_screen_proportional():
+    from analysis.player.render.effects.camera import CameraEffect
+    eff = CameraEffect(move=[{'time': 0, 'x': 1366.0, 'y': 0,
+                              'duration': 0, 'ease': 0}])
+    ctx = _ctx_win(t=1.0, W=1366, H=768)
+    frame = eff.at(ctx)
+    assert frame.transform is None
+    # camera right by one ref-width -> scene slides one chart-width left.
+    assert frame.scene_transform.dx() == pytest.approx(-1366.0)
+
+
+def test_camera_scale_pivots_on_chart_center():
+    from analysis.player.render.effects.camera import CameraEffect
+    eff = CameraEffect(scale=[{'time': 0, 'scale': 2.0,
+                               'duration': 0, 'ease': 0}])
+    ctx = _ctx_win(t=1.0, W=1000, H=800)
+    scene = eff.at(ctx).scene_transform
+    assert scene.map(500.0, 400.0) == pytest.approx((500.0, 400.0))
+    assert scene.m11() == pytest.approx(2.0)
+
+
+def test_camera_inactive_returns_none():
+    from analysis.player.render.effects.camera import CameraEffect
+    assert CameraEffect().at(_ctx_win(t=1.0)) is None
+    assert not CameraEffect()
+
+
+def test_composite_scene_channel_and_top_split():
+    from analysis.player.render.effects.base import SCENE_TOP_Z
+    scene = QTransform().translate(5, 0)
+    frame = composite([
+        _Effect(EffectFrame(scene_transform=scene)),
+        _Effect(EffectFrame(draws=((SCENE_TOP_Z + 100, lambda c, p: None),
+                                   (2, lambda c, p: None),
+                                   (-1, lambda c, p: None)))),
+    ], _ctx())
+    assert frame.scene_transform is not None
+    assert not frame.is_identity
+    assert [z for z, _ in frame.below] == [-1]
+    assert [z for z, _ in frame.above] == [2]
+    assert [z for z, _ in frame.top] == [SCENE_TOP_Z + 100]
+
+
+def test_begin_scene_transform_clips_to_chart_rect():
+    from analysis.player.render.qt_renderer import QtPlayerRenderer
+    from analysis.player.render.effects.base import CompositeFrame
+
+    class FakePainter:
+        def __init__(self):
+            self.saved = 0
+            self.clip = None
+        def save(self): self.saved += 1
+        def restore(self): self.saved -= 1
+        def setClipRect(self, r): self.clip = r
+        def setTransform(self, t, combine): pass
+
+    ctx = _ctx_win()
+    p = FakePainter()
+    frame = CompositeFrame(scene_transform=QTransform().translate(9, 9))
+    assert QtPlayerRenderer._begin_scene_transform(frame, p, ctx)
+    assert p.saved == 1 and p.clip is not None
+    QtPlayerRenderer._end_effect_transform(p)
+    assert p.saved == 0
+    assert not QtPlayerRenderer._begin_scene_transform(
+        CompositeFrame(), p, ctx)
+
+
+def test_upscroll_mirrors_about_chart_center():
+    from analysis.player.render.effects.upscroll import UpscrollEffect
+    ctx = _ctx_win(W=1000, H=800)
+    frame = UpscrollEffect().at(ctx)
+    # judge line at 0.8H lands at 0.2H; center is fixed.
+    assert frame.transform.map(500.0, 640.0) == pytest.approx((500.0, 160.0))
+    assert frame.transform.map(500.0, 400.0) == pytest.approx((500.0, 400.0))
+
+
+def test_composite_concatenates_field_instances():
+    a = _Effect(EffectFrame(fields=((None, 1.0),)))
+    b = _Effect(EffectFrame(
+        fields=((QTransform().translate(50, 0), 0.5),)))
+    frame = composite([a, b], _ctx())
+    assert len(frame.fields) == 2
+    assert frame.fields[0] == (None, 1.0)
+    assert frame.fields[1][1] == 0.5
+    assert not frame.is_identity
+
+
+def test_fluxis_adapter_wires_camera():
+    from analysis.games.fluxis.adapter import FluxisAdapter
+    from analysis.player.render.effects.camera import CameraEffect
+    replay = {'_fluxis_effect_streams': {
+        'camera-move': [{'time': 0, 'x': 100.0, 'y': 0,
+                         'duration': 0, 'ease': 0}]}}
+    effects = FluxisAdapter().effects(replay)
+    assert any(isinstance(e, CameraEffect) for e in effects)
+
+
 # ── flash --------------------------------------------------------------
 
 def _flash_event(time_ms, duration_ms, *, start=(1, 1, 1, 1), start_a=1.0,

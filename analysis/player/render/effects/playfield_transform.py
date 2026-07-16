@@ -22,13 +22,10 @@ from __future__ import annotations
 from PySide6.QtGui import QTransform
 
 from analysis.player.render.effects.base import EffectFrame
+from analysis.player.render.effects.ref_space import REF_H, REF_W
 from analysis.player.render.effects.timeline import (
     EventTimeline, keyframes_from_events)
 
-# osu.Framework DrawSizePreservingFillContainer reference (fluXis's
-# gameplay draw space); event x/y are pixels in this space.
-_REF_W = 1366.0
-_REF_H = 768.0
 # Camera distance for the z-depth projection (fluXis: camera at z=-100).
 _CAM_Z = 100.0
 # Safety clamp: never translate the field center past the window edge.
@@ -69,8 +66,8 @@ class PlayfieldTransformEffect:
 
         # Screen-proportional translation, clamped so the field center
         # can't leave the window.
-        dx = mx * W / _REF_W
-        dy = my * H / _REF_H
+        dx = mx * W / REF_W
+        dy = my * H / REF_H
         dx = max(-W * _MAX_OFFSET_FRAC, min(W * _MAX_OFFSET_FRAC, dx))
         dy = max(-H * _MAX_OFFSET_FRAC, min(H * _MAX_OFFSET_FRAC, dy))
 

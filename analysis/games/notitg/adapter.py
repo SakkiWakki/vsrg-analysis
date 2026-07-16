@@ -1,0 +1,166 @@
+"""NotITG game adapter: a chart-only Etterna variant.
+
+NotITG (StepMania 3.95 lineage) shares the .sm format, warp/stop
+timing, and note semantics with Etterna, so this adapter subclasses
+EtternaAdapter and inherits the chart/timing/hold machinery; the
+registry name is what marks the split (library column, judge system,
+and the future home of modfile compilation).
+
+NotITG has no replay system. Library entries are the charts
+themselves (see library_scan) and `parse_replay` receives a chart ref
+(`<simfile>::<index>`), synthesizing a perfect autoplay replay:
+offsets 0, nothing missed. Everything downstream - player, judgments,
+SV, effects - runs unchanged on it. Chart lookups short-circuit to
+the referenced file, never the chartkey/fingerprint search.
+
+Judgement windows are ITG's fixed set (Fantastic .. Way Off), not
+Etterna's Wife judges; the judge nudge is a no-op.
+"""
+from __future__ import annotations
+
+import numpy as np
+
+from analysis.core.cache import Cache
+from analysis.games.etterna.adapter import EtternaAdapter
+from analysis.games.etterna.sm_chart import (NT_HOLD_HEAD, NT_TAP, parse_sm,
+                                             stepstype_keycount)
+from analysis.games.notitg.library_scan import (HEAD_TYPES, judged_notes,
+                                                scan_songs, simfile_paths,
+                                                split_chart_ref)
+from analysis.games.notitg.paths import find_notitg_dirs
+
+_LIBRARY_CACHE = Cache('notitg_library.pkl')
+
+_ITG_WINDOWS_MS = (
+    ('fantastic', 23.0),
+    ('excellent', 44.5),
+    ('great', 103.5),
+    ('decent', 136.5),
+    ('wayoff', 181.5),
+)
+
+def _autoplay_arrays(chart) -> dict:
+    judged = judged_notes(chart)
+    count = len(judged)
+    return {
+        'noterows': np.array([row for row, _c, _nt in judged],
+                             dtype=np.int64),
+        'offsets': np.zeros(count, dtype=np.float64),
+        'columns': np.array([col for _r, col, _nt in judged],
+                            dtype=np.int32),
+        'notetypes': np.array(
+            [NT_HOLD_HEAD if nt in HEAD_TYPES else NT_TAP
+             for _r, _c, nt in judged], dtype=np.int32),
+        'misses': np.zeros(count, dtype=bool),
+        'holds': [(row, col) for row, col, nt in judged
+                  if nt in HEAD_TYPES],
+        'dropped_holds': [],
+        'mine_hits': [],
+        'replay_version': 2,
+    }
+
+
+class NotitgAdapter(EtternaAdapter):
+    name = 'notitg'
+
+    # --- chart-only playback ---------------------------------------------
+
+    def parse_replay(self, path, chart_path=None):
+        sm_path, index = split_chart_ref(path)
+        data = parse_sm(sm_path)
+        chart = data['charts'][index]
+
+        replay = _autoplay_arrays(chart)
+        replay['filepath'] = str(path)
+        replay['keycount'] = stepstype_keycount(chart.get('stepstype', ''))
+        self._remember_song(replay,
+                            {'file': str(sm_path), 'data': data,
+                             'chart': chart})
+        return replay
+
+    def _find_chart(self, replay, entry=None, progress=None):
+        """The chart ref IS the chart; never chartkey/fingerprint-search
+        the Etterna songs folder."""
+        sm_path, index = split_chart_ref(replay.get('filepath', ''))
+        try:
+            data = parse_sm(sm_path)
+            chart = data['charts'][index]
+        except (OSError, IndexError):
+            return None
+        return {'file': str(sm_path), 'data': data, 'chart': chart}
+
+    # --- judge system: fixed ITG windows ----------------------------------
+
+    def judgement_windows(self, replay, judge=None, **_):
+        return [(name, ms / 1000.0) for name, ms in _ITG_WINDOWS_MS]
+
+    def judge_label(self, replay, judge=None, **_):
+        return 'ITG'
+
+    def nudge_judge(self, current, delta):
+        return current
+
+    def player_kwargs(self, replay, judge=None, **_):
+        return {'ett_judge': 'ITG'}
+
+    def transparent_field(self) -> bool:
+        return True
+
+    def upscroll(self) -> bool:
+        return True
+
+    def judgment_colors(self) -> dict:
+        return {
+            'fantastic': (90, 220, 255), 'excellent': (255, 220, 90),
+            'great': (120, 255, 120), 'decent': (200, 120, 255),
+            'wayoff': (230, 150, 90), 'miss': (255, 85, 85),
+        }
+
+    def mods_short(self, replay) -> str:
+        return ''
+
+    def mods_rate_multiplier(self, replay) -> float:
+        return 1.0
+
+    def chart_stats_extra(self, replay):
+        return {}
+
+    # --- library ----------------------------------------------------------
+
+    def scan_library(self, progress=None):
+        songs = find_notitg_dirs().get('songs_dir')
+        if not songs:
+            return []
+        return scan_songs(songs, progress=progress)
+
+    def load_cached(self):
+        return _LIBRARY_CACHE.load()
+
+    def save_cached(self, entries):
+        _LIBRARY_CACHE.save(
+            [e for e in entries if e.get('game') == 'notitg'])
+
+    def rebuild(self, progress=None):
+        _LIBRARY_CACHE.clear()
+        entries = self.scan_library(progress=progress)
+        if entries:
+            _LIBRARY_CACHE.save(entries)
+        return entries
+
+    def incremental_update(self, progress=None):
+        """Rescan only when the set of simfiles changed; header parsing
+        every launch would cost seconds on big song folders."""
+        cached = _LIBRARY_CACHE.load()
+        if cached is None:
+            return self.rebuild(progress=progress)
+
+        songs = find_notitg_dirs().get('songs_dir')
+        on_disk = ([str(p) for p in simfile_paths(songs)]
+                   if songs else [])
+        known = sorted({e['chart_path'] for e in cached})
+        if sorted(on_disk) == known:
+            return cached
+        return self.rebuild(progress=progress)
+
+
+ADAPTER = NotitgAdapter()

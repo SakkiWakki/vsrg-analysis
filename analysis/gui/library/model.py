@@ -60,6 +60,9 @@ class LibraryQuery:
         if key_filter is not None:
             results = [e for e in results if e.get('keycount') == key_filter]
 
+        if not self.tab.unplayed_cbx.isChecked():
+            results = [e for e in results if not e.get('unplayed')]
+
         if not self.tab.group_cbx.isChecked():
             return [EntryRow(e, entry_values(e)) for e in results[:5000]]
 

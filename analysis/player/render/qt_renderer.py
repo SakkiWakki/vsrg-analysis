@@ -192,18 +192,36 @@ class QtPlayerRenderer:
         # HUD never moves with the playfield. Below-draws (storyboards)
         # paint between the clear and the transformed field.
         chart_wrapped = False
+        scene_wrapped = False
         below_drawn = False
+        field_painter = None
         for name, fn, stage in self._layers:
             is_hud = name in _HUD_LAYERS and cache_enabled
             in_field = not is_hud and name != 'background'
-            if chart_wrapped and not in_field:
-                self._end_effect_transform(chart_painter)
-                chart_wrapped = False
+            if not in_field and (chart_wrapped or field_painter is not None):
+                if chart_wrapped:
+                    self._end_effect_transform(field_painter or chart_painter)
+                    chart_wrapped = False
+                if field_painter is not None:
+                    field_painter.end()
+                    self._blit_field_instances(effect_frame, ctx,
+                                               chart_painter)
+                    field_painter = None
             if in_field and not below_drawn:
+                # Scene (camera) bracket opens before the below-draws
+                # so background storyboards ride the camera; the
+                # canvas clear stays outside it in screen space.
+                scene_wrapped = self._begin_scene_transform(
+                    effect_frame, chart_painter, ctx)
                 self._draw_effect_below(effect_frame, ctx, chart_painter)
                 below_drawn = True
+                # Field instances: the field layer group (its own
+                # transform bracket included) renders once into an
+                # offscreen buffer, then blits per instance.
+                field_painter = self._begin_field_capture(
+                    effect_frame, ctx, chart_painter)
                 chart_wrapped = self._begin_effect_transform(
-                    effect_frame, chart_painter, ctx)
+                    effect_frame, field_painter or chart_painter, ctx)
             if is_hud:
                 # HUD layers render into a cached pixmap at most
                 # _HUD_REDRAW_HZ; chart layers stay per-frame. On dense
@@ -216,7 +234,8 @@ class QtPlayerRenderer:
                     hud_painter = self._begin_hud_pixmap(ctx, painter)
                 target = hud_painter
             else:
-                target = chart_painter
+                target = (field_painter if in_field and field_painter
+                          is not None else chart_painter)
             if visibility.get(name, True):
                 if fn is not None:
                     self._draw_layer(fn, ctx, target, name, is_hud)
@@ -226,8 +245,14 @@ class QtPlayerRenderer:
                 self.plugins.draw(stage, ctx)
                 ctx.painter = prev_painter
         if chart_wrapped:
-            self._end_effect_transform(chart_painter)
+            self._end_effect_transform(field_painter or chart_painter)
+        if field_painter is not None:
+            field_painter.end()
+            self._blit_field_instances(effect_frame, ctx, chart_painter)
         self._draw_effect_above(effect_frame, ctx, chart_painter)
+        if scene_wrapped:
+            self._end_effect_transform(chart_painter)
+        self._draw_effect_top(effect_frame, ctx, chart_painter)
         if capturing:
             self.shader_pipeline.end_capture(effect_frame.shaders, ctx.t_now)
         if hud_painter is not None:
@@ -286,6 +311,51 @@ class QtPlayerRenderer:
     def _end_effect_transform(painter) -> None:
         painter.restore()
 
+    def _begin_field_capture(self, frame, ctx, painter):
+        """Redirect the field layer group into a transparent pixmap
+        when this frame carries field instances; returns the capture
+        painter or None (single identity field, direct painting)."""
+        if (frame is None or not frame.fields or painter is None
+                or getattr(ctx, 'player', None) is None):
+            return None
+        from PySide6.QtGui import QPixmap
+        p = ctx.player
+        dpr = float(painter.device().devicePixelRatioF())
+        pm = QPixmap(int(p.W * dpr), int(p.H * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        self._field_pixmap = pm
+        field_painter = QPainter(pm)
+        field_painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        return field_painter
+
+    def _blit_field_instances(self, frame, ctx, painter) -> None:
+        """One blit per field instance, clipped to the chart region so
+        no copy can land on the sidebar."""
+        for transform, opacity in frame.fields:
+            if opacity < 1.0 / 255.0:
+                continue
+            painter.save()
+            painter.setClipRect(QRectF(*ctx.chart_rect))
+            if transform is not None:
+                painter.setTransform(transform, True)
+            painter.setOpacity(min(1.0, opacity))
+            painter.drawPixmap(0, 0, self._field_pixmap)
+            painter.restore()
+
+    @staticmethod
+    def _begin_scene_transform(frame, painter, ctx) -> bool:
+        """Push the scene-wide camera transform around below-draws,
+        chart layers, and effect draws under SCENE_TOP_Z, clipped to
+        the chart region. Returns whether a save() was made."""
+        if (frame is None or frame.scene_transform is None
+                or painter is None):
+            return False
+        painter.save()
+        painter.setClipRect(QRectF(*ctx.chart_rect))
+        painter.setTransform(frame.scene_transform, True)
+        return True
+
     @staticmethod
     def _draw_layer(fn, ctx, painter, name, is_hud) -> None:
         """Draw one layer, applying its layerfade alpha when a field layer
@@ -319,6 +389,12 @@ class QtPlayerRenderer:
     def _draw_effect_above(self, frame, ctx, painter) -> None:
         if frame is not None:
             self._draw_effect_draws(frame.above, ctx, painter)
+
+    def _draw_effect_top(self, frame, ctx, painter) -> None:
+        """Draws above SCENE_TOP_Z: screen-space overlays (pulse,
+        foreground flash) that never ride the camera."""
+        if frame is not None:
+            self._draw_effect_draws(frame.top, ctx, painter)
 
     def _hud_redraw_due(self, ctx, hud) -> bool:
         """The HUD pixmap re-renders when its content can actually have

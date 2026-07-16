@@ -53,8 +53,14 @@ def draw_lanes(ctx, painter):
     column dividers in a single pen pass.
 
     Before: 2 * keycount draw calls (fillRect + drawLine per lane)
-    After:  1 fillRect + (keycount + 1) drawLines, one setPen."""
+    After:  1 fillRect + (keycount + 1) drawLines, one setPen.
+
+    Games with a transparent field (NotITG-style floating notes over
+    the scene) skip the fills and dividers entirely; notes, judgment
+    line, and press marks still draw."""
     p = ctx.player
+    if p._adapter.transparent_field():
+        return
     x0 = ctx.x0
     lane_w = ctx.lane_w
     kc = p.keycount

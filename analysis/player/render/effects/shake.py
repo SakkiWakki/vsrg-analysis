@@ -21,9 +21,8 @@ from PySide6.QtGui import QTransform
 
 from analysis.player.render.effects.base import EffectFrame
 from analysis.player.render.effects.easing import ease
+from analysis.player.render.effects.ref_space import REF_H, REF_W
 
-_REF_W = 1366.0
-_REF_H = 768.0
 _BOUNCES = 4
 
 _EASE_OUT_SINE = 16
@@ -86,8 +85,8 @@ class ShakeEffect:
         if offset is None:
             return None
         _rx, _ry, w, h = ctx.chart_rect
-        dx = offset[0] * w / _REF_W
-        dy = offset[1] * h / _REF_H
+        dx = offset[0] * w / REF_W
+        dy = offset[1] * h / REF_H
         if dx == 0.0 and dy == 0.0:
             return None
         return EffectFrame(transform=QTransform().translate(dx, dy))

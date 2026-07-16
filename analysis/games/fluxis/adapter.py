@@ -122,11 +122,16 @@ class FluxisAdapter(GameAdapter):
         from analysis.player.render.effects.pulse import PulseEffect
         from analysis.player.render.effects.shake import ShakeEffect
         from analysis.player.render.shaders import ShaderStackEffect
+        from analysis.player.render.effects.camera import CameraEffect
         streams = replay.get('_fluxis_effect_streams') or {}
         transform = PlayfieldTransformEffect(
             move=streams.get('playfieldmove'),
             scale=streams.get('playfieldscale'),
             rotate=streams.get('playfieldrotate'))
+        camera = CameraEffect(
+            move=streams.get('camera-move'),
+            scale=streams.get('camera-scale'),
+            rotate=streams.get('camera-rotate'))
         beat_pulse = BeatPulseEffect(
             streams.get('beatpulse'),
             replay.get('_fluxis_timing_points'),
@@ -136,7 +141,7 @@ class FluxisAdapter(GameAdapter):
         pulse = PulseEffect(streams.get('pulse'))
         flash = FlashEffect(streams.get('flash'))
         shaders = ShaderStackEffect(streams.get('shader'))
-        return [e for e in (transform, beat_pulse, shake, layer_fade,
+        return [e for e in (transform, camera, beat_pulse, shake, layer_fade,
                             pulse, flash, shaders) if e]
 
     def scroll_multipliers(self, replay):
