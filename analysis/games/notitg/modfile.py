@@ -19,6 +19,23 @@ included `modhelpers.xml`. We compile this in two ways:
   Shader pokes come through `mod_shader`/SetShaderFlag; `mod_actions`
   holds per-frame closures we do NOT execute (unsupported tail).
 
+- One-shot replay (mod_actions closures): the template's `mod_actions`
+  are SCHEDULED ONE-SHOTS - the per-frame reader fires each closure
+  exactly once when its beat passes (curaction advances monotonically,
+  never resets). We execute each closure once, in beat order, against
+  the recording stub, capturing the `SetShaderFlag`/`ApplyGameCommand`
+  pokes it makes. A closure that pokes an actor we do not model faults
+  harmlessly (per-closure try/except).
+
+  PERSISTENCE of message-applied mods: an `ApplyGameCommand('mod,X')`
+  fired from a closure is NOT persistent. The reader runs `mod,clearall`
+  every frame and only reapplies windows from the `mods`/`mods2` tables;
+  a closure's mod is not in those tables, so the very next frame's
+  clearall wipes it. It therefore lives for one frame (~20ms). We encode
+  each as a ZERO-LENGTH window [beat, beat] (a one-frame spike), NOT a
+  persistent [beat, +inf) start - verified against gat's reader
+  (default.xml ~line 3999 clearall + ~4680 monotonic action loop).
+
 - Actor compilation (classic command strings -> storyboard IR):
   Sprites/Quads/BitmapText with `x,100;zoom,2;linear,1;...` commands
   become storyboard Elements with property Keyframes, timed from the
@@ -205,6 +222,24 @@ def _mod_event(row, to_seconds, beat_based):
     }
 
 
+def _normalize_applied_mods(env, to_seconds):
+    """`ApplyGameCommand('mod,X')` recordings from the one-shot replay ->
+    zero-length mod windows [beat, beat]. See the module docstring: these
+    are one-frame spikes (wiped by the next frame's clearall), not
+    persistent windows, so start and end coincide."""
+    events = []
+    for beat, modstring, player in env.applied_mods:
+        if not isinstance(modstring, str) or not modstring:
+            continue
+        t = to_seconds(beat)
+        events.append({
+            'beat': beat, 'len_beats': 0.0, 'modstring': modstring,
+            'apply_type': 'oneshot', 'player': player,
+            't_start': t, 't_end': t, 'time_based': False,
+        })
+    return events
+
+
 def _normalize_shader_flags(env, to_seconds):
     flags = []
     for beat, key, which in env.shader_flags:
@@ -381,11 +416,18 @@ def _compile_modfile(sm_path):
                      default=0.0)
 
     env, chunk_warnings = _run_chunks(lua_chunks, start_beat)
+    fired, failed = env.replay_mod_actions()
+
+    mod_events = _normalize_mod_events(env, to_seconds)
+    mod_events.extend(_normalize_applied_mods(env, to_seconds))
     return {
-        'mod_events': _normalize_mod_events(env, to_seconds),
+        'mod_events': mod_events,
         'shader_flags': _normalize_shader_flags(env, to_seconds),
         'unsupported': _describe_unsupported(env),
         'elements': _compile_elements(classic_commands, to_seconds,
                                       start_beat),
+        'replay': {'fired': fired, 'failed': failed,
+                   'applied_mods': len(env.applied_mods),
+                   'swallowed': env.swallowed},
         'warnings': chunk_warnings,
     }

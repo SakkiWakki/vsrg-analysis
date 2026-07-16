@@ -109,17 +109,54 @@ class NotitgAdapter(EtternaAdapter):
     def upscroll(self) -> bool:
         return True
 
-    def note_mods(self, replay):
-        from analysis.games.notitg.mod_channels import compile_mod_channels
+    def _compiled_modfile(self, replay):
+        """compile_modfile for this replay's chart, memoized on the replay
+        so note_mods / scroll_multipliers / effects share one harvest."""
+        cached = replay.get('_notitg_modfile')
+        if cached is not None:
+            return cached or None
         from analysis.games.notitg.modfile import compile_modfile
-        from analysis.games.notitg.note_mods import NotitgNoteMods
         sm_path, _index = split_chart_ref(replay.get('filepath', ''))
         compiled = compile_modfile(sm_path)
+        replay['_notitg_modfile'] = compiled or {}
+        return compiled
+
+    def note_mods(self, replay):
+        from analysis.games.notitg.mod_channels import compile_mod_channels
+        from analysis.games.notitg.note_mods import NotitgNoteMods
+        compiled = self._compiled_modfile(replay)
         if not compiled or not compiled.get('mod_events'):
             return None
         channels = compile_mod_channels(compiled['mod_events'])
+        sm_path, _index = split_chart_ref(replay.get('filepath', ''))
         bpms = parse_sm(sm_path)['bpms']
         return NotitgNoteMods(channels, bpms)
+
+    def scroll_multipliers(self, replay):
+        from analysis.games.notitg.mod_channels import compile_scroll_multipliers
+        compiled = self._compiled_modfile(replay)
+        if not compiled or not compiled.get('mod_events'):
+            return None
+        events, _skipped_cm = compile_scroll_multipliers(compiled['mod_events'])
+        return events or None
+
+    def effects(self, replay):
+        from analysis.games.notitg.shader_bridge import notitg_shader_effects
+        compiled = self._compiled_modfile(replay)
+        if not compiled:
+            return []
+        return notitg_shader_effects(compiled.get('shader_flags'))
+
+    def storyboard(self, replay):
+        """Modfile actor elements (prank overlays, quads, text) render
+        through the storyboard pipeline in SM's 640x480 screen space."""
+        from analysis.player.render.storyboard import Storyboard
+        compiled = self._compiled_modfile(replay)
+        elements = (compiled or {}).get('elements')
+        if not elements:
+            return None
+        return Storyboard(design_w=640.0, design_h=480.0, fit='height',
+                          elements=tuple(elements))
 
     def judgment_colors(self) -> dict:
         return {

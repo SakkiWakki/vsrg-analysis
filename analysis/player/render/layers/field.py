@@ -9,6 +9,8 @@ from __future__ import annotations
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QPen
 
+import numpy as np
+
 
 # ── palette: built once at import, never again ──────────────────────
 
@@ -24,6 +26,14 @@ _LANE_LINE_PEN  = QPen(_LANE_LINE_C, 1)
 _JUDGE_LINE_PEN = QPen(_WHITE, 2)
 _DEATH_LINE_PEN = QPen(_DEATH_RED, 2)
 _NO_PEN         = QPen(QColor(0, 0, 0, 0))
+
+# Per-column receptor notch: a thin white bar filling most of the lane
+# width, centered on the lane center at the hit line. Height and the
+# fraction of the lane it spans are the only geometry knobs; the mark
+# picks up its position/rotation/zoom/alpha from ctx.receptor_offsets.
+_RECEPTOR_H          = 4.0
+_RECEPTOR_LANE_FRAC  = 0.82
+_RECEPTOR_BRUSH      = QBrush(_WHITE)
 
 # Judgment-window overlay brushes are keyed by (r, g, b) and built on
 # first use ; the color set depends on the active judge scheme which
@@ -102,6 +112,50 @@ def _field_span(ctx):
     return left, right - left
 
 
+def _receptor_offsets(ctx, keycount):
+    """Per-column receptor mod arrays in OUR pixel space, defaulting to
+    the identity when the producer hasn't stashed anything on the ctx.
+
+    Returns `(dx, dy, rotation_deg, zoom, alpha)`, each length keycount.
+    The producer (games/*/note_mods) sets `ctx.receptor_offsets` to a
+    dict of numpy arrays; we consume via getattr so an unmodded chart --
+    every game by default -- pays only the zeros allocation."""
+    offs = getattr(ctx, 'receptor_offsets', None)
+    zeros = np.zeros(keycount, dtype=np.float64)
+    if offs is None:
+        return zeros, zeros, zeros, None, None
+    return (offs.get('dx', zeros), offs.get('dy', zeros),
+            offs.get('rotation_deg', zeros),
+            offs.get('zoom', None), offs.get('alpha', None))
+
+
+def _draw_receptor_mark(painter, cx, cy, lane_w, rotation_deg, zoom, alpha):
+    """One per-column receptor notch centered at `(cx, cy)`.
+
+    rotation/zoom are applied about the mark's own center through the
+    painter transform, and only when non-identity, so unmodded marks
+    draw with a single fillRect and no save/restore."""
+    bar_w = lane_w * _RECEPTOR_LANE_FRAC
+    rect = QRectF(-bar_w / 2.0, -_RECEPTOR_H / 2.0, bar_w, _RECEPTOR_H)
+    transformed = rotation_deg or (zoom is not None and zoom != 1.0)
+    faded = alpha is not None and alpha < 1.0
+
+    if not transformed and not faded:
+        painter.fillRect(rect.translated(cx, cy), _RECEPTOR_BRUSH)
+        return
+
+    painter.save()
+    if faded:
+        painter.setOpacity(painter.opacity() * max(0.0, alpha))
+    painter.translate(cx, cy)
+    if rotation_deg:
+        painter.rotate(rotation_deg)
+    if zoom is not None and zoom != 1.0:
+        painter.scale(zoom, zoom)
+    painter.fillRect(rect, _RECEPTOR_BRUSH)
+    painter.restore()
+
+
 def draw_judgment(ctx, painter):
     p = ctx.player
     t_now = ctx.t_now
@@ -126,10 +180,13 @@ def draw_judgment(ctx, painter):
         painter.drawRect(QRectF(x0, judge_y - half_top, field_w,
                                 half_top + half_bot))
 
-    # Judgment line
-    painter.setPen(_JUDGE_LINE_PEN)
     x_end = x0 + field_w
-    painter.drawLine(QPointF(x0, judge_y), QPointF(x_end, judge_y))
+    if p._adapter.receptor_style() == 'line':
+        # Legacy single full-width line across the field.
+        painter.setPen(_JUDGE_LINE_PEN)
+        painter.drawLine(QPointF(x0, judge_y), QPointF(x_end, judge_y))
+    else:
+        _draw_receptors(ctx, painter, judge_y)
 
     # Death line
     death_t = p.replay.get('death_time')
@@ -137,3 +194,23 @@ def draw_judgment(ctx, painter):
         y = ctx.time_to_y(float(death_t))
         painter.setPen(_DEATH_LINE_PEN)
         painter.drawLine(QPointF(x0, y), QPointF(x_end, y))
+
+
+def _draw_receptors(ctx, painter, judge_y):
+    """Per-column receptor notches. Each rides its lane center
+    (`ctx.lane_x` + width, so lane switches and animated widths track
+    for free) plus the per-column receptor mod displacement, and lives
+    inside the effect transform bracket so every field transform carries
+    it too. Fill-only, no pen state."""
+    kc = ctx.keycount
+    dx, dy, rot, zoom, alpha = _receptor_offsets(ctx, kc)
+    painter.setPen(_NO_PEN)
+    for col in range(kc):
+        lane_w = ctx.lane_width(col)
+        if lane_w <= 0.5:
+            continue
+        cx = ctx.lane_center(col) + float(dx[col])
+        cy = judge_y + float(dy[col])
+        _draw_receptor_mark(painter, cx, cy, lane_w, float(rot[col]),
+                            None if zoom is None else float(zoom[col]),
+                            None if alpha is None else float(alpha[col]))

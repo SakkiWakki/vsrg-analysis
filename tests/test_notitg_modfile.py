@@ -206,6 +206,217 @@ def test_mod_event_normalization_len_vs_end():
     assert by_string['b']['t_end'] == 20.0    # end: the field itself
 
 
+# -- one-shot mod_actions replay ------------------------------------------
+
+def test_replay_fires_closures_in_beat_order_once():
+    env = StubEnvironment(start_beat=0.0)
+    env.run("order = {}\n"
+            "mod_actions = {\n"
+            "  {8, function() table.insert(order, 'b') end},\n"
+            "  {4, function() table.insert(order, 'a') end},\n"
+            "  {12, function() table.insert(order, 'c') end},\n"
+            "}", name='t')
+    fired, failed = env.replay_mod_actions()
+    assert (fired, failed) == (3, 0)
+    fired_order = env._host.env['order']
+    assert [fired_order[i] for i in (1, 2, 3)] == ['a', 'b', 'c']
+
+
+def test_replay_records_apply_game_command_as_one_shot():
+    env = StubEnvironment(start_beat=0.0)
+    env.run("mod_actions = {\n"
+            "  {8, function() GAMESTATE:ApplyGameCommand("
+            "'mod,*-1 100 drunk', 2) end},\n"
+            "}", name='t')
+    env.replay_mod_actions()
+    assert env.applied_mods == [(8.0, '*-1 100 drunk', 2)]
+
+
+def test_replay_records_shader_flag_from_closure_at_fire_beat():
+    env = StubEnvironment(start_beat=0.0)
+    env.run("mod_actions = {\n"
+            "  {32, function() GAMESTATE:SetShaderFlag(55) end},\n"
+            "}", name='t')
+    env.replay_mod_actions()
+    assert env.shader_flags == [(32.0, 55, None)]
+
+
+def test_replay_swallows_string_payloads_and_survives_faults():
+    env = StubEnvironment(start_beat=0.0)
+    env.run("mod_actions = {\n"
+            "  {4, 'SomeBroadcast'},\n"
+            "  {8, function() error('boom') end},\n"
+            "  {12, function() ok = true end},\n"
+            "}", name='t')
+    fired, failed = env.replay_mod_actions()
+    assert fired == 2 and failed == 1
+    assert env._host.env['ok'] is True
+
+
+def test_apply_game_command_ignores_non_mod_commands():
+    env = StubEnvironment(start_beat=0.0)
+    env.run("mod_actions = {\n"
+            "  {4, function() GAMESTATE:ApplyGameCommand("
+            "'screen,ScreenTitleMenu') end},\n"
+            "}", name='t')
+    env.replay_mod_actions()
+    assert env.applied_mods == []
+    assert env.swallowed == 1
+
+
+def test_applied_mods_normalize_to_zero_length_windows(tmp_path):
+    from analysis.games.notitg import modfile
+
+    env = StubEnvironment(start_beat=0.0)
+    env.run("mod_actions = {\n"
+            "  {4, function() GAMESTATE:ApplyGameCommand("
+            "'mod,*-1 100 drunk') end},\n"
+            "}", name='t')
+    env.replay_mod_actions()
+    events = modfile._normalize_applied_mods(env, _seconds)
+    assert len(events) == 1
+    e = events[0]
+    assert e['apply_type'] == 'oneshot'
+    assert e['t_start'] == e['t_end'] == 4.0
+
+
+# -- shader-flag bridge ---------------------------------------------------
+
+def test_shader_bridge_maps_pulse_to_stack_events():
+    from analysis.games.notitg.shader_bridge import build_shader_events
+
+    flags = [{'beat': 0, 't': 10.0, 'key': 55, 'which': None},
+             {'beat': 0, 't': 10.5, 'key': 0, 'which': None}]
+    events, skipped = build_shader_events(flags)
+    assert skipped == []
+    assert [e['shader'] for e in events] == ['screen_tile', 'screen_tile']
+    assert events[0]['time'] == 10000.0
+    assert events[0]['end-params']['strength'] == 1.0
+    assert events[1]['time'] == 10500.0
+    assert events[1]['end-params']['strength'] == 0.0
+
+
+def test_shader_bridge_skips_unmapped_keys():
+    from analysis.games.notitg.shader_bridge import build_shader_events
+
+    events, skipped = build_shader_events(
+        [{'beat': 0, 't': 1.0, 'key': 217, 'which': 0}])
+    assert events == []
+    assert skipped == [217]
+
+
+def test_shader_bridge_builds_effect_or_empty():
+    from analysis.games.notitg.shader_bridge import notitg_shader_effects
+
+    assert notitg_shader_effects(None) == []
+    assert notitg_shader_effects([]) == []
+    built = notitg_shader_effects(
+        [{'beat': 0, 't': 1.0, 'key': 55, 'which': None}])
+    assert len(built) == 1 and built[0]
+
+
+def test_new_screen_shaders_follow_uniform_contract():
+    from analysis.player.render.shaders import library
+
+    for name in ('screen_mirror', 'screen_tile'):
+        src = library.source(name)
+        assert src is not None
+        assert 'uniform sampler2D u_tex;' in src
+        assert 'uniform vec2 u_resolution;' in src
+        assert 'uniform vec3 u_strength;' in src
+        assert 'gl_FragCoord' in src
+
+
+# -- speed-mod extraction -------------------------------------------------
+
+def test_parse_speed_mods_reads_xmod_and_cmod():
+    from analysis.games.notitg.mod_channels import parse_speed_mods
+
+    assert parse_speed_mods('2x') == [(1.0, 'x', 2.0)]
+    assert parse_speed_mods('*0.5 1.7x') == [(0.5, 'x', 1.7)]
+    assert parse_speed_mods('*-1 3x') == [(-1.0, 'x', 3.0)]
+    assert parse_speed_mods('c400') == [(1.0, 'c', 400.0)]
+    assert parse_speed_mods('m550') == [(1.0, 'm', 550.0)]
+    assert parse_speed_mods('50 drunk') == []
+
+
+def test_scroll_multipliers_relative_to_base_and_snap_holds():
+    from analysis.games.notitg.mod_channels import compile_scroll_multipliers
+    from analysis.player.render.effects.timeline import (
+        EventTimeline, keyframes_from_events)
+
+    events = [
+        {'t_start': 0.0, 't_end': 9000.0, 'modstring': '2x', 'player': None},
+        {'t_start': 10.0, 't_end': 20.0, 'modstring': '*-1 3x',
+         'player': None},
+    ]
+    sc, skipped_cm = compile_scroll_multipliers(events)
+    assert skipped_cm == 0
+    tl = EventTimeline(keyframes_from_events(sc, ('multiplier',), (1.0,)),
+                       rest=(1.0,))
+    assert tl.sample(5.0)[0] == pytest.approx(1.0)     # holds at base
+    assert tl.sample(15.0)[0] == pytest.approx(1.5)    # 3x / 2x base
+    assert tl.sample(25.0)[0] == pytest.approx(1.0)    # reverts to base
+
+
+def test_scroll_multipliers_skip_and_count_cmods():
+    from analysis.games.notitg.mod_channels import compile_scroll_multipliers
+
+    events = [{'t_start': 0.0, 't_end': 10.0, 'modstring': 'c400',
+               'player': None}]
+    sc, skipped_cm = compile_scroll_multipliers(events)
+    assert sc == []
+    assert skipped_cm == 1
+
+
+def test_compile_mod_channels_still_drops_speed_mods():
+    from analysis.games.notitg.mod_channels import compile_mod_channels
+
+    channels = compile_mod_channels(
+        [{'t_start': 0.0, 't_end': 10.0, 'modstring': '2x, 50 drunk',
+          'player': None}])
+    assert 'xmod' not in channels.mods(0)
+    assert 'drunk' in channels.mods(0)
+
+
+# -- producer stashes -----------------------------------------------------
+
+def test_note_mods_stashes_rotation_zoom_and_receptor_offsets():
+    import types
+
+    import numpy as np
+
+    from analysis.games.notitg.mod_channels import compile_mod_channels
+    from analysis.games.notitg.note_mods import NotitgNoteMods
+
+    bpms = [(0.0, 120.0)]
+    channels = compile_mod_channels(
+        [{'t_start': 0.0, 't_end': 100.0, 'modstring': '*-1 100 confusion',
+          'player': None}])
+    mods = NotitgNoteMods(channels, bpms)
+
+    keycount = 4
+    notes = types.SimpleNamespace(noterows_list=[0, 48, 96, 144])
+    player = types.SimpleNamespace(
+        columns=np.array([0, 1, 2, 3]), keycount=keycount, notes=notes)
+    ctx = types.SimpleNamespace(
+        candidates=[0, 1, 2, 3], t_now=5.0, player=player,
+        lane_w=64.0, judge_y=400.0,
+        candidate_head_y=np.full(4, 200.0),
+        candidate_tail_y=np.full(4, 180.0),
+        candidate_press_y=np.full(4, 200.0))
+    mods.apply(ctx)
+
+    assert ctx.candidate_rot_deg.shape == (4,)
+    assert ctx.candidate_zoom.shape == (4,)
+    receptors = ctx.receptor_offsets
+    assert set(receptors) == {'dx', 'dy', 'rotation_deg', 'zoom', 'alpha'}
+    for key in receptors:
+        assert receptors[key].shape == (keycount,)
+    # confusion is a whole-field spin => nonzero receptor rotation.
+    assert np.any(receptors['rotation_deg'] != 0.0)
+
+
 # -- resilience -----------------------------------------------------------
 
 def test_compile_never_raises_on_missing_lua(tmp_path):
@@ -253,3 +464,27 @@ def test_gat_pilot_harvests_mods_and_elements():
     assert any(e['time_based'] for e in result['mod_events'])
     assert any(e['player'] is not None for e in result['mod_events'])
     assert result['unsupported']['count'] > 0
+
+
+@pytest.mark.skipif(not _GAT_SM.exists(),
+                    reason='NotITG gat pilot not present')
+def test_gat_pilot_replays_mod_actions():
+    result = compile_modfile(str(_GAT_SM))
+    replay = result['replay']
+    # Every mod_actions closure is fired once; gat's are actor pokes, so
+    # many fault harmlessly (caught) and none touch ApplyGameCommand /
+    # SetShaderFlag - so the recovered one-shot / shader counts are 0.
+    assert replay['fired'] > 100
+    assert replay['fired'] + result['unsupported']['count'] >= 0
+    assert replay['applied_mods'] == 0
+
+
+@pytest.mark.skipif(not _GAT_SM.exists(),
+                    reason='NotITG gat pilot not present')
+def test_gat_pilot_extracts_scroll_multipliers():
+    from analysis.games.notitg.mod_channels import compile_scroll_multipliers
+
+    result = compile_modfile(str(_GAT_SM))
+    sc, _skipped = compile_scroll_multipliers(result['mod_events'])
+    # gat rides its 2x base with frequent xmod changes.
+    assert len(sc) > 20

@@ -60,6 +60,12 @@ class _NoteView:
     is_tick: bool = False
     # Per-note mod alpha (NotITG stealth/hidden family); 1 = opaque.
     alpha: float = 1.0
+    # Per-note mod rotation (deg) / zoom (multiplier), applied about the
+    # head center. Defaults are the identity so unmodded notes pay
+    # nothing; LN bodies/tails keep their position (only the head sprite
+    # spins/scales -- documented in `_draw_view`).
+    rotation_deg: float = 0.0
+    zoom: float = 1.0
     # Quaver: under SV reversal an LN body covers a wider span than
     # head->tail. `body_min_y` / `body_max_y` are screen-y bounds of the
     # convex hull of cum positions over the LN's chart-time interval.
@@ -227,6 +233,8 @@ def _build(ctx, i, pos) -> _NoteView | None:
 
     mod_dx = getattr(ctx, 'candidate_dx', None)
     mod_alpha = getattr(ctx, 'candidate_alpha', None)
+    mod_rot = getattr(ctx, 'candidate_rot_deg', None)
+    mod_zoom = getattr(ctx, 'candidate_zoom', None)
     return _NoteView(
         i=i, col=col,
         y=float(ctx.candidate_head_y[pos]), y_end=y_end,
@@ -234,6 +242,8 @@ def _build(ctx, i, pos) -> _NoteView | None:
         lx=int(ctx.lane_x(col)
                + (mod_dx[pos] if mod_dx is not None else 0.0)),
         alpha=float(mod_alpha[pos]) if mod_alpha is not None else 1.0,
+        rotation_deg=float(mod_rot[pos]) if mod_rot is not None else 0.0,
+        zoom=float(mod_zoom[pos]) if mod_zoom is not None else 1.0,
         off=off, press_t=press_t,
         release_t=release_t, rel_off=rel_off, end_t=end_t,
         is_ln=is_ln,
@@ -264,9 +274,43 @@ def prepare(ctx) -> None:
 
 
 def _draw_view(ctx, painter, n, draw_fn) -> None:
-    """Run one view's drawer, honoring its per-note mod alpha. The
-    save/restore pair only exists for modded notes, so unmodded charts
-    pay nothing."""
+    """Run one view's drawer, honoring its per-note mod alpha, rotation,
+    and zoom. The save/restore pair only exists for modded notes, so
+    unmodded charts pay nothing.
+
+    Rotation/zoom apply about the head center via the painter transform.
+    For an LN this spins/scales the head sprite only; the body and tail
+    are drawn at their own (already-displaced) positions inside the same
+    bracket, so under a large rotation the head detaches from the body
+    -- an accepted simplification (per-note LN-body deformation would
+    need the body to be rebuilt in the rotated frame)."""
+    faded = n.alpha < 1.0
+    transformed = n.rotation_deg or n.zoom != 1.0
+    if not faded and not transformed:
+        draw_fn(ctx, painter, n)
+        return
+    if faded and n.alpha < 1.0 / 255.0:
+        return
+
+    painter.save()
+    if faded:
+        painter.setOpacity(painter.opacity() * n.alpha)
+    if transformed:
+        cx = n.lx + _lane_width(ctx, n.col) / 2.0
+        painter.translate(cx, float(n.y))
+        if n.rotation_deg:
+            painter.rotate(n.rotation_deg)
+        if n.zoom != 1.0:
+            painter.scale(n.zoom, n.zoom)
+        painter.translate(-cx, -float(n.y))
+    draw_fn(ctx, painter, n)
+    painter.restore()
+
+
+def _draw_alpha_only(ctx, painter, n, draw_fn) -> None:
+    """Like `_draw_view` but honors the mod alpha without the head-only
+    rotation/zoom transform -- used for LN bodies/tails, which keep
+    their scroll positions while the head spins/scales."""
     if n.alpha >= 1.0:
         draw_fn(ctx, painter, n)
         return
@@ -288,12 +332,16 @@ def draw_taps(ctx, painter) -> None:
 
 def draw_lns(ctx, painter) -> None:
     """Draw LN bodies, tails, release guides, and heads from the
-    prebuilt views."""
+    prebuilt views.
+
+    Per-note rotation/zoom is a head-only transform (see `_draw_view`):
+    the body + tail draw under alpha only so they keep their scroll
+    positions, and the head sprite gets the full transform bracket."""
     for n in ctx.note_views:
         if n is None or not n.is_ln:
             continue
-        _draw_view(ctx, painter, n, _draw_ln)
-        _draw_replay_note(ctx, painter, n)
+        _draw_alpha_only(ctx, painter, n, _draw_ln)
+        _draw_view(ctx, painter, n, _draw_replay_note)
 
 
 def _draw_replay_note(ctx, painter, n) -> None:

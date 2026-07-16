@@ -4,8 +4,13 @@
 (hooked from build_context): it samples the channels at t_now, runs
 the vectorized ArrowEffects pipeline over the visible candidates, and
 - adds dy to the head/tail/press y arrays in place,
-- stashes per-candidate dx / alpha for the note views
-  (ctx.candidate_dx / ctx.candidate_alpha, both in our pixel space).
+- stashes per-candidate dx / alpha / rotation / zoom for the note views
+  (ctx.candidate_dx / _alpha / _rot_deg / _zoom; dx in our pixel space,
+  rotation in degrees, zoom a multiplier),
+- stashes ctx.receptor_offsets: a dict of numpy arrays keyed
+  'dx','dy','rotation_deg','zoom','alpha' (length keycount) in OUR pixel
+  space, so the receptor layer displaces the hit marks the same way the
+  engine displaces receptors (drunk/tornado shift, confusion spin, ...).
 
 Space conversion: the engine formulas work in ITG pixels (arrow size
 64 at a 480-tall field); our lane width is the arrow size, so
@@ -24,7 +29,8 @@ from __future__ import annotations
 import numpy as np
 
 from analysis.games.etterna.sm_chart import beat_to_time
-from analysis.player.render.mods.arrow_effects import ARROW_SIZE, note_offsets
+from analysis.player.render.mods.arrow_effects import (ARROW_SIZE, note_offsets,
+                                                       receptor_offsets)
 
 _ACTIVE_EPS = 1e-4
 
@@ -76,3 +82,21 @@ class NotitgNoteMods:
         ctx.candidate_press_y += dy
         ctx.candidate_dx = offs.dx * scale
         ctx.candidate_alpha = offs.alpha_mult
+        ctx.candidate_rot_deg = offs.rotation_deg
+        ctx.candidate_zoom = offs.zoom
+        ctx.receptor_offsets = self._receptor_offsets(
+            percents, p.keycount, scale, t)
+
+    def _receptor_offsets(self, percents, keycount, scale, t) -> dict:
+        """Per-column receptor mods in OUR pixel space. `receptor_offsets`
+        evaluates the pipeline at y_offset = 0 over one note per column;
+        dx/dy convert from engine px by `scale`, rotation/zoom/alpha are
+        unitless."""
+        cols = np.arange(keycount, dtype=np.int64)
+        offs = receptor_offsets(percents, cols, t_now=t,
+                                beat_now=self._beat_at(t), keycount=keycount)
+        return {
+            'dx': offs.dx * scale, 'dy': offs.dy * scale,
+            'rotation_deg': offs.rotation_deg, 'zoom': offs.zoom,
+            'alpha': offs.alpha_mult,
+        }
