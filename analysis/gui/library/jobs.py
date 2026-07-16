@@ -3,12 +3,12 @@ from __future__ import annotations
 from collections import Counter
 from typing import Callable, Any
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QMessageBox, QProgressDialog
+from PySide6.QtWidgets import QMessageBox
 
 from analysis.core import game as game_mod
 from analysis.core import manifest as manifest_mod
 from analysis.gui.loaders import Worker
+from analysis.gui.loading_dialog import LoadingDialog
 
 from analysis.core.search import build_library
 
@@ -40,15 +40,12 @@ class LibraryJobRunner:
         error_title: str,
         label_prefix: str | None = None,
     ) -> Worker:
-        dlg = self._progress_dialog(label, title)
+        dlg = LoadingDialog(label, title, self.tab,
+                            label_prefix=label_prefix)
         worker = self.track(Worker(job))
+        dlg.attach(worker)
+        dlg.show()
 
-        prefix = label_prefix
-
-        def on_progress(msg: str) -> None:
-            dlg.setLabelText(f'{prefix}\n{msg}' if prefix else str(msg))
-
-        worker.progress.connect(on_progress)
         worker.done.connect(
             lambda payload, w=worker, d=dlg: self._finish_dialog_job(
                 d, w, on_done, payload
@@ -59,6 +56,10 @@ class LibraryJobRunner:
                 d, w, error_title, tb
             )
         )
+        # A cancelled worker emits neither done nor failed; `finished`
+        # (the QThread signal) fires regardless, so tracking releases
+        # once the thread actually exits.
+        worker.finished.connect(lambda w=worker: self.untrack(w))
         worker.start()
         return worker
 
@@ -73,20 +74,8 @@ class LibraryJobRunner:
         QMessageBox.warning(self.tab, title, text)
 
     def _close_dialog_job(self, dlg, worker) -> None:
-        dlg.close()
-        dlg.deleteLater()
+        dlg.finish()
         self.untrack(worker)
-
-    def _progress_dialog(self, text: str, title: str) -> QProgressDialog:
-        dlg = QProgressDialog(text, None, 0, 0, self.tab)
-        dlg.setWindowTitle(title)
-        dlg.setWindowModality(Qt.ApplicationModal)
-        dlg.setCancelButton(None)
-        dlg.setMinimumDuration(0)
-        dlg.setAutoClose(False)
-        dlg.setAutoReset(False)
-        dlg.show()
-        return dlg
 
     # Existing library scan/rebuild jobs can keep living here too.
 
