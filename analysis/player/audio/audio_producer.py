@@ -429,12 +429,24 @@ class AudioProducer:
                 pad = np.zeros((n - samples.shape[0], self._ring._channels),
                                dtype=np.float32)
                 samples = np.concatenate([samples, pad], axis=0)
-        block_dt = (n / self._sr) * rate
-        chart_end = self._next_chart_t + block_dt
+        # GUI-requested silence (pause/scrub) freezes the chart cursor:
+        # the PV isn't generating, so stamping progress the source
+        # didn't make would desync the playhead from the audible music
+        # by the full pause duration. Rate 0 makes the DAC-anchor
+        # extrapolation hold flat too. Lead-in / post-end silence still
+        # advances -- there the cursor moving through silence is the
+        # point.
+        if silent:
+            chart_end = self._next_chart_t
+            stamp_rate = 0.0
+        else:
+            block_dt = (n / self._sr) * rate
+            chart_end = self._next_chart_t + block_dt
+            stamp_rate = rate
         ended = not cont
         stamp = BlockStamp(
             chart_end=chart_end,
-            rate=rate,
+            rate=stamp_rate,
             ended=ended,
             silent=emit_silent,
         )

@@ -21,9 +21,10 @@ from analysis.player.render.qt_renderer import QtPlayerRenderer
 
 # Below this inter-swap interval the compositor clearly isn't
 # vsync-throttling us (broken driver, offscreen, VM); rescheduling
-# immediately would busy-spin the GUI thread, so defer instead.
-_SPIN_GUARD_S = 0.002
-_SPIN_DEFER_MS = 8
+# immediately would busy-spin the GUI thread, so defer instead. The
+# threshold must sit below the refresh period of any real display
+_SPIN_GUARD_S = 0.0005
+_SPIN_DEFER_MS = 2
 
 
 class PlayerCanvas(QOpenGLWidget):

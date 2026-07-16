@@ -1,10 +1,19 @@
 """Native Qt renderer for the embedded replay player."""
 from __future__ import annotations
 
+import time
+
 import numpy as np
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QPen
+from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
+
+# The HUD (sidebar + free-region panels) re-renders at most this often;
+# between renders the cached pixmap blits in one call. Text readouts at
+# 60 Hz stay fluid while dense-chart frames stop paying the sidebar's
+# measure+draw passes.
+_HUD_REDRAW_HZ = 60
+_HUD_LAYERS = frozenset(('free_sections', 'hud'))
 
 
 from analysis.player.render import culling, theme
@@ -77,6 +86,9 @@ class QtPlayerRenderer:
         self.font = QFont('monospace', 10)
         self.big_font = QFont('monospace', 14)
         self.big_font.setBold(True)
+        self._hud_pixmap = None
+        self._hud_rendered_at = 0.0
+        self._hud_snapshot = None
 
     def build_context(self, player, painter, t_now):
         player._render_t_now = float(t_now)
@@ -129,20 +141,48 @@ class QtPlayerRenderer:
 
     def draw(self, player, painter, t_now):
         ctx = self.build_context(player, painter, t_now)
-        # Hitboxes are frame-scoped ; clear them up front so the free
-        # region (painted *before* the sidebar) can register its buttons
-        # + drag handles without the sidebar pass wiping them later.
         hud = getattr(player, 'hud', None) if player is not None else None
-        if hud is not None:
+        # Narrowly-mocked contexts (layer-gating tests) have no player
+        # or painter; for those, HUD layers draw directly like any other
+        # layer instead of through the cache.
+        cache_enabled = (painter is not None
+                         and getattr(ctx, 'player', None) is not None)
+        hud_due = not cache_enabled or self._hud_redraw_due(ctx, hud)
+        # Hitboxes all belong to the HUD region (sidebar, free panels,
+        # drag/resize affordances); the chart layers register none. They
+        # are cleared only when the HUD actually re-renders so cached
+        # frames keep last render's clickable regions.
+        if hud is not None and hud_due:
             hud.clear_hitboxes()
         self.plugins.draw(Stage.PRE_FRAME, ctx)
         visibility = self._layer_visibility(ctx)
+        hud_painter = None
         for name, fn, stage in self._layers:
+            if name in _HUD_LAYERS and cache_enabled:
+                # HUD layers render into a cached pixmap at most
+                # _HUD_REDRAW_HZ; chart layers stay per-frame. On dense
+                # charts the sidebar's measure+draw passes cost more
+                # than the notes, and its content changes far slower
+                # than the 500 Hz frame cadence.
+                if not hud_due:
+                    continue
+                if hud_painter is None:
+                    hud_painter = self._begin_hud_pixmap(ctx, painter)
+                target = hud_painter
+            else:
+                target = painter
             if visibility.get(name, True):
                 if fn is not None:
-                    fn(ctx, painter)
+                    fn(ctx, target)
             if stage is not None:
+                prev_painter = getattr(ctx, 'painter', None)
+                ctx.painter = target
                 self.plugins.draw(stage, ctx)
+                ctx.painter = prev_painter
+        if hud_painter is not None:
+            hud_painter.end()
+        if cache_enabled and self._hud_pixmap is not None:
+            painter.drawPixmap(0, 0, self._hud_pixmap)
         # Drag affordances: ghost + blue insertion line. Drawn last so
         # they sit above both the HUD and the free-region panels.
         if hud is not None and hud.edit_mode and hud.drag_key is not None:
@@ -155,6 +195,47 @@ class QtPlayerRenderer:
             paint_profiler.record_frame(ctx)
         except ImportError:
             pass
+
+    def _hud_redraw_due(self, ctx, hud) -> bool:
+        """The HUD pixmap re-renders when its content can actually have
+        changed faster than the steady cadence: interaction state
+        (edit mode, drag, flyout, wheel scroll), geometry, or layer
+        visibility. Otherwise at most every 1/_HUD_REDRAW_HZ."""
+        if self._hud_pixmap is None:
+            return True
+        p = ctx.player
+        interacting = hud is not None and (
+            hud.edit_mode or hud.drag_key is not None
+            or hud.open_flyout is not None)
+        visibility = self._layer_visibility(ctx)
+        snapshot = (
+            p.W, p.H,
+            hud.sidebar_scroll if hud is not None else 0,
+            tuple(sorted(
+                (k, v) for k, v in visibility.items() if k in _HUD_LAYERS)),
+        )
+        now = time.monotonic()
+        stale = now - self._hud_rendered_at >= 1.0 / _HUD_REDRAW_HZ
+        if interacting or stale or snapshot != self._hud_snapshot:
+            self._hud_rendered_at = now
+            self._hud_snapshot = snapshot
+            return True
+        return False
+
+    def _begin_hud_pixmap(self, ctx, painter):
+        """Fresh transparent pixmap covering the window; HUD layers and
+        their plugin stages paint into it, then it blits per frame."""
+        from PySide6.QtGui import QPixmap
+        p = ctx.player
+        dpr = float(painter.device().devicePixelRatioF())
+        pm = QPixmap(int(p.W * dpr), int(p.H * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        self._hud_pixmap = pm
+        hud_painter = QPainter(pm)
+        hud_painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        hud_painter.setFont(self.font)
+        return hud_painter
 
     def _layer_draw_fns(self):
         # Only layers whose `draw` is a string lookup (plugin manifest

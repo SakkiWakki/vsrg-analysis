@@ -15,6 +15,8 @@ Public API:
 """
 from __future__ import annotations
 
+from PySide6.QtCore import QPointF, QRectF
+
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, NamedTuple
@@ -300,7 +302,6 @@ def _ln_body_span(ctx, n, hide) -> tuple | None:
 
 
 def _draw_ln_body_tile(ctx, painter, n, top, bot, state):
-    from PySide6.QtCore import QRectF
     pm = ctx.sprite_cache.get('ln_body', ctx,
                               col=n.col, state=state, is_roll=n.is_roll)
     # Tile vertically over the body rect. Using QRectF + drawTiledPixmap
@@ -309,7 +310,6 @@ def _draw_ln_body_tile(ctx, painter, n, top, bot, state):
 
 
 def _draw_ln_tail_sprite(ctx, painter, n):
-    from PySide6.QtCore import QPointF
     state = _tail_state(n)
     pm = ctx.sprite_cache.get('ln_tail', ctx, col=n.col, state=state)
     if n.flip_tail:
@@ -344,7 +344,6 @@ def _tail_state(n) -> str:
 def _draw_head(ctx, painter, n) -> bool:
     """Blit the head sprite from the cache if visible. Returns whether
     it was drawn (press-mark and miss-X both key off this)."""
-    from PySide6.QtCore import QPointF
     visible, state, y = _head_vis(ctx, n)
     if not visible:
         return False
@@ -408,14 +407,12 @@ def _draw_stroke_with_tick(ctx, painter, color, lx, y_from, y_to):
     """Vertical line from y_from to y_to + cached tick sprite at y_to.
     The line's endpoints change per note so it stays vector; the tick
     is a fixed-geometry sprite cached per color."""
-    from PySide6.QtCore import QPointF
     _extras.draw_lane_line(painter, color, lx, ctx.lane_w, y_from, y_to)
     pm = ctx.sprite_cache.get('tick', ctx, color=color)
     painter.drawPixmap(QPointF(float(lx), float(y_to - 2)), pm)
 
 
 def _draw_miss_x(ctx, painter, n):
-    from PySide6.QtCore import QPointF
     pm = ctx.sprite_cache.get('miss_x', ctx, jcolor=n.jcolor)
     painter.drawPixmap(
         QPointF(float(n.lx), float(n.y - pm.height() / 2)), pm)

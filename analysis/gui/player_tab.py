@@ -405,7 +405,12 @@ class PlayerTab(QWidget):
         self.player.toggle_pause()
         self.play_btn.setText('▶' if self.player.paused else '⏸')
 
-        if self._audio_is_ready() and seeked_to_start:
+        # Seek on every resume, not just restart-from-end: blocks that
+        # were already in flight when the pause landed advanced the
+        # audio position slightly past the frozen visual playhead, and
+        # the seek re-aligns the two so resume is snap-free.
+        resumed = not self.player.paused
+        if self._audio_is_ready() and (seeked_to_start or resumed):
             self._audio.seek(self._chart_to_audio_time(self.player.t_intended))
 
         self._sync_audio(force=True)

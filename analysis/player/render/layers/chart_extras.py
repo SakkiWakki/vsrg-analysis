@@ -98,7 +98,6 @@ def draw_miss_holds(ctx: RenderContext, painter) -> None:
     indices = _visible_miss_hold_indices(ctx)
     indices = indices[p.notes.miss_hold_cols[indices] < p.keycount]
 
-    from PySide6.QtCore import QPointF
     red = p.judge_colors['miss']
     lane_x, lane_w = ctx.lane_x, ctx.lane_w
     time_to_y = ctx.time_to_y
@@ -182,7 +181,6 @@ def _draw_chart_sprites(ctx, painter, times, cols, sv_times, active_until, *,
     if not indices.size:
         return
 
-    from PySide6.QtCore import QPointF
     cache = ctx.sprite_cache
     lane_x = ctx.lane_x
 
