@@ -14,6 +14,8 @@ answerable (e.g. live ``accuracy`` -- not meaningful mid-replay) raise
 """
 from __future__ import annotations
 
+from collections import Counter
+
 import numpy as np
 
 from analysis.components.api import (
@@ -94,11 +96,22 @@ class PlayerDataSource:
         note_judges = getattr(self._p, 'note_judges', None)
         if windows is None or note_judges is None:
             raise DataNotAvailable('judgment_counts')
+
+        # Tallying every note is O(chart) and the sidebar calls this
+        # twice per paint (measure + draw), so cache on the player (this
+        # data source is rebuilt per draw). Keyed by identity: a judge
+        # change rebuilds both `windows` and `note_judges` (see
+        # `apply_judge`), which invalidates the cache for free.
+        cached = getattr(self._p, '_judgment_counts_cache', None)
+        if cached is not None and cached[0] is note_judges \
+                and cached[1] is windows:
+            return dict(cached[2])
+
         counts = {n: 0 for n, _ in windows}
         counts['miss'] = 0
-        for j in note_judges:
-            counts[j] = counts.get(j, 0) + 1
-        return counts
+        counts.update(Counter(note_judges))
+        self._p._judgment_counts_cache = (note_judges, windows, counts)
+        return dict(counts)
 
     def judgment_colors(self) -> dict[str, tuple]:
         c = getattr(self._p, 'judge_colors', None)
