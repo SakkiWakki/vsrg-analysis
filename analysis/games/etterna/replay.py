@@ -325,6 +325,31 @@ def _resolve_etterna_root(root):
     return _resolve_etterna_save(root)
 
 
+def _default_root_candidates():
+    """Likely Etterna install roots for the current OS. Windows installs
+    are portable (Save/ sits next to the exe; the installer defaults to
+    C:\\Games\\Etterna); macOS ships as a drag-installed app folder;
+    Linux uses dotfile roots."""
+    home = Path.home()
+    match sys.platform:
+        case 'win32':
+            system_drive = os.environ.get('SystemDrive', 'C:')
+            return [
+                Path(system_drive + r'\Games\Etterna'),
+                home / 'Etterna',
+                home / 'Desktop' / 'Etterna',
+            ]
+        case 'darwin':
+            return [Path('/Applications/Etterna'), home / 'Etterna']
+        case _:
+            return [
+                home / '.etterna',
+                home / 'etterna',
+                home / '.stepmania-5.0',
+                home / '.stepmania-5.1',
+            ]
+
+
 def find_etterna_dirs():
     """Returns dict with save_dir, replays_dir, xml_path, extra_songs_dirs.
     User override from GUI settings wins over autodetection."""
@@ -333,13 +358,7 @@ def find_etterna_dirs():
         resolved = _resolve_etterna_root(override)
         if resolved is not None:
             return resolved
-    candidates = [
-        Path.home() / '.etterna',
-        Path.home() / 'etterna',
-        Path.home() / '.stepmania-5.0',
-        Path.home() / '.stepmania-5.1',
-    ]
-    for root in candidates:
+    for root in _default_root_candidates():
         resolved = _resolve_etterna_root(root)
         if resolved is not None:
             return resolved

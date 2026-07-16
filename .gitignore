@@ -170,3 +170,5 @@ tools
 
 # Community tosu overlays dropped in locally; not part of the repo.
 plugins/overlays/
+analysis/games/fluxis/realmdump/bin/
+analysis/games/fluxis/realmdump/obj/

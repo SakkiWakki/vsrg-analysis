@@ -67,7 +67,12 @@ MANIFEST = GameManifest(
             hint=('Point at your Etterna install folder ; the one that '
                   'contains `Save/` and `Songs/`. Additional song folders '
                   'listed in `Preferences.ini` are picked up automatically.'),
-            placeholder='e.g. ~/.etterna or ~/etterna',
+            placeholder={
+                'win32': r'e.g. C:\Games\Etterna',
+                'linux': 'e.g. ~/.etterna or ~/etterna',
+                'darwin': 'e.g. /Applications/Etterna',
+                'default': 'e.g. ~/.etterna or ~/etterna',
+            },
             settings_key=_ETTERNA_ROOT_KEY,
             error_hint='folder missing Save/ (or LocalProfiles/Etterna.xml)',
             autodetect=_autodetect_root,

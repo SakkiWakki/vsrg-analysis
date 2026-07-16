@@ -1,0 +1,60 @@
+"""fluXis game manifest -- the GUI's view of the game."""
+from __future__ import annotations
+
+from analysis.core.manifest import GameManifest, PathField
+
+from analysis.games.fluxis.paths import (FLUXIS_DATA_KEY, autodetect_data_dir,
+                                          find_fluxis_dirs, validate_data_dir)
+
+
+# Default-difficulty judgement windows (ms), the middle anchor of each
+# fluXis `HitWindows.CreateTimings` row; real per-map windows scale with
+# the chart's AccuracyDifficulty and the play rate, which the future
+# .fsc/.frp parser will provide.
+_DEFAULT_WINDOWS_MS = (
+    ('flawless', 19.0), ('perfect', 49.0), ('great', 82.0),
+    ('alright', 112.0), ('okay', 136.0), ('miss', 173.0),
+)
+
+_VIZ_COLORS = {
+    'flawless': '#5cf', 'perfect': '#5fc', 'great': '#cf5',
+    'alright': '#fc5', 'okay': '#f5c', 'miss': '#f55',
+}
+
+
+def _note_viz_config(replay, judge=None, od=None):
+    windows = [(name, ms / 1000.0, _VIZ_COLORS[name])
+               for name, ms in _DEFAULT_WINDOWS_MS]
+    return {
+        'windows': windows,
+        'unit_label': 'time (ms)',
+        'rows_per_ms': None,
+        'win': 8000,
+    }
+
+
+MANIFEST = GameManifest(
+    name='fluxis',
+    path_fields=[
+        PathField(
+            key='data',
+            label='fluXis data folder',
+            hint=('Point at your fluXis data folder ; the one that '
+                  'contains `fluxis.realm`, `maps/`, and `replays/`. '
+                  'This is the game\'s storage directory, not the '
+                  'install folder.'),
+            placeholder={
+                'win32': r'e.g. %APPDATA%\fluXis',
+                'linux': 'e.g. ~/.local/share/fluXis',
+                'darwin': 'e.g. ~/Library/Application Support/fluXis',
+                'default': 'e.g. ~/.local/share/fluXis',
+            },
+            settings_key=FLUXIS_DATA_KEY,
+            error_hint='folder missing fluxis.realm',
+            autodetect=autodetect_data_dir,
+            validate=validate_data_dir,
+        ),
+    ],
+    find_dirs=find_fluxis_dirs,
+    note_viz_config=_note_viz_config,
+)
