@@ -99,6 +99,14 @@ class GameAdapter:
         stores SM noterows that need the chart's BPM map to time out."""
         raise NotImplementedError
 
+    def lane_mask(self, replay):
+        """Active-lane timeline `[(t_start_s, mask_tuple)]` for charts
+        whose visible lane set changes mid-play (fluXis lane switches),
+        or None for static layouts. Masks are per-lane 0/1 tuples of
+        length keycount; note arrays stay full-width with absolute
+        columns, so only lane painting consults this."""
+        return None
+
     def judge_kwarg_name(self) -> str:
         """Name of the keyword the game's judge system takes in
         `judgement_windows`/`judge_label`/`player_kwargs` ('judge' for

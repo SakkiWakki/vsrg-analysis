@@ -39,6 +39,10 @@ class PlayerInitState:
             sm_offset=sm_offset,
             keycount=keycount,
         )
+        # Active-lane timeline for charts whose lane count changes
+        # mid-play (fluXis lane switches); None = static layout. The
+        # lane layer reads this per frame.
+        p._lane_mask = p._adapter.lane_mask(replay)
 
         p.columns = replay['columns']
         p.offsets = replay['offsets']

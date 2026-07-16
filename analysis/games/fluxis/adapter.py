@@ -78,9 +78,91 @@ class FluxisAdapter(GameAdapter):
     name = 'fluxis'
 
     def parse_replay(self, path, chart_path=None):
-        raise NotImplementedError(
-            'fluXis playback is not implemented yet; the library scan '
-            'works, but .fsc/.frp parsing is still to come')
+        from analysis.games.fluxis.parse import parse_replay
+        entry = self._cached_entry(path)
+        if chart_path is None:
+            chart_path = (entry or {}).get('chart_path')
+        if chart_path is None:
+            raise FileNotFoundError(
+                'no chart known for this fluXis replay; rescan the '
+                'library so the realm dump can link it')
+        # The play rate lives only in the realm score row (the .frp has
+        # no mods); it scales the judgement windows.
+        rate = float((entry or {}).get('rate') or 1.0)
+        return parse_replay(path, chart_path, rate=rate)
+
+    def _cached_entry(self, replay_path):
+        cached = _LIBRARY_CACHE.load() or []
+        wanted = str(replay_path)
+        for e in cached:
+            if e.get('replay_path') == wanted:
+                return e
+        return None
+
+    # --- playback surfaces ----------------------------------------------
+
+    def prepare_replay_times(self, replay, **_):
+        import numpy as np
+        times = replay['noterows'].astype(np.float64) / 1000.0
+        hold_tails = {}
+        for t, c, end_ms in replay.get('holds', []):
+            if end_ms is not None:
+                hold_tails[(t, c)] = end_ms / 1000.0
+        return times, hold_tails, int(replay['keycount'])
+
+    def lane_mask(self, replay):
+        return replay.get('_fluxis_lane_mask') or None
+
+    def populate_notes_model(self, replay, model) -> None:
+        from analysis.player.init.notes_model import copy_chart_streams
+        copy_chart_streams(model, replay)
+
+    def judge_kwarg_name(self) -> str:
+        return 'od'
+
+    def _difficulty(self, replay, od=None):
+        if od is not None:
+            return float(od)
+        return float(replay.get('accuracy_difficulty', 8.0))
+
+    def judgement_windows(self, replay, od=None, **_):
+        from analysis.games.fluxis.judge_sim import hit_windows_ms
+        rate = float(replay.get('rate') or 1.0)
+        # 'miss' is the hittable cutoff, not a window: anything past
+        # 'okay' judges miss via the shared fallback, and the sidebar
+        # adds its own unconditional miss row.
+        return [(name, ms / 1000.0)
+                for name, ms in hit_windows_ms(self._difficulty(replay, od),
+                                               rate)
+                if name != 'miss']
+
+    def judge_label(self, replay, od=None, **_):
+        return f'ACC {self._difficulty(replay, od):g}'
+
+    def player_kwargs(self, replay, od=None, **_):
+        return {'od': self._difficulty(replay, od)}
+
+    def nudge_judge(self, current, delta):
+        step = 0.2 if delta > 0 else -0.2
+        return max(0.0, min(10.0, float(current) + step))
+
+    def judgment_colors(self) -> dict:
+        return {
+            'flawless': (85, 204, 255), 'perfect': (85, 255, 204),
+            'great': (204, 255, 85), 'alright': (255, 204, 85),
+            'okay': (255, 85, 204), 'miss': (255, 85, 85),
+        }
+
+    def default_scroll_mode(self):
+        return 'ms'
+
+    def resolve_audio(self, replay, entry=None, progress=None):
+        chart_path = replay.get('chart_path')
+        audio = replay.get('_fluxis_audio_file')
+        if not chart_path or not audio:
+            return None
+        cand = Path(chart_path).parent / audio
+        return str(cand) if cand.exists() else None
 
     # --- library scan --------------------------------------------------
 

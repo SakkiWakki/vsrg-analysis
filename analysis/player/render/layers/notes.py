@@ -21,6 +21,7 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, NamedTuple
 
+from analysis.player.notetypes import NT_TICK
 from analysis.player.render.layers import chart_extras as _extras
 
 if TYPE_CHECKING:
@@ -55,6 +56,8 @@ class _NoteView:
     # Quaver: tail sprite flips when SV at the LN's end_time is negative.
     # Other games leave this False ; the renderer just skips the flip.
     flip_tail: bool = False
+    # fluXis tick notes; drawn bright yellow via the 'tick' sprite state.
+    is_tick: bool = False
     # Quaver: under SV reversal an LN body covers a wider span than
     # head->tail. `body_min_y` / `body_max_y` are screen-y bounds of the
     # convex hull of cum positions over the LN's chart-time interval.
@@ -143,6 +146,11 @@ def _classify(ctx, press_t, release_t, is_ln, miss) -> str:
     return 'released'
 
 
+def _is_tick(p, i) -> bool:
+    nts = getattr(p, 'notetypes', None)
+    return nts is not None and i < len(nts) and int(nts[i]) == NT_TICK
+
+
 def _build(ctx, i, pos) -> _NoteView | None:
     p = ctx.player
     col = p.notes.columns_list[i]
@@ -198,6 +206,7 @@ def _build(ctx, i, pos) -> _NoteView | None:
         is_ln=is_ln,
         is_roll=bool(is_ln and p.notes.roll_head_keys
                      and (p.notes.noterows_list[i], col) in p.notes.roll_head_keys),
+        is_tick=_is_tick(p, i),
         miss=bool(p.misses[i]),
         state=_classify(ctx, press_t, release_t, is_ln, p.misses[i]),
         note_color=p.palette[col],
@@ -348,6 +357,8 @@ def _draw_head(ctx, painter, n) -> bool:
     if not visible:
         return False
     sprite_name = 'ln_head' if n.is_ln else 'tap_head'
+    if n.is_tick and state == 'normal':
+        state = 'tick'
     pm = ctx.sprite_cache.get(sprite_name, ctx, col=n.col, state=state)
     painter.drawPixmap(
         QPointF(float(n.lx), float(y - pm.height() / 2)), pm)

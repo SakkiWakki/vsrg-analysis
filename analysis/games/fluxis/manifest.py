@@ -7,15 +7,6 @@ from analysis.games.fluxis.paths import (FLUXIS_DATA_KEY, autodetect_data_dir,
                                           find_fluxis_dirs, validate_data_dir)
 
 
-# Default-difficulty judgement windows (ms), the middle anchor of each
-# fluXis `HitWindows.CreateTimings` row; real per-map windows scale with
-# the chart's AccuracyDifficulty and the play rate, which the future
-# .fsc/.frp parser will provide.
-_DEFAULT_WINDOWS_MS = (
-    ('flawless', 19.0), ('perfect', 49.0), ('great', 82.0),
-    ('alright', 112.0), ('okay', 136.0), ('miss', 173.0),
-)
-
 _VIZ_COLORS = {
     'flawless': '#5cf', 'perfect': '#5fc', 'great': '#cf5',
     'alright': '#fc5', 'okay': '#f5c', 'miss': '#f55',
@@ -23,14 +14,26 @@ _VIZ_COLORS = {
 
 
 def _note_viz_config(replay, judge=None, od=None):
+    from analysis.games.fluxis.judge_sim import hit_windows_ms
+    difficulty = (float(od) if od is not None
+                  else float(replay.get('accuracy_difficulty', 8.0))
+                  if isinstance(replay, dict) else 8.0)
+    rate = (float(replay.get('rate') or 1.0)
+            if isinstance(replay, dict) else 1.0)
     windows = [(name, ms / 1000.0, _VIZ_COLORS[name])
-               for name, ms in _DEFAULT_WINDOWS_MS]
+               for name, ms in hit_windows_ms(difficulty, rate)]
     return {
         'windows': windows,
-        'unit_label': 'time (ms)',
+        'unit_label': f'time (ms)  ;  ACC {difficulty:g}',
         'rows_per_ms': None,
         'win': 8000,
     }
+
+
+def _resolve_chart_context(replay, entry=None, progress=None):
+    from analysis.core import game as game_mod
+    audio = game_mod.get('fluxis').resolve_audio(replay)
+    return None, 0.0, audio
 
 
 MANIFEST = GameManifest(
@@ -57,4 +60,5 @@ MANIFEST = GameManifest(
     ],
     find_dirs=find_fluxis_dirs,
     note_viz_config=_note_viz_config,
+    resolve_chart_context=_resolve_chart_context,
 )

@@ -22,3 +22,7 @@ from analysis.games.etterna.sm_chart import (  # noqa: F401
     NT_FAKE,
     NT_AUTO_KEYSOUND,
 )
+
+# Not an Etterna type: fluXis tick notes (chunithm-style "activates
+# while the key is down"). Value chosen clear of the sm_chart enum.
+NT_TICK = 8

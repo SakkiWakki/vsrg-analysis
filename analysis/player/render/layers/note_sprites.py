@@ -35,6 +35,7 @@ from analysis.player.render.primitives import (
 
 _ROLL_BODY      = (90, 210, 90)
 _ROLL_TAIL      = (60, 160, 60)
+_TICK_BODY      = (255, 230, 40) # Bright yellow for convention
 _MISS_TAP_BODY  = (77, 77, 77)
 _MISS_LN_BODY   = (38, 38, 38)
 
@@ -53,6 +54,8 @@ def _head_state_color(state, color):
             return _MISS_TAP_BODY
         case 'miss_ln':
             return _MISS_LN_BODY
+        case 'tick':
+            return _TICK_BODY
         case _:
             return color
 
