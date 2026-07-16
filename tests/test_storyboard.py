@@ -256,3 +256,143 @@ def test_effect_skips_invisible_elements(tmp_path):
     recorder = _Recorder()
     frame.draws[0][1](_ctx(t=2.999), recorder)
     assert not recorder.named('fillRect')   # alpha eased to ~0
+
+
+# ── hierarchical groups ---------------------------------------------------
+
+from analysis.player.render.storyboard.model import Element  # noqa: E402
+from analysis.player.render.storyboard.render import (  # noqa: E402
+    _is_white_texture, _white_pixmap)
+
+
+def _leaf(kind, **overrides):
+    fields = dict(
+        kind=kind, z=0, z_index=0, t_start=0.0, t_end=float('inf'),
+        anchor=(0.0, 0.0), origin=(0.0, 0.0), timelines=build_timelines())
+    fields.update(overrides)
+    return Element(**fields)
+
+
+def _group(children, **overrides):
+    return _leaf('group', children=tuple(children), **overrides)
+
+
+def _rendered_bbox(storyboard, t, size=200):
+    """Render one frame into an offscreen ARGB image and return the
+    bounding box (x0, y0, x1, y1) of the non-transparent pixels, or None
+    when nothing drew. Design space maps 1:1 into the image."""
+    from PySide6.QtGui import QImage, QPainter
+
+    image = QImage(size, size, QImage.Format.Format_ARGB32)
+    image.fill(0)
+    eff = StoryboardEffect(storyboard)
+    frame = eff.at(_ctx(t=t, rect=(0, 0, size, size)))
+    if frame is None:
+        return None
+    painter = QPainter(image)
+    for _z, draw in frame.draws:
+        draw(_ctx(t=t, rect=(0, 0, size, size)), painter)
+    painter.end()
+
+    xs, ys = [], []
+    for py in range(size):
+        for px in range(size):
+            if image.pixelColor(px, py).alpha() > 0:
+                xs.append(px)
+                ys.append(py)
+    return (min(xs), min(ys), max(xs), max(ys)) if xs else None
+
+
+def _center_group(children, **overrides):
+    """A group hung at the design-rect center (anchor 0.5,0.5), so a
+    rotated child stays on-canvas around the midpoint."""
+    return _leaf('group', anchor=(0.5, 0.5), children=tuple(children),
+                 **overrides)
+
+
+def test_group_rotation_moves_child_position():
+    # A child rect sits to the RIGHT of the group's center origin.
+    # Rotating the group 90deg clockwise (Qt y-down => +x maps to -y)
+    # swings the child ABOVE the center.
+    child = _leaf('rect', timelines=build_timelines({'x': 60.0, 'w': 8.0,
+                                                     'h': 8.0}))
+    flat_sb = Storyboard(200, 200, 'height',
+                         (_center_group([child],
+                                        timelines=build_timelines()),))
+    rot_sb = Storyboard(200, 200, 'height',
+                        (_center_group([child],
+                                       timelines=build_timelines(
+                                           {'rotation': 90.0})),))
+
+    flat = _rendered_bbox(flat_sb, t=0.5)
+    rotated = _rendered_bbox(rot_sb, t=0.5)
+    assert flat is not None and rotated is not None
+    # Unrotated: child sits to the RIGHT of center (x ~160), y ~100.
+    assert flat[0] > 140 and 90 < flat[1] < 110
+    # Rotated 90deg about the center (Qt clockwise, y-down): the +x
+    # offset maps to +y, so the child swings BELOW center (y ~160) at
+    # x ~100 - a position the flat layout never occupies.
+    assert rotated[1] > 140 and 90 < rotated[0] < 110
+
+
+def test_group_window_culls_whole_subtree():
+    child = _leaf('rect', timelines=build_timelines({'w': 20.0, 'h': 20.0}))
+    sb = Storyboard(200, 200, 'height',
+                    (_group([child], t_start=5.0, t_end=10.0,
+                            timelines=build_timelines()),))
+    # Group window is [5, 10): nothing draws before it opens.
+    assert _rendered_bbox(sb, t=1.0) is None
+    assert _rendered_bbox(sb, t=7.0) is not None
+
+
+def test_child_window_culls_while_siblings_draw():
+    early = _leaf('rect', t_start=0.0, t_end=2.0,
+                  timelines=build_timelines({'x': 10.0, 'w': 8.0, 'h': 8.0}))
+    late = _leaf('rect', t_start=5.0, t_end=9.0,
+                 timelines=build_timelines({'x': 120.0, 'w': 8.0, 'h': 8.0}))
+    sb = Storyboard(200, 200, 'height',
+                    (_group([early, late], timelines=build_timelines()),))
+    at_1 = _rendered_bbox(sb, t=1.0)
+    at_6 = _rendered_bbox(sb, t=6.0)
+    assert at_1 is not None and at_1[0] < 40      # only the early child
+    assert at_6 is not None and at_6[0] > 100     # only the late child
+
+
+def test_group_alpha_multiplies_onto_children():
+    child = _leaf('rect', timelines=build_timelines(
+        {'w': 20.0, 'h': 20.0, 'alpha': 0.5}))
+    sb = Storyboard(200, 200, 'height',
+                    (_group([child],
+                            timelines=build_timelines({'alpha': 0.4})),))
+    from PySide6.QtGui import QImage, QPainter
+    image = QImage(200, 200, QImage.Format.Format_ARGB32)
+    image.fill(0)
+    eff = StoryboardEffect(sb)
+    painter = QPainter(image)
+    for _z, draw in eff.at(_ctx(t=0.5, rect=(0, 0, 200, 200))).draws:
+        draw(_ctx(t=0.5, rect=(0, 0, 200, 200)), painter)
+    painter.end()
+    # composed opacity = 0.4 * 0.5 = 0.2 over white => alpha ~= 51/255.
+    alpha = image.pixelColor(5, 5).alpha()
+    assert 40 < alpha < 65
+
+
+# ── SM built-in 'white' texture -------------------------------------------
+
+def test_white_texture_recognized_and_synthesized():
+    assert _is_white_texture('white')
+    assert _is_white_texture('  White ')
+    assert not _is_white_texture('/path/to/white.png')
+    assert not _is_white_texture(None)
+    pm = _white_pixmap()
+    assert not pm.isNull()
+    assert pm.toImage().pixelColor(0, 0).alpha() == 255
+
+
+def test_sprite_referencing_white_draws_without_missing_warning(capsys):
+    sprite = _leaf('sprite', asset='white',
+                   timelines=build_timelines({'alpha': 1.0}))
+    sb = Storyboard(200, 200, 'height', (sprite,))
+    bbox = _rendered_bbox(sb, t=0.5)
+    assert bbox is not None                       # the white pixmap drew
+    assert 'missing' not in capsys.readouterr().out

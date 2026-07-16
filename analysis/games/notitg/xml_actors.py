@@ -192,6 +192,12 @@ def _parse_classic_command(value: str) -> list:
     return commands
 
 
+def parse_command_string(value: str) -> list:
+    """`x,100;zoom,2;linear,1;y,300` -> [(verb, [args]), ...]. Public
+    entry for compilers that hold an actor's raw command attribute."""
+    return _parse_classic_command(value)
+
+
 def is_tween_verb(verb: str) -> bool:
     return verb in _TWEEN_VERBS or verb in _TWEEN_FALLBACK_VERBS
 

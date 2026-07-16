@@ -46,12 +46,13 @@ chunk runs under try/except and partial output is fine.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from analysis.games.etterna import sm_chart
 from analysis.games.notitg import xml_actors
 from analysis.games.notitg.mod_stubs import StubEnvironment
-from analysis.player.render.effects.timeline import Keyframe
+from analysis.games.notitg.recording_actor import RecordingActor
 from analysis.player.render.storyboard.model import Element, build_timelines
 
 _DESIGN_W = 640.0
@@ -91,8 +92,6 @@ def parse_fgchanges(sm_path) -> list:
 
 
 def _iter_change_entries(text: str, tag: str):
-    import re
-
     match = re.search(r'#' + tag + r':([^;]*);', text, flags=re.DOTALL)
     if not match:
         return
@@ -163,20 +162,40 @@ def _beat_to_seconds(sm_data, chart):
     return convert
 
 
-def _run_chunks(lua_chunks, start_beat):
-    """Run every CODE chunk under a shared stubbed host, in document
-    order, then harvest the mod tables. Per-chunk failures warn and are
-    skipped so a partial harvest survives."""
-    env = StubEnvironment(start_beat)
+def _run_chunks(lua_chunks, start_beat, to_seconds):
+    """Run every load-time CODE chunk under a shared stubbed host, in
+    document order, then harvest the mod tables. Each chunk runs with a
+    fresh recording `self`, so an InitCommand's `self:x(..)` pokes record
+    and a trailing `NAME = self` binds a global to that recorder (the
+    poke target for the mod_actions closures). Per-chunk failures warn
+    and are skipped so a partial harvest survives."""
+    env = StubEnvironment(start_beat, to_seconds=to_seconds)
     warnings = []
     for chunk in lua_chunks:
         if chunk.attr not in _LOAD_TIME_ATTRS:
             continue
         try:
-            env.run(chunk.body, name=f'{chunk.actor.kind}.{chunk.attr}')
+            env.run_actor_chunk(chunk.body,
+                                name=f'{chunk.actor.kind}.{chunk.attr}')
         except Exception as exc:
             warnings.append(f'{chunk.actor.kind}.{chunk.attr}: {exc}')
     return env, warnings
+
+
+_BIND_RE = re.compile(r'\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*self\b')
+
+
+def _bound_global_name(actor):
+    """The Lua global an actor's InitCommand/OnCommand self-assigns
+    (`gat_g_rot_intro = self`), or None. This is the name the scheduled
+    mod_actions closures poke, so it links the actor to its recorder."""
+    for attr in _LOAD_TIME_ATTRS:
+        value = actor.attrs.get(attr, '')
+        if value.startswith('%'):
+            match = _BIND_RE.search(value)
+            if match and match.group(1) != 'self':
+                return match.group(1)
+    return None
 
 
 def _normalize_mod_events(env, to_seconds):
@@ -280,30 +299,101 @@ def _as_int(value):
     return int(f) if f is not None else None
 
 
-def _compile_elements(classic_commands, to_seconds, start_beat):
-    """Actors with classic command strings -> storyboard Elements. One
-    element per actor that carries renderable geometry commands."""
+def _compile_elements(classic_commands, to_seconds, start_beat,
+                      named_keyframes=None):
+    """FLAT compile (kept for charts/tests with no hierarchy): actors
+    with classic command strings -> storyboard Elements, one per actor,
+    with recorded pokes merged in when the actor bound a global name."""
     by_actor = {}
+    order = []
     for command in classic_commands:
-        by_actor.setdefault(id(command.actor), (command.actor, []))
-        by_actor[id(command.actor)][1].append(command)
+        if id(command.actor) not in by_actor:
+            by_actor[id(command.actor)] = command.actor
+            order.append(command.actor)
 
     start_time = to_seconds(start_beat)
+    named_keyframes = named_keyframes or {}
     elements = []
-    for actor, commands in by_actor.values():
-        element = _actor_element(actor, commands, start_time)
+    for actor in order:
+        element = _leaf_element(actor, start_time, named_keyframes)
         if element is not None:
             elements.append(element)
     return elements
 
 
-def _actor_element(actor, commands, start_time):
+def compile_element_tree(root, to_seconds, start_beat, named_keyframes=None):
+    """HIERARCHICAL compile: the actor tree becomes a tree of storyboard
+    Elements. An ActorFrame with drawable descendants becomes a 'group'
+    whose transform composes onto its children; a Sprite/Quad/BitmapText
+    becomes a leaf. Each actor's timeline merges its XML command-string
+    keyframes with the pokes recorded onto the global it self-assigned.
+
+    Empty subtrees (frames with no drawable descendants and no own
+    animation) are pruned, so a chart with no real hierarchy collapses
+    back to a flat element list."""
+    start_time = to_seconds(start_beat)
+    named_keyframes = named_keyframes or {}
+    children = []
+    for child in root.children:
+        element = _compile_actor(child, start_time, named_keyframes)
+        if element is not None:
+            children.append(element)
+    return children
+
+
+def _compile_actor(actor, start_time, named_keyframes):
+    child_elements = []
+    for child in actor.children:
+        element = _compile_actor(child, start_time, named_keyframes)
+        if element is not None:
+            child_elements.append(element)
+
+    keyframes = _merged_keyframes(actor, start_time, named_keyframes)
+    if child_elements:
+        return _group_element(actor, start_time, keyframes,
+                              tuple(child_elements))
+    return _leaf_element(actor, start_time, named_keyframes,
+                         precomputed=keyframes)
+
+
+def _merged_keyframes(actor, start_time, named_keyframes):
+    """XML command keyframes + recorded pokes for one actor, on ONE
+    RecordingActor so both obey the same tween model, then merged with
+    whatever the actor's bound global recorded from the closures."""
+    recorder = RecordingActor(clock=start_time)
+    for attr in ('InitCommand', 'OnCommand'):
+        value = actor.attrs.get(attr, '')
+        if value and not value.startswith('%'):
+            for verb, args in xml_actors.parse_command_string(value):
+                recorder.poke(verb, args)
+    keyframes = recorder.keyframes()
+
+    name = _bound_global_name(actor)
+    if name and name in named_keyframes:
+        for prop, frames in named_keyframes[name].items():
+            keyframes.setdefault(prop, []).extend(frames)
+    return keyframes
+
+
+def _group_element(actor, start_time, keyframes, children):
+    return Element(
+        kind='group', z=0, z_index=0,
+        t_start=start_time, t_end=float('inf'),
+        anchor=(0.5, 0.5), origin=(0.5, 0.5),
+        timelines=build_timelines(keyframes=_drawable_props(keyframes)),
+        children=children,
+    )
+
+
+def _leaf_element(actor, start_time, named_keyframes, precomputed=None):
     kind = _element_kind(actor.kind)
     if kind is None:
         return None
 
-    keyframes = _collect_keyframes(commands, start_time)
-    if not any(keyframes.values()):
+    keyframes = precomputed if precomputed is not None \
+        else _merged_keyframes(actor, start_time, named_keyframes)
+    drawable = _drawable_props(keyframes)
+    if not any(drawable.values()):
         return None
 
     text = actor.attrs.get('Text', '')
@@ -312,11 +402,23 @@ def _actor_element(actor, commands, start_time):
         kind=kind, z=0, z_index=0,
         t_start=start_time, t_end=float('inf'),
         anchor=(0.5, 0.5), origin=(0.5, 0.5),
-        timelines=build_timelines(keyframes={
-            prop: kfs for prop, kfs in keyframes.items() if kfs}),
+        timelines=build_timelines(keyframes=drawable),
         asset=str(asset) if asset else None,
         text=str(text),
     )
+
+
+# Storyboard properties the renderer samples. The recorder also captures
+# 3D-only channels (z, rotation_x/y, skew, scale_z) with no 2D analogue;
+# they are kept out of the built element timelines.
+_DRAWABLE_PROPS = frozenset({
+    'x', 'y', 'scale_x', 'scale_y', 'rotation', 'alpha', 'color',
+})
+
+
+def _drawable_props(keyframes):
+    return {prop: frames for prop, frames in keyframes.items()
+            if prop in _DRAWABLE_PROPS and frames}
 
 
 def _element_kind(actor_kind: str):
@@ -325,67 +427,6 @@ def _element_kind(actor_kind: str):
     if actor_kind in _SPRITE_KINDS:
         return 'sprite' if actor_kind == 'Sprite' else 'rect'
     return None
-
-
-def _collect_keyframes(commands, start_time):
-    """Replay each command list as the engine would: a tween verb sets
-    the pending duration+easing for the next property command, `sleep`
-    advances the clock, property verbs emit a Keyframe at the running
-    time. Only OnCommand/InitCommand run on creation; Message commands
-    fire on engine broadcasts we do not model, so they are skipped."""
-    props = {prop: [] for prop in
-             ('x', 'y', 'scale_x', 'scale_y', 'rotation', 'alpha', 'color')}
-    for command in commands:
-        if command.attr not in ('OnCommand', 'InitCommand'):
-            continue
-        _replay_commands(command.commands, start_time, props)
-    return props
-
-
-def _replay_commands(commands, start_time, props):
-    clock = start_time
-    pending_dur = 0.0
-    pending_ease = 0
-    for verb, args in commands:
-        if xml_actors.is_tween_verb(verb):
-            duration = _as_float(args[0]) if args else 0.0
-            if verb == 'sleep':
-                clock += duration or 0.0
-                pending_dur, pending_ease = 0.0, 0
-            else:
-                pending_dur = duration or 0.0
-                pending_ease = xml_actors.tween_easing(verb) or 0
-            continue
-        _emit_property(verb, args, clock, pending_dur, pending_ease, props)
-        pending_dur, pending_ease = 0.0, 0
-
-
-def _emit_property(verb, args, clock, duration, easing, props):
-    if verb == 'diffuse':
-        values = _rgb(args)
-        if values is not None:
-            props['color'].append(Keyframe(clock, values, duration, easing))
-        alpha = _as_float(args[3]) if len(args) > 3 else None
-        if alpha is not None:
-            props['alpha'].append(Keyframe(clock, (alpha,), duration, easing))
-        return
-
-    prop = _SCALAR_PROPS.get(verb)
-    if prop is None:
-        return
-    value = _as_float(args[0]) if args else None
-    if value is None:
-        return
-    targets = prop if isinstance(prop, tuple) else (prop,)
-    for target in targets:
-        props[target].append(Keyframe(clock, (value,), duration, easing))
-
-
-def _rgb(args):
-    channels = [_as_float(a) for a in args[:3]]
-    if len(channels) < 3 or any(c is None for c in channels):
-        return None
-    return tuple(channels)
 
 
 def compile_modfile(sm_path) -> dict | None:
@@ -397,7 +438,8 @@ def compile_modfile(sm_path) -> dict | None:
         return _compile_modfile(sm_path)
     except Exception as exc:
         return {'mod_events': [], 'shader_flags': [], 'unsupported':
-                {'count': 0, 'described': []}, 'elements': [],
+                {'count': 0, 'described': []}, 'elements': [], 'tree': [],
+                'named_actors': 0, 'recorded_keyframes': 0,
                 'warnings': [f'compile aborted: {exc}']}
 
 
@@ -408,26 +450,36 @@ def _compile_modfile(sm_path):
         return None
 
     sm_data = sm_chart.parse_sm(sm_path)
-    _root, lua_chunks, classic_commands = _load_document(lua_dir)
+    root, lua_chunks, classic_commands = _load_document(lua_dir)
 
     _bpms, _offset, chart = _timing(sm_data)
     to_seconds = _beat_to_seconds(sm_data, chart)
     start_beat = min((b for b, _n, k in entries if k == 'FGCHANGES'),
                      default=0.0)
 
-    env, chunk_warnings = _run_chunks(lua_chunks, start_beat)
+    env, chunk_warnings = _run_chunks(lua_chunks, start_beat, to_seconds)
     fired, failed = env.replay_mod_actions()
+    named_keyframes = env.named_actor_keyframes()
 
     mod_events = _normalize_mod_events(env, to_seconds)
     mod_events.extend(_normalize_applied_mods(env, to_seconds))
+    tree = compile_element_tree(root, to_seconds, start_beat, named_keyframes)
     return {
         'mod_events': mod_events,
         'shader_flags': _normalize_shader_flags(env, to_seconds),
         'unsupported': _describe_unsupported(env),
         'elements': _compile_elements(classic_commands, to_seconds,
-                                      start_beat),
+                                      start_beat, named_keyframes),
+        'tree': tree,
+        'named_actors': len(named_keyframes),
+        'recorded_keyframes': _count_recorded_keyframes(named_keyframes),
         'replay': {'fired': fired, 'failed': failed,
                    'applied_mods': len(env.applied_mods),
                    'swallowed': env.swallowed},
         'warnings': chunk_warnings,
     }
+
+
+def _count_recorded_keyframes(named_keyframes) -> int:
+    return sum(len(frames) for props in named_keyframes.values()
+               for frames in props.values())

@@ -68,6 +68,39 @@ _UNIFORMS = ('u_tex', 'u_resolution', 'u_time', 'u_strength')
 _QUAD = struct.pack('8f', -1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0)
 
 
+def _uniform_floats(raw):
+    """The pass-dict value as a tuple of 1..4 floats, or None for shapes
+    we don't drive here (extra sampler textures are deferred, see module
+    notes)."""
+    if isinstance(raw, (int, float)):
+        return (float(raw),)
+    seq = tuple(raw) if isinstance(raw, (tuple, list)) else ()
+    if 2 <= len(seq) <= 4:
+        return tuple(float(v) for v in seq)
+    return None
+
+
+def _set_custom_uniforms(f, program, uniforms) -> None:
+    """Set arbitrary float/vec2/vec3/vec4 uniforms by name from the pass
+    dict, so the bridge can drive registered chart shaders' own uniforms
+    (their Lua `:uniform1f` pokes) from compiled channels.
+
+    Set through glUniformNf on the GL functions, NOT
+    QOpenGLShaderProgram.setUniformValue: under PySide6 a plain Python
+    float argument to setUniformValue(int, ...) binds the QColor/int
+    overload, not the float one, so the value silently never reaches a
+    scalar uniform. Contract names are set by the caller; unknown names
+    resolve to location -1 and glUniform ignores them."""
+    setters = (None, f.glUniform1f, f.glUniform2f, f.glUniform3f,
+               f.glUniform4f)
+    for name, raw in uniforms.items():
+        if name in _UNIFORMS:
+            continue
+        values = _uniform_floats(raw)
+        if values is not None:
+            setters[len(values)](program.uniformLocation(name), *values)
+
+
 def _adapt_dialect(src: str) -> str:
     """Library sources are desktop GLSL 1.50; ES contexts (Qt picks
     OpenGL ES under Wayland/EGL and ANGLE) reject that header, so swap
@@ -249,10 +282,15 @@ class ShaderGLPipeline:
             program.setUniformValue(locs['u_tex'], 0)
             program.setUniformValue(locs['u_resolution'],
                                     QVector2D(pw, ph))
-            program.setUniformValue(locs['u_time'], float(t_now))
             program.setUniformValue(
                 locs['u_strength'],
                 QVector3D(*uniforms.get('u_strength', (0.0, 0.0, 0.0))))
+            # u_time is a scalar float: set it through glUniform1f, not
+            # setUniformValue -- a Python float there binds PySide6's
+            # QColor/int overload and never reaches the uniform (time-
+            # animated shaders like noise/glitch would otherwise freeze).
+            f.glUniform1f(locs['u_time'], float(t_now))
+            _set_custom_uniforms(f, program, uniforms)
             f.glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
             program.release()
             src = 1 - src

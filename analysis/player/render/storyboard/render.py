@@ -44,6 +44,22 @@ def _design_transform(storyboard, chart_rect):
     return k, ox, oy
 
 
+def _is_white_texture(path: str) -> bool:
+    """SM's built-in solid-white texture. Quads/Sprites that fill a
+    flat color reference the virtual asset name 'white' (no real file on
+    disk), so it is synthesized rather than warned as missing."""
+    return isinstance(path, str) and path.strip().lower() == 'white'
+
+
+def _white_pixmap() -> QPixmap:
+    """A 1x1 opaque-white pixmap; drawPixmap stretches it to the
+    element's size, and the sprite tint path recolors it like any
+    texture (a white base multiplies cleanly to the target color)."""
+    pm = QPixmap(1, 1)
+    pm.fill(Qt.GlobalColor.white)
+    return pm
+
+
 def _quantize_color(r, g, b) -> tuple:
     q = _TINT_QUANT_LEVELS - 1
     return (round(r * q), round(g * q), round(b * q))
@@ -56,6 +72,9 @@ def _is_white(quantized) -> bool:
 
 class StoryboardEffect:
     def __init__(self, storyboard):
+        # Only TOP-LEVEL elements own z-slots; a group draws its whole
+        # subtree inside its own slot bracket, so nested children never
+        # appear in the layer table.
         elements = sorted(storyboard.elements,
                           key=lambda e: (e.z, e.z_index, e.t_start))
         self._sb = storyboard
@@ -93,16 +112,20 @@ class StoryboardEffect:
         def draw(ctx, painter):
             k, ox, oy = _design_transform(self._sb, ctx.chart_rect)
             for i in indices:
-                self._paint_element(painter, self._elements[i], t, k, ox, oy)
+                self._paint_element(painter, self._elements[i], t, k, ox, oy,
+                                    self._sb.design_w, self._sb.design_h)
         return draw
 
     # -- element painting -------------------------------------------------
 
-    def _paint_element(self, painter, el, t, k, ox, oy) -> None:
-        alpha = el.sample('alpha', t)[0]
+    def _paint_element(self, painter, el, t, k, ox, oy,
+                       ref_w, ref_h, inherited_alpha=1.0) -> None:
+        alpha = el.sample('alpha', t)[0] * inherited_alpha
         if alpha < _MIN_VISIBLE_ALPHA:
             return
-        size = self._element_size(el, t)
+        # A group has no natural size; it rotates/scales about its own
+        # anchor + position point (zero-size origin), then draws children.
+        size = (0.0, 0.0) if el.kind == 'group' else self._element_size(el, t)
         if size is None:
             return
         w, h = size
@@ -121,8 +144,8 @@ class StoryboardEffect:
 
         ax, ay = el.anchor
         painter.save()
-        painter.translate(ox + (ax * self._sb.design_w + x) * k,
-                          oy + (ay * self._sb.design_h + y) * k)
+        painter.translate(ox + (ax * ref_w + x) * k,
+                          oy + (ay * ref_h + y) * k)
         painter.scale(k, k)
         if rotation:
             painter.rotate(rotation)
@@ -132,8 +155,25 @@ class StoryboardEffect:
         if el.additive:
             painter.setCompositionMode(
                 QPainter.CompositionMode.CompositionMode_Plus)
-        self._paint_kind(painter, el, t, w, h)
+        if el.kind == 'group':
+            self._paint_children(painter, el, t, alpha)
+        else:
+            self._paint_kind(painter, el, t, w, h)
         painter.restore()
+
+    def _paint_children(self, painter, el, t, group_alpha) -> None:
+        """Draw a group's subtree in the group's own transformed space.
+        The group bracket already applied its translate/rotate/scale, so
+        the painter origin is now the frame's local (0, 0): children
+        position by raw (x, y) relative to it (SM ActorFrame semantics,
+        a zero-size anchor box) at k=1. Each child re-checks its own
+        window, so one outside [t_start, t_end) is skipped while siblings
+        still draw; if the whole group is outside its window the caller
+        never reaches here."""
+        for child in el.children:
+            if child.t_start <= t < child.t_end:
+                self._paint_element(painter, child, t, 1.0, 0.0, 0.0,
+                                    0.0, 0.0, group_alpha)
 
     def _paint_kind(self, painter, el, t, w, h) -> None:
         color = self._qcolor(el.sample('color', t))
@@ -193,7 +233,8 @@ class StoryboardEffect:
         if path is None:
             return None
         if path not in self._pixmaps:
-            pm = QPixmap(path)
+            pm = (_white_pixmap() if _is_white_texture(path)
+                  else QPixmap(path))
             if pm.isNull():
                 print(f'storyboard asset missing/unreadable: {path}')
             self._pixmaps[path] = None if pm.isNull() else pm

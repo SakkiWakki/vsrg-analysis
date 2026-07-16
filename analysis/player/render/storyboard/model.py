@@ -20,7 +20,14 @@ Properties and arities:
 `anchor` is a fraction of the design rect (where the element hangs);
 `origin` is a fraction of the element's own size (what point lands on
 the anchor + offset). Kinds: 'sprite', 'frames' (sprite sequence),
-'rect', 'ellipse', 'outline_rect', 'outline_ellipse', 'text'.
+'rect', 'ellipse', 'outline_rect', 'outline_ellipse', 'text', 'group'.
+
+A 'group' is an ActorFrame: it draws nothing itself but carries its
+own property timelines, and its transform (translate about anchor +
+position, rotate/scale about its own origin) composes onto its
+`children`, recursively. Rotating a group rotates every descendant.
+Flat storyboards (no groups, empty `children`) keep the existing
+zero-cost draw path.
 """
 from __future__ import annotations
 
@@ -67,6 +74,7 @@ class Element:
     frames: tuple = ()        # absolute paths for 'frames'
     frame_delay: float = 0.0  # seconds per frame
     loop_forever: bool = True
+    children: tuple = ()      # nested Elements for a 'group' (ActorFrame)
 
     def sample(self, prop: str, t: float):
         return self.timelines[prop].sample(t)

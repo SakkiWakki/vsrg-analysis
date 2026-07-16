@@ -148,11 +148,14 @@ class NotitgAdapter(EtternaAdapter):
         return notitg_shader_effects(compiled.get('shader_flags'))
 
     def storyboard(self, replay):
-        """Modfile actor elements (prank overlays, quads, text) render
-        through the storyboard pipeline in SM's 640x480 screen space."""
+        """Modfile actors (prank overlays, quads, text, ActorFrame
+        groups) render through the storyboard pipeline in SM's 640x480
+        screen space. The hierarchical `tree` (XML nesting = groups whose
+        transforms compose onto children) is preferred; the flat
+        `elements` list is the fallback for charts with no hierarchy."""
         from analysis.player.render.storyboard import Storyboard
-        compiled = self._compiled_modfile(replay)
-        elements = (compiled or {}).get('elements')
+        compiled = self._compiled_modfile(replay) or {}
+        elements = compiled.get('tree') or compiled.get('elements')
         if not elements:
             return None
         return Storyboard(design_w=640.0, design_h=480.0, fit='height',

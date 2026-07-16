@@ -17,6 +17,7 @@ explicitly; everything else is caught by the metatable fallback.
 """
 from __future__ import annotations
 
+from analysis.games.notitg.recording_actor import RecordingActor
 from analysis.player.render.lua import LuaHost
 
 # A metatable that makes any missing key return a callable/indexable
@@ -42,6 +43,22 @@ function __make_singleton(overrides)
     return t
 end
 
+-- A recording actor: every method call (`a:x(100)`, `a:linear(1)`) is
+-- routed to Python via __actor_poke and returns the table so SM's
+-- chained `a:linear(1):x(0)` keeps working. `id` ties it to a Python
+-- RecordingActor; the table is what an InitCommand self-assigns to a
+-- global, so later closures poking that global hit the same recorder.
+function __make_recorder(id)
+    local t = {__recorder_id = id}
+    setmetatable(t, {__index = function(_, key)
+        return function(_self, ...)
+            __actor_poke(id, key, ...)
+            return t
+        end
+    end})
+    return t
+end
+
 -- NotITG embeds Lua 5.0; these live under the LuaJIT (5.1) runtime as
 -- their renamed forms. The template calls the 5.0 names.
 if math.mod == nil then math.mod = math.fmod end
@@ -53,18 +70,35 @@ class StubEnvironment:
     """One LuaJIT host with the classic-template engine stubs installed,
     plus the harvested tables after chunks run."""
 
-    def __init__(self, start_beat: float = 0.0):
+    def __init__(self, start_beat: float = 0.0, to_seconds=None):
         self._start_beat = float(start_beat)
         self._clock_beat = float(start_beat)
+        self._to_seconds = to_seconds or (lambda beat: float(beat))
         self._shader_flags: list = []
         self._applied_mods: list = []
         self._swallowed = 0
+        self._recorders: dict = {}
+        self._next_recorder_id = 0
         self._host = LuaHost(dialect='luajit21')
         self._host.run(_PERMISSIVE_BOOTSTRAP, name='permissive-bootstrap')
         self._install()
 
     def run(self, source: str, name: str) -> None:
         self._host.run(source, name=name)
+
+    def run_actor_chunk(self, source: str, name: str) -> None:
+        """Run one actor command chunk with a FRESH recording `self`
+        bound in the sandbox, so `self:x(100)` records and a trailing
+        `NAME = self` binds a global to that recorder. The recorder's
+        local clock starts at the chart's load moment (start beat).
+
+        `self` is restored to permissive afterwards so it never lingers
+        as a stray recorder global: only the names the chunk assigned
+        (`gat_g_rot_intro = self`) keep the recorder alive."""
+        recorder_table = self._new_recorder(self._to_seconds(self._start_beat))
+        self._host.env['self'] = recorder_table
+        self._host.run(source, name=name)
+        self._host.env['self'] = self._host.env['__permissive']()
 
     # -- harvest ----------------------------------------------------------
 
@@ -98,6 +132,56 @@ class StubEnvironment:
         through the counting proxy are tallied)."""
         return self._swallowed
 
+    # -- recording actors -------------------------------------------------
+
+    def _new_recorder(self, clock_seconds: float):
+        """Create a Python RecordingActor plus its Lua-side table, wired
+        by id; returns the Lua table (to bind as `self` / a global)."""
+        rec_id = self._next_recorder_id
+        self._next_recorder_id += 1
+        self._recorders[rec_id] = RecordingActor(clock=clock_seconds)
+        return self._host.env['__make_recorder'](rec_id)
+
+    def _actor_poke(self, rec_id, verb=None, *args) -> None:
+        recorder = self._recorders.get(_to_int(rec_id))
+        if recorder is not None and isinstance(verb, str):
+            recorder.poke(verb, list(args))
+
+    def named_actor_keyframes(self) -> dict:
+        """global name -> {property: [Keyframe]} for every actor a chunk
+        self-assigned to a Lua global (the closures' poke targets). Only
+        globals bound to one of our recorder tables are reported; an
+        actor with no recorded pokes is dropped."""
+        out = {}
+        for name in self._recorder_global_names():
+            table = self._host.env[name]
+            recorder = self._recorder_for_table(table)
+            if recorder is None:
+                continue
+            keyframes = recorder.keyframes()
+            if keyframes:
+                out[name] = keyframes
+        return out
+
+    def _recorder_global_names(self):
+        """Sandbox globals whose value is one of our recorder tables."""
+        names = []
+        for key, value in self._host.env.items():
+            if isinstance(key, str) and self._recorder_for_table(value) \
+                    is not None:
+                names.append(key)
+        return names
+
+    def _recorder_for_table(self, table):
+        if not hasattr(table, '__getitem__'):
+            return None
+        try:
+            rec_id = table['__recorder_id']
+        except (KeyError, TypeError):
+            return None
+        return self._recorders.get(_to_int(rec_id)) if rec_id is not None \
+            else None
+
     def replay_mod_actions(self):
         """Fire every `mod_actions` closure ONCE, in beat order, exactly
         as the template's per-frame reader does (curaction advances
@@ -120,7 +204,9 @@ class StubEnvironment:
             payload = row.get(2) if isinstance(row, dict) else None
             if not callable(payload):
                 continue
-            self._clock_beat = _beat_of(row)
+            beat = _beat_of(row)
+            self._clock_beat = beat
+            self._reset_recorder_clocks(self._to_seconds(beat))
             fired += 1
             try:
                 payload()
@@ -128,6 +214,13 @@ class StubEnvironment:
                 failed += 1
         self._clock_beat = self._start_beat
         return fired, failed
+
+    def _reset_recorder_clocks(self, seconds: float) -> None:
+        """Point every recorder's local command clock at a fire time.
+        A closure's pokes chain forward from here (each closure is a
+        freshly scheduled command stream)."""
+        for recorder in self._recorders.values():
+            recorder.reset_clock(seconds)
 
     def _read_table(self, name: str) -> list:
         table = self._host.env[name]
@@ -199,9 +292,11 @@ class StubEnvironment:
 
         # The InitCommand/OnCommand wrapper's `self` (the actor) becomes a
         # free global once we strip `function(self)`. A permissive actor
-        # lets creation-time self:method() pokes no-op instead of faulting.
+        # lets creation-time self:method() pokes no-op instead of faulting;
+        # run_actor_chunk swaps in a recording self per actor.
         host.run('_G.self = __permissive()', name='self-stub')
 
+        host.expose('__actor_poke', self._actor_poke)
         host.expose('Trace', lambda *_a: None)
         host.expose('print', lambda *_a: None)
 

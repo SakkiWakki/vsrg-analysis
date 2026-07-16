@@ -10,6 +10,7 @@ pytest.importorskip('lupa')
 from analysis.games.notitg import xml_actors
 from analysis.games.notitg.mod_stubs import StubEnvironment
 from analysis.games.notitg.modfile import (compile_modfile, parse_fgchanges)
+from analysis.player.render.effects.timeline import Keyframe
 
 _GAT_SM = Path('/mnt/Yucky/Rhythm Games/Players/NotITG/Songs/'
                'UKSRT8/5. gat/gat.sm')
@@ -417,6 +418,155 @@ def test_note_mods_stashes_rotation_zoom_and_receptor_offsets():
     assert np.any(receptors['rotation_deg'] != 0.0)
 
 
+# -- recording actor: SM tween model --------------------------------------
+
+def test_recording_actor_chained_tweens_accumulate():
+    from analysis.games.notitg.recording_actor import RecordingActor
+
+    actor = RecordingActor(clock=8.0)
+    # accelerate(1) opens [8,9]; y(20) rides it; decelerate(2) closes it
+    # (clock -> 9) and opens [9,11]; y(40) rides that.
+    for verb, args in (('accelerate', ['1']), ('y', ['20']),
+                       ('decelerate', ['2']), ('y', ['40'])):
+        actor.poke(verb, args)
+    y = actor.keyframes()['y']
+    assert [(k.t, k.values, k.duration, k.easing) for k in y] == [
+        (8.0, (20.0,), 1.0, 3),    # accelerate -> ease-in id 3
+        (9.0, (40.0,), 2.0, 4),    # decelerate -> ease-out id 4
+    ]
+
+
+def test_recording_actor_parallel_setters_share_interval():
+    from analysis.games.notitg.recording_actor import RecordingActor
+
+    actor = RecordingActor(clock=0.0)
+    for verb, args in (('linear', ['1']), ('x', ['100']), ('y', ['50'])):
+        actor.poke(verb, args)
+    frames = actor.keyframes()
+    # x and y both tween over the SAME [0,1] window (one open interval).
+    assert frames['x'][0].t == 0.0 and frames['x'][0].duration == 1.0
+    assert frames['y'][0].t == 0.0 and frames['y'][0].duration == 1.0
+
+
+def test_recording_actor_sleep_and_finishtweening():
+    from analysis.games.notitg.recording_actor import RecordingActor
+
+    actor = RecordingActor(clock=0.0)
+    for verb, args in (('x', ['1']), ('sleep', ['2']), ('x', ['2']),
+                       ('linear', ['5']), ('finishtweening', []),
+                       ('x', ['3'])):
+        actor.poke(verb, args)
+    x = actor.keyframes()['x']
+    assert x[0].t == 0.0                       # instant
+    assert x[1].t == 2.0                        # after sleep(2)
+    # finishtweening closes the open linear(5) interval (clock -> 7) and
+    # clears the pending tween, so the last x is instant at t=7.
+    assert x[2].t == 7.0 and x[2].duration == 0.0
+
+
+def test_recording_actor_add_reads_current_value():
+    from analysis.games.notitg.recording_actor import RecordingActor
+
+    actor = RecordingActor(clock=0.0)
+    for verb, args in (('x', ['10']), ('addx', ['5']), ('addx', ['5'])):
+        actor.poke(verb, args)
+    values = [k.values[0] for k in actor.keyframes()['x']]
+    assert values == [10.0, 15.0, 20.0]
+
+
+def test_recording_actor_diffuse_and_visibility():
+    from analysis.games.notitg.recording_actor import RecordingActor
+
+    actor = RecordingActor(clock=0.0)
+    actor.poke('diffuse', ['1', '0', '0', '0.5'])
+    actor.poke('hidden', ['1'])
+    actor.poke('visible', ['1'])
+    frames = actor.keyframes()
+    assert frames['color'][0].values == (1.0, 0.0, 0.0)
+    assert frames['alpha'][0].values == (0.5,)
+    assert frames['alpha'][1].values == (0.0,)   # hidden(1)
+    assert frames['alpha'][2].values == (1.0,)   # visible
+
+
+# -- named-actor binding: XML self-assign + closure pokes -----------------
+
+def test_named_actor_binding_from_synthetic_xml_and_closure():
+    """An InitCommand self-assigns a global; a scheduled mod_actions
+    closure pokes that global at its fire beat. Both must land on one
+    recorder timeline, keyed by the global name."""
+    env = StubEnvironment(start_beat=0.0)
+    # InitCommand: hide the actor and bind it to a global (SM pattern).
+    env.run_actor_chunk("self:hidden(1); my_frame = self;", name='init')
+    # Scheduled closure fires at beat 4 (= 4s under the identity clock).
+    env.run("mod_actions = { {4, function()\n"
+            "  my_frame:linear(1); my_frame:y(30)\n"
+            "  my_frame:linear(1); my_frame:y(60)\n"
+            "end} }", name='ma')
+    fired, failed = env.replay_mod_actions()
+    assert (fired, failed) == (1, 0)
+
+    named = env.named_actor_keyframes()
+    assert set(named) == {'my_frame'}            # 'self' does not linger
+    frames = named['my_frame']
+    # InitCommand hidden(1) recorded at load (t=0), fire-time y pokes at 4/5.
+    assert frames['alpha'][0].values == (0.0,)
+    y = frames['y']
+    assert (y[0].t, y[0].values) == (4.0, (30.0,))
+    assert (y[1].t, y[1].values) == (5.0, (60.0,))
+
+
+def test_closure_fire_time_uses_beat_to_seconds():
+    env = StubEnvironment(start_beat=0.0, to_seconds=lambda beat: beat * 0.5)
+    env.run_actor_chunk("thing = self;", name='init')
+    env.run("mod_actions = { {8, function() thing:x(1) end} }", name='ma')
+    env.replay_mod_actions()
+    # fire beat 8 -> 4.0s through the converter.
+    assert env.named_actor_keyframes()['thing']['x'][0].t == 4.0
+
+
+def test_tree_merges_xml_command_and_recorded_pokes(tmp_path):
+    """compile_element_tree binds an actor's XML command keyframes and
+    the pokes its bound global recorded into ONE element timeline."""
+    from analysis.games.notitg import modfile
+
+    xml = ('<ActorFrame><children>'
+           '<Sprite Type="Sprite" Texture="white" '
+           'OnCommand="x,100" '
+           'InitCommand="%function(self) named_sprite = self; end"/>'
+           '</children></ActorFrame>')
+    parsed = xml_actors.parse_actor_xml(xml)
+    named = {'named_sprite': {'y': [Keyframe(5.0, (200.0,), 0.0, 0)]}}
+    tree = modfile.compile_element_tree(
+        parsed.root, _seconds, start_beat=0.0, named_keyframes=named)
+    # The document's ActorFrame is the container; its one Sprite child is
+    # the top-level element, carrying BOTH timelines merged.
+    (sprite,) = tree
+    assert sprite.kind == 'sprite'
+    assert sprite.sample('x', 0.0) == (100.0,)   # from the XML command
+    assert sprite.sample('y', 5.0) == (200.0,)   # from the recorded poke
+
+
+def test_tree_wraps_nested_actorframe_as_group(tmp_path):
+    """A drawable descendant nested under an inner ActorFrame makes that
+    frame a 'group' whose transform composes onto the child."""
+    from analysis.games.notitg import modfile
+
+    xml = ('<ActorFrame><children>'
+           '<ActorFrame OnCommand="rotationz,45"><children>'
+           '<Quad Type="Quad" OnCommand="x,10"/>'
+           '</children></ActorFrame>'
+           '</children></ActorFrame>')
+    parsed = xml_actors.parse_actor_xml(xml)
+    tree = modfile.compile_element_tree(
+        parsed.root, _seconds, start_beat=0.0)
+    (group,) = tree
+    assert group.kind == 'group'
+    assert group.sample('rotation', 0.0) == (45.0,)
+    (child,) = group.children
+    assert child.kind == 'rect'
+    assert child.sample('x', 0.0) == (10.0,)
+
+
 # -- resilience -----------------------------------------------------------
 
 def test_compile_never_raises_on_missing_lua(tmp_path):
@@ -477,6 +627,25 @@ def test_gat_pilot_replays_mod_actions():
     assert replay['fired'] > 100
     assert replay['fired'] + result['unsupported']['count'] >= 0
     assert replay['applied_mods'] == 0
+
+
+@pytest.mark.skipif(not _GAT_SM.exists(),
+                    reason='NotITG gat pilot not present')
+def test_gat_pilot_records_named_actor_timelines():
+    """The 667 mod_actions closures poke named actors; firing them once
+    each must recover keyframes onto many named actors' timelines, and
+    the hierarchical tree must carry drawable groups."""
+    result = compile_modfile(str(_GAT_SM))
+    assert result['named_actors'] > 50
+    assert result['recorded_keyframes'] > 500
+    assert result['tree']
+    assert any(e.kind == 'group' for e in _flatten_tree(result['tree']))
+
+
+def _flatten_tree(elements):
+    for element in elements:
+        yield element
+        yield from _flatten_tree(element.children)
 
 
 @pytest.mark.skipif(not _GAT_SM.exists(),

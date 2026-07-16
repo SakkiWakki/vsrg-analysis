@@ -4,10 +4,62 @@ from types import SimpleNamespace
 
 import pytest
 
+from pathlib import Path
+
 from analysis.player.render.effects import composite
 from analysis.player.render.effects.base import EffectFrame
 from analysis.player.render.effects.timeline import EventTimeline, Keyframe
 from analysis.player.render.shaders import ShaderStackEffect, library
+from analysis.player.render.shaders.library import notitg_compat
+
+
+# A real NotITG chart frag from the corpus (Mod Rush,
+# "Catapult_Marshmallow/mods/fisheye.frag"): single `amount` uniform,
+# imageCoord varying, img2tex helper, resolution, per-vertex color.
+# Embedded so the tests run without the Songs library present; the
+# guarded tests below re-validate against the on-disk file when it
+# exists.
+NOTITG_FISHEYE_FRAG = """\
+uniform float amount;
+
+varying vec4 color;
+varying vec2 imageCoord;
+uniform vec2 resolution;
+uniform vec2 textureSize;
+uniform vec2 imageSize;
+uniform sampler2D sampler0;
+
+vec2 img2tex( vec2 v ) { return v / textureSize * imageSize; }
+
+void main()
+{
+\tvec2 uv = imageCoord;
+\tuv -= 0.5;
+\tuv *= 1.0 - amount / 2.0;
+
+\tfloat r = sqrt(dot(uv,uv));
+\tuv *= 1.0 + r * amount;
+\tuv += 0.5;
+
+\tvec2 res = resolution;
+\tuv = clamp( uv, 1.0 / res, (res - 1.0) / res );
+
+\tvec3 col = texture2D( sampler0, img2tex(uv) ).rgb;
+
+\tgl_FragColor = vec4( col, 1.0 ) * color;
+}
+"""
+
+_REAL_FISHEYE_PATH = Path(
+    '/mnt/Yucky/Rhythm Games/Players/NotITG/Songs/Mod Rush/'
+    'Catapult_Marshmallow/mods/fisheye.frag')
+
+
+@pytest.fixture(autouse=True)
+def _clean_registry():
+    library.clear_registry()
+    yield
+    library.clear_registry()
 
 
 def _ctx(t=0.0):
@@ -208,3 +260,210 @@ def test_gl_capture_chain_runs_and_inverts(gl):
     assert (capture.red(), capture.green(), capture.blue()) == (255, 0, 0)
     inverted = pipeline._fbos[1].toImage().pixelColor(32, 32)
     assert (inverted.red(), inverted.green(), inverted.blue()) == (0, 255, 255)
+
+
+# ── tier-2 registry: precedence + namespacing ------------------------
+
+def test_register_source_serves_namespaced_id():
+    library.register_source('chart:demo', 'FOO')
+    assert library.source('chart:demo') == 'FOO'
+    assert 'chart:demo' in library.available()
+
+
+def test_register_file_reads_from_disk(tmp_path):
+    frag = tmp_path / 'x.frag'
+    frag.write_text('BAR', encoding='utf-8')
+    library.register_file('chart:x', frag)
+    assert library.source('chart:x') == 'BAR'
+
+
+def test_registry_requires_namespace_separator():
+    with pytest.raises(ValueError):
+        library.register_source('demo', 'FOO')
+
+
+def test_registration_cannot_shadow_builtin():
+    # Even namespaced, an id resolving to a builtin filename is refused;
+    # and a bare builtin name never reaches the registry at all.
+    with pytest.raises(ValueError):
+        library.register_source('invert', 'HACK')
+    library.register_source('chart:invert', 'HACK')   # namespaced is fine
+    assert 'uniform sampler2D u_tex;' in library.source('invert')  # builtin
+    assert library.source('chart:invert') == 'HACK'
+
+
+def test_builtin_wins_over_same_bare_name():
+    # A registry entry can only exist under a namespaced key, so a bare
+    # builtin lookup can never be intercepted.
+    library.register_source('chart:invert', 'HACK')
+    assert library.source('invert') != 'HACK'
+
+
+def test_unknown_id_is_none():
+    assert library.source('chart:nope') is None
+    assert library.source('nope') is None
+
+
+# ── NotITG compat translation ----------------------------------------
+
+def test_translate_produces_contract_shader():
+    out = notitg_compat.translate(NOTITG_FISHEYE_FRAG)
+    assert out.startswith('#version 150')
+    assert 'uniform sampler2D u_tex;' in out
+    assert 'uniform vec2 u_resolution;' in out
+    assert 'uniform vec3 u_strength;' in out
+    assert '#define sampler0 u_tex' in out
+    assert '#define texture2D texture' in out
+    assert 'out vec4 _fs_fragcolor;' in out
+    # varyings gone as `varying`, present as fed globals / aliases
+    assert 'varying' not in out
+    assert 'uniform float amount;' in out   # chart uniform survives, drivable
+
+
+def test_translate_reports_chart_uniforms():
+    assert notitg_compat.uniform_names(NOTITG_FISHEYE_FRAG) == ('amount',)
+    assert library.register_notitg_frag('chart:fish', NOTITG_FISHEYE_FRAG)
+    assert library.registered_uniform_names('chart:fish') == ('amount',)
+
+
+def test_translate_rejects_frag_without_sampler0():
+    with pytest.raises(ValueError):
+        notitg_compat.translate('void main() { gl_FragColor = vec4(1.0); }')
+
+
+def test_translate_hoists_nonconstant_global_initializers():
+    # ~a third of the corpus has file-scope `float x = f(time);` which a
+    # core/ES profile rejects; the initializer must move into main().
+    frag = ('uniform sampler2D sampler0;\n'
+            'uniform float amp;\n'
+            'float k = 0.5;\n'                   # constant -- stays put
+            'float wobble = sin(amp) * 2.0;\n'   # non-const -- hoisted
+            'void main() { gl_FragColor = texture2D(sampler0, vec2(wobble, k)); }')
+    out = notitg_compat.translate(frag)
+    assert 'float wobble;' in out                # declaration only at scope
+    assert 'wobble =sin(amp) * 2.0;' in out      # initializer inside main()
+    assert 'float k = 0.5;' in out               # constant left untouched
+
+
+def test_translate_leaves_local_initializers_alone():
+    frag = ('uniform sampler2D sampler0;\n'
+            'void main() {\n'
+            '  float local = float(gl_FragCoord.x);\n'
+            '  gl_FragColor = texture2D(sampler0, vec2(local));\n}')
+    out = notitg_compat.translate(frag)
+    assert 'float local = float(gl_FragCoord.x);' in out
+
+
+def test_register_notitg_frag_translates():
+    library.register_notitg_frag('chart:fish', NOTITG_FISHEYE_FRAG)
+    assert '#define sampler0 u_tex' in library.source('chart:fish')
+
+
+# ── custom uniform coercion -------------------------------------------
+
+def test_uniform_floats_coercions():
+    from analysis.player.render.shaders.gl_pipeline import _uniform_floats
+    assert _uniform_floats(0.5) == (0.5,)
+    assert _uniform_floats(3) == (3.0,)
+    assert _uniform_floats((1.0, 2.0)) == (1.0, 2.0)
+    assert _uniform_floats([1.0, 2.0, 3.0]) == (1.0, 2.0, 3.0)
+    assert _uniform_floats((1.0, 2.0, 3.0, 4.0)) == (1.0, 2.0, 3.0, 4.0)
+    assert _uniform_floats('a-texture-name') is None   # samplers deferred
+    assert _uniform_floats((1.0, 2, 3, 4, 5)) is None  # unsupported width
+
+
+# ── GL: register a real corpus frag and run it as a pass --------------
+
+def _run_single_pass(pipeline, shader_id, uniforms, w=64, h=64, split=False):
+    from PySide6.QtGui import QColor, QPainter
+    from PySide6.QtOpenGL import QOpenGLPaintDevice
+    host_device = QOpenGLPaintDevice(w, h)
+    host = QPainter(host_device)
+    try:
+        painter = pipeline.begin_capture(host, w, h)
+        assert painter is not None
+        painter.fillRect(0, 0, w, h, QColor(200, 120, 40))
+        if split:
+            # A small off-centre patch so a distortion sampling a
+            # different texel produces a visibly different pixel (a
+            # centred split would sit on the fisheye's fixed point).
+            painter.fillRect(4, 4, 16, 16, QColor(10, 200, 220))
+        # Duplicate the pass so the chain product lands in the readable
+        # ping-pong FBO (the final pass renders into the default FBO).
+        pipeline.end_capture(((shader_id, uniforms),) * 2, t_now=0.5)
+    finally:
+        host.end()
+    return pipeline
+
+
+def test_gl_registered_notitg_frag_compiles_and_runs(gl):
+    from analysis.player.render.shaders.gl_pipeline import ShaderGLPipeline
+    shader_id = library.register_notitg_frag('chart:fish', NOTITG_FISHEYE_FRAG)
+    pipeline = ShaderGLPipeline()
+    _run_single_pass(pipeline, shader_id, {'amount': 0.4, 'u_strength': (0, 0, 0)})
+    assert not pipeline._broken
+    entry = pipeline._programs.get(shader_id)
+    assert entry is not None, 'registered NotITG frag failed to build'
+    # amount=0 is identity (uv unchanged); centre pixel keeps its colour.
+    pipeline2 = ShaderGLPipeline()
+    _run_single_pass(pipeline2, shader_id, {'amount': 0.0})
+    out = pipeline2._fbos[1].toImage().pixelColor(32, 32)
+    assert (out.red(), out.green(), out.blue()) == (200, 120, 40)
+
+
+def test_gl_custom_uniform_changes_output(gl):
+    from analysis.player.render.shaders.gl_pipeline import ShaderGLPipeline
+    shader_id = library.register_notitg_frag('chart:fish', NOTITG_FISHEYE_FRAG)
+    # A strong fisheye pulls a different texel into an off-centre pixel,
+    # so the driven `amount` uniform must reach the shader.
+    pipeline = ShaderGLPipeline()
+    _run_single_pass(pipeline, shader_id, {'amount': 0.0}, split=True)
+    calm = pipeline._fbos[1].toImage()
+    pipeline2 = ShaderGLPipeline()
+    _run_single_pass(pipeline2, shader_id, {'amount': 0.9}, split=True)
+    warped = pipeline2._fbos[1].toImage()
+
+    def _rgb(img, x, y):
+        c = img.pixelColor(x, y)
+        return (c.red(), c.green(), c.blue())
+
+    changed = sum(_rgb(calm, x, y) != _rgb(warped, x, y)
+                  for y in range(0, 64, 4) for x in range(0, 64, 4))
+    assert changed > 0, 'driven amount uniform did not reach the shader'
+
+
+def test_gl_u_time_reaches_shader(gl):
+    # Regression: u_time must be set via glUniform1f, not setUniformValue
+    # (whose Python-float path is a no-op under PySide6), or time-animated
+    # builtins freeze.
+    from PySide6.QtGui import QColor, QPainter
+    from PySide6.QtOpenGL import QOpenGLPaintDevice
+    from analysis.player.render.shaders.gl_pipeline import ShaderGLPipeline
+
+    def sample(t):
+        pipeline = ShaderGLPipeline()
+        device = QOpenGLPaintDevice(64, 64)
+        host = QPainter(device)
+        try:
+            painter = pipeline.begin_capture(host, 64, 64)
+            painter.fillRect(0, 0, 64, 64, QColor(128, 128, 128))
+            pipeline.end_capture(
+                (('noise', {'u_strength': (1.0, 0.0, 0.0)}),) * 2, t_now=t)
+        finally:
+            host.end()
+        c = pipeline._fbos[1].toImage().pixelColor(20, 40)
+        return (c.red(), c.green(), c.blue())
+
+    assert sample(0.0) != sample(9.0)
+
+
+@pytest.mark.skipif(not _REAL_FISHEYE_PATH.is_file(),
+                    reason='NotITG Songs library not present')
+def test_gl_real_corpus_file_compiles_and_runs(gl):
+    from analysis.player.render.shaders.gl_pipeline import ShaderGLPipeline
+    shader_id = library.register_file(
+        'chart:fisheye-real', _REAL_FISHEYE_PATH, compat=True)
+    pipeline = ShaderGLPipeline()
+    _run_single_pass(pipeline, shader_id, {'amount': 0.3})
+    assert not pipeline._broken
+    assert pipeline._programs.get(shader_id) is not None
