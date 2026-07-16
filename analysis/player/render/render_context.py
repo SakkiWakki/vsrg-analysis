@@ -58,10 +58,25 @@ class RenderContext:
             float(t),
         ) * self._scroll_speed
 
+    @property
+    def chart_rect(self):
+        """The replay viewport `(x, y, w, h)`: window minus sidebar.
+        Effects, backgrounds, and clips reference this, never the raw
+        window, so nothing replay-visual leaks into the HUD."""
+        return self.player.chart_rect
+
     def lane_x(self, col):
         if self.lane_xs is not None:
             return self.lane_xs[int(col)]
         return self.x0 + int(col) * self.lane_w
 
+    def lane_width(self, col):
+        """Current width of `col`'s lane: animated during lane switches,
+        `lane_w` otherwise. Anything drawn to a lane's width (note
+        sprites, LN bodies, lane strokes) sizes with this."""
+        if self.lane_ws is not None:
+            return self.lane_ws[int(col)]
+        return self.lane_w
+
     def lane_center(self, col):
-        return self.lane_x(col) + self.lane_w / 2
+        return self.lane_x(col) + self.lane_width(col) / 2

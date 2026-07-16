@@ -378,13 +378,22 @@ class Player:
 
     # ---------- misc ----------
 
+    @property
+    def chart_rect(self):
+        """`(x, y, w, h)` of the replay viewport: the window minus the
+        sidebar. Everything replay-visual -- lane geometry, effects
+        (transforms, backgrounds, clips) -- is positioned and clipped
+        against this rect, never the raw window."""
+        from analysis.player.render import theme
+        return (0, 0, max(0, self.W - theme.SIDEBAR_WIDTH), self.H)
+
     def _lane_geom(self):
-        margin_l = 60
-        margin_r = 220
-        avail = self.W - margin_l - margin_r
+        margin = 60
+        _cx, _cy, chart_w, _chart_h = self.chart_rect
+        avail = chart_w - 2 * margin
         lane_w = min(90, max(50, avail / self.keycount))
         total = lane_w * self.keycount
-        x0 = margin_l + (avail - total) / 2
+        x0 = margin + (avail - total) / 2
         return x0, lane_w
 
     def resize(self, w, h):

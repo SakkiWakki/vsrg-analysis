@@ -36,6 +36,17 @@ class QuaverAdapter(GameAdapter):
         cand = Path(chart_path).parent / audio
         return str(cand) if cand.exists() else None
 
+    def background_path(self, replay) -> str | None:
+        chart_path = replay.get('chart_path')
+        if not chart_path:
+            return None
+        from analysis.games.quaver.qua_chart import parse_qua_file
+        bg = parse_qua_file(chart_path).get('background')
+        if not bg:
+            return None
+        cand = Path(chart_path).parent / bg
+        return str(cand) if cand.exists() else None
+
     def resolve_chart_timing(self, replay, entry=None, progress=None):
         # Quaver replays carry absolute ms timings ; no offset needed.
         return None, 0.0

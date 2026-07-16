@@ -305,6 +305,7 @@ def _post_process(raw):
         'creator': raw.get('Creator', ''),
         'version': raw.get('DifficultyName', ''),
         'audio': raw.get('AudioFile', ''),
+        'background': raw.get('BackgroundFile', ''),
         'mode': mode_str,
         'keycount': keycount,
         'hitobjects': hitobjects,

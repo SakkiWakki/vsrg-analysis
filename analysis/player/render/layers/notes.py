@@ -146,6 +146,33 @@ def _classify(ctx, press_t, release_t, is_ln, miss) -> str:
     return 'released'
 
 
+def _lane_width(ctx, col) -> float:
+    """`ctx.lane_width(col)` when available, else the uniform `lane_w`.
+    The fallback keeps narrowly-mocked test contexts (SimpleNamespace)
+    working without a real RenderContext."""
+    fn = getattr(ctx, 'lane_width', None)
+    return fn(col) if fn is not None else ctx.lane_w
+
+
+def _blit_lane_pixmap(ctx, painter, pm, lx, y_top, col) -> None:
+    """Blit a lane-width sprite. During a lane switch the lane's width
+    animates, so the sprite is squeezed horizontally and kept centered
+    on the (animated) lane center -- matching fluXis, where notes ride
+    the lane's center as it collapses, not its left edge."""
+    w = _lane_width(ctx, col)
+    if w == ctx.lane_w:
+        painter.drawPixmap(QPointF(float(lx), float(y_top)), pm)
+        return
+    scale = w / ctx.lane_w if ctx.lane_w else 1.0
+    draw_w = pm.width() * scale
+    # `lx` is the lane's left edge; center the squeezed sprite in the
+    # lane so it tracks the collapsing center instead of the edge.
+    cx = lx + w / 2.0
+    target = QRectF(float(cx - draw_w / 2), float(y_top),
+                    draw_w, float(pm.height()))
+    painter.drawPixmap(target, pm, QRectF(pm.rect()))
+
+
 def _is_tick(p, i) -> bool:
     nts = getattr(p, 'notetypes', None)
     return nts is not None and i < len(nts) and int(nts[i]) == NT_TICK
@@ -278,7 +305,7 @@ def _draw_ln(ctx, painter, n):
     if n.rel_off is not None and n.state not in ('released', 'missed'):
         rel_y = ctx.time_to_y(float(n.release_t))
         _draw_stroke_with_tick(ctx, painter, n.jcolor,
-                                n.lx, n.y_end, rel_y)
+                                n.lx, n.y_end, rel_y, n.col)
 
 
 def _ln_body_span(ctx, n, hide) -> tuple | None:
@@ -315,7 +342,8 @@ def _draw_ln_body_tile(ctx, painter, n, top, bot, state):
                               col=n.col, state=state, is_roll=n.is_roll)
     # Tile vertically over the body rect. Using QRectF + drawTiledPixmap
     # so fractional pixel heights (high-DPI) render cleanly.
-    painter.drawTiledPixmap(QRectF(n.lx, top, ctx.lane_w, bot - top), pm)
+    painter.drawTiledPixmap(
+        QRectF(n.lx, top, ctx.lane_width(n.col), bot - top), pm)
 
 
 def _draw_ln_tail_sprite(ctx, painter, n):
@@ -334,8 +362,8 @@ def _draw_ln_tail_sprite(ctx, painter, n):
         painter.drawPixmap(QPointF(0.0, -pm.height() / 2), pm)
         painter.restore()
     else:
-        painter.drawPixmap(
-            QPointF(float(n.lx), float(n.y_end - pm.height() / 2)), pm)
+        _blit_lane_pixmap(ctx, painter, pm, n.lx,
+                          n.y_end - pm.height() / 2, n.col)
 
 
 def _tail_state(n) -> str:
@@ -360,8 +388,7 @@ def _draw_head(ctx, painter, n) -> bool:
     if n.is_tick and state == 'normal':
         state = 'tick'
     pm = ctx.sprite_cache.get(sprite_name, ctx, col=n.col, state=state)
-    painter.drawPixmap(
-        QPointF(float(n.lx), float(y - pm.height() / 2)), pm)
+    _blit_lane_pixmap(ctx, painter, pm, n.lx, y - pm.height() / 2, n.col)
     return True
 
 
@@ -411,22 +438,23 @@ def _draw_press_mark(ctx, painter, n):
     if abs(n.press_y - n.y) < 2.0:
         return
     color = p.judge_colors['miss'] if n.miss else n.jcolor
-    _draw_stroke_with_tick(ctx, painter, color, n.lx, n.y, n.press_y)
+    _draw_stroke_with_tick(ctx, painter, color, n.lx, n.y, n.press_y, n.col)
 
 
-def _draw_stroke_with_tick(ctx, painter, color, lx, y_from, y_to):
+def _draw_stroke_with_tick(ctx, painter, color, lx, y_from, y_to, col):
     """Vertical line from y_from to y_to + cached tick sprite at y_to.
     The line's endpoints change per note so it stays vector; the tick
     is a fixed-geometry sprite cached per color."""
-    _extras.draw_lane_line(painter, color, lx, ctx.lane_w, y_from, y_to)
+    _extras.draw_lane_line(painter, color, lx, _lane_width(ctx, col),
+                           y_from, y_to)
     pm = ctx.sprite_cache.get('tick', ctx, color=color)
-    painter.drawPixmap(QPointF(float(lx), float(y_to - 2)), pm)
+    _blit_lane_pixmap(ctx, painter, pm, lx, y_to - 2, col)
 
 
 def _draw_miss_x(ctx, painter, n):
     pm = ctx.sprite_cache.get('miss_x', ctx, jcolor=n.jcolor)
-    painter.drawPixmap(
-        QPointF(float(n.lx), float(n.y - pm.height() / 2)), pm)
+    _blit_lane_pixmap(ctx, painter, pm, n.lx,
+                      n.y - pm.height() / 2, n.col)
 
 
 

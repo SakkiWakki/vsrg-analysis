@@ -34,6 +34,36 @@ def test_composite_skips_inactive_effects():
     assert frame.is_identity
 
 
+def test_begin_effect_transform_confined_to_chart_rect():
+    # Opacity + transform apply only inside the effect bracket; the HUD
+    # paints outside it, so an invisibility effect can never hide the
+    # sidebar. Assert the bracket clips to chart_rect and is restorable.
+    from analysis.player.render.qt_renderer import QtPlayerRenderer
+    from analysis.player.render.effects.base import CompositeFrame
+
+    class FakePainter:
+        def __init__(self):
+            self.saved = 0
+            self.clip = None
+            self.opacity = 1.0
+        def save(self): self.saved += 1
+        def restore(self): self.saved -= 1
+        def setClipRect(self, r): self.clip = r
+        def setOpacity(self, o): self.opacity = o
+        def setTransform(self, t, combine): pass
+
+    ctx = _ctx_win()
+    p = FakePainter()
+    frame = CompositeFrame(transform=None, opacity=0.0)
+    wrapped = QtPlayerRenderer._begin_effect_transform(frame, p, ctx)
+    assert wrapped and p.saved == 1
+    assert p.opacity == 0.0
+    assert (p.clip.width(), p.clip.height()) == pytest.approx(
+        (ctx.chart_rect[2], ctx.chart_rect[3]))
+    QtPlayerRenderer._end_effect_transform(p)
+    assert p.saved == 0   # opacity/clip fully unwound before HUD paints
+
+
 def test_composite_multiplies_opacity_and_composes_transforms():
     a = QTransform().translate(10, 0)
     b = QTransform().scale(2, 2)
@@ -72,19 +102,62 @@ def test_timeline_eases_then_holds():
 
 # ── playfield transform ----------------------------------------------
 
+def _ctx_win(t=0.0, W=1366, H=768):
+    player = SimpleNamespace(keycount=4, W=W, H=H)
+    return SimpleNamespace(t_now=t, x0=100.0, lane_w=40.0, judge_y=600,
+                           player=player, chart_rect=(0, 0, W, H))
+
+
 def test_playfield_rotate_is_about_field_center():
     eff = PlayfieldTransformEffect(
         rotate=[{'time': 0, 'roll': 90.0, 'duration': 0, 'ease': 0}])
-    ctx = _ctx(t=1.0)
+    ctx = _ctx_win(t=1.0)
     frame = eff.at(ctx)
     cx = ctx.x0 + ctx.player.keycount * ctx.lane_w / 2   # 180
     cy = ctx.judge_y                                     # 600
     mapped = frame.transform.map(cx, cy)
-    assert mapped[0] == pytest.approx(cx)   # center is fixed under rotation
+    assert mapped[0] == pytest.approx(cx)   # receptor is fixed under rotation
     assert mapped[1] == pytest.approx(cy)
+
+
+def test_playfield_z_depth_zooms_about_screen_center():
+    # z = +100 halves the perspective scale (100/(100+100)); the field
+    # shrinks about screen center.
+    eff = PlayfieldTransformEffect(
+        move=[{'time': 0, 'x': 0, 'y': 0, 'z': 100.0,
+               'duration': 0, 'ease': 0}])
+    ctx = _ctx_win(t=1.0)
+    frame = eff.at(ctx)
+    scx, scy = ctx.player.W / 2, ctx.player.H / 2
+    assert frame.transform.map(scx, scy) == pytest.approx((scx, scy))
+    m11 = frame.transform.m11()
+    assert m11 == pytest.approx(0.5)
+
+
+def test_playfield_move_scales_to_window():
+    # x = ref width -> full-window shift, clamped to _MAX_OFFSET_FRAC.
+    eff = PlayfieldTransformEffect(
+        move=[{'time': 0, 'x': 1366.0, 'y': 0, 'z': 0,
+               'duration': 0, 'ease': 0}])
+    ctx = _ctx_win(t=1.0, W=1366, H=768)
+    frame = eff.at(ctx)
+    # raw dx would be 1366px; clamped to 0.5 * W = 683.
+    assert frame.transform.dx() == pytest.approx(683.0)
 
 
 def test_playfield_inactive_returns_none():
     eff = PlayfieldTransformEffect(move=[], scale=[], rotate=[])
     assert eff.at(_ctx()) is None
     assert not eff
+
+
+def test_playfield_move_scales_with_chart_rect_width():
+    # The same authored move shifts proportionally more in a wider
+    # viewport -- effects reference the playfield/chart region size.
+    eff = PlayfieldTransformEffect(
+        move=[{'time': 0, 'x': 100.0, 'y': 0, 'z': 0,
+               'duration': 0, 'ease': 0}])
+    narrow = _ctx_win(t=1.0, W=800, H=600)
+    wide = _ctx_win(t=1.0, W=1600, H=600)
+    assert (eff.at(wide).transform.dx()
+            > eff.at(narrow).transform.dx())

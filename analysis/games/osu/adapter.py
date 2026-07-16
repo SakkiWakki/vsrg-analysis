@@ -36,6 +36,16 @@ class OsuAdapter(GameAdapter):
         cand = Path(replay['chart_path']).parent / audio
         return str(cand) if cand.exists() else None
 
+    def background_path(self, replay) -> str | None:
+        from analysis.games.osu.replay import parse_osu_file
+        if not replay.get('chart_path'):
+            return None
+        bg = parse_osu_file(replay['chart_path']).get('background')
+        if not bg:
+            return None
+        cand = Path(replay['chart_path']).parent / bg
+        return str(cand) if cand.exists() else None
+
     def resolve_chart_timing(self, replay, entry=None, progress=None):
         # osu! replays carry absolute ms timings; no sm-style offset needed.
         return None, 0.0

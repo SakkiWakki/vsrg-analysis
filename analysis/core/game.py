@@ -107,6 +107,14 @@ class GameAdapter:
         absolute columns, so only lane geometry consults this."""
         return None
 
+    def background_path(self, replay) -> str | None:
+        """Absolute path to this replay's map background image, or None
+        when the game/chart has none. Rendered behind the playfield
+        (dimmed, cover-fit) by the builtin background effect. Resolved
+        like `resolve_audio`: a filename from the chart, joined to the
+        chart's folder, existence-checked."""
+        return None
+
     def effects(self, replay) -> list:
         """Column-space visual effects for this replay (playfield
         transforms, storyboards, ...); see

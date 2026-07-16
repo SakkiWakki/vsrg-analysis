@@ -69,6 +69,7 @@ def parse_replay(frp_path, fsc_path, rate=1.0):
             'keycount': keycount,
         },
         '_fluxis_audio_file': chart['audio'],
+        '_fluxis_background_file': chart['background'],
         '_fluxis_lane_mask': build_lane_mask_timeline(
             chart['lane_switches'], keycount, v2=chart['ls_v2']),
         '_fluxis_effect_streams': chart['effect_streams'],

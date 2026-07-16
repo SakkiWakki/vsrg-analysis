@@ -61,7 +61,7 @@ def _draw_hold_mine_spans(ctx, painter) -> None:
         if (y_head < lo and y_end < lo) or (y_head > hi and y_end > hi):
             continue
         lx = ctx.lane_x(c)
-        draw_lane_line(painter, _MINE_BODY_COLOR, lx, ctx.lane_w,
+        draw_lane_line(painter, _MINE_BODY_COLOR, lx, ctx.lane_width(c),
                        y_head, y_end, _MINE_BODY_WIDTH)
         painter.drawPixmap(
             QPointF(float(lx), float(y_end - end_pm.height() / 2)), end_pm)

@@ -32,6 +32,11 @@ def _build_render_effects(player, replay) -> list:
     effects (playfield transforms, storyboards). Order matters --
     transforms compose over the collapsed field."""
     effects = []
+    bg_path = player._adapter.background_path(replay)
+    if bg_path:
+        from analysis.player.render.effects.map_background import (
+            MapBackgroundEffect)
+        effects.append(MapBackgroundEffect(bg_path))
     if player._lane_mask:
         from analysis.player.render.effects.lane_switch import LaneSwitchEffect
         effects.append(LaneSwitchEffect(player._lane_mask))

@@ -52,7 +52,7 @@ def parse_osu_file(osu_path):
     """Parse a `.osu` file. Return metadata + hitobjects + sv_sections
     (list of `(time_sec, sv_multiplier)` from [TimingPoints])."""
     meta = {'title': '', 'artist': '', 'creator': '', 'version': '',
-            'audio': '', 'keycount': None, 'hitobjects': [],
+            'audio': '', 'background': '', 'keycount': None, 'hitobjects': [],
             'timing_points': [], 'sv_sections': [], 'od': 8.0}
     section = None
     with open(osu_path, encoding='utf-8', errors='replace') as f:
@@ -62,6 +62,14 @@ def parse_osu_file(osu_path):
                 continue
             if line.startswith('[') and line.endswith(']'):
                 section = line[1:-1]
+                continue
+            if section == 'Events':
+                # Background line: `0,0,"bg.jpg"[,x,y]`. Type 0 (or the
+                # legacy alias "Background") is the map background.
+                parts = [p.strip() for p in line.split(',')]
+                if (len(parts) >= 3 and parts[0] in ('0', 'Background')
+                        and not meta['background']):
+                    meta['background'] = parts[2].strip('"')
                 continue
             if section == 'TimingPoints':
                 parts = line.split(',')

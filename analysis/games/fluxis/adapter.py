@@ -167,11 +167,17 @@ class FluxisAdapter(GameAdapter):
         return 'ms'
 
     def resolve_audio(self, replay, entry=None, progress=None):
+        return self._sibling(replay, replay.get('_fluxis_audio_file'))
+
+    def background_path(self, replay) -> str | None:
+        return self._sibling(replay, replay.get('_fluxis_background_file'))
+
+    @staticmethod
+    def _sibling(replay, name):
         chart_path = replay.get('chart_path')
-        audio = replay.get('_fluxis_audio_file')
-        if not chart_path or not audio:
+        if not chart_path or not name:
             return None
-        cand = Path(chart_path).parent / audio
+        cand = Path(chart_path).parent / name
         return str(cand) if cand.exists() else None
 
     # --- library scan --------------------------------------------------

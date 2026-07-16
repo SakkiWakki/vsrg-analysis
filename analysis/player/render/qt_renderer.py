@@ -171,22 +171,31 @@ class QtPlayerRenderer:
         self.plugins.draw(Stage.PRE_FRAME, ctx)
         visibility = self._layer_visibility(ctx)
         hud_painter = None
-        # Effects transform + bracket only the chart layers; the HUD
-        # (sidebar, free panels) never moves with the playfield.
-        self._draw_effect_below(effect_frame, ctx, painter)
-        chart_wrapped = self._begin_effect_transform(effect_frame, painter)
+        # Effects transform + bracket only the playfield layers. The
+        # 'background' layer is the whole-canvas clear and must stay in
+        # screen space (a transformed clear leaves stale pixels outside
+        # the moved field -- visible as frame-trail smearing), and the
+        # HUD never moves with the playfield. Below-draws (storyboards)
+        # paint between the clear and the transformed field.
+        chart_wrapped = False
+        below_drawn = False
         for name, fn, stage in self._layers:
             is_hud = name in _HUD_LAYERS and cache_enabled
+            in_field = not is_hud and name != 'background'
+            if chart_wrapped and not in_field:
+                self._end_effect_transform(painter)
+                chart_wrapped = False
+            if in_field and not below_drawn:
+                self._draw_effect_below(effect_frame, ctx, painter)
+                below_drawn = True
+                chart_wrapped = self._begin_effect_transform(
+                    effect_frame, painter, ctx)
             if is_hud:
                 # HUD layers render into a cached pixmap at most
                 # _HUD_REDRAW_HZ; chart layers stay per-frame. On dense
                 # charts the sidebar's measure+draw passes cost more
                 # than the notes, and its content changes far slower
-                # than the 500 Hz frame cadence. The HUD paints outside
-                # the effect transform, so lift it before drawing.
-                if chart_wrapped:
-                    self._end_effect_transform(painter)
-                    chart_wrapped = False
+                # than the 500 Hz frame cadence.
                 if not hud_due:
                     continue
                 if hud_painter is None:
@@ -231,13 +240,15 @@ class QtPlayerRenderer:
         return None if frame.is_identity else frame
 
     @staticmethod
-    def _begin_effect_transform(frame, painter) -> bool:
+    def _begin_effect_transform(frame, painter, ctx) -> bool:
         """Push the composited transform + opacity for the chart-layer
-        group. Returns whether a save() was made (so the caller knows to
-        restore)."""
+        group, clipped to the chart region so no transform can paint
+        into the sidebar. Returns whether a save() was made (so the
+        caller knows to restore)."""
         if frame is None or (frame.transform is None and frame.opacity >= 1.0):
             return False
         painter.save()
+        painter.setClipRect(QRectF(*ctx.chart_rect))
         if frame.transform is not None:
             painter.setTransform(frame.transform, True)
         if frame.opacity < 1.0:
@@ -249,16 +260,24 @@ class QtPlayerRenderer:
         painter.restore()
 
     @staticmethod
-    def _draw_effect_below(frame, ctx, painter) -> None:
-        if frame is not None:
-            for _z, fn in frame.below:
-                fn(ctx, painter)
+    def _draw_effect_draws(draws, ctx, painter) -> None:
+        """Run overlay draws clipped to the chart region; effects never
+        paint into the sidebar."""
+        if not draws:
+            return
+        painter.save()
+        painter.setClipRect(QRectF(*ctx.chart_rect))
+        for _z, fn in draws:
+            fn(ctx, painter)
+        painter.restore()
 
-    @staticmethod
-    def _draw_effect_above(frame, ctx, painter) -> None:
+    def _draw_effect_below(self, frame, ctx, painter) -> None:
         if frame is not None:
-            for _z, fn in frame.above:
-                fn(ctx, painter)
+            self._draw_effect_draws(frame.below, ctx, painter)
+
+    def _draw_effect_above(self, frame, ctx, painter) -> None:
+        if frame is not None:
+            self._draw_effect_draws(frame.above, ctx, painter)
 
     def _hud_redraw_due(self, ctx, hud) -> bool:
         """The HUD pixmap re-renders when its content can actually have

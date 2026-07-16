@@ -97,6 +97,7 @@ def parse_fsc(fsc_path):
         'mapper': str(meta.get('mapper', '')),
         'difficulty': str(meta.get('difficulty', '')),
         'audio': str(raw.get('AudioFile', '')),
+        'background': str(raw.get('BackgroundFile', '')),
         'accuracy_difficulty': float(
             raw.get('AccuracyDifficulty') or DEFAULT_ACCURACY_DIFFICULTY),
         'keycount': keycount,
