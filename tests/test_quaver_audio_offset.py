@@ -142,6 +142,7 @@ def test_player_tab_initial_audio_seek_uses_source_time():
     tab.audio_state.last_sync_state = None
     tab._sync_audio = lambda force=False: None
     tab._audio_worker = object()
+    tab.view = type('View', (), {'update': lambda self: None})()
 
     tab._on_audio_built(fake)
 

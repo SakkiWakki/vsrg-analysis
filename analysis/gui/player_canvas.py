@@ -10,20 +10,38 @@ and the output is pixel-equivalent per ``tests/test_sidebar_output.py``.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+import time
+
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPainter
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 from analysis.gui import paint_profiler
 from analysis.player.render.qt_renderer import QtPlayerRenderer
 
+# Below this inter-swap interval the compositor clearly isn't
+# vsync-throttling us (broken driver, offscreen, VM); rescheduling
+# immediately would busy-spin the GUI thread, so defer instead.
+_SPIN_GUARD_S = 0.002
+_SPIN_DEFER_MS = 8
+
 
 class PlayerCanvas(QOpenGLWidget):
     # TODO: Port to Component API
-    def __init__(self, player, parent=None):
+    def __init__(self, player, parent=None, *, swap_paced=True):
         super().__init__(parent)
         self.player = player
         self.renderer = QtPlayerRenderer(player.plugins)
+        self._last_swap = 0.0
+        if swap_paced:
+            # Presentation-driven render loop: schedule the next paint
+            # each time a frame is handed to the compositor, so paints
+            # run once per displayed frame at a fixed phase instead of
+            # beating a wall-clock timer against the display's refresh.
+            # Queued so the update lands on the next event-loop pass
+            # rather than re-entering the swap.
+            self.frameSwapped.connect(self._schedule_next_frame,
+                                      Qt.ConnectionType.QueuedConnection)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMinimumSize(400, 400)
         # Mouse tracking lets move events fire without a button held.
@@ -38,6 +56,26 @@ class PlayerCanvas(QOpenGLWidget):
         # window briefly closing and reopening. Creating the surface up
         # front keeps it tied to this widget's native handle.
         self.setAttribute(Qt.WA_NativeWindow, True)
+
+    def _schedule_next_frame(self):
+        # The chain intentionally dies while paused (nothing animates;
+        # input handlers repaint on demand) and restarts from the next
+        # update() -- unpause, seek, expose, or any handled input.
+        if self.player.paused:
+            return
+        now = time.monotonic()
+        throttled = now - self._last_swap >= _SPIN_GUARD_S
+        self._last_swap = now
+        if throttled:
+            self.update()
+        else:
+            QTimer.singleShot(_SPIN_DEFER_MS, self.update)
+
+    def showEvent(self, ev):
+        # Hidden widgets don't paint, so the swap chain dies on tab
+        # switch / minimize; re-arm it on expose.
+        self.update()
+        super().showEvent(ev)
 
     def resizeEvent(self, ev):
         self.player.W = max(200, int(self.width()))

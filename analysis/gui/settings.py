@@ -15,12 +15,24 @@ carry an incompatible value across a game switch."""
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QObject, QSettings, Signal
 
 _ORG = 'clanker'
 _APP = 'vsrg-analysis'
 
 _cached = None
+
+
+class _SettingsSignals(QObject):
+    """App-wide change notifications for player settings. QSettings has
+    no native change signal; every write goes through
+    `save_player_setting`, so emitting there is complete coverage.
+    Receivers (e.g. open PlayerTabs) connect bound methods, which Qt
+    auto-disconnects when the receiver is destroyed."""
+    player_setting_changed = Signal(str)
+
+
+signals = _SettingsSignals()
 
 
 def get_settings():
@@ -100,8 +112,10 @@ PLAYER_SETTINGS: dict[str, PlayerSetting] = {
         PlayerSetting('player/skin', False, 'bar', _validate_skin),
         PlayerSetting('player/press_hide', False, False, _validate_bool(False)),
         PlayerSetting('player/pitch_correct', False, True, _validate_bool(True)),
-        PlayerSetting('player/render_uncapped', False, True,
-                  _validate_bool(True)),
+        # Default False: the player paces itself off frameSwapped.
+        # True opts into the legacy uncapped-QTimer render loop.
+        PlayerSetting('player/render_uncapped', False, False,
+                  _validate_bool(False)),
         PlayerSetting('player/scroll_mode', True, None, _validate_scroll_mode),
     )
 }
@@ -128,3 +142,4 @@ def save_player_setting(name: str, value: Any) -> None:
     repeating the `player/...` key string."""
     desc = PLAYER_SETTINGS[name]
     get_settings().setValue(desc.key, value)
+    signals.player_setting_changed.emit(name)

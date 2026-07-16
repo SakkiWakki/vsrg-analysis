@@ -16,7 +16,11 @@ from PySide6.QtWidgets import (
 )
 
 from analysis.gui.player_canvas import PlayerCanvas
-from analysis.gui.settings import load_player_settings, save_player_setting
+from analysis.gui.settings import (
+    load_player_settings,
+    save_player_setting,
+    signals as settings_signals,
+)
 from analysis.gui.widgets import JumpSlider
 
 
@@ -108,9 +112,12 @@ class PlayerTab(QWidget):
         self.scroll_edit: QLineEdit | None = None
         self._audio = None
         self._audio_worker = None
+        self._time_text = None
+        self._dur_text = None
+        self._legacy_hz = self._legacy_render_hz()
 
         self._build_ui()
-        self._build_timer()
+        self._build_frame_loop()
         self._build_audio(audio_path)
         self._connect_player_events()
         self._build_input_router()
@@ -182,7 +189,8 @@ class PlayerTab(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self.view = PlayerCanvas(self.player)
+        self.view = PlayerCanvas(self.player,
+                                 swap_paced=self._legacy_hz is None)
         self.view.installEventFilter(self)
         layout.addWidget(self.view, 1)
 
@@ -216,12 +224,31 @@ class PlayerTab(QWidget):
 
         return bar
 
-    def _build_timer(self) -> None:
-        prefs = load_player_settings(self.player.game)
+    def _build_frame_loop(self) -> None:
+        """Wire the per-displayed-frame chores and, in legacy mode only,
+        a wall-clock repaint timer.
 
+        Default mode has no timer: the canvas self-schedules paints from
+        `frameSwapped` while playing, and every paint's swap drives
+        `_on_frame` (playbar, labels, end-of-chart, audio drift sync).
+        While paused nothing animates, so repaints come from input
+        handlers on demand and `_on_frame` still follows each one."""
+        self.view.frameSwapped.connect(self._on_frame)
+        settings_signals.player_setting_changed.connect(
+            self._on_setting_changed)
+
+        self.timer = None
+        if self._legacy_hz is None:
+            return
         self.timer = QTimer(self)
-        self._configure_render_timer(prefs)
-        self.timer.timeout.connect(self._tick)
+        interval = (0 if self._legacy_hz == 0
+                    else max(1, int(round(1000.0 / self._legacy_hz))))
+        self.timer.setInterval(interval)
+        try:
+            self.timer.setTimerType(Qt.TimerType.PreciseTimer)
+        except Exception:
+            pass
+        self.timer.timeout.connect(self.view.update)
         self.timer.start()
 
     def _build_audio(self, audio_path) -> None:
@@ -261,6 +288,7 @@ class PlayerTab(QWidget):
             self.player.attach_audio_clock(self._audio_current_chart_time)
             self.player.attach_audio_status(self._audio.callback_status_snapshot)
             self._sync_audio(force=True)
+            self.view.update()
 
     def _on_audio_failed(self, tb) -> None:
         self._audio_worker = None
@@ -284,6 +312,7 @@ class PlayerTab(QWidget):
         self.play_btn.setText('⏸')
         self._sync_audio(force=True)
         _sync_gc_to_playback(True)
+        self.view.update()
 
     # ------------------------------------------------------------------
     # Render timer
@@ -302,34 +331,25 @@ class PlayerTab(QWidget):
             return False
         return None
 
-    @staticmethod
-    def _env_int(name: str, default: int) -> int:
-        raw = os.environ.get(name)
-        if raw is None:
-            return int(default)
-
-        try:
-            value = int(raw)
-        except (TypeError, ValueError):
-            return int(default)
-
-        return max(1, value)
-
-    def _configure_render_timer(self, prefs: dict) -> None:
-        pref_uncapped = bool(prefs.get('render_uncapped', False))
+    def _legacy_render_hz(self) -> int | None:
+        """Opt-in escape hatch for compositors where `frameSwapped`
+        pacing misbehaves (broken vsync throttling, VMs). Returns None
+        for the default swap-paced loop, 0 for an uncapped timer, or a
+        timer rate in Hz."""
+        prefs = load_player_settings(self.player.game)
         env_uncapped = self._env_flag('VSRG_RENDER_UNCAPPED')
-        uncapped = pref_uncapped if env_uncapped is None else env_uncapped
-
+        uncapped = (bool(prefs.get('render_uncapped', False))
+                    if env_uncapped is None else env_uncapped)
         if uncapped:
-            self.timer.setInterval(0)
-        else:
-            hz = self._env_int('VSRG_RENDER_HZ', 120)
-            self.timer.setInterval(max(1, int(round(1000.0 / float(hz)))))
+            return 0
 
+        raw = os.environ.get('VSRG_RENDER_HZ')
+        if raw is None:
+            return None
         try:
-            self.timer.setTimerType(Qt.TimerType.PreciseTimer)
-        except Exception:
-            pass
+            return max(1, int(raw))
+        except (TypeError, ValueError):
+            return None
 
     # ------------------------------------------------------------------
     # Audio / transport
@@ -390,6 +410,7 @@ class PlayerTab(QWidget):
 
         self._sync_audio(force=True)
         _sync_gc_to_playback(not self.player.paused)
+        self.view.update()
 
     def _restart_if_resuming_after_end(self) -> bool:
         if not self.player.paused:
@@ -413,10 +434,12 @@ class PlayerTab(QWidget):
             self._audio.seek(self._chart_to_audio_time(self.player.t_intended))
 
         self._sync_audio(force=True)
+        self.view.update()
 
     def _nudge_rate(self, delta) -> None:
         self.player.nudge_rate(delta)
         self._sync_audio(force=True)
+        self.view.update()
 
     def _toggle_mute(self) -> None:
         if not self._audio_is_ready():
@@ -520,6 +543,7 @@ class PlayerTab(QWidget):
 
         self.player._set_current_mode_value(value)
         self._close_scroll_edit()
+        self.view.update()
 
     def _close_scroll_edit(self) -> None:
         if self.scroll_edit is None:
@@ -587,6 +611,7 @@ class PlayerTab(QWidget):
             bool(self.scrub.resume_after_release),
         )
         self.player.attach_audio_clock(self._audio_current_chart_time)
+        self.view.update()
 
     def _on_playbar_changed(self, value) -> None:
         if self.scrub.suppress_slider:
@@ -596,6 +621,7 @@ class PlayerTab(QWidget):
 
         if not self.playbar.isSliderDown():
             self._sync_audio(force=True)
+        self.view.update()
 
     def _update_playbar(self) -> None:
         if self.scrub.active:
@@ -631,18 +657,33 @@ class PlayerTab(QWidget):
             self.play_btn.setText('▶')
             _sync_gc_to_playback(False)
 
-    def _tick(self) -> None:
-        self._sync_settings_toggles()
+    def _on_frame(self) -> None:
+        """Runs once per presented frame (connected to the canvas's
+        `frameSwapped`). Everything here must early-out cheaply; at
+        144 Hz this is hot-path."""
         self._finish_playback_if_needed()
-
-        self.view.update()
         self._update_playbar()
-
-        self.time_lbl.setText(self._fmt_time(self.player.t))
-        self.dur_lbl.setText(self._fmt_time(self.player.t_max))
+        self._update_time_labels()
 
         if not self.scrub.active:
             self._sync_audio()
+
+    def _update_time_labels(self) -> None:
+        # QLabel.setText re-layouts even for identical text, so compare
+        # against the last-set string ourselves.
+        now_text = self._fmt_time(self.player.t)
+        if now_text != self._time_text:
+            self._time_text = now_text
+            self.time_lbl.setText(now_text)
+
+        dur_text = self._fmt_time(self.player.t_max)
+        if dur_text != self._dur_text:
+            self._dur_text = dur_text
+            self.dur_lbl.setText(dur_text)
+
+    def _on_setting_changed(self, _name: str) -> None:
+        self._sync_settings_toggles()
+        self.view.update()
 
     # ------------------------------------------------------------------
     # Input events
@@ -712,6 +753,7 @@ class PlayerTab(QWidget):
             return False
 
         handler()
+        self.view.update()
         return True
 
     def _restart_from_keyboard(self) -> None:
@@ -723,12 +765,15 @@ class PlayerTab(QWidget):
 
     def _handle_wheel(self, ev) -> bool:
         x, y = self._event_xy(ev)
-        return self.input_router.dispatch_wheel(
+        handled = self.input_router.dispatch_wheel(
             x,
             y,
             ev.angleDelta().y(),
             ev.modifiers(),
         )
+        if handled:
+            self.view.update()
+        return handled
 
     def _handle_mouse_press(self, ev) -> bool:
         if ev.button() != Qt.LeftButton:
@@ -784,7 +829,8 @@ class PlayerTab(QWidget):
     # ------------------------------------------------------------------
 
     def cleanup(self) -> None:
-        self.timer.stop()
+        if self.timer is not None:
+            self.timer.stop()
         _sync_gc_to_playback(False)
 
         worker = getattr(self, '_audio_worker', None)
