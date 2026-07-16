@@ -58,12 +58,9 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.setTabsClosable(True)
         self.tabs.tabCloseRequested.connect(self._close_tab)
-        # QOpenGLWidget children (PlayerCanvas) need a native window in the
-        # widget hierarchy before being added to a tab, otherwise the first
-        # reparent forces a top-level compositor re-present that looks like
-        # the main window minimizing. Giving the tab widget's internal stack
-        # a native window handle lets GL children slot in without the flash.
-        self.tabs.setAttribute(Qt.WA_NativeWindow, True)
+        # No WA_NativeWindow here (or on PlayerCanvas): native GL
+        # subsurfaces nested in the tab stack presented with constant
+        # multi-ms stalls on Wayland/KWin. See PlayerCanvas.__init__.
         self.setCentralWidget(self.tabs)
 
         self.library_tab = LibraryTab(add_tab=self._add_tab)

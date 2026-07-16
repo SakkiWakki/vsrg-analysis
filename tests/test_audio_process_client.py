@@ -95,3 +95,15 @@ def test_seek_gates_stale_anchor_until_child_ack():
     _anchor(c, pos=5.0, mono=time.monotonic() - 0.005)
     t = c.current_chart_time()
     assert 5.0 < t < 5.1
+
+
+def test_post_seek_anchor_behind_target_holds_at_target():
+    """The first post-seek anchor sits one device-latency behind the
+    seek target (its samples haven't reached the DAC yet). The playhead
+    must hold flat at the target rather than stepping backward."""
+    c = _client()
+    c.seek_to_chart_time(10.0)
+    c._status[ap._F_SEEK_GEN] = 1.0
+
+    _anchor(c, pos=10.012, mono=time.monotonic() + 0.052)
+    assert c.current_chart_time() == 10.0

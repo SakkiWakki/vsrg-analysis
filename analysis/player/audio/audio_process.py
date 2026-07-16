@@ -546,7 +546,13 @@ class AudioProcessClient:
 
     def seek_to_chart_time(self, chart_t: float) -> None:
         chart_t = float(chart_t)
-        self._chart_time_floor = -float('inf')
+        # Floor at the target, not -inf: the first post-seek anchor
+        # lands one device-latency behind the target (those samples
+        # haven't reached the DAC yet), and without the floor the
+        # playhead would visibly step backward and re-approach. Holding
+        # flat at the target until real playback catches up matches
+        # what's audible.
+        self._chart_time_floor = chart_t
         self._last_seek_target = chart_t
         self._seek_gen_sent += 1
         self._send(_OP_SEEK, chart_t)
