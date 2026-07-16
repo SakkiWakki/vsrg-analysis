@@ -1,6 +1,7 @@
 """Embedded replay player tab: native Qt canvas + transport controls."""
 from __future__ import annotations
 
+import gc
 import os
 from dataclasses import dataclass
 
@@ -32,6 +33,23 @@ class ScrubState:
     active: bool = False
     suppress_slider: bool = False
     resume_after_release: bool = False
+
+
+def _sync_gc_to_playback(playing: bool) -> None:
+    """Keep the cycle collector's full passes out of playback frames.
+
+    Parsed charts, numpy caches, and Qt wrappers make an old generation
+    large enough that an automatic gen-2 collection lands as a visible
+    frame hitch. While playing, freeze the current heap so collections
+    only traverse allocations made since; on pause, unfreeze and run the
+    deferred full collection while nothing is animating.
+    """
+    if playing:
+        gc.collect()
+        gc.freeze()
+    else:
+        gc.unfreeze()
+        gc.collect()
 
 
 class PlayerTab(QWidget):
@@ -265,6 +283,7 @@ class PlayerTab(QWidget):
         self.player.paused = False
         self.play_btn.setText('⏸')
         self._sync_audio(force=True)
+        _sync_gc_to_playback(True)
 
     # ------------------------------------------------------------------
     # Render timer
@@ -370,6 +389,7 @@ class PlayerTab(QWidget):
             self._audio.seek(self._chart_to_audio_time(self.player.t_intended))
 
         self._sync_audio(force=True)
+        _sync_gc_to_playback(not self.player.paused)
 
     def _restart_if_resuming_after_end(self) -> bool:
         if not self.player.paused:
@@ -609,6 +629,7 @@ class PlayerTab(QWidget):
         if audio_done or clock_done:
             self.player.paused = True
             self.play_btn.setText('▶')
+            _sync_gc_to_playback(False)
 
     def _tick(self) -> None:
         self._sync_settings_toggles()
@@ -764,6 +785,7 @@ class PlayerTab(QWidget):
 
     def cleanup(self) -> None:
         self.timer.stop()
+        _sync_gc_to_playback(False)
 
         worker = getattr(self, '_audio_worker', None)
         if worker is not None and worker.isRunning():

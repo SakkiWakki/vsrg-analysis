@@ -63,7 +63,9 @@ _F_CB_STATUS_COUNT      = 8   # PortAudio callback status flag count
 _F_CB_RING_UNDERFLOW    = 9   # ring-empty events seen by callback
 _F_RING_FILL_FRAMES     = 10  # readable frames in the producer ring
 _F_RING_CAPACITY_FRAMES = 11  # ring capacity (constant after init)
-_NUM_STATUS_FIELDS      = 12
+_F_HW_MONO              = 12  # time.monotonic() at which _F_HW_POS plays
+_F_SEEK_GEN             = 13  # count of seek commands the child processed
+_NUM_STATUS_FIELDS      = 14
 
 
 # ── command protocol ───────────────────────────────────────────────
@@ -183,8 +185,19 @@ def _run_audio_child(config: AudioProcessConfig,
             anchor_chart_end = stamp.chart_end
         producer.signal_drain()
         # DAC anchor.
-        dac_end = float(time_info.outputBufferDacTime) + (frames / state.sr)
-        block_dt = (frames / state.sr) * rate_est
+        block_period = frames / state.sr
+        dac_end = float(time_info.outputBufferDacTime) + block_period
+        # The parent can't read this stream's PortAudio clock, so publish
+        # the anchor's deadline in time.monotonic()'s timebase instead
+        # (CLOCK_MONOTONIC / QPC tick system-wide, shared across
+        # processes). Some host APIs report zero time_info fields; fall
+        # back to "one block from now".
+        dac_now = float(getattr(time_info, 'currentTime', 0.0) or 0.0)
+        if dac_now > 0.0 and dac_end > dac_now:
+            mono_end = time.monotonic() + (dac_end - dac_now)
+        else:
+            mono_end = time.monotonic() + block_period
+        block_dt = block_period * rate_est
         block_chart_start = anchor_chart_end - block_dt
         if block_chart_start > state.chart_time:
             state.chart_time = block_chart_start
@@ -199,6 +212,7 @@ def _run_audio_child(config: AudioProcessConfig,
         # keeps any debugger snapshots coherent.
         status[_F_HW_POS] = anchor_chart_end
         status[_F_HW_WALL] = dac_end
+        status[_F_HW_MONO] = mono_end
         status[_F_HW_RATE] = rate_est
         status[_F_DAC_ANCHOR_VALID] = 1.0
         status[_F_RING_FILL_FRAMES] = float(ring.readable_frames())
@@ -249,6 +263,7 @@ class _ChildState:
     lead_in_seconds: float
     cb_status_count: int = 0
     cb_ring_underflow: int = 0
+    seek_gen: int = 0
     stream: object = None
     producer: object = None
     source: object = None
@@ -301,6 +316,11 @@ def _command_loop(cmd_queue, state: _ChildState) -> None:
                 state.scheduled_chart_pos = audio_t
                 state.chart_time = audio_t
                 state.producer.request_seek(audio_t, lead_in)
+                # Acknowledge last: once the parent sees the new gen,
+                # every anchor field it reads is post-seek (invalid
+                # until the next callback re-anchors).
+                state.seek_gen += 1
+                state.status[_F_SEEK_GEN] = float(state.seek_gen)
             elif op == _OP_PREWARM:
                 # No-op for now; the in-process engine had a prewarm
                 # path that's not strictly necessary.
@@ -417,6 +437,14 @@ class AudioProcessClient:
             pitch_correct=pitch_correct,
             volume=volume,
         )
+        # Monotone floor for current_chart_time(); reset on seek, which
+        # is the only legitimate backward move of the playhead. The gen
+        # counter gates reads after a seek: until the child acknowledges
+        # via _F_SEEK_GEN, the anchor fields are pre-seek and must not
+        # be extrapolated from (they'd re-poison the floor).
+        self._chart_time_floor = -float('inf')
+        self._seek_gen_sent = 0
+        self._last_seek_target = 0.0
         self._proc = self._ctx.Process(
             target=_run_audio_child,
             args=(config, self._cmd_queue, self._status,
@@ -448,26 +476,40 @@ class AudioProcessClient:
     def current_chart_time(self) -> float:
         """Chart-time of the audible playhead. Mirrors the in-process
         engine's `_current_source_position_locked` formula:
-        anchor + (stream_time - hw_wall) * hw_rate, minus lead-in.
+        anchor + (now - anchor_deadline) * hw_rate, minus lead-in.
 
-        The parent doesn't have access to PortAudio's `stream.time` in
-        the child, so we approximate using `time.monotonic()` against
-        the wall captured at the last anchor write. The drift between
-        `monotonic` and PortAudio's stream clock is sub-ms over the
-        ring depth, which is well below the predictor's jitter
-        tolerance.
+        The child publishes the anchor's play deadline translated into
+        `time.monotonic()`'s timebase (`_F_HW_MONO`), so we can
+        extrapolate between audio callbacks here. Without that, reads
+        would quantize to one block period (~12 ms), which renders as a
+        staircase playhead.
+
+        Reads are lock-free and can tear across a callback's field
+        writes, mispairing pos/mono by up to one block. The monotone
+        clamp turns any resulting backward step into a one-frame flat
+        hold instead of a visible snap.
+
+        After a seek, reads return the seek target until the child has
+        both acknowledged the seek (gen counter) and re-anchored on its
+        next callback; the anchor fields are stale or invalid until
+        then.
         """
-        hw_pos = self._status[_F_HW_POS]
-        hw_wall = self._status[_F_HW_WALL]
-        hw_rate = self._status[_F_HW_RATE]
         anchor_valid = self._status[_F_DAC_ANCHOR_VALID]
-        lead_in = self._status[_F_LEAD_IN_SECONDS]
-        if not anchor_valid:
+        seek_pending = self._status[_F_SEEK_GEN] < self._seek_gen_sent
+        if seek_pending or not anchor_valid:
+            if self._seek_gen_sent:
+                return self._last_seek_target
+            lead_in = self._status[_F_LEAD_IN_SECONDS]
             return -lead_in if lead_in else 0.0
-        # We don't have the child's stream clock. Use the most recent
-        # anchor as ground truth -- accurate within one block period
-        # (~12 ms), which is below the predictor's smoothing.
-        return hw_pos - lead_in
+
+        hw_pos = self._status[_F_HW_POS]
+        hw_mono = self._status[_F_HW_MONO]
+        hw_rate = self._status[_F_HW_RATE]
+        lead_in = self._status[_F_LEAD_IN_SECONDS]
+        t = hw_pos + (time.monotonic() - hw_mono) * hw_rate - lead_in
+        if t > self._chart_time_floor:
+            self._chart_time_floor = t
+        return self._chart_time_floor
 
     def callback_status_snapshot(self) -> tuple[int, str]:
         pa_n = int(self._status[_F_CB_STATUS_COUNT])
@@ -503,7 +545,11 @@ class AudioProcessClient:
         self._send(_OP_SET_PITCH_CORRECT, bool(on))
 
     def seek_to_chart_time(self, chart_t: float) -> None:
-        self._send(_OP_SEEK, float(chart_t))
+        chart_t = float(chart_t)
+        self._chart_time_floor = -float('inf')
+        self._last_seek_target = chart_t
+        self._seek_gen_sent += 1
+        self._send(_OP_SEEK, chart_t)
 
     def stop(self) -> None:
         self._send(_OP_STOP, None)
