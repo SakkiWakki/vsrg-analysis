@@ -75,6 +75,8 @@ def parse_replay(frp_path, fsc_path, rate=1.0):
             chart['lane_switches'], keycount, v2=chart['ls_v2']),
         '_fluxis_effect_streams': chart['effect_streams'],
         '_fluxis_timing_points': chart['timing_points'],
+        '_fluxis_hitobjects': chart['hitobjects'],
+        '_fluxis_scroll_velocities': chart['scroll_velocities'],
         '_fluxis_end_time': _chart_end_ms(chart['hitobjects']),
     }
 

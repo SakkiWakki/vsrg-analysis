@@ -4,5 +4,6 @@ osrparse
 PySide6
 sounddevice
 maturin
-soundfile 
+soundfile
 audioread
+lupa

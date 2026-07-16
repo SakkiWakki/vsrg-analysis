@@ -148,7 +148,28 @@ class FluxisAdapter(GameAdapter):
         path = self._sibling(replay, replay.get('_fluxis_storyboard_file'))
         if not path:
             return None
-        return parse_fsb(path)
+        return parse_fsb(path, chart=self._script_chart_context(replay),
+                         audio_path=self.resolve_audio(replay))
+
+    @staticmethod
+    def _script_chart_context(replay) -> dict:
+        """Chart data the Lua storyboard-script API queries."""
+        meta = replay.get('chart_meta') or {}
+        return {
+            'hitobjects': replay.get('_fluxis_hitobjects') or [],
+            'timing_points': replay.get('_fluxis_timing_points') or [],
+            'scroll_velocities':
+                replay.get('_fluxis_scroll_velocities') or [],
+            'effect_streams': replay.get('_fluxis_effect_streams') or {},
+            'meta': {
+                'title': meta.get('title', ''),
+                'artist': meta.get('artist', ''),
+                'mapper': meta.get('creator', ''),
+                'difficulty': meta.get('version', ''),
+                'background': replay.get('_fluxis_background_file', ''),
+                'cover': '',
+            },
+        }
 
     def populate_notes_model(self, replay, model) -> None:
         from analysis.player.init.notes_model import copy_chart_streams

@@ -174,9 +174,29 @@ def _compile_element(el, version, assets_dir, warned) -> Element | None:
     )
 
 
-def parse_fsb(fsb_path) -> Storyboard | None:
+def _record_scripts(raw, fsb_dir, chart, audio_path) -> list:
+    """Raw elements recorded by running the file's Lua scripts (Mode-2
+    recorder); [] without chart context or when lupa is unavailable."""
+    if chart is None:
+        return []
+    try:
+        from analysis.games.fluxis.lua_storyboard import (
+            record_script_elements)
+    except ImportError:
+        print('fluXis storyboard: lupa not installed; Script elements'
+              ' skipped')
+        return []
+    return record_script_elements(raw, fsb_dir, chart,
+                                  audio_path=audio_path)
+
+
+def parse_fsb(fsb_path, *, chart=None, audio_path=None) -> Storyboard | None:
     """Compile a `.fsb` into the storyboard IR; None when the file is
-    absent/unreadable or has no supported elements."""
+    absent/unreadable or has no supported elements. With `chart`
+    context (parsed .fsc dict) the file's Lua Script elements run
+    through the Mode-2 recorder and their output compiles too;
+    recorded elements always carry absolute animation times (version-1
+    semantics), whatever the file's version."""
     fsb_path = Path(fsb_path)
     try:
         with open(fsb_path, encoding='utf-8') as f:
@@ -188,12 +208,20 @@ def parse_fsb(fsb_path) -> Storyboard | None:
 
     version = int(raw.get('version') or 1)
     resolution = raw.get('resolution') or {}
-    warned: set = set()
+    # With chart context the Script elements are handled by the
+    # recorder, so the unsupported-kind warning would be misleading.
+    warned: set = set() if chart is None else {'Script'}
     elements = [
         compiled for el in raw.get('elements') or [] if isinstance(el, dict)
         if (compiled := _compile_element(el, version, fsb_path.parent,
                                          warned)) is not None
     ]
+    elements.extend(
+        compiled
+        for el in _record_scripts(raw, fsb_path.parent, chart, audio_path)
+        if (compiled := _compile_element(el, 1, fsb_path.parent,
+                                         warned)) is not None
+    )
     if not elements:
         return None
 
