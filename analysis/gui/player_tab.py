@@ -313,6 +313,17 @@ class PlayerTab(QWidget):
     def _connect_player_events(self) -> None:
         self.player.events.on('scroll_changed', self._on_scroll_change)
         self.player.events.on('hud_action', self._on_hud_action)
+        self.player.events.on('paused_changed', self._on_paused_changed)
+
+    def _on_paused_changed(self) -> None:
+        """Fan-out for the pause state; fires on every transition
+        regardless of which call site wrote it (transport button,
+        keyboard, scrub grab, end-of-chart, autostart)."""
+        paused = self.player.paused
+        self.play_btn.setText('▶' if paused else '⏸')
+        self._sync_audio(force=True)
+        _sync_gc_to_playback(not paused)
+        self.view.update()
 
     def _build_input_router(self) -> None:
         from analysis.gui.region import InputRouter, SidebarRegion, LanesRegion
@@ -323,10 +334,6 @@ class PlayerTab(QWidget):
 
     def _start_playing(self) -> None:
         self.player.paused = False
-        self.play_btn.setText('⏸')
-        self._sync_audio(force=True)
-        _sync_gc_to_playback(True)
-        self.view.update()
 
     # ------------------------------------------------------------------
     # Render timer
@@ -417,20 +424,16 @@ class PlayerTab(QWidget):
         self._autostart_pending = False
         seeked_to_start = self._restart_if_resuming_after_end()
 
-        self.player.toggle_pause()
-        self.play_btn.setText('▶' if self.player.paused else '⏸')
-
         # Seek on every resume, not just restart-from-end: blocks that
         # were already in flight when the pause landed advanced the
         # audio position slightly past the frozen visual playhead, and
-        # the seek re-aligns the two so resume is snap-free.
-        resumed = not self.player.paused
-        if self._audio_is_ready() and (seeked_to_start or resumed):
+        # the seek re-aligns the two so resume is snap-free. Runs
+        # before the unpause so audio never plays the stale position.
+        resuming = self.player.paused
+        if self._audio_is_ready() and (seeked_to_start or resuming):
             self._audio.seek(self._chart_to_audio_time(self.player.t_intended))
 
-        self._sync_audio(force=True)
-        _sync_gc_to_playback(not self.player.paused)
-        self.view.update()
+        self.player.toggle_pause()
 
     def _restart_if_resuming_after_end(self) -> bool:
         if not self.player.paused:
@@ -590,47 +593,31 @@ class PlayerTab(QWidget):
         return tmin + (value / float(self.SLIDER_MAX)) * (tmax - tmin)
 
     def _on_playbar_pressed(self) -> None:
+        self._autostart_pending = False
         self.scrub.active = True
         self.scrub.resume_after_release = not self.player.paused
+        # Holding the bar is a pause
+        self.player.paused = True
 
-        if not self._audio_is_ready():
-            return
-
-        rate = self._refresh_audio_chart_offset_rate()
-        audio_t = self._chart_to_audio_time(self.player.t_intended)
-        self.player.attach_audio_clock(None)
-        self._audio.set_state(
-            audio_t,
-            rate,
-            False,
-        )
-        self.audio_state.last_sync_state = (
-            audio_t,
-            rate,
-            False,
-        )
+        if self._audio_is_ready():
+            self.player.attach_audio_clock(None)
 
     def _on_playbar_released(self) -> None:
         self.scrub.active = False
         self.player.t = self._slider_to_t(self.playbar.value())
 
-        if not self._audio_is_ready():
-            return
+        # Audio seeks to the drop point before the unpause fan-out can
+        # unsilence it, so it never plays the stale pre-scrub position.
+        if self._audio_is_ready():
+            self._audio.seek(self._chart_to_audio_time(self.player.t_intended))
 
-        rate = self._refresh_audio_chart_offset_rate()
-        audio_t = self._chart_to_audio_time(self.player.t_intended)
-        self._audio.seek(audio_t)
-        self._audio.set_state(
-            audio_t,
-            rate,
-            self.scrub.resume_after_release,
-        )
-        self.audio_state.last_sync_state = (
-            audio_t,
-            rate,
-            bool(self.scrub.resume_after_release),
-        )
-        self.player.attach_audio_clock(self._audio_current_chart_time)
+        self.player.paused = not self.scrub.resume_after_release
+
+        if self._audio_is_ready():
+            self.player.attach_audio_clock(self._audio_current_chart_time)
+        # The pause state may not have changed (scrub while paused);
+        # push the new position and repaint regardless.
+        self._sync_audio(force=True)
         self.view.update()
 
     def _on_playbar_changed(self, value) -> None:
@@ -674,8 +661,6 @@ class PlayerTab(QWidget):
 
         if audio_done or clock_done:
             self.player.paused = True
-            self.play_btn.setText('▶')
-            _sync_gc_to_playback(False)
 
     def _on_frame(self) -> None:
         """Runs once per presented frame (connected to the canvas's

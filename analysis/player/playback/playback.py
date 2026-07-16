@@ -35,8 +35,12 @@ class PlaybackController:
 
     @paused.setter
     def paused(self, value):
-        self.p._clock.set_paused(bool(value))
+        value = bool(value)
+        if value == self.p._clock.paused:
+            return
+        self.p._clock.set_paused(value)
         self.p._reset_render_timeline()
+        self.p.events.emit('paused_changed')
 
     @property
     def play_rate(self):
@@ -113,5 +117,4 @@ class PlaybackController:
         self.p._reset_render_timeline()
 
     def toggle_pause(self):
-        self.p._clock.set_paused(not self.p._clock.paused)
-        self.p._reset_render_timeline()
+        self.paused = not self.paused
