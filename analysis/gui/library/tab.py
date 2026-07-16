@@ -21,9 +21,11 @@ from analysis.gui.paths_dialog import PathsDialog
 
 
 class LibraryTab(QWidget):
-    def __init__(self, add_tab):
+    def __init__(self, add_tab, focus_tab=None):
         super().__init__()
         self._add_tab = add_tab
+        self.focus_tab = focus_tab if focus_tab is not None \
+            else lambda key: False
         self.library = []
         self._replay_cache = ReplayCache(max_size=16)
 

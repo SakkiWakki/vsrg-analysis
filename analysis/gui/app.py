@@ -63,7 +63,8 @@ class MainWindow(QMainWindow):
         # multi-ms stalls on Wayland/KWin. See PlayerCanvas.__init__.
         self.setCentralWidget(self.tabs)
 
-        self.library_tab = LibraryTab(add_tab=self._add_tab)
+        self.library_tab = LibraryTab(add_tab=self._add_tab,
+                                      focus_tab=self._focus_tab)
         self._add_tab(self.library_tab, 'Library', closable=False)
 
     def closeEvent(self, ev):
@@ -81,13 +82,28 @@ class MainWindow(QMainWindow):
                 except Exception: pass
         super().closeEvent(ev)
 
-    def _add_tab(self, widget, title, closable=True):
+    def _add_tab(self, widget, title, closable=True, key=None):
+        # `key` identifies what the tab shows (e.g. which replay); the
+        # library's entry actions use it via `_focus_tab` to jump to an
+        # already-open tab instead of building a duplicate.
+        widget._tab_key = key
         idx = self.tabs.addTab(widget, title)
         if not closable:
             self.tabs.tabBar().setTabButton(
                 idx, self.tabs.tabBar().ButtonPosition.RightSide, None)
         self.tabs.setCurrentIndex(idx)
         return idx
+
+    def _focus_tab(self, key) -> bool:
+        """Activate the open tab carrying `key`, if any. Closed tabs
+        leave the QTabWidget, so stale keys simply never match."""
+        if key is None:
+            return False
+        for i in range(self.tabs.count()):
+            if getattr(self.tabs.widget(i), '_tab_key', None) == key:
+                self.tabs.setCurrentIndex(i)
+                return True
+        return False
 
     def _close_tab(self, idx):
         w = self.tabs.widget(idx)

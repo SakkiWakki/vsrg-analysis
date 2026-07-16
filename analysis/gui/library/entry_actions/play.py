@@ -10,6 +10,9 @@ from analysis.gui.library.entry_actions.base import EntryActionBase
 
 class PlayReplayAction(EntryActionBase):
     def run(self, entry: dict, *, replay=None) -> None:
+        if self.tab.focus_tab(self.tab_key('play', entry)):
+            return
+
         default_ms = self.default_scroll_ms()
         get_settings().setValue('library/default_scroll_ms', default_ms)
 
@@ -72,7 +75,7 @@ class PlayReplayAction(EntryActionBase):
         )
 
         title = self.title_song(entry, fallback='play')
-        self.tab._add_tab(tab, f'▶ {title}')
+        self.tab._add_tab(tab, f'▶ {title}', key=self.tab_key('play', entry))
 
     def default_scroll_ms(self) -> float:
         try:

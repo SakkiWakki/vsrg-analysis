@@ -23,6 +23,9 @@ class OpenVisualizationAction(EntryActionBase):
         name, builder, category = match
         title_song = self.title_song(entry)
         tab_title = f'📊 {name} ; {title_song}'
+        key = self.tab_key('viz', entry, name)
+        if self.tab.focus_tab(key):
+            return
 
         def job(progress):
             progress('parsing replay…')
@@ -50,6 +53,7 @@ class OpenVisualizationAction(EntryActionBase):
                 payload,
                 builder=builder,
                 tab_title=tab_title,
+                key=key,
             ),
         )
 
@@ -66,7 +70,8 @@ class OpenVisualizationAction(EntryActionBase):
             None,
         )
 
-    def finish(self, entry: dict, payload, *, builder, tab_title: str) -> None:
+    def finish(self, entry: dict, payload, *, builder, tab_title: str,
+               key=None) -> None:
         kind, replay, prebuilt = payload
         self.maybe_backfill_entry(entry, replay)
 
@@ -77,7 +82,7 @@ class OpenVisualizationAction(EntryActionBase):
         else:
             widget = self.build_widget_viz(builder, replay, entry, on_play)
 
-        self.tab._add_tab(widget, tab_title)
+        self.tab._add_tab(widget, tab_title, key=key)
 
     def build_widget_viz(self, builder, replay, entry, on_play):
         try:
