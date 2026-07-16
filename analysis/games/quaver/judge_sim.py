@@ -135,6 +135,48 @@ def _simulate_column(col, notes, events, windows, tail_windows):
     return per
 
 
+def simulate_mines(mines_by_col, key_events_by_col, marv_w):
+    """Port of Quaver's ``KeysInputManager.HandleMinePresses``.
+
+    A mine is armed over ``[start - marv, end + marv]`` (``end`` is the
+    mine's EndTime for hold mines, else its StartTime). Every key press
+    detonates every armed mine in that lane's window; each detonation
+    scores a Miss in Quaver. Avoided mines score nothing by design.
+
+    `mines_by_col[c]`: sorted list of `{'time', 'end_time'}`.
+    `key_events_by_col[c]`: chronological `(t_ms, is_press)`.
+
+    Returns a flat list of `{'col', 'mine_time', 'end_time',
+    'press_time'}` per detonation.
+    """
+    hits = []
+    for c, mines in enumerate(mines_by_col):
+        events = key_events_by_col[c] if c < len(key_events_by_col) else []
+        alive = [True] * len(mines)
+        first_live = 0
+        for t, is_press in events:
+            if not is_press:
+                continue
+            for i in range(first_live, len(mines)):
+                m = mines[i]
+                end = m['end_time'] or m['time']
+                if t < m['time'] - marv_w:
+                    break
+                if not alive[i]:
+                    continue
+                if t > end + marv_w:
+                    # Passed for good: presses are chronological, so no
+                    # later press can arm it either.
+                    alive[i] = False
+                    continue
+                alive[i] = False
+                hits.append({'col': c, 'mine_time': m['time'],
+                             'end_time': end, 'press_time': t})
+            while first_live < len(mines) and not alive[first_live]:
+                first_live += 1
+    return hits
+
+
 def simulate_mania(notes_by_col, key_events_by_col, windows):
     """Run the Quaver judgement sim across every column.
 

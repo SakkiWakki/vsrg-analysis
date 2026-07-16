@@ -61,6 +61,14 @@ def rate_for_mods(mods):
 # ----------------------------------------------------------------------
 
 
+def _version_tuple(replay_version):
+    """`'0.0.3'` -> `(0, 0, 3)`; the legacy `'None'` sorts lowest."""
+    try:
+        return tuple(int(x) for x in replay_version.split('.'))
+    except (AttributeError, ValueError):
+        return (0,)
+
+
 def _read_uleb(buf, off):
     """C# 7-bit-encoded length prefix used by `BinaryWriter.Write(string)`.
     Identical to the osu replay format's ULEB128."""
@@ -190,6 +198,14 @@ def parse_qr_events(qr_path):
     count_good, off = _read_int32(data, off)
     count_okay, off = _read_int32(data, off)
     count_miss, off = _read_int32(data, off)
+
+    # Replay v0.0.3 (Quaver 1.7, Replay.VersionMineHit) inserts the
+    # mine-hit tally here; skipping it misaligns everything after,
+    # including the LZMA frame blob.
+    count_mine_hit = 0
+    if _version_tuple(replay_version) >= (0, 0, 3):
+        count_mine_hit, off = _read_int32(data, off)
+
     pause_count, off = _read_int32(data, off)
 
     rng_seed = -1
@@ -223,6 +239,7 @@ def parse_qr_events(qr_path):
         'count_good': count_good,
         'count_okay': count_okay,
         'count_miss': count_miss,
+        'count_mine_hit': count_mine_hit,
         'pause_count': pause_count,
         'rng_seed': rng_seed,
         'used_bits': used_bits,

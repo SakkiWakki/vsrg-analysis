@@ -49,6 +49,12 @@ class QuaverAdapter(GameAdapter):
                 hold_tails[(h[0], h[1])] = h[2] / 1000.0
         return times, hold_tails, int(replay['keycount'])
 
+    def populate_notes_model(self, replay, model) -> None:
+        # Mines + detonations from the .qua/.qr pair; the parser fills
+        # the same chart-stream keys Etterna's adapter produces.
+        from analysis.player.init.notes_model import copy_chart_streams
+        copy_chart_streams(model, replay)
+
     def judgement_windows(self, replay, judge=None, **_):
         from analysis.games.quaver.judgment import windows_for
         return windows_for(self._normalize_judge(replay, judge))
@@ -339,6 +345,12 @@ def _parse_one_qr(p, hash_to_chart=None):
     from analysis.games.quaver.qr_replay import parse_qr_events
     try:
         keycount, _events, meta = parse_qr_events(str(p))
+    except Exception as exc:
+        # Surfacing matters: a format bump (e.g. the 0.0.3 mine-hit
+        # field) silently emptied the library of new replays once.
+        print(f'quaver: failed to parse {p}: {exc}')
+        return None
+    try:
         md5 = meta['map_md5']
         hit = (hash_to_chart or {}).get(md5)
         if hit is not None:

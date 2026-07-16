@@ -754,18 +754,8 @@ def _build_chart_extras(m, replay):
     """Copy Etterna chart-only streams (mines, lifts, fakes, rolls) from
     the replay dict. The adapter populates these during prepare_replay_times
     when a chart match was found; they're absent for osu."""
-    for key in ('mine', 'lift', 'fake'):
-        ts = replay.get(f'{key}_times')
-        cs = replay.get(f'{key}_cols')
-        if ts is not None and cs is not None:
-            setattr(m, f'{key}_times', np.asarray(ts, dtype=np.float64))
-            setattr(m, f'{key}_cols', np.asarray(cs, dtype=np.int32))
-        rs = replay.get(f'{key}_rows')
-        if rs is not None:
-            setattr(m, f'{key}_rows', np.asarray(rs, dtype=np.int64))
-        until = replay.get(f'{key}_until')
-        if until is not None:
-            setattr(m, f'{key}_until', np.asarray(until, dtype=np.float64))
+    from analysis.player.init.notes_model import copy_chart_streams
+    copy_chart_streams(m, replay)
     roll_heads = replay.get('roll_heads')
     if roll_heads:
         m.roll_head_keys = set(roll_heads)

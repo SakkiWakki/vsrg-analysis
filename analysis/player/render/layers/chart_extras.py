@@ -23,12 +23,75 @@ if TYPE_CHECKING:
 # ── public entry points ─────────────────────────────────────────────
 
 
+# Hold-mine body stroke (Quaver): connects the armed span so the player
+# can see how long the lane stays hot.
+_MINE_BODY_COLOR = (170, 60, 60)
+_MINE_BODY_WIDTH = 3
+
+
 def draw_mines(ctx: RenderContext, painter) -> None:
     p = ctx.player
     _draw_chart_sprites(ctx, painter,
                         p.notes.mine_times, p.notes.mine_cols, p.notes.mine_sv,
                         p.notes.mine_until,
                         sprite='mine', keyed=False)
+    _draw_hold_mine_spans(ctx, painter)
+    _draw_mine_detonations(ctx, painter)
+
+
+def _draw_hold_mine_spans(ctx, painter) -> None:
+    """Body stroke + end sprite for Quaver hold mines (finite
+    `mine_end_times`; NaN marks a point mine). The head sprite is
+    already drawn by the shared mine pass."""
+    p = ctx.player
+    n = p.notes
+    ends = n.mine_end_times
+    if not ends.size:
+        return
+
+    margin = ctx.screen_margin
+    lo, hi = -margin, p.H + margin
+    end_pm = ctx.sprite_cache.get('mine', ctx)
+    for k in np.nonzero(np.isfinite(ends))[0]:
+        c = int(n.mine_cols[k])
+        if c >= p.keycount:
+            continue
+        y_head = _chart_sprite_y(ctx, float(n.mine_times[k]), n.mine_sv, k)
+        y_end = ctx.time_to_y(float(ends[k]))
+        if (y_head < lo and y_end < lo) or (y_head > hi and y_end > hi):
+            continue
+        lx = ctx.lane_x(c)
+        draw_lane_line(painter, _MINE_BODY_COLOR, lx, ctx.lane_w,
+                       y_head, y_end, _MINE_BODY_WIDTH)
+        painter.drawPixmap(
+            QPointF(float(lx), float(y_end - end_pm.height() / 2)), end_pm)
+
+
+def _draw_mine_detonations(ctx, painter) -> None:
+    """Miss-X over every mine the player actually set off (Quaver
+    scores each detonation as a Miss). Appears from the press time
+    onward so scrubbing back before the press hides it again."""
+    p = ctx.player
+    n = p.notes
+    idx = n.mine_hit_idx
+    if not idx.size:
+        return
+
+    shown = np.nonzero(n.mine_hit_press <= float(ctx.t_now))[0]
+    if not shown.size:
+        return
+    pm = ctx.sprite_cache.get('miss_x', ctx, jcolor=p.judge_colors['miss'])
+    margin = ctx.screen_margin
+    for k in shown:
+        i = int(idx[k])
+        c = int(n.mine_cols[i])
+        if c >= p.keycount:
+            continue
+        y = _chart_sprite_y(ctx, float(n.mine_times[i]), n.mine_sv, i)
+        if not (-margin <= y <= p.H + margin):
+            continue
+        painter.drawPixmap(
+            QPointF(float(ctx.lane_x(c)), float(y - pm.height() / 2)), pm)
 
 
 def draw_lifts(ctx: RenderContext, painter) -> None:

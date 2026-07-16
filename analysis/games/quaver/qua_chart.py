@@ -211,6 +211,10 @@ def _set_inline_kv(item, body):
 def _post_process(raw):
     mode_str = raw.get('Mode', 'Keys4')
     keycount = _GAME_MODE_KEYS.get(mode_str, 4)
+    # Quaver 1.7 scratch: the map plays as mode+1 lanes, with scratch
+    # notes occupying the last lane (Qua.GetKeyCount).
+    if _coerce_bool(raw.get('HasScratchKey', 'false')):
+        keycount += 1
 
     timing_points = [_coerce_timing_point(tp)
                      for tp in raw.get('TimingPoints') or []
@@ -366,6 +370,10 @@ def _coerce_hitobject(h, keycount):
         'column': lane - 1,
         'is_hold': end_time > 0,
         'end_time': end_time if end_time > 0 else None,
+        # Quaver 1.7 HitObjectType: absent/'Normal' = tap, 'Mine' = mine.
+        # Mines never enter the tap/hold judgment stream; hitting one is
+        # a Miss (long mines stay armed over [start, end]).
+        'is_mine': str(h.get('Type', '')).strip() == 'Mine',
         'group': raw_group or DEFAULT_GROUP_ID,
     }
 

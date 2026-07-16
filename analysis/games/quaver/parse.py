@@ -15,7 +15,8 @@ from analysis.games.quaver.qr_replay import (parse_qr_events,
                                               extract_key_events)
 from analysis.games.quaver.qua_chart import (parse_qua_file,
                                               find_qua_by_hash)
-from analysis.games.quaver.judge_sim import simulate_mania, windows_ms
+from analysis.games.quaver.judge_sim import (simulate_mania, simulate_mines,
+                                              windows_ms)
 from analysis.player.sv.replay_doc import SvReplayDoc, KIND_TIME_SPACE
 
 
@@ -28,10 +29,13 @@ def parse_replay(qr_path, qua_path=None, songs_dir=None, judge='Standard'):
     chart = parse_qua_file(qua_path)
     keycount = chart.get('keycount') or max(keycount_from_qr, 4)
 
-    by_col_notes, holds_meta = _group_notes_by_col(chart['hitobjects'], keycount)
+    by_col_notes, holds_meta, mines_by_col = _group_notes_by_col(
+        chart['hitobjects'], keycount)
     key_events_by_col = extract_key_events(events, keycount)
     windows = windows_ms(judge)
     sim = simulate_mania(by_col_notes, key_events_by_col, windows)
+    mine_hits = simulate_mines(mines_by_col, key_events_by_col, windows[0])
+    mine_arrays = _build_mine_arrays(mines_by_col, mine_hits)
 
     # Map each (time_ms, column) -> TimingGroup id so the renderer can
     # bind a per-note group array parallel to the simulator's output.
@@ -53,6 +57,7 @@ def parse_replay(qr_path, qua_path=None, songs_dir=None, judge='Standard'):
     )
     return {
         **arrays,
+        **mine_arrays,
         'sv': sv_doc,
         'holds': holds_meta,
         'keycount': keycount,
@@ -80,19 +85,60 @@ def _resolve_qua_path(qr_path, qua_path, songs_dir, map_md5):
 
 
 def _group_notes_by_col(hitobjects, keycount):
+    """Split hitobjects into per-column tap/hold notes, hold metadata,
+    and per-column mines. Mines never enter the judgment note stream;
+    they detonate via `simulate_mines` and render as a chart stream."""
     by_col = [[] for _ in range(keycount)]
+    mines_by_col = [[] for _ in range(keycount)]
     holds_meta = []
     for h in hitobjects:
         c = h['column']
         if c >= keycount:
             continue
-        by_col[c].append({'time': int(h['time']),
-                          'end_time': h['end_time']})
+        record = {'time': int(h['time']), 'end_time': h['end_time']}
+        if h.get('is_mine'):
+            mines_by_col[c].append(record)
+            continue
+        by_col[c].append(record)
         if h['is_hold']:
             holds_meta.append((h['time'], c, h['end_time']))
     for col in by_col:
         col.sort(key=lambda n: n['time'])
-    return by_col, holds_meta
+    for col in mines_by_col:
+        col.sort(key=lambda n: n['time'])
+    return by_col, holds_meta, mines_by_col
+
+
+def _build_mine_arrays(mines_by_col, mine_hits):
+    """Chart-stream arrays for the renderer, same contract Etterna's
+    adapter fills: `mine_times`/`mine_cols`/`mine_until` (time-sorted;
+    no `mine_rows` -- Quaver is time-based, and empty rows route the SV
+    projection through time-space). Plus the detonations:
+    `mine_hit_idx` (index into the sorted mine arrays) and
+    `mine_hit_press` (press time, seconds)."""
+    flat = [(m['time'], c, m['end_time'] or 0)
+            for c, mines in enumerate(mines_by_col) for m in mines]
+    if not flat:
+        return {}
+    flat.sort()
+
+    index_of = {(t, c): i for i, (t, c, _e) in enumerate(flat)}
+    hit_pairs = [(index_of[(h['mine_time'], h['col'])],
+                  h['press_time'] / 1000.0) for h in mine_hits]
+    hit_pairs.sort()
+
+    return {
+        'mine_times': np.array([t / 1000.0 for t, _c, _e in flat],
+                               dtype=np.float64),
+        'mine_cols': np.array([c for _t, c, _e in flat], dtype=np.int32),
+        'mine_until': np.full(len(flat), np.inf, dtype=np.float64),
+        'mine_end_times': np.array(
+            [e / 1000.0 if e else np.nan for _t, _c, e in flat],
+            dtype=np.float64),
+        'mine_hit_idx': np.array([i for i, _p in hit_pairs], dtype=np.int64),
+        'mine_hit_press': np.array([p for _i, p in hit_pairs],
+                                   dtype=np.float64),
+    }
 
 
 def _build_arrays(sim, note_group_map):

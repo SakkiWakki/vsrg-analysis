@@ -76,6 +76,15 @@ class NotesModel:
         default_factory=lambda: np.empty(0, dtype=np.float64))
     mine_sv: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.float64))
+    # Hold-mine spans (Quaver): end time per mine, NaN for point mines.
+    mine_end_times: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float64))
+    # Mine detonations (Quaver): index into the mine arrays + the press
+    # time that set it off. Each detonation scored a Miss in-game.
+    mine_hit_idx: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.int64))
+    mine_hit_press: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float64))
     lift_times: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.float64))
     lift_rows: np.ndarray = field(
@@ -100,6 +109,25 @@ class NotesModel:
     # renderer uses this to tint LN tails green for rolls.
     roll_head_keys: set = field(default_factory=set)
 
+
+_CHART_STREAM_FIELDS = (
+    'mine_times', 'mine_rows', 'mine_cols', 'mine_until',
+    'mine_end_times', 'mine_hit_idx', 'mine_hit_press',
+    'lift_times', 'lift_rows', 'lift_cols', 'lift_until',
+    'fake_times', 'fake_rows', 'fake_cols', 'fake_until',
+)
+
+
+def copy_chart_streams(model: NotesModel, replay) -> None:
+    """Copy chart-only stream arrays (mines/lifts/fakes + Quaver mine
+    detonations) from the replay dict onto the model, preserving each
+    field's declared dtype. Adapters call this from
+    `populate_notes_model`; absent keys keep the empty defaults."""
+    for name in _CHART_STREAM_FIELDS:
+        value = replay.get(name)
+        if value is not None:
+            dtype = getattr(model, name).dtype
+            setattr(model, name, np.asarray(value, dtype=dtype))
 
 
 def build_notes_model(replay, times, hold_tails, adapter) -> NotesModel:
