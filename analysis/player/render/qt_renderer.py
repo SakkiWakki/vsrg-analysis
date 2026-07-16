@@ -17,6 +17,7 @@ _HUD_LAYERS = frozenset(('free_sections', 'hud'))
 
 
 from analysis.player.render import culling, theme
+from analysis.player.render.frame_stats import FrameStats
 from analysis.player.hud.sidebar_api import SidebarContext
 from analysis.player.plugin.plugin_api import Stage
 from analysis.player.render.render_context import RenderContext
@@ -89,6 +90,7 @@ class QtPlayerRenderer:
         self._hud_pixmap = None
         self._hud_rendered_at = 0.0
         self._hud_snapshot = None
+        self._frame_stats = FrameStats()
 
     def build_context(self, player, painter, t_now):
         player._render_t_now = float(t_now)
@@ -141,6 +143,13 @@ class QtPlayerRenderer:
 
     def draw(self, player, painter, t_now):
         ctx = self.build_context(player, painter, t_now)
+        # Per-rendered-frame cadence sample; published on the player so
+        # the frame-analyzer component (whose own draw is throttled to
+        # the HUD cache cadence) reads real frame timing via
+        # `data.frame_stats()`.
+        self._frame_stats.tick()
+        if player is not None:
+            player._render_frame_stats = self._frame_stats
         hud = getattr(player, 'hud', None) if player is not None else None
         # Narrowly-mocked contexts (layer-gating tests) have no player
         # or painter; for those, HUD layers draw directly like any other

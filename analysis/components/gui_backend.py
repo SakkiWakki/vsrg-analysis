@@ -46,7 +46,7 @@ class PlayerDataSource:
     _FIELDS = frozenset({
         'game', 'keycount', 'combo', 'judgment_windows',
         'judgment_counts', 'judgment_colors', 'judge_label',
-        't_now', 'play_rate', 'paused', 'note_count',
+        't_now', 'play_rate', 'paused', 'note_count', 'frame_stats',
         'sv_enabled', 'sv_suspended', 'sv_sections',
         'skin', 'press_hide', 'scroll_mode', 'scroll_value',
         'effective_scroll_ms', 'layer_visible', 'layer_tree',
@@ -112,6 +112,14 @@ class PlayerDataSource:
         counts.update(Counter(note_judges))
         self._p._judgment_counts_cache = (note_judges, windows, counts)
         return dict(counts)
+
+    def frame_stats(self) -> dict | None:
+        """Render-frame cadence summary, ticked by the renderer once
+        per rendered frame. None until enough frames have rendered."""
+        stats = getattr(self._p, '_render_frame_stats', None)
+        if stats is None:
+            return None
+        return stats.summary()
 
     def judgment_colors(self) -> dict[str, tuple]:
         c = getattr(self._p, 'judge_colors', None)
