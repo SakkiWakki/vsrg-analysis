@@ -22,10 +22,15 @@ from dataclasses import dataclass, field
 @dataclass
 class HudState:
     # Sidebar scrolling. ``scroll`` is the vertical offset (px) applied
-    # to top-pinned sections; bottom-pinned sections ignore it. ``max``
-    # is recomputed each frame by the renderer after measuring content.
+    # to top-pinned sections; bottom-pinned sections ignore it.
+    # ``content_h`` is the top region's painted height, observed by the
+    # renderer after each real draw (never trusted from plugin measure
+    # hooks), and ``max`` derives from it -- so scrollability tracks
+    # whatever the sections actually painted, one HUD render behind at
+    # worst.
     sidebar_scroll: int = 0
     sidebar_scroll_max: int = 0
+    sidebar_content_h: int = 0
 
     # Collapsible plugins panel in the sidebar. Opened by the user via
     # the painted toggle; the renderer checks it to decide layout.

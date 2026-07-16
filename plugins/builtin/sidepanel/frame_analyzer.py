@@ -52,9 +52,6 @@ def _audio_line(count: int, last: str) -> str:
 
 
 def _draw(ctx):
-    if getattr(ctx, 'measure_only', False):
-        return
-
     s = ctx.data.frame_stats()
 
     state = 'PAUSED' if ctx.data.paused() else 'PLAYING'

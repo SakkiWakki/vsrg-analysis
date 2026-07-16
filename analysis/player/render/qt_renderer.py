@@ -302,21 +302,25 @@ class QtPlayerRenderer:
 
         bottom_start_y = (p.H - bottom_h - theme.SIDEBAR_BOTTOM_MARGIN
                           if bottom_h else p.H)
-        top_viewport_bottom = max(theme.SIDEBAR_TOP, bottom_start_y)
+        # The page-break divider floats `divider_gap` above the pinned
+        # sections; the scrollable viewport ends the same gap above the
+        # divider, so scrolled content keeps symmetric breathing room
+        # instead of running through the separator.
+        divider_gap = theme.DIVIDER_MARGIN_Y + 8
+        divider_y = bottom_start_y - divider_gap
+        top_region_end = divider_y - divider_gap if bottom_h else p.H
+        top_viewport_bottom = max(theme.SIDEBAR_TOP, top_region_end)
         top_viewport_h = max(0, top_viewport_bottom - theme.SIDEBAR_TOP)
-
-        # Measure top sections to know whether they need scrolling.
-        measure_top = SidebarContext(ctx, painter, self, sidebar_x,
-                                     theme.SIDEBAR_WIDTH, theme.SIDEBAR_TOP,
-                                     measure_only=True)
-        self._run_sections(top, measure_top)
-        top_content_h = max(0, measure_top.y - theme.SIDEBAR_TOP)
 
         # Clamp the player-owned scroll offset to the legal range so the
         # Qt wheel handler can write to it freely without knowing the
-        # layout. Max scroll is "content_h - viewport_h" (zero when the
-        # content already fits).
-        overflow = max(0, top_content_h - top_viewport_h)
+        # layout. The top region is deliberately NOT pre-measured: its
+        # content height is whatever the previous real draw painted
+        # (recorded below), so scrollability follows actual content and
+        # never depends on plugins implementing measure hooks honestly.
+        # A size change (e.g. expanding the layer tree) corrects the
+        # clamp on the next HUD render.
+        overflow = max(0, p.hud.sidebar_content_h - top_viewport_h)
         p.hud.sidebar_scroll_max = overflow
         if p.hud.sidebar_scroll < 0:
             p.hud.sidebar_scroll = 0
@@ -338,10 +342,16 @@ class QtPlayerRenderer:
         self._run_sections(top, top_ctx)
         painter.restore()
 
+        # Observe what the sections actually painted; this feeds the
+        # next render's scroll clamp and this render's thumb.
+        top_content_h = max(0, top_ctx.y - (theme.SIDEBAR_TOP - scroll))
+        p.hud.sidebar_content_h = top_content_h
+        overflow = max(0, top_content_h - top_viewport_h)
+        p.hud.sidebar_scroll_max = overflow
+
         if bottom:
             divider_w = int(theme.SIDEBAR_WIDTH * theme.DIVIDER_WIDTH_FRAC * 2)
             divider_x = sidebar_x + (theme.SIDEBAR_WIDTH - divider_w) // 2
-            divider_y = bottom_start_y - theme.DIVIDER_MARGIN_Y - 8
             pen = QPen(_qcolor(theme.DIVIDER_COLOR),
                        int(theme.DIVIDER_THICKNESS))
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)

@@ -207,7 +207,16 @@ class PlayerTab(QWidget):
         bar = QHBoxLayout()
 
         self.play_btn = QPushButton('▶')
-        self.play_btn.setMaximumWidth(36)
+        # Fixed in BOTH dimensions, sized to the taller of the two
+        # glyphs: the pause glyph renders ~3px taller than play in the
+        # default font, so a size-to-content button (and with it the
+        # whole transport row) visibly resizes on every toggle.
+        glyph_heights = []
+        for glyph in ('▶', '⏸'):
+            self.play_btn.setText(glyph)
+            glyph_heights.append(self.play_btn.sizeHint().height())
+        self.play_btn.setText('▶')
+        self.play_btn.setFixedSize(36, max(glyph_heights))
         self.play_btn.setFocusPolicy(Qt.NoFocus)
         self.play_btn.clicked.connect(lambda _checked=False: self._toggle())
         bar.addWidget(self.play_btn)
