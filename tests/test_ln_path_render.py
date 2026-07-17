@@ -268,3 +268,57 @@ def test_body_span_window_is_path_extent_for_fold():
     assert top == pytest.approx(100.0)
     assert bot == pytest.approx(420.0)       # includes the apex past the tail
     assert state == 'normal'
+
+
+# --- straight-span orientation + consumed holds ---------------------
+
+def test_upscroll_straight_body_spans_head_to_tail():
+    # NotITG's mirrored field scrolls up: head near the receptor at the
+    # TOP (small y), tail deeper below. The window is ordered min/max, so
+    # the body draws in both scroll orientations.
+    ctx = _ctx()
+    n = _ln_view(state='upcoming', y=115.0, y_end=300.0)
+    assert nl._ln_body_span(ctx, n, hide=False) == (115.0, 300.0, 'normal')
+
+
+def test_held_upscroll_body_runs_receptor_to_tail():
+    # The consumer pins a held head at the receptor upstream; the body
+    # window is then exactly receptor -> tail (nothing past the receptor).
+    ctx = _ctx()
+    n = _ln_view(state='held', y=115.0, y_end=300.0)
+    assert nl._ln_body_span(ctx, n, hide=False) == (115.0, 300.0, 'normal')
+
+
+def test_held_hide_clamps_at_judge_without_crossing_tail():
+    ctx = _ctx(judge_y=500)
+    n = _ln_view(state='held', y=560.0, y_end=300.0)
+    assert nl._ln_body_span(ctx, n, hide=True) == (300.0, 500.0, 'normal')
+    # Once the tail crosses the judge line the window degenerates: the
+    # clamp never extends the body past its own tail.
+    n = _ln_view(state='held', y=560.0, y_end=520.0)
+    top, bot, _state = nl._ln_body_span(ctx, n, hide=True)
+    assert top == bot
+
+
+def test_display_judge_follows_receptor_dy():
+    ctx = _ctx(judge_y=500)
+    assert nl._display_judge_y(ctx, 0) == 500.0
+    ctx.receptor_offsets = {'dy': np.array([-385.0, 0.0])}
+    assert nl._display_judge_y(ctx, 0) == 115.0
+
+
+def test_released_hold_without_release_data_draws_nothing():
+    # Autoplay streams carry no release offsets: a hold is fully consumed
+    # at its tail -- no body slab, no tail cap drifting past the receptor.
+    ctx = _ctx()
+    n = _ln_view(state='released', rel_off=None, y=115.0, y_end=90.0)
+    assert nl._ln_body_span(ctx, n, hide=False) is None
+    painter = _RecordPainter()
+    nl._draw_ln(ctx, painter, n)
+    assert not painter.tiled and not painter.paths and not painter.pixmaps
+
+
+def test_released_hold_with_release_data_keeps_guide_window():
+    ctx = _ctx(judge_y=500)
+    n = _ln_view(state='released', rel_off=-0.05, y_end=420.0)
+    assert nl._ln_body_span(ctx, n, hide=False) == (420.0, 500, 'released')

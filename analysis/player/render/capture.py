@@ -1,0 +1,146 @@
+"""Offscreen capture slots for the field-instance composite.
+
+The renderer captures layer groups into per-purpose offscreen targets
+(slots 'field', 'field2', 'backdrop', 'screen') and composites them
+back as transformed per-instance blits. This module abstracts the
+render target + blit + snapshot operations behind one small interface
+so the composite step can run on either backend:
+
+- RasterCaptureBackend (here): pooled window-sized QPixmaps and
+  QPainter drawPixmap blits. The default; works on any host painter,
+  including headless tests under QT_QPA_PLATFORM=offscreen.
+- GLCaptureBackend (gl_capture.py): FBO render targets, textured-quad
+  blits, glBlitFramebuffer snapshots. Chosen per frame when the host
+  painter renders on a GL 3+ context (the QOpenGLWidget canvas).
+
+Handles returned by `close`/`snapshot` are opaque to the renderer: it
+stores them (AFT retention dicts, the previous-frame screen capture)
+and passes them back to `blit`. Raster handles are QPixmaps; GL
+handles are retained textures. `release` returns a snapshot handle the
+renderer no longer holds so the GL backend can recycle its texture
+(no-op for raster).
+
+Slot lifecycle per frame: open -> paint via the returned QPainter ->
+close -> blit/present. `snapshot` may be taken mid-paint (between
+open and close) - the AFT node captures the in-progress screen
+composite at its draw position.
+"""
+from __future__ import annotations
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QPainter, QPixmap
+
+
+class RasterCaptureBackend:
+    """Pooled-QPixmap capture slots (the CPU raster path)."""
+
+    def __init__(self):
+        # slot -> pooled QPixmap, reused across frames while the size
+        # holds - a fresh window-sized allocation per capture per frame
+        # is a measurable slice of the frame budget.
+        self._pool: dict = {}
+        self._painters: dict = {}
+
+    def open(self, slot: str, host_painter, w: int, h: int) -> QPainter:
+        """An active painter into the named slot's transparent target,
+        sized to the window at the host painter's device pixel ratio.
+        Pooled targets must never be RETAINED across frames by the
+        caller (`snapshot` copies out of the slot)."""
+        dpr = float(host_painter.device().devicePixelRatioF())
+        size = (int(w * dpr), int(h * dpr))
+        pm = self._pool.get(slot)
+        if pm is None or (pm.width(), pm.height()) != size:
+            pm = QPixmap(*size)
+            self._pool[slot] = pm
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pm)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        self._painters[slot] = painter
+        return painter
+
+    def close(self, slot: str):
+        """End the slot's painter; returns the slot's drawable handle,
+        valid until the slot is next opened."""
+        painter = self._painters.pop(slot, None)
+        if painter is not None:
+            painter.end()
+        return self._pool.get(slot)
+
+    def snapshot(self, slot: str, recycle=None):
+        """An immutable copy of the slot's current pixels (legal
+        mid-paint). `recycle` is a released handle the backend may
+        reuse as the copy's storage; the raster copy never needs it."""
+        pm = self._pool.get(slot)
+        return pm.copy() if pm is not None else None
+
+    def release(self, handle) -> None:
+        """The renderer no longer holds `handle`; QPixmaps just get
+        garbage-collected."""
+
+    def blit(self, painter, handle, clip, transform=None, src_box=None,
+             opacity=1.0) -> None:
+        """One instance blit of `handle` onto `painter`: clipped to the
+        `clip` rect in target space, under `transform`, additionally
+        clipped to `src_box` in the handle's own source space (the
+        design box - offscreen content never bleeds in), at `opacity`.
+        `blits` batches several onto one painter state push."""
+        with self.blits(painter, clip) as batch:
+            batch.blit(handle, transform=transform, src_box=src_box,
+                       opacity=opacity)
+
+    def blits(self, painter, clip):
+        """Context manager for a run of instance blits sharing one
+        target painter; yields a batch with `blit(handle, ...)` (same
+        semantics as the standalone `blit`) and `fill(rgb, opacity)`
+        (a flat color quad covering the clip rect - the AFT-rig
+        curtain at its tree position among the blits)."""
+        return _RasterBlits(painter, clip)
+
+    def present(self, painter, slot: str) -> None:
+        """Draw the (closed) slot's full content onto `painter` at the
+        origin - the screen composite's final hand-off to the real
+        chart target."""
+        pm = self._pool.get(slot)
+        if pm is not None:
+            painter.drawPixmap(0, 0, pm)
+
+
+class _RasterBlits:
+    """One batch of instance blits: each blit saves/restores around its
+    own transform + clips so entries stay independent."""
+
+    def __init__(self, painter, clip):
+        self._painter = painter
+        self._clip = clip
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def blit(self, handle, transform=None, src_box=None,
+             opacity=1.0) -> None:
+        painter = self._painter
+        painter.save()
+        painter.setClipRect(self._clip)
+        if transform is not None:
+            painter.setTransform(transform, True)
+        if src_box is not None:
+            # Set after the transform: clips the copy's SOURCE (the
+            # design box in the capture) so only that region is copied,
+            # mapped to the copy's position by the transform.
+            painter.setClipRect(src_box, Qt.ClipOperation.IntersectClip)
+        painter.setOpacity(min(1.0, opacity))
+        painter.drawPixmap(0, 0, handle)
+        painter.restore()
+
+    def fill(self, rgb, opacity) -> None:
+        painter = self._painter
+        painter.save()
+        painter.setClipRect(self._clip)
+        painter.setOpacity(min(1.0, opacity))
+        r, g, b = rgb
+        painter.fillRect(self._clip, QColor.fromRgbF(r, g, b))
+        painter.restore()

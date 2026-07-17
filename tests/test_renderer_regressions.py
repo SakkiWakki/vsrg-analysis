@@ -207,6 +207,7 @@ def test_ln_release_guide_uses_projected_time_to_y(monkeypatch):
         lane_w=80, note_h=20, judge_y=500, screen_margin=100,
         # drawers removed - sprite cache is the sole draw path
         sprite_cache=sprite_cache,
+        lane_width=lambda col: 80,
         time_to_y=lambda t: 456.0 if abs(t - 0.75) < 1e-9 else -999.0,
     )
     note = _NoteView(

@@ -31,8 +31,8 @@ _SCREEN_PREV_SCOPE = 'screen_prev'
 # the instance blits (covers earlier blits, capped by later ones).
 _FILL_SCOPE = 'fill'
 # The second, independently-modded playfield capture (dual-player NotITG).
-# A 'field2' copy blits `_field2_pixmap` instead of the primary field
-# pixmap; produced only when the frame carries a second_field spec.
+# A 'field2' copy blits the second field capture instead of the
+# primary; produced only when the frame carries a second_field spec.
 _FIELD2_SCOPE = 'field2'
 
 # A chart-time advance larger than this (or any backward step) between
@@ -63,6 +63,7 @@ def _field_extra(entry):
 
 
 from analysis.player.render import culling, theme
+from analysis.player.render.capture import RasterCaptureBackend
 from analysis.player.render.frame_stats import FrameStats
 from analysis.player.hud.sidebar_api import SidebarContext
 from analysis.player.plugin.plugin_api import Stage
@@ -136,12 +137,18 @@ class QtPlayerRenderer:
         self._hud_pixmap = None
         self._hud_rendered_at = 0.0
         self._hud_snapshot = None
-        self._field_pixmap = None
-        # Second, independently-modded field capture for dual-player NotITG
-        # charts (EffectFrame.second_field). None on every frame that has no
+        # Offscreen capture slots + blit/snapshot ops (render/capture.py).
+        # Raster (pooled QPixmaps) by default; a GL host swaps in the
+        # FBO-backed backend.
+        self._capture = RasterCaptureBackend()
+        # Drawable handles for this frame's closed capture slots, reset
+        # by each begin. `_field2_src` is the second, independently-
+        # modded field capture for dual-player NotITG charts
+        # (EffectFrame.second_field); None on every frame without a
         # second_field spec - the zero-cost path for every other game.
-        self._field2_pixmap = None
-        self._backdrop_pixmap = None
+        self._field_src = None
+        self._field2_src = None
+        self._backdrop_src = None
         self._backdrop_painter = None
         # Previous frame's AFT capture (the chart area as of the node's
         # draw position), retained for this frame's 'screen_prev' copies.
@@ -150,13 +157,12 @@ class QtPlayerRenderer:
         # was captured at, used to detect that discontinuity.
         self._prev_screen = None
         self._prev_screen_t = None
-        self._screen_pixmap = None
-        self._screen_painter = None
+        # Whether the 'screen' slot is open this frame (chart painting
+        # redirected into the offscreen composite).
+        self._screen_open = False
         # This frame's node-point capture, taken lazily during the
         # instance blits and promoted to `_prev_screen` at composite end.
         self._screen_capture = None
-        # Per-purpose pooled capture pixmaps (see _new_capture_pixmap).
-        self._capture_pool: dict = {}
         # Preserve-texture freezes: the last capture each AFT source
         # blitted while its node was visible, held across hidden frames.
         self._aft_frozen: dict = {}
@@ -288,9 +294,10 @@ class QtPlayerRenderer:
         # chart region incl. background + below-draws (NotITG AFT copies
         # whose ShowAFTBG grabs the background). To serve both from one
         # frame, the field layers ALWAYS capture into a transparent
-        # `_field_pixmap`, and when any 'full' copy is present the
+        # the transparent field slot, and when any 'full' copy is present the
         # background clear + below-draws capture into a separate
-        # `_backdrop_pixmap` (also blitted to screen once as the real
+        # a separate
+        # backdrop slot (also blitted to screen once as the real
         # backdrop). A 'full' copy then blits backdrop+field under its
         # transform; a 'field' copy blits only the field pixmap.
         full_capture = self._full_field_capture(effect_frame, ctx)
@@ -307,7 +314,7 @@ class QtPlayerRenderer:
                     self._end_effect_transform(field_painter or chart_painter)
                     chart_wrapped = False
                 if field_painter is not None:
-                    field_painter.end()
+                    self._end_field_capture()
                     self._capture_second_field(effect_frame, ctx,
                                                chart_painter, visibility)
                     self._blit_field_instances(effect_frame, ctx,
@@ -372,7 +379,7 @@ class QtPlayerRenderer:
         if chart_wrapped:
             self._end_effect_transform(field_painter or chart_painter)
         if field_painter is not None:
-            field_painter.end()
+            self._end_field_capture()
             self._capture_second_field(effect_frame, ctx, chart_painter,
                                        visibility)
             self._blit_field_instances(effect_frame, ctx, chart_painter)
@@ -479,10 +486,13 @@ class QtPlayerRenderer:
         t = float(ctx.t_now)
         prev_t = self._prev_screen_t
         if prev_t is not None and not (0.0 <= t - prev_t <= _SEEK_GAP_S):
+            self._capture.release(self._prev_screen)
             self._prev_screen = None
             self._prev_screen_t = None
             # Retained freezes predate the jump too; they re-prime from
             # the next frame their source node draws.
+            for handle in self._aft_frozen.values():
+                self._capture.release(handle)
             self._aft_frozen.clear()
 
     def _begin_screen_composite(self, frame, ctx, painter):
@@ -491,18 +501,15 @@ class QtPlayerRenderer:
         or None (no screen copies, direct painting). The composite is
         what the AFT node's capture snapshots mid-blit; compositing
         offscreen keeps that snapshot cheap and consistent."""
-        self._screen_pixmap = None
-        self._screen_painter = None
+        self._screen_open = False
+        self._capture.release(self._screen_capture)
         self._screen_capture = None
         if (not self._has_screen_copy(frame) or painter is None
                 or getattr(ctx, 'player', None) is None):
             return None
-        pm = self._new_capture_pixmap(ctx, painter, slot='screen')
-        sp = QPainter(pm)
-        sp.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        self._screen_pixmap = pm
-        self._screen_painter = sp
-        return sp
+        p = ctx.player
+        self._screen_open = True
+        return self._capture.open('screen', painter, p.W, p.H)
 
     def _end_screen_composite(self, painter, ctx) -> None:
         """Finish the screen composite: end its painter, blit it to the
@@ -512,79 +519,54 @@ class QtPlayerRenderer:
         it includes the screen blits themselves, and feeding it back
         makes an identity opaque sampler a fixed point that freezes the
         chart area."""
-        pm = self._screen_pixmap
-        self._screen_pixmap = None
-        if self._screen_painter is not None:
-            self._screen_painter.end()
-            self._screen_painter = None
-        if pm is None:
+        if not self._screen_open:
             return
-        painter.drawPixmap(0, 0, pm)
+        self._capture.close('screen')
+        self._screen_open = False
+        self._capture.present(painter, 'screen')
         if self._screen_capture is not None:
+            self._capture.release(self._prev_screen)
             self._prev_screen = self._screen_capture
             self._prev_screen_t = float(ctx.t_now)
             self._screen_capture = None
 
-    def _new_capture_pixmap(self, ctx, painter, slot=None):
-        """A transparent window-sized pixmap matching the painter's device
-        pixel ratio, for an offscreen field/backdrop capture. `slot`
-        names a per-purpose pooled pixmap reused across frames while the
-        size holds - a fresh window-sized allocation per capture per
-        frame is a measurable slice of the frame budget. Pooled pixmaps
-        must never be RETAINED across frames by the caller (the screen
-        retention copies out of its slot)."""
-        from PySide6.QtGui import QPixmap
-        p = ctx.player
-        dpr = float(painter.device().devicePixelRatioF())
-        size = (int(p.W * dpr), int(p.H * dpr))
-        pm = self._capture_pool.get(slot) if slot is not None else None
-        if pm is None or (pm.width(), pm.height()) != size:
-            pm = QPixmap(*size)
-            if slot is not None:
-                self._capture_pool[slot] = pm
-        pm.setDevicePixelRatio(dpr)
-        pm.fill(Qt.GlobalColor.transparent)
-        return pm
-
     def _begin_backdrop_capture(self, frame, ctx, painter) -> None:
-        """Open a backdrop pixmap capturing the background clear +
+        """Open the backdrop slot capturing the background clear +
         below-draws, used as the source for 'full' field copies (their
         capture includes the background). No-op unless this frame has a
         'full' copy. The captured backdrop also becomes the base backdrop
         blitted to screen, so it is never double-drawn."""
-        self._backdrop_pixmap = None
+        self._backdrop_src = None
         self._backdrop_painter = None
         if (not self._full_field_capture(frame, ctx) or painter is None
                 or getattr(ctx, 'player', None) is None):
             return
-        pm = self._new_capture_pixmap(ctx, painter, slot='backdrop')
-        self._backdrop_pixmap = pm
-        bp = QPainter(pm)
-        bp.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        self._backdrop_painter = bp
+        p = ctx.player
+        self._backdrop_painter = self._capture.open(
+            'backdrop', painter, p.W, p.H)
 
     def _end_backdrop_capture(self) -> None:
         if self._backdrop_painter is not None:
-            self._backdrop_painter.end()
+            self._backdrop_src = self._capture.close('backdrop')
             self._backdrop_painter = None
 
     def _begin_field_capture(self, frame, ctx, painter):
-        """Redirect the field layer group into a transparent pixmap
-        when this frame carries field instances; returns the capture
-        painter or None (no fields, direct painting)."""
-        self._field_pixmap = None
+        """Redirect the field layer group into the transparent field
+        slot when this frame carries field instances; returns the
+        capture painter or None (no fields, direct painting)."""
+        self._field_src = None
         if (frame is None or not frame.fields or painter is None
                 or getattr(ctx, 'player', None) is None):
             return None
-        pm = self._new_capture_pixmap(ctx, painter, slot='field')
-        self._field_pixmap = pm
-        field_painter = QPainter(pm)
-        field_painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        return field_painter
+        p = ctx.player
+        return self._capture.open('field', painter, p.W, p.H)
+
+    def _end_field_capture(self) -> None:
+        self._field_src = self._capture.close('field')
 
     def _capture_second_field(self, frame, ctx, painter, visibility) -> None:
         """Render the field layers a second time with a dual-player chart's
-        alternate (player-1) note-mod consumer, into `_field2_pixmap`, so
+        alternate (player-1) note-mod consumer, into the field2 slot, so
         'field2'-scope copies blit an independently-modded playfield.
 
         Engine parity (item 43/ENGINE_ORACLE 2b): an ActorProxy of a
@@ -597,16 +579,14 @@ class QtPlayerRenderer:
         transform bracket the primary capture uses so field transforms
         replicate), then player-0 state is restored for the rest of the
         frame. Zero cost when no second_field spec is present."""
-        self._field2_pixmap = None
+        self._field2_src = None
         spec = getattr(frame, 'second_field', None)
         if (spec is None or painter is None
                 or getattr(ctx, 'player', None) is None):
             return
         player = ctx.player
         primary = getattr(player, '_note_mods', None)
-        pm = self._new_capture_pixmap(ctx, painter, slot='field2')
-        fp = QPainter(pm)
-        fp.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        fp = self._capture.open('field2', painter, player.W, player.H)
         try:
             player._note_mods = spec.note_mods
             self._rebuild_note_mods(ctx)
@@ -615,10 +595,9 @@ class QtPlayerRenderer:
             if wrapped:
                 self._end_effect_transform(fp)
         finally:
-            fp.end()
+            self._field2_src = self._capture.close('field2')
             player._note_mods = primary
             self._rebuild_note_mods(ctx)
-        self._field2_pixmap = pm
 
     @staticmethod
     def _rebuild_note_mods(ctx) -> None:
@@ -672,73 +651,69 @@ class QtPlayerRenderer:
         box = (design_box(ctx.chart_rect)
                if (self._full_field_capture(frame, ctx)
                    or self._has_screen_copy(frame)) else None)
-        if self._backdrop_pixmap is not None:
-            painter.save()
-            painter.setClipRect(QRectF(*ctx.chart_rect))
-            painter.drawPixmap(0, 0, self._backdrop_pixmap)
-            painter.restore()
-        for entry in frame.fields:
-            transform, opacity, scope = _field_entry(entry)
-            extra = _field_extra(entry)
-            if opacity < 1.0 / 255.0:
-                continue
-            if scope == _FILL_SCOPE:
-                # An AFT-rig curtain quad at its tree position: covers
-                # every blit made before it, capped by the ones after.
-                # The AFT node sits BEFORE the curtains in the rig's
-                # tree (gat: nodes at 5718/5738, quads after), so the
-                # node-point capture must snapshot the composite before
-                # the curtain lands - otherwise a 'screen' sampler
-                # above the quad blits the blackout back at itself.
-                if (self._screen_pixmap is not None
-                        and self._screen_capture is None):
-                    self._screen_capture = self._screen_pixmap.copy()
-                painter.save()
-                painter.setClipRect(QRectF(*ctx.chart_rect))
-                painter.setOpacity(min(1.0, opacity))
-                r, g, b = extra or (1.0, 1.0, 1.0)
-                painter.fillRect(QRectF(*ctx.chart_rect),
-                                 QColor.fromRgbF(r, g, b))
-                painter.restore()
-                continue
-            if scope == _SCREEN_SCOPE and self._screen_pixmap is None:
-                continue
-            if scope == _SCREEN_PREV_SCOPE and self._prev_screen is None:
-                continue
-            if scope == _FIELD2_SCOPE and self._field2_pixmap is None:
-                continue
-            if scope == _SCREEN_SCOPE and self._screen_capture is None:
-                self._screen_capture = self._screen_pixmap.copy()
-            painter.save()
-            painter.setClipRect(QRectF(*ctx.chart_rect))
-            if transform is not None:
-                painter.setTransform(transform, True)
-            if box is not None:
-                # Set after the transform: clips the copy's SOURCE (the
-                # 640x480 design box in the pixmap) so only that region is
-                # copied, mapped to the copy's position by the transform.
-                painter.setClipRect(box, Qt.ClipOperation.IntersectClip)
-            painter.setOpacity(min(1.0, opacity))
-            if scope == _SCREEN_SCOPE:
-                painter.drawPixmap(
-                    0, 0, self._aft_source(extra, self._screen_capture))
-            elif scope == _SCREEN_PREV_SCOPE:
-                painter.drawPixmap(
-                    0, 0, self._aft_source(extra, self._prev_screen))
-            elif scope == _FIELD2_SCOPE:
-                # The second player's independently-modded field capture.
-                painter.drawPixmap(0, 0, self._field2_pixmap)
-            else:
-                if scope == 'full' and self._backdrop_pixmap is not None:
-                    painter.drawPixmap(0, 0, self._backdrop_pixmap)
-                painter.drawPixmap(0, 0, self._field_pixmap)
-            painter.restore()
-        if self._screen_pixmap is not None and self._screen_capture is None:
+        with self._capture.blits(painter, QRectF(*ctx.chart_rect)) as batch:
+            if self._backdrop_src is not None:
+                batch.blit(self._backdrop_src)
+            for entry in frame.fields:
+                self._blit_field_instance(batch, entry, box)
+        if self._screen_open and self._screen_capture is None:
             # No 'screen' sampler drew this frame, but the node still
             # captures - its draw position follows the instance blits -
             # so 'screen_prev' copies have next frame's source.
-            self._screen_capture = self._screen_pixmap.copy()
-        self._backdrop_pixmap = None
+            self._take_screen_capture()
+        self._backdrop_src = None
+
+    def _take_screen_capture(self) -> None:
+        """This frame's node-point AFT capture: the in-progress screen
+        composite as of the node's draw position, reusing the retention
+        slot freed when a seek dropped the previous capture."""
+        self._screen_capture = self._capture.snapshot('screen')
+
+    def _blit_field_instance(self, batch, entry, box) -> None:
+        """One instance blit into the open batch (or the fill scope's
+        curtain quad), honouring the scope's capture source. Skips
+        instances whose source doesn't exist this frame ('screen_prev'
+        before any capture is retained, 'field2' without a second
+        capture)."""
+        transform, opacity, scope = _field_entry(entry)
+        extra = _field_extra(entry)
+        if opacity < 1.0 / 255.0:
+            return
+        if scope == _FILL_SCOPE:
+            # An AFT-rig curtain quad at its tree position: covers
+            # every blit made before it, capped by the ones after.
+            # The AFT node sits BEFORE the curtains in the rig's
+            # tree (gat: nodes at 5718/5738, quads after), so the
+            # node-point capture must snapshot the composite before
+            # the curtain lands - otherwise a 'screen' sampler
+            # above the quad blits the blackout back at itself.
+            if self._screen_open and self._screen_capture is None:
+                self._take_screen_capture()
+            batch.fill(extra or (1.0, 1.0, 1.0), opacity)
+            return
+        if scope == _SCREEN_SCOPE and not self._screen_open:
+            return
+        if scope == _SCREEN_PREV_SCOPE and self._prev_screen is None:
+            return
+        if scope == _FIELD2_SCOPE and self._field2_src is None:
+            return
+        if scope == _SCREEN_SCOPE and self._screen_capture is None:
+            self._take_screen_capture()
+        match scope:
+            case 'screen':
+                source = self._aft_source(extra, self._screen_capture)
+            case 'screen_prev':
+                source = self._aft_source(extra, self._prev_screen)
+            case 'field2':
+                # The second player's independently-modded field capture.
+                source = self._field2_src
+            case _:
+                if scope == 'full' and self._backdrop_src is not None:
+                    batch.blit(self._backdrop_src, transform=transform,
+                               src_box=box, opacity=opacity)
+                source = self._field_src
+        batch.blit(source, transform=transform, src_box=box,
+                   opacity=opacity)
 
     def _aft_source(self, extra, live_pixmap):
         """The pixmap an AFT sampler blits, honouring preserve-texture
