@@ -198,6 +198,8 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
         if notefield is not None:
             proxy_players[notefield] = number
     names = env.named_actor_ids()
+    aft_nodes = {sim.aft_texture_name: rec_id
+                 for rec_id, sim in env.actors.items() if sim.is_aft}
 
     instances = []
     if _dual_players(mod_channels, named_keyframes):
@@ -211,8 +213,12 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
         sim = env.actors.get(rec_id)
         if sim is None:
             continue
+        aft_order = None
         if sim.aft_source:
             kind, player = 'aft', 0
+            node = aft_nodes.get(sim.aft_source)
+            aft_order = ('pre' if node is not None and rec_id < node
+                         else 'post')
         elif sim.proxy_target in proxy_players:
             kind, player = 'proxy', proxy_players[sim.proxy_target]
         else:
@@ -227,7 +233,7 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
                              if env.actor_id(a) in names), 'copy')
             name = f'{ancestor}_{rec_id}'
         instances.append(field_compose.instance(name, kind, player, links,
-                                                t0=t0))
+                                                t0=t0, aft_order=aft_order))
     return instances
 
 

@@ -477,6 +477,10 @@ class SimActor:
     def is_aft(self) -> bool:
         return self._aft_texture_name is not None
 
+    @property
+    def aft_texture_name(self) -> str | None:
+        return self._aft_texture_name
+
     # ActorProxy target bind (SetTarget): the recorder id of the actor
     # this proxy re-renders (ActorProxy.cpp:18 - a proxy is the target
     # re-drawn under the proxy's transform). The environment resolves

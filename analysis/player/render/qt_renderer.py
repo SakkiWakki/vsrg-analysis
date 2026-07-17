@@ -18,11 +18,15 @@ _HUD_LAYERS = frozenset(('free_sections', 'hud'))
 # A field instance is `(transform, opacity)` or, for a per-copy capture
 # scope, `(transform, opacity, scope)`. A missing scope is 'field'
 # (transparent field-only capture) - the zero-cost path other games use.
-# 'full' additionally carries the backdrop (background + below-draws);
-# 'screen' blits the previous frame's whole chart-area composite (SM AFT
-# feedback semantics).
+# 'full' additionally carries the backdrop (background + below-draws).
+# The screen scopes model SM's ActorFrameTexture: the AFT node captures
+# the chart area as drawn so far in the SAME frame (backdrop + field
+# blits, before any post-node sampler draws); 'screen' samplers show
+# that fresh capture, 'screen_prev' samplers drew before the node so
+# they show the previous frame's retained capture.
 _DEFAULT_FIELD_SCOPE = 'field'
 _SCREEN_SCOPE = 'screen'
+_SCREEN_PREV_SCOPE = 'screen_prev'
 # The second, independently-modded playfield capture (dual-player NotITG).
 # A 'field2' copy blits `_field2_pixmap` instead of the primary field
 # pixmap; produced only when the frame carries a second_field spec.
@@ -130,16 +134,18 @@ class QtPlayerRenderer:
         self._field2_pixmap = None
         self._backdrop_pixmap = None
         self._backdrop_painter = None
-        # Previous frame's chart-area composite, retained for this frame's
-        # 'screen'-scope field copies (SM ActorFrameTexture semantics: an
-        # AFT holds the composed screen as of the previous frame). None
-        # until a frame with 'screen' copies composites one, and dropped on
-        # a seek discontinuity. `_prev_screen_t` is the chart time it was
-        # captured at, used to detect that discontinuity.
+        # Previous frame's AFT capture (the chart area as of the node's
+        # draw position), retained for this frame's 'screen_prev' copies.
+        # None until a frame with screen copies captures one, and dropped
+        # on a seek discontinuity. `_prev_screen_t` is the chart time it
+        # was captured at, used to detect that discontinuity.
         self._prev_screen = None
         self._prev_screen_t = None
         self._screen_pixmap = None
         self._screen_painter = None
+        # This frame's node-point capture, taken lazily during the
+        # instance blits and promoted to `_prev_screen` at composite end.
+        self._screen_capture = None
         self._frame_stats = FrameStats()
         # Set by GL hosts (PlayerCanvas); frames whose effects carry
         # shader passes route chart painting through it. None = raster
@@ -240,13 +246,14 @@ class QtPlayerRenderer:
         capturing = chart_painter is not None
         if not capturing:
             chart_painter = painter
-        # 'screen'-scope field copies blit the previous frame's chart-area
-        # composite. When any are live, composite the whole chart region
-        # into an offscreen pixmap this frame (so the copy blits land in it
-        # too - the one-frame-delayed self-reference that is SM's AFT
-        # feedback), blit it to the real target, and retain it for next
-        # frame. Zero-cost otherwise: `chart_painter` stays the real target
-        # and _prev_screen machinery is untouched.
+        # Screen-scope field copies blit the AFT node's chart-area
+        # capture. When any are live, composite the whole chart region
+        # into an offscreen pixmap this frame so the capture can be
+        # snapshotted mid-blit at the node's draw position ('screen' =
+        # this frame's snapshot, 'screen_prev' = last frame's retained
+        # one), blit it to the real target, and retain the snapshot.
+        # Zero-cost otherwise: `chart_painter` stays the real target and
+        # _prev_screen machinery is untouched.
         self._sync_prev_screen(ctx)
         underlying_chart_painter = chart_painter
         screen_target = self._begin_screen_composite(
@@ -436,23 +443,23 @@ class QtPlayerRenderer:
 
     @staticmethod
     def _has_screen_copy(frame) -> bool:
-        """True when any field copy this frame is 'screen' scope, so the
-        whole chart region must composite offscreen and be retained for
-        next frame's copies."""
+        """True when any field copy this frame is a screen scope, so the
+        whole chart region must composite offscreen and the node-point
+        capture be taken for this frame's 'screen' copies and next
+        frame's 'screen_prev' ones."""
         if frame is None or not frame.fields:
             return False
-        return any(_field_scope(entry) == _SCREEN_SCOPE
+        return any(_field_scope(entry) in (_SCREEN_SCOPE, _SCREEN_PREV_SCOPE)
                    for entry in frame.fields)
 
     def _sync_prev_screen(self, ctx) -> None:
-        """Drop the retained previous-frame screen composite on a seek
+        """Drop the retained previous-frame AFT capture on a seek
         discontinuity. Playback advances chart time smoothly forward by
         one small frame delta; a seek jumps it (backward, or forward past
-        several frames). A retained composite from before the jump is not
+        several frames). A retained capture from before the jump is not
         the visual predecessor of this frame, so it must not feed the
-        feedback - clearing it makes 'screen' copies fall back to this
-        frame's own composite (minus one feedback generation) for one
-        frame, then the feedback re-primes."""
+        'screen_prev' feedback - those copies skip one frame, then the
+        capture re-primes."""
         if getattr(ctx, 'player', None) is None:
             return
         t = float(ctx.t_now)
@@ -463,12 +470,13 @@ class QtPlayerRenderer:
 
     def _begin_screen_composite(self, frame, ctx, painter):
         """Redirect the whole chart region into an offscreen pixmap when
-        this frame carries 'screen' copies; returns the composite painter
-        or None (no screen copies, direct painting). The composite includes
-        the field-copy blits, so a 'screen' copy blitting last frame's
-        retained composite lands one feedback generation into this one."""
+        this frame carries screen copies; returns the composite painter
+        or None (no screen copies, direct painting). The composite is
+        what the AFT node's capture snapshots mid-blit; compositing
+        offscreen keeps that snapshot cheap and consistent."""
         self._screen_pixmap = None
         self._screen_painter = None
+        self._screen_capture = None
         if (not self._has_screen_copy(frame) or painter is None
                 or getattr(ctx, 'player', None) is None):
             return None
@@ -481,8 +489,12 @@ class QtPlayerRenderer:
 
     def _end_screen_composite(self, painter, ctx) -> None:
         """Finish the screen composite: end its painter, blit it to the
-        real chart target, and retain it (with its chart time) as
-        `_prev_screen` for next frame's 'screen' copies."""
+        real chart target, and retain this frame's node-point capture
+        (with its chart time) as `_prev_screen` for next frame's
+        'screen_prev' copies. The FINAL composite is never retained -
+        it includes the screen blits themselves, and feeding it back
+        makes an identity opaque sampler a fixed point that freezes the
+        chart area."""
         pm = self._screen_pixmap
         self._screen_pixmap = None
         if self._screen_painter is not None:
@@ -491,8 +503,10 @@ class QtPlayerRenderer:
         if pm is None:
             return
         painter.drawPixmap(0, 0, pm)
-        self._prev_screen = pm
-        self._prev_screen_t = float(ctx.t_now)
+        if self._screen_capture is not None:
+            self._prev_screen = self._screen_capture
+            self._prev_screen_t = float(ctx.t_now)
+            self._screen_capture = None
 
     def _new_capture_pixmap(self, ctx, painter):
         """A transparent window-sized pixmap matching the painter's device
@@ -609,14 +623,18 @@ class QtPlayerRenderer:
         A 'full' copy blits the backdrop capture (background + below-draws)
         then the field capture under its transform, so the whole screen is
         replicated. A 'field' copy blits only the field capture, so the
-        real backdrop shows through. A 'screen' copy blits the PREVIOUS
-        frame's whole chart-area composite (`_prev_screen`) - the engine's
-        AFT feedback: that composite already holds backdrop + field + last
-        frame's copy blits, so repeated application echoes one frame at a
-        time and terminates. When no previous composite is retained (first
-        frame after start or a seek), the 'screen' copy is skipped for that
-        one frame; this frame's composite is still built and retained, so
-        the copy reappears next frame. Each copy is additionally clipped to
+        real backdrop shows through. The screen scopes model the AFT
+        node's capture, snapshotted from the in-progress composite at
+        the first 'screen' blit (or after all blits when only
+        'screen_prev' copies are live) - the node's draw position,
+        holding backdrop + field blits + any pre-node sampler blits,
+        never the screen blits made after it. A 'screen' copy blits THIS
+        frame's capture (identity is a no-op re-draw, a transform is a
+        screen-copy toss); a 'screen_prev' copy blits last frame's
+        retained capture - its own blit lands in this frame's, the
+        one-frame feedback that accumulates trails. When none is
+        retained yet (first frame after start or a seek), 'screen_prev'
+        skips a frame and re-primes. Each copy is additionally clipped to
         the mapped design box in its own source space, so it shows only the
         hard-cropped 640x480 screen (offscreen content never bleeds in).
 
@@ -636,10 +654,14 @@ class QtPlayerRenderer:
             transform, opacity, scope = _field_entry(entry)
             if opacity < 1.0 / 255.0:
                 continue
-            if scope == _SCREEN_SCOPE and self._prev_screen is None:
+            if scope == _SCREEN_SCOPE and self._screen_pixmap is None:
+                continue
+            if scope == _SCREEN_PREV_SCOPE and self._prev_screen is None:
                 continue
             if scope == _FIELD2_SCOPE and self._field2_pixmap is None:
                 continue
+            if scope == _SCREEN_SCOPE and self._screen_capture is None:
+                self._screen_capture = self._screen_pixmap.copy()
             painter.save()
             painter.setClipRect(QRectF(*ctx.chart_rect))
             if transform is not None:
@@ -651,8 +673,8 @@ class QtPlayerRenderer:
                 painter.setClipRect(box, Qt.ClipOperation.IntersectClip)
             painter.setOpacity(min(1.0, opacity))
             if scope == _SCREEN_SCOPE:
-                # The retained composite already holds the whole chart area
-                # (backdrop, field, prior copies): blit it alone.
+                painter.drawPixmap(0, 0, self._screen_capture)
+            elif scope == _SCREEN_PREV_SCOPE:
                 painter.drawPixmap(0, 0, self._prev_screen)
             elif scope == _FIELD2_SCOPE:
                 # The second player's independently-modded field capture.
@@ -662,6 +684,11 @@ class QtPlayerRenderer:
                     painter.drawPixmap(0, 0, self._backdrop_pixmap)
                 painter.drawPixmap(0, 0, self._field_pixmap)
             painter.restore()
+        if self._screen_pixmap is not None and self._screen_capture is None:
+            # No 'screen' sampler drew this frame, but the node still
+            # captures - its draw position follows the instance blits -
+            # so 'screen_prev' copies have next frame's source.
+            self._screen_capture = self._screen_pixmap.copy()
         self._backdrop_pixmap = None
 
     @staticmethod

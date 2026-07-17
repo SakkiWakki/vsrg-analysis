@@ -166,13 +166,17 @@ class TransformChannel:
         return m
 
 
-def instance(name, kind, player, links, t0=None) -> dict:
+def instance(name, kind, player, links, t0=None, aft_order=None) -> dict:
     """One compiled field instance. `kind` is 'player' (a real player's
     always-rendered field group), 'proxy' (an ActorProxy re-render of
     player `player`'s notefield), or 'aft' (an ActorFrameTexture screen
     sampler); `player` is the 1-based player whose capture the instance
-    blits (0 for 'aft')."""
+    blits (0 for 'aft'). `aft_order` places an 'aft' sampler relative to
+    its source AFT node in draw order: 'post' samplers show the frame's
+    fresh capture (drawn after the node captured), 'pre' samplers show
+    the previous frame's (their draw preceded this frame's capture)."""
     return {'name': name, 'kind': kind, 'player': player,
+            'aft_order': aft_order,
             'transform': TransformChannel(links, t0=t0,
                                           flip_base_y=kind == 'aft')}
 
@@ -202,7 +206,10 @@ def harvest_instances(field_copies, player_keyframes=None,
         player = _PROXY_PLAYERS.get(copy['source'], 0)
         kind = 'proxy' if player else 'aft'
         link = {**link_timelines(None), **copy['timelines']}
-        instances.append(instance(copy['name'], kind, player, [link]))
+        # The harvest dict carries no draw-order info; 'post' (fresh
+        # capture) is the common sampler shape.
+        instances.append(instance(copy['name'], kind, player, [link],
+                                  aft_order='post' if kind == 'aft' else None))
     if dual:
         keyframes = player_keyframes or {}
         oscillators = field_oscillators or {}

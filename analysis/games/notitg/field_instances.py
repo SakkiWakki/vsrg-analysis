@@ -21,9 +21,13 @@ to the chart region. `(None, 1.0, 'field')` is the untouched original.
 Scopes: proxy/player instances blit a notefield capture - player 2's
 instances the independently-modded second capture ('field2') when a
 `second_field` spec is present, everything else the primary ('field').
-AFT instances carry 'screen': the renderer blits last frame's chart-area
-composite under the copy transform, which is engine-exact capture
-feedback (the freeze/echo sections) and makes bg-in-capture automatic.
+AFT instances blit the chart-area capture their source node took at its
+draw position (backdrop + field blits, before any post-node sampler):
+'screen' samplers draw AFTER the node, so they show this frame's fresh
+capture (identity is a no-op re-draw, a transform is a screen-copy
+toss); 'screen_prev' samplers draw BEFORE it, so they show the previous
+frame's (their own blit lands in the next capture - the feedback leg
+that accumulates echo trails).
 
 Design-space mapping: a sampled homography is authored in SM's 640x480
 screen space; the screen transform is the conjugation M . H . M^-1
@@ -44,6 +48,9 @@ _DESIGN_H = 480.0
 
 _PROXY_SCOPE = 'field'
 _AFT_SCOPE = 'screen'
+# Pre-node AFT samplers: drawn before their source node captures, so
+# they show the previous frame's capture (the feedback leg of trails).
+_AFT_PREV_SCOPE = 'screen_prev'
 # The second-player capture scope: instances whose source is player 2
 # blit from the independently-modded second capture.
 _FIELD2_SCOPE = 'field2'
@@ -167,7 +174,8 @@ class NotitgFieldInstances:
 
     def _scope(self, inst) -> str:
         if inst['kind'] == 'aft':
-            return _AFT_SCOPE
+            return (_AFT_PREV_SCOPE if inst.get('aft_order') == 'pre'
+                    else _AFT_SCOPE)
         if inst['player'] == 2 and self._second_field is not None:
             return _FIELD2_SCOPE
         return _PROXY_SCOPE

@@ -38,14 +38,17 @@ class EffectFrame:
         - 'full'   also blits a backdrop capture (background clear +
           below-draws) under the copy transform, replicating the whole
           chart region incl. background.
-        - 'screen' blits the PREVIOUS frame's whole chart-area composite
-          (backdrop + field + the copy blits themselves). This is SM's
-          ActorFrameTexture: an AFT holds the composed screen as of the
-          previous frame, so the copy is one frame delayed and its
-          repeated application is the engine's feedback (echo/DelayFrame
-          trails). When any 'screen' copy is present the renderer
-          composites the chart region offscreen this frame and retains it
-          for next frame; on a seek the retention is invalidated.
+        - 'screen'/'screen_prev' model SM's ActorFrameTexture: the AFT
+          node captures the chart area at its draw position each frame
+          (backdrop + field blits, never the screen blits made after
+          it). 'screen' samplers draw after the node and blit THIS
+          frame's capture (identity is a no-op re-draw); 'screen_prev'
+          samplers draw before it and blit the previous frame's - their
+          own blit lands in the next capture, the one-frame feedback
+          that accumulates echo trails. When any is present the renderer
+          composites the chart region offscreen, snapshots the capture
+          mid-blit, and retains it; on a seek the retention is
+          invalidated.
       Other games omit scope for the zero-cost path. A copy may name a
       second field capture with the scope 'field2' (see `second_field`).
     - `second_field`  a second, independently-modded playfield capture
