@@ -30,10 +30,15 @@ from analysis.games.notitg.xml_actors import (
     _strip_lua_wrapper, parse_command_string)
 from analysis.player.render.lua import LuaHost
 
-# Broadcast/command recursion guards, as in the harvest path: a handler
-# may broadcast a message whose handlers broadcast again.
+# Broadcast/command recursion guard: a handler may broadcast a message
+# whose handlers broadcast again. Depth-only, deliberately: the engine
+# has no TOTAL dispatch budget, and a whole-chart sim legitimately runs
+# hundreds of thousands of self-scheduled command fires (every chara /
+# pool actor loops via sleep+queuecommand). A global total cap starves
+# every chain mid-song at once - it silently no-ops the body whose tail
+# re-arms the loop. Runaway protection is the depth cap here plus the
+# per-update drain cap and tween-overflow guard on the actor.
 _MAX_DISPATCH_DEPTH = 24
-_MAX_DISPATCH_TOTAL = 200000
 
 # The sim bridge routes two extra getters (GetSecsIntoEffect/GetText)
 # the harvest path leaves unrouted; swap the generated __GETTER set
@@ -70,7 +75,6 @@ class SimEnvironment:
         self._faults = 0
         self._fault_messages: list = []
         self._dispatch_depth = 0
-        self._dispatch_total = 0
         self._rng_seed = int(rng_seed)
         self._screen_id: int | None = None
         self._screen_children: dict = {}
@@ -197,12 +201,16 @@ class SimEnvironment:
     # -- load pass ---------------------------------------------------------
 
     def load_actors(self, root) -> list:
-        """Register every actor's commands, then run Init/On in tree
-        order with `self` bound to the actor's recorder table. The
-        chart's self-scheduling Update chain arms itself here (its
-        queuecommand lands on the real queue)."""
+        """Register every actor's commands, then run load commands in
+        TWO tree-order phases, as the engine does: every InitCommand
+        (actor creation), then every OnCommand (screen start). An
+        OnCommand may therefore read a global that a LATER actor's
+        InitCommand bound - the AFT rigs depend on this. The chart's
+        self-scheduling Update chain arms itself here (its queuecommand
+        lands on the real queue)."""
         self._register(root)
-        self._run_load(root)
+        self._run_load(root, 'InitCommand')
+        self._run_load(root, 'OnCommand')
         return self._warnings
 
     def _register(self, actor) -> None:
@@ -217,17 +225,16 @@ class SimEnvironment:
         for child in actor.children:
             self._register(child)
 
-    def _run_load(self, actor) -> None:
+    def _run_load(self, actor, attr) -> None:
         rec_id = self._id_for(actor)
-        for attr in ('InitCommand', 'OnCommand'):
-            value = actor.attrs.get(attr, '')
-            if value.startswith('%'):
-                self._run_lua_body(rec_id, _strip_lua_wrapper(value),
-                                   f'{actor.kind}.{attr}', load=True)
-            elif value:
-                self._run_classic_body(rec_id, value)
+        value = actor.attrs.get(attr, '')
+        if value.startswith('%'):
+            self._run_lua_body(rec_id, _strip_lua_wrapper(value),
+                               f'{actor.kind}.{attr}', load=True)
+        elif value:
+            self._run_classic_body(rec_id, value)
         for child in actor.children:
-            self._run_load(child)
+            self._run_load(child, attr)
 
     def _id_for(self, actor) -> int:
         existing = getattr(actor, '_sim_id', None)
@@ -293,10 +300,8 @@ class SimEnvironment:
     # -- dispatch ----------------------------------------------------------
 
     def _run_command_body(self, rec_id, body, name) -> None:
-        if self._dispatch_total >= _MAX_DISPATCH_TOTAL \
-                or self._dispatch_depth >= _MAX_DISPATCH_DEPTH:
+        if self._dispatch_depth >= _MAX_DISPATCH_DEPTH:
             return
-        self._dispatch_total += 1
         self._dispatch_depth += 1
         try:
             if body.startswith('%'):
