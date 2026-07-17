@@ -1,4 +1,15 @@
-"""Bridge: harvested NotITG shader-flag events -> fullscreen shader passes.
+"""Bridge: harvested NotITG shaders -> fullscreen shader passes.
+
+Two independent NotITG shader surfaces feed the fullscreen pipeline:
+
+- SHADER FLAGS (`build_shader_events` / `notitg_shader_effects`): the
+  classic-template `mod_shader` pulses of NotITG's built-in shader-flag
+  registry, mapped to builtin library passes. gat uses this.
+- MAP-SUPPLIED FRAGS (`chart_shader_effect`): a chart's own `.frag`
+  files attached to a fullscreen ActorFrameTexture sprite (the
+  `CatAFT.aft` / `CatAFT.sprite` post-process pattern), translated onto
+  our contract by notitg_compat and driven by their per-frame uniform
+  pokes. The Government Knows tier. See the map-supplied section below.
 
 # What a shader flag is
 
@@ -32,7 +43,14 @@ shader path already consumes.
 """
 from __future__ import annotations
 
-from analysis.player.render.shaders import ShaderStackEffect
+import re
+from pathlib import Path
+
+from analysis.player.render.effects.base import EffectFrame
+from analysis.player.render.effects.timeline import (EventTimeline,
+                                                     keyframes_from_events)
+from analysis.player.render.shaders import ShaderStackEffect, library
+from analysis.player.render.shaders.library import notitg_compat
 
 # Flag key -> (shader id in the builtin library, params for u_strength.y/z).
 # strength.x is driven by the on/off pulse; y/z carry the pass's mode
@@ -123,3 +141,156 @@ def _close_all(open_since, t, windows) -> None:
         t_off = t if t is not None else t_on + 0.5
         windows.append((key, t_on, t_off))
     open_since.clear()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Map-supplied fragment shaders (tier 2)
+# ─────────────────────────────────────────────────────────────────────
+#
+# A Government-Knows-style chart attaches its own `.frag` to a fullscreen
+# sprite that draws a whole-screen ActorFrameTexture:
+#
+#     <Layer Type="Sprite" OnCommand="CatAFT.aft(self,'x')"/>       -- render scene to AFT 'x'
+#     <Layer Type="Sprite" Frag="shaders/vhs.frag"                   -- post-process it
+#            OnCommand="CatAFT.sprite(self,'x'); self:GetShader():uniform1f('time', t) ..."/>
+#
+# For that fullscreen case the AFT is exactly our capture, so the frag
+# maps onto our contract (notitg_compat.translate): sampler0 -> u_tex,
+# imageCoord/textureCoord -> the fullscreen UV, and the chart's own
+# scalar uniforms (`GetShader():uniform1f('phase', v)` pokes) become
+# named custom uniforms the pipeline sets per frame. Per-actor frags
+# (vertex-stage note deformers, engine-texture noise samplers) are NOT
+# fullscreen-expressible; translate raises and we skip them (Stage B).
+#
+# COMPILED-DICT CONTRACT (`compiled['chart_shaders']`): a list of
+#
+#     {'name':      unique id stem (str),
+#      'frag':      the raw NotITG GLSL source (str),   # or 'frag_path'
+#      'frag_path': absolute path to the .frag (str),   # alternative to 'frag'
+#      'uniforms':  {uniform_name: [<.ffx-shaped event dicts>], ...},
+#      'windows':   [<.ffx-shaped on/off event dicts>]}  # optional; 'strength'
+#                    > 0 means the pass is live (default: always live).
+#
+# `uniforms` streams and `windows` are what a recorder must harvest from
+# the per-frame `GetShader():uniform1f(...)` / visibility pokes. Until
+# that harvest exists (see the recorder note in the project memory), the
+# bridge drives whatever static data is present and RESTS EVERY UNSET
+# UNIFORM AT 0, so a frag authored as a no-op at 0 stays identity.
+
+# The only sampler a fullscreen pass can be fed: the capture (u_tex). A
+# translated frag that still declares any other sampler needs an engine
+# texture we do not supply (noise/atlas tables, a second feedback
+# capture) -- a per-actor (Stage-B) shader, skipped rather than run
+# black. (u_tex2, the pre-chain capture, is not produced by the current
+# translator, so it counts as unfeedable here too.)
+_SAMPLER_DECL_RE = re.compile(r'\buniform\s+sampler2D\s+(\w+)\s*;')
+
+
+def chart_shader_effect(chart_shaders):
+    """Register each map-supplied frag and return a `ChartShaderEffect`
+    driving them, or None when none are fullscreen-expressible. Skips
+    (does not raise on) Stage-B per-actor frags."""
+    passes = _build_chart_passes(chart_shaders)
+    return ChartShaderEffect(passes) if passes else None
+
+
+def _build_chart_passes(chart_shaders):
+    """(`shader_id`, uniform-timelines, window-timeline) per registerable
+    frag. A frag notitg_compat cannot translate to a fullscreen pass is
+    skipped; only uniforms the translated shader actually declares are
+    driven (a stray poke stream for an undeclared name is dropped)."""
+    passes = []
+    for entry in chart_shaders or []:
+        built = _build_one_pass(entry)
+        if built is not None:
+            passes.append(built)
+    return passes
+
+
+def _build_one_pass(entry):
+    """One `(shader_id, timelines, window)` pass, or None if the entry is
+    malformed or its frag is a Stage-B (per-actor) shader."""
+    if not isinstance(entry, dict):
+        return None
+    glsl, name = _frag_source(entry), entry.get('name')
+    if not glsl or not name:
+        return None
+    shader_id = _register(name, glsl)
+    if shader_id is None:
+        return None
+    declared = set(library.registered_uniform_names(shader_id))
+    timelines = {uname: _stream_timeline(events)
+                 for uname, events in (entry.get('uniforms') or {}).items()
+                 if uname in declared}
+    return shader_id, timelines, _window_timeline(entry.get('windows'))
+
+
+def _stream_timeline(events) -> EventTimeline:
+    """A single-value `EventTimeline` from `.ffx`-shaped events, resting
+    at 0 (identity when the driving stream is absent)."""
+    return EventTimeline(
+        keyframes_from_events(events, ('strength',), (0.0,)), rest=(0.0,))
+
+
+def _register(name, glsl):
+    """Register `glsl` as a chart shader, returning its id or None for a
+    Stage-B frag (no sampler0 / needs an engine texture we cannot feed)
+    or a duplicate/invalid name."""
+    try:
+        contract = notitg_compat.translate(glsl)
+    except ValueError:
+        return None
+    if _needs_unfeedable_texture(contract):
+        return None
+    return library.register_source(f'chart:notitg:{name}', contract)
+
+
+def _needs_unfeedable_texture(contract_glsl) -> bool:
+    samplers = set(_SAMPLER_DECL_RE.findall(contract_glsl))
+    return bool(samplers - {'u_tex'})
+
+
+def _frag_source(entry):
+    """The frag GLSL for an entry: inline `frag`, else the file at
+    `frag_path`, else None (missing / unreadable)."""
+    if entry.get('frag'):
+        return entry['frag']
+    path = entry.get('frag_path')
+    if not path:
+        return None
+    try:
+        return Path(path).read_text(encoding='utf-8')
+    except OSError:
+        return None
+
+
+def _window_timeline(windows):
+    """A 0/1 liveness timeline from on/off events, or None when the pass
+    is always live (no windows harvested)."""
+    return _stream_timeline(windows) if windows else None
+
+
+class ChartShaderEffect:
+    """Per-frame fullscreen passes for a chart's own frags: each live
+    pass emits `(shader_id, {uniform: value, ...})`, the custom uniforms
+    sampled from their driving streams (0 at rest). A pass with a window
+    timeline is emitted only while that window is live."""
+
+    def __init__(self, passes):
+        self._passes = tuple(passes)
+
+    def __bool__(self):
+        return bool(self._passes)
+
+    def at(self, ctx) -> EffectFrame | None:
+        t = ctx.t_now
+        out = []
+        for shader_id, timelines, window in self._passes:
+            if window is not None and window.sample(t)[0] <= 0.0:
+                continue
+            uniforms = {name: tl.sample(t)[0]
+                        for name, tl in timelines.items()}
+            out.append((shader_id, uniforms))
+        if not out:
+            return None
+        return EffectFrame(shaders=tuple(out))
