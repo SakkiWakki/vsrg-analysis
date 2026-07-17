@@ -541,6 +541,94 @@ def test_recording_actor_add_reads_current_value():
     assert values == [10.0, 15.0, 20.0]
 
 
+def test_recording_actor_oscillator_span_open_replace_stop():
+    """A kind verb opens a span; a DIFFERENT kind closes the open one at
+    the current clock and starts fresh; stopeffect closes the last. Each
+    span carries its magnitude/period/clock."""
+    from analysis.games.notitg.recording_actor import RecordingActor
+
+    actor = RecordingActor(clock=0.0)
+    # bounce at clock 0, then advance the clock (a sleep) and replace with
+    # bob, then advance and stop.
+    actor.poke('bounce', [])
+    actor.poke('effectperiod', ['1'])
+    actor.poke('effectclock', ['bgm'])
+    actor.poke('effectmagnitude', ['0', '-100', '0'])
+    actor.poke('sleep', ['4'])          # clock -> 4
+    actor.poke('bob', [])                # closes bounce at 4, opens bob
+    actor.poke('effectmagnitude', ['100', '0', '0'])
+    actor.poke('sleep', ['4'])          # clock -> 8
+    actor.poke('stopeffect', [])         # closes bob at 8
+
+    spans = actor.oscillator_spans()
+    assert [(s.kind, s.start, s.end) for s in spans] == [
+        ('bounce', 0.0, 4.0), ('bob', 4.0, 8.0)]
+    assert spans[0].clock == 'bgm' and spans[0].period == 1.0
+    assert spans[0].magnitude_at(0.0) == (0.0, -100.0, 0.0)
+    assert spans[1].magnitude_at(4.0) == (100.0, 0.0, 0.0)
+
+
+def test_recording_actor_oscillator_repoke_same_kind_is_one_span():
+    """Re-poking the same kind (gat's per-frame `a:vibrate()`) continues
+    the open span rather than starting a new one each tick; magnitude
+    pokes accumulate into that one span's envelope."""
+    from analysis.games.notitg.recording_actor import RecordingActor
+
+    actor = RecordingActor(clock=0.0)
+    for clock, mag in ((0.0, '10'), (1.0, '20'), (2.0, '30')):
+        actor.reset_clock(clock)
+        actor.poke('vibrate', [])
+        actor.poke('effectmagnitude', [mag, '0', '0'])
+    spans = actor.oscillator_spans()
+    assert len(spans) == 1
+    assert spans[0].kind == 'vibrate' and spans[0].start == 0.0
+    assert spans[0].end == 2.0
+    # The magnitude in force steps up with each poke.
+    assert spans[0].magnitude_at(0.5) == (10.0, 0.0, 0.0)
+    assert spans[0].magnitude_at(1.5) == (20.0, 0.0, 0.0)
+    assert spans[0].magnitude_at(2.5) == (30.0, 0.0, 0.0)
+
+
+def test_oscillator_span_magnitude_at_step_holds():
+    """`magnitude_at` step-holds the last sample at or before a clock, and
+    returns the first sample for a clock before them all."""
+    from analysis.games.notitg.recording_actor import _OscSpan
+
+    span = _OscSpan('vibrate', 0.0, 1.0, 0.0, 'bgm')
+    span.set_magnitude(1.0, (10.0, 0.0, 0.0))
+    span.set_magnitude(2.0, (20.0, 0.0, 0.0))
+    span.set_magnitude(3.0, (30.0, 0.0, 0.0))
+    assert span.magnitude_at(0.5) == (10.0, 0.0, 0.0)   # before first
+    assert span.magnitude_at(1.5) == (10.0, 0.0, 0.0)   # holds 1.0
+    assert span.magnitude_at(2.0) == (20.0, 0.0, 0.0)   # exact
+    assert span.magnitude_at(9.0) == (30.0, 0.0, 0.0)   # holds last
+
+
+def test_recording_actor_oscillator_ignored_when_no_motion():
+    """A span that never sets a magnitude (and is not a spin) produces no
+    motion, so it is dropped - only motion-bearing spans are reported."""
+    from analysis.games.notitg.recording_actor import RecordingActor
+
+    actor = RecordingActor(clock=0.0)
+    actor.poke('bob', [])
+    actor.poke('stopeffect', [])
+    assert actor.oscillator_spans() == ()
+
+
+def test_recording_actor_set_vanish_point_records_channels():
+    """`SetVanishPoint(x, y)` records onto the vanish_x/vanish_y channels
+    (rest = screen centre); per-frame pokes build a stream."""
+    from analysis.games.notitg.recording_actor import RecordingActor
+
+    actor = RecordingActor(clock=0.0)
+    actor.poke('SetVanishPoint', ['400', '100'])
+    actor.reset_clock(1.0)
+    actor.poke('SetVanishPoint', ['200', '300'])
+    frames = actor.keyframes()
+    assert [k.values for k in frames['vanish_x']] == [(400.0,), (200.0,)]
+    assert [k.values for k in frames['vanish_y']] == [(100.0,), (300.0,)]
+
+
 def test_recording_actor_diffuse_and_visibility():
     """`diffuse`/`diffusealpha` feed the `alpha` channel; `hidden`/`visible`
     feed a SEPARATE `hidden` channel (SM's hard visibility bit is
@@ -732,6 +820,217 @@ def test_gat_pilot_extracts_scroll_multipliers():
     sc, _skipped = compile_scroll_multipliers(result['mod_events'])
     # gat rides its 2x base with frequent xmod changes.
     assert len(sc) > 20
+
+
+# -- effect oscillators ---------------------------------------------------
+
+def _identity_osc_clock():
+    """An oscillator clock over an identity beat<->second mapping, so a
+    span's second clock reads straight through as its beat/phase source
+    (unit tests fix the phase directly, no chart timing involved)."""
+    from analysis.games.notitg import modfile
+    return modfile._OscillatorClock(lambda beat: float(beat), (0.0, 64.0))
+
+
+def _make_span(kind, start, end, mag, period=1.0, offset=0.0, clock='bgm'):
+    from analysis.games.notitg.recording_actor import _OscSpan
+    span = _OscSpan(kind, start, period, offset, clock)
+    span.end = end
+    span.set_magnitude(start, mag)
+    return span
+
+
+def test_effect_pct_matches_engine_scale_and_wrap():
+    """SM's pct = clamp(fmod(phase + offset, period) / period, 0, 1)
+    (Actor.cpp:273-278). Wraps every period, honours offset, clamps."""
+    from analysis.games.notitg.modfile import _effect_pct
+
+    assert _effect_pct(0.0, 1.0, 0.0) == 0.0
+    assert _effect_pct(0.25, 1.0, 0.0) == pytest.approx(0.25)
+    assert _effect_pct(1.25, 1.0, 0.0) == pytest.approx(0.25)   # wraps
+    assert _effect_pct(0.0, 1.0, 0.5) == pytest.approx(0.5)     # offset
+    assert _effect_pct(2.0, 2.0, 0.0) == 0.0                    # period 2
+
+
+def test_bounce_span_synthesises_abs_sine_on_y():
+    """bounce: pos += mag * sin(pct*pi) (Actor.cpp:344). Magnitude
+    (0,-100,0) drives y by -100*sin(pct*pi); the step keyframe at a sample
+    time holds exactly that value."""
+    import math
+    from analysis.games.notitg.modfile import _span_keyframes
+
+    span = _make_span('bounce', 0.0, 1.0, (0.0, -100.0, 0.0))
+    frames = _span_keyframes(span, _identity_osc_clock(), _no_rng())
+    assert set(frames) == {'x', 'y'}   # x delta is 0 but present
+    from analysis.player.render.effects.timeline import EventTimeline
+    y = EventTimeline(frames['y'], rest=(0.0,))
+    for t in (0.25, 0.5, 0.75):
+        assert y.sample(t)[0] == pytest.approx(-100.0 * math.sin(t * math.pi),
+                                               abs=1.0)
+
+
+def test_bob_span_synthesises_full_sine():
+    """bob: pos += mag * sin(pct*2pi) (Actor.cpp:353) - a full sine, so it
+    swings both directions unlike bounce."""
+    import math
+    from analysis.games.notitg.modfile import _span_keyframes
+    from analysis.player.render.effects.timeline import EventTimeline
+
+    span = _make_span('bob', 0.0, 1.0, (100.0, 0.0, 0.0))
+    x = EventTimeline(_span_keyframes(span, _identity_osc_clock(),
+                                      _no_rng())['x'], rest=(0.0,))
+    assert x.sample(0.25)[0] == pytest.approx(100.0, abs=2.0)   # sin(pi/2)
+    assert x.sample(0.75)[0] == pytest.approx(-100.0, abs=2.0)  # sin(3pi/2)
+
+
+def test_wag_span_drives_rotation_by_z_magnitude():
+    """wag: rotation += mag * sin(pct*2pi) (Actor.cpp:332). The 2D rotation
+    is the z magnitude; x/y magnitudes are 3D rotations we drop."""
+    import math
+    from analysis.games.notitg.modfile import _span_keyframes
+    from analysis.player.render.effects.timeline import EventTimeline
+
+    span = _make_span('wag', 0.0, 1.0, (0.0, 0.0, 30.0))
+    frames = _span_keyframes(span, _identity_osc_clock(), _no_rng())
+    assert set(frames) == {'rotation'}
+    r = EventTimeline(frames['rotation'], rest=(0.0,))
+    assert r.sample(0.25)[0] == pytest.approx(30.0, abs=1.0)
+
+
+def test_spin_span_accumulates_rotation_over_elapsed():
+    """spin: rotation += effectDelta * mag every frame (Actor.cpp:599),
+    i.e. rotation(t) = mag.z * (phase - phase_start). Linear, unbounded."""
+    from analysis.games.notitg.modfile import _span_keyframes
+    from analysis.player.render.effects.timeline import EventTimeline
+
+    span = _make_span('spin', 0.0, 4.0, (0.0, 0.0, 90.0))
+    r = EventTimeline(_span_keyframes(span, _identity_osc_clock(),
+                                      _no_rng())['rotation'], rest=(0.0,))
+    # phase advances 1:1 with time under the identity clock, so at t=2 the
+    # accumulated rotation is 90 * 2 = 180.
+    assert r.sample(2.0)[0] == pytest.approx(180.0, abs=1.0)
+    assert r.sample(4.0)[0] == pytest.approx(360.0, abs=1.0)
+
+
+def test_vibrate_span_is_seeded_and_reproducible():
+    """vibrate: pos += mag * randomf(-1,1) (Actor.cpp:338). Seeded, so the
+    same span + seed compiles the identical jitter twice."""
+    import random
+    from analysis.games.notitg.modfile import _span_keyframes
+
+    span = _make_span('vibrate', 0.0, 0.5, (10.0, 10.0, 0.0))
+    clock = _identity_osc_clock()
+    a = _span_keyframes(span, clock, random.Random('seed'))
+    b = _span_keyframes(_make_span('vibrate', 0.0, 0.5, (10.0, 10.0, 0.0)),
+                        clock, random.Random('seed'))
+    assert [k.values for k in a['x']] == [k.values for k in b['x']]
+    # The jitter stays within the magnitude bound.
+    assert all(abs(k.values[0]) <= 10.0 + 1e-6 for k in a['x'])
+
+
+def test_span_returns_to_rest_after_end():
+    """A synthesised span appends a trailing rest keyframe, so the delta
+    is 0 once the effect stops rather than holding its last sample."""
+    from analysis.games.notitg.modfile import _span_keyframes
+    from analysis.player.render.effects.timeline import EventTimeline
+
+    span = _make_span('bounce', 0.0, 1.0, (0.0, -100.0, 0.0))
+    y = EventTimeline(_span_keyframes(span, _identity_osc_clock(),
+                                      _no_rng())['y'], rest=(0.0,))
+    assert y.sample(5.0)[0] == pytest.approx(0.0)
+
+
+def test_compile_oscillator_keyframes_rides_base_motion():
+    """The synthesised delta rides the actor's tweened base value: inside
+    the span the keyframe value is base(t) + delta; outside, the base
+    motion is kept untouched."""
+    from analysis.games.notitg.modfile import compile_oscillator_keyframes
+    from analysis.player.render.effects.timeline import EventTimeline, Keyframe
+
+    # Base: y held at 100 from t=0. bounce delta rides on top of it.
+    base = {'y': [Keyframe(0.0, (100.0,), 0.0, 0)]}
+    span = _make_span('bounce', 0.5, 1.0, (0.0, -50.0, 0.0))
+    merged = compile_oscillator_keyframes([span], base, _identity_osc_clock(),
+                                          _no_rng())
+    y = EventTimeline(merged['y'], rest=(0.0,))
+    # Before the span, base holds at 100.
+    assert y.sample(0.2)[0] == pytest.approx(100.0)
+    # Inside, it is 100 + (-50*sin(pct*pi)) < 100.
+    assert y.sample(0.75)[0] < 100.0
+    # After, back to the base 100 (trailing rest hands motion back).
+    assert y.sample(2.0)[0] == pytest.approx(100.0)
+
+
+def _no_rng():
+    """An RNG for non-vibrate spans, which never draw from it."""
+    import random
+    return random.Random(0)
+
+
+@pytest.mark.skipif(not _GAT_SM.exists(),
+                    reason='NotITG gat pilot not present')
+def test_gat_pilot_field_oscillators_animate():
+    """gat's t~8-48 section drives the player fields with bounce/bob/wag;
+    the compiled field_oscillators must carry live x/y/rotation deltas for
+    both players in that window."""
+    import numpy as np
+
+    result = compile_modfile(str(_GAT_SM))
+    fo = result['field_oscillators']
+    assert fo is not None and set(fo) == {1, 2}
+    p1 = fo[1]
+    # Some channel is non-zero somewhere in the 9-14s bounce/bob/wag window
+    # (the actors would be frozen without synthesis).
+    moved = False
+    for tl in p1.values():
+        vals = np.array([tl.sample(float(t))[0]
+                         for t in np.linspace(9.5, 13.5, 200)])
+        moved = moved or float(np.abs(vals).max()) > 1.0
+    assert moved
+
+
+@pytest.mark.skipif(not _GAT_SM.exists(),
+                    reason='NotITG gat pilot not present')
+def test_gat_pilot_screen_oscillator_shakes_scene():
+    """gat's datamosh section (t~312-382) pokes `screen:vibrate()` with a
+    per-frame magnitude envelope; the compiled screen_oscillator must carry
+    a live x/y jitter there (the whole-scene shake)."""
+    import numpy as np
+
+    result = compile_modfile(str(_GAT_SM))
+    so = result['screen_oscillator']
+    assert so is not None and {'x', 'y'} <= set(so)
+    peak = 0.0
+    for tl in so.values():
+        vals = np.array([tl.sample(float(t))[0]
+                         for t in np.linspace(340.0, 370.0, 300)])
+        peak = max(peak, float(np.abs(vals).max()))
+    assert peak > 5.0
+
+
+@pytest.mark.skipif(not _GAT_SM.exists(),
+                    reason='NotITG gat pilot not present')
+def test_gat_pilot_vanish_streams_recorded_and_mostly_sane():
+    """gat drives SetVanishPoint per frame on the P1p/P2p proxies; the
+    compiled field_vanish carries both players' streams, and the values
+    sit within ~2x the design box except in the base-hidden runaway-proxy
+    section the 3D consumer defers past."""
+    import numpy as np
+
+    result = compile_modfile(str(_GAT_SM))
+    fv = result['field_vanish']
+    assert fv is not None and 1 in fv
+    vy = fv[1]['vanish_y']
+    ts = np.linspace(0.0, 520.0, 4000)
+    vals = np.array([vy.sample(float(t))[0] for t in ts])
+    # Design H is 480; ~2x either side of the centre 240 is [-480, 960].
+    within = np.abs(vals - 240.0) <= 720.0
+    assert within.mean() > 0.9
+    # The out-of-box samples are confined to the base-hidden section.
+    base_hidden = result['base_field_hidden']
+    if base_hidden is not None:
+        out_ts = ts[~within]
+        assert all(base_hidden.sample(float(t))[0] >= 0.5 for t in out_ts)
 
 
 # -- message dispatch -----------------------------------------------------

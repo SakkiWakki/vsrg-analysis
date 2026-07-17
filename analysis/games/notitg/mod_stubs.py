@@ -449,9 +449,13 @@ class StubEnvironment:
             return
         if self._recording_frozen:
             # A mod_actions closure re-fired inside the update integration:
-            # keyframe recording is frozen, but a poke that resets an
-            # accumulator a per-frame driver reads back (gat's Toss quad
-            # re-anchor) must still land on the live mirror state.
+            # keyframe recording (and oscillator state) is frozen - those
+            # pokes were already captured by the one-shot replay. Only an
+            # accumulator reset a per-frame driver reads back (gat's Toss
+            # quad re-anchor) updates the live mirror. The per-frame effect
+            # pokes (`screen:effectmagnitude` / `Proxy:vibrate`) come from
+            # the Update BODY tick, which runs unfrozen, so they record via
+            # the normal path below.
             if self._integration_clock is not None:
                 recorder.live_poke(verb, list(args))
             return
@@ -618,6 +622,39 @@ class StubEnvironment:
             if keyframes:
                 out[rec_id] = keyframes
         return out
+
+    def actor_oscillator_spans(self) -> dict:
+        """recorder-id -> tuple of `_OscSpan` for every actor that ran an
+        effect oscillator (vibrate/wag/bob/bounce/spin). Keyed like
+        `actor_keyframes` so the tree compiler can synthesise each actor's
+        oscillator motion into keyframes on its own timeline. Empty for the
+        common no-oscillator chart."""
+        out = {}
+        for rec_id, recorder in self._recorders.items():
+            spans = recorder.oscillator_spans()
+            if spans:
+                out[rec_id] = spans
+        return out
+
+    def screen_oscillator_spans(self) -> tuple:
+        """Effect-oscillator spans on the top screen (`screen:vibrate()` +
+        the per-frame `screen:effectmagnitude(gat_vib:GetX()..)` scene
+        shake, gat's t~312-382 datamosh), or () when the screen never ran
+        one. A whole-scene jitter the screen-camera consumer applies."""
+        recorder = (self._recorders.get(self._screen_recorder_id)
+                    if self._screen_recorder_id is not None else None)
+        return recorder.oscillator_spans() if recorder is not None else ()
+
+    def player_oscillator_spans(self, name: str) -> tuple:
+        """Oscillator spans for an engine player actor
+        (`PlayerP1`/`PlayerP2`), or () when it ran no effect. gat's t~8-48
+        bounce/bob/wag drives `Plr(pn)` = these player recorders (they are
+        engine actors fetched via GetChild, not tree actors), so the field
+        producer reads their oscillators from here."""
+        table = self._screen_children.get(name)
+        recorder = self._recorder_for_table(table) if table is not None \
+            else None
+        return recorder.oscillator_spans() if recorder is not None else ()
 
     def named_actor_meta(self) -> dict:
         """global name -> {'aft_source': str|None, 'is_aft': bool} for
