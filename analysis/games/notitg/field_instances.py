@@ -215,12 +215,23 @@ class NotitgFieldInstances:
         x = tl['x'].sample(t)[0]
         y = tl['y'].sample(t)[0]
         rotation = tl['rotation'].sample(t)[0]
+        scope = self._scope(copy)
+        base_sy = tl['base_scale_y'].sample(t)[0]
+        if scope == _AFT_SCOPE:
+            # Charts set basezoomy(-1) on every AFT sampler purely to
+            # compensate the engine's bottom-up GL captures. Our capture
+            # is already top-down, so honoring the compensation flips a
+            # correct image upside down over the live scene - neutralize
+            # it. A deliberate extra mirror (scale_y, or a chart leaving
+            # basezoomy at +1 to WANT the raw flipped texture) still
+            # lands: only the sign convention is translated.
+            base_sy = -base_sy
         sx = tl['scale_x'].sample(t)[0] * tl['base_scale_x'].sample(t)[0]
-        sy = tl['scale_y'].sample(t)[0] * tl['base_scale_y'].sample(t)[0]
+        sy = tl['scale_y'].sample(t)[0] * base_sy
         if sx == 0.0 or sy == 0.0:
             return None
         return (_copy_transform(x, y, rotation, sx, sy, k, ox, oy),
-                min(1.0, alpha), self._scope(copy))
+                min(1.0, alpha), scope)
 
     def _scope(self, copy) -> str:
         """The capture a copy blits from. An AFT copy blits the previous-
