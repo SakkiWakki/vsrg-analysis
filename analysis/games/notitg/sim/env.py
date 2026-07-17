@@ -243,6 +243,16 @@ class SimEnvironment:
             if (payload := row.get(2) if isinstance(row, dict) else None)
             is not None and (callable(payload) or isinstance(payload, str))]
         self._next_action = 0
+        # The classic template's update body replays the same table
+        # itself (`while curaction <= table.getn(mod_actions) ...`).
+        # With the sweep firing every action at its true time, that
+        # in-body replay would run each action a SECOND time one tick
+        # later (tween chains restart 1+ chain-lengths late, leaving
+        # e.g. a decayed-to-zero effectmagnitude frozen at a stale
+        # nonzero value). Park the template's cursor past the end so
+        # its loop never enters.
+        if self._staged_actions and 'curaction' in self._host.env:
+            self._host.env['curaction'] = float(len(rows) + 1)
         return len(self._staged_actions)
 
     def fire_mod_actions_until(self, t: float) -> None:

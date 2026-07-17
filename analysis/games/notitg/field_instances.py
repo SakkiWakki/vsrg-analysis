@@ -54,6 +54,9 @@ _AFT_PREV_SCOPE = 'screen_prev'
 # The second-player capture scope: instances whose source is player 2
 # blit from the independently-modded second capture.
 _FIELD2_SCOPE = 'field2'
+# An AFT-rig curtain quad blitted at its tree position (covers the
+# proxies under it; samplers above it stay visible).
+_FILL_SCOPE = 'fill'
 
 _IDENTITY_H = np.eye(3)
 
@@ -74,35 +77,33 @@ class SecondFieldSpec:
 
 
 def _design_map(chart_rect):
-    """(k, ox, oy) mapping SM 640x480 design space to the chart region,
-    'min' letterbox fit (the exact 640x480 box, centered) - kept in
-    lockstep with the notitg storyboard's _design_transform so a field
-    copy lines up with the storyboard actors drawn over it and with the
-    notefield centered in the same box."""
+    """(kx, ky, ox, oy) mapping SM 640x480 design space onto the chart
+    region by stretching each axis to fill - the engine's own policy:
+    NotITG renders a fixed 640x480 design screen and stretches it to the
+    window, so widescreen play widens the content instead of
+    letterboxing it. Kept in lockstep with the notitg storyboard's
+    _design_transform ('stretch' fit) so a field copy lines up with the
+    storyboard actors drawn over it."""
     x, y, w, h = chart_rect
-    k = min(w / _DESIGN_W, h / _DESIGN_H)
-    ox = x + (w - _DESIGN_W * k) / 2.0
-    oy = y + (h - _DESIGN_H * k) / 2.0
-    return k, ox, oy
+    return w / _DESIGN_W, h / _DESIGN_H, x, y
 
 
 def design_box(chart_rect) -> QRectF:
-    """The mapped SM 640x480 box in screen space (the hard crop region),
-    matching _design_map. Used by the renderer to clip AFT copies to the
-    design box so offscreen content never bleeds into a copy."""
-    k, ox, oy = _design_map(chart_rect)
-    return QRectF(ox, oy, _DESIGN_W * k, _DESIGN_H * k)
+    """The mapped design box in screen space (the hard crop region),
+    matching _design_map: under the stretch fit it IS the chart region -
+    the engine clips at its render-target edge."""
+    return QRectF(*chart_rect)
 
 
-def _screen_transform(H, k, ox, oy) -> QTransform | None:
+def _screen_transform(H, kx, ky, ox, oy) -> QTransform | None:
     """Window-space QTransform for a sampled capture->design homography:
     None for the identity (the untransformed-blit fast path), else the
     design-map conjugation M^-1 . H . M (Qt row-vector composition:
     the leftmost factor applies to a point first)."""
     if np.allclose(H, _IDENTITY_H, atol=1e-9):
         return None
-    to_design = QTransform(1.0 / k, 0.0, 0.0, 1.0 / k, -ox / k, -oy / k)
-    to_screen = QTransform(k, 0.0, 0.0, k, ox, oy)
+    to_design = QTransform(1.0 / kx, 0.0, 0.0, 1.0 / ky, -ox / kx, -oy / ky)
+    to_screen = QTransform(kx, 0.0, 0.0, ky, ox, oy)
     return to_design * transform3d.qtransform_from_h(H) * to_screen
 
 
@@ -133,7 +134,7 @@ class NotitgFieldInstances:
             return None
         t = float(ctx.t_now)
         base_hidden = self._base_field_hidden(t)
-        k, ox, oy = _design_map(ctx.chart_rect)
+        kx, ky, ox, oy = _design_map(ctx.chart_rect)
 
         entries = []
         for inst in self._instances:
@@ -143,8 +144,9 @@ class NotitgFieldInstances:
             if sampled is None:
                 continue
             H, alpha = sampled
-            entries.append((_screen_transform(H, k, ox, oy),
-                            min(1.0, alpha), self._scope(inst)))
+            entries.append((_screen_transform(H, kx, ky, ox, oy),
+                            min(1.0, alpha), self._scope(inst),
+                            self._extra(inst, t)))
 
         if self._second_field is not None:
             return EffectFrame(
@@ -173,12 +175,30 @@ class NotitgFieldInstances:
                 and self._base_hidden.sample(t)[0] >= 0.5)
 
     def _scope(self, inst) -> str:
+        if inst['kind'] == 'fill':
+            return _FILL_SCOPE
         if inst['kind'] == 'aft':
             return (_AFT_PREV_SCOPE if inst.get('aft_order') == 'pre'
                     else _AFT_SCOPE)
         if inst['player'] == 2 and self._second_field is not None:
             return _FIELD2_SCOPE
         return _PROXY_SCOPE
+
+    @staticmethod
+    def _extra(inst, t):
+        """The scope's per-frame payload: a fill's sampled rgb, or an
+        aft sampler's (source name, capture-live?) freeze key. None for
+        proxy/player blits."""
+        match inst['kind']:
+            case 'fill':
+                color = inst.get('color')
+                return tuple(color.sample(t)) if color is not None \
+                    else (1.0, 1.0, 1.0)
+            case 'aft':
+                live = inst.get('aft_live')
+                return (inst['name'],
+                        live is None or live.sample(t)[0] >= 0.5)
+        return None
 
 
 class NotitgScreenCamera:
@@ -213,12 +233,12 @@ class NotitgScreenCamera:
         ty = self._tl['y'].sample(t)[0]
         if sx == 1.0 and sy == 1.0 and tx == 0.0 and ty == 0.0:
             return None
-        k, ox, oy = _design_map(ctx.chart_rect)
+        kx, ky, ox, oy = _design_map(ctx.chart_rect)
         transform = QTransform()
         transform.translate(ox, oy)
-        transform.scale(k, k)
+        transform.scale(kx, ky)
         transform.translate(tx, ty)
         transform.scale(sx, sy)
-        transform.scale(1.0 / k, 1.0 / k)
+        transform.scale(1.0 / kx, 1.0 / ky)
         transform.translate(-ox, -oy)
         return EffectFrame(scene_transform=transform)

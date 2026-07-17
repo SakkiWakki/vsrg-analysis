@@ -262,11 +262,11 @@ def _screen_transform(chart_rect, H):
     reads left-to-right: `M_inv * H_qt * M` applies M^-1 first."""
     from PySide6.QtGui import QTransform
 
-    k, ox, oy = _design_map(chart_rect)
+    kx, ky, ox, oy = _design_map(chart_rect)
     to_design = QTransform()
-    to_design.scale(1.0 / k, 1.0 / k)
+    to_design.scale(1.0 / kx, 1.0 / ky)
     to_design.translate(-ox, -oy)
     to_screen = QTransform()
     to_screen.translate(ox, oy)
-    to_screen.scale(k, k)
+    to_screen.scale(kx, ky)
     return to_design * transform3d.qtransform_from_h(H) * to_screen

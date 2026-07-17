@@ -166,17 +166,22 @@ class TransformChannel:
         return m
 
 
-def instance(name, kind, player, links, t0=None, aft_order=None) -> dict:
+def instance(name, kind, player, links, t0=None, aft_order=None,
+             aft_live=None, color=None) -> dict:
     """One compiled field instance. `kind` is 'player' (a real player's
     always-rendered field group), 'proxy' (an ActorProxy re-render of
-    player `player`'s notefield), or 'aft' (an ActorFrameTexture screen
-    sampler); `player` is the 1-based player whose capture the instance
-    blits (0 for 'aft'). `aft_order` places an 'aft' sampler relative to
-    its source AFT node in draw order: 'post' samplers show the frame's
-    fresh capture (drawn after the node captured), 'pre' samplers show
-    the previous frame's (their draw preceded this frame's capture)."""
+    player `player`'s notefield), 'aft' (an ActorFrameTexture screen
+    sampler), or 'fill' (an AFT-rig curtain quad blitted at its tree
+    position); `player` is the 1-based player whose capture the instance
+    blits (0 for 'aft'/'fill'). `aft_order` places an 'aft' sampler
+    relative to its source AFT node in draw order: 'post' samplers show
+    the frame's fresh capture (drawn after the node captured), 'pre'
+    samplers show the previous frame's (their draw preceded this frame's
+    capture). `aft_live` samples the source node's visibility (0.0 =
+    hidden = the preserve-texture capture is frozen); `color` samples a
+    'fill' curtain's diffuse rgb."""
     return {'name': name, 'kind': kind, 'player': player,
-            'aft_order': aft_order,
+            'aft_order': aft_order, 'aft_live': aft_live, 'color': color,
             'transform': TransformChannel(links, t0=t0,
                                           flip_base_y=kind == 'aft')}
 

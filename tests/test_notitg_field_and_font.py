@@ -107,32 +107,32 @@ def test_identity_copy_is_screen_identity():
     copy = _proxy(keyframes={'x': [_kf(0.0, 320.0)],
                              'y': [_kf(0.0, 240.0)]})
     frame = NotitgFieldInstances([copy]).at(_Ctx(1.0))
-    transform, opacity, _scope = frame.fields[1]
+    transform, opacity, _scope, _extra = frame.fields[1]
     assert transform is None and opacity == 1.0
 
 
 def test_copy_translation_scales_by_design_ratio():
     chart_rect = _Ctx.chart_rect
-    k, ox, oy = _design_map(chart_rect)
+    kx, ky, ox, oy = _design_map(chart_rect)
     copy = _proxy(keyframes={'x': [_kf(0.0, 420.0)],
                              'y': [_kf(0.0, 240.0)]})
     frame = NotitgFieldInstances([copy]).at(_Ctx(1.0))
-    centre = QPointF(ox + 320 * k, oy + 240 * k)
+    centre = QPointF(ox + 320 * kx, oy + 240 * ky)
     shifted = frame.fields[1][0].map(centre)
-    assert shifted.x() == pytest.approx(centre.x() + 100 * k)
+    assert shifted.x() == pytest.approx(centre.x() + 100 * kx)
     assert shifted.y() == pytest.approx(centre.y())
 
 
 def test_vertical_mirror_flips_about_screen_centre():
     chart_rect = _Ctx.chart_rect
-    k, ox, oy = _design_map(chart_rect)
+    kx, ky, ox, oy = _design_map(chart_rect)
     copy = _proxy(keyframes={'x': [_kf(0.0, 320.0)],
                              'y': [_kf(0.0, 240.0)],
                              'scale_y': [_kf(0.0, -1.0)]})
     frame = NotitgFieldInstances([copy]).at(_Ctx(1.0))
-    point = QPointF(ox + 320 * k, oy + 100 * k)  # design (320, 100)
+    point = QPointF(ox + 320 * kx, oy + 100 * ky)  # design (320, 100)
     mirrored = frame.fields[1][0].map(point)
-    assert mirrored.y() == pytest.approx(oy + (480 - 100) * k)
+    assert mirrored.y() == pytest.approx(oy + (480 - 100) * ky)
 
 
 def test_identity_original_always_present_with_copies():
@@ -154,7 +154,7 @@ def test_hidden_copy_is_dropped():
 
 def test_proxy_copy_is_field_scope_never_screen():
     frame = NotitgFieldInstances([_proxy()]).at(_Ctx(1.0))
-    _transform, _opacity, scope = frame.fields[1]
+    _transform, _opacity, scope, _extra = frame.fields[1]
     assert scope == 'field'
 
 
@@ -303,27 +303,27 @@ def _flatten(elements):
         yield from _flatten(element.children)
 
 
-# -- design box (min-fit crop) + screen-constant resolution ---------------
+# -- design box (stretch-fill crop) + screen-constant resolution ----------
 
-def test_design_box_is_centered_min_fit():
+def test_design_box_is_the_chart_region():
     """The 640x480 design box letterboxes ('min' fit) centered in a wide
-    chart region - its center coincides with the region center so the
-    notefield and actors agree on where 320 is."""
+    chart region - under the engine's stretch policy the design box IS
+    the region, so the notefield and actors agree on where 320 is."""
     rect = (0, 0, 900, 600)
     box = design_box(rect)
     assert box.center().x() == pytest.approx(450)
     assert box.center().y() == pytest.approx(300)
-    # min fit: scaled by the tighter axis (height here), 4:3 box.
+    assert box.width() == pytest.approx(900)
     assert box.height() == pytest.approx(600)
-    assert box.width() == pytest.approx(800)
 
 
 def test_design_map_matches_design_box():
     rect = (0, 0, 900, 600)
-    k, ox, oy = _design_map(rect)
+    kx, ky, ox, oy = _design_map(rect)
     box = design_box(rect)
     assert (ox, oy) == pytest.approx((box.x(), box.y()))
-    assert k == pytest.approx(box.height() / 480.0)
+    assert kx == pytest.approx(box.width() / 640.0)
+    assert ky == pytest.approx(box.height() / 480.0)
 
 
 def test_screen_constants_resolve_in_classic_commands():

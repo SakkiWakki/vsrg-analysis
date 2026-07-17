@@ -145,16 +145,16 @@ class DocumentStoryboardRenderer:
         index = self._index
 
         def draw(ctx, painter):
-            k, ox, oy = _design_transform(sb, ctx.chart_rect)
-            clipped = sb.clip_design_box
-            if clipped:
-                painter.save()
-                painter.setClipRect(_design_box_rect(sb, k, ox, oy),
+            kx, ky, ox, oy = _design_transform(sb, ctx.chart_rect)
+            painter.save()
+            if sb.clip_design_box:
+                painter.setClipRect(_design_box_rect(sb, kx, ky, ox, oy),
                                     Qt.ClipOperation.IntersectClip)
+            painter.translate(ox, oy)
+            painter.scale(kx, ky)
             for root_id in root_ids:
                 paint._paint_element(
-                    painter, index[root_id], t, k, ox, oy,
+                    painter, index[root_id], t, 1.0, 0.0, 0.0,
                     sb.design_w, sb.design_h, walker=walk, node=root_id)
-            if clipped:
-                painter.restore()
+            painter.restore()
         return draw

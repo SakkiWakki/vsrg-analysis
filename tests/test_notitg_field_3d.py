@@ -76,12 +76,12 @@ def test_screen_transform_pivots_on_mapped_design_centre():
     """The conjugated screen transform keeps the mapped SM centre fixed and
     lands the design box in the chart region (lockstep with copies)."""
     chart_rect = (100.0, 0.0, 800.0, 720.0)
-    k, ox, oy = f3._design_map(chart_rect)
+    kx, ky, ox, oy = f3._design_map(chart_rect)
     proj = t3.projection(f3._DEFAULT_FOV, f3._DESIGN_W, f3._DESIGN_H)
     model = f3._field_model(0.0, 20.0, 0.0, 0.0)
     _v, H, _c = t3.project_with_verdict(model, proj, f3._PLANE_CORNERS)
     qt = f3._screen_transform(chart_rect, H)
-    cx_s, cy_s = ox + f3._DESIGN_CX * k, oy + f3._DESIGN_CY * k
+    cx_s, cy_s = ox + f3._DESIGN_CX * kx, oy + f3._DESIGN_CY * ky
     mapped = qt.map(cx_s, cy_s)
     assert abs(mapped[0] - cx_s) < 1e-6 and abs(mapped[1] - cy_s) < 1e-6
 

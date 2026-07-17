@@ -27,6 +27,9 @@ _HUD_LAYERS = frozenset(('free_sections', 'hud'))
 _DEFAULT_FIELD_SCOPE = 'field'
 _SCREEN_SCOPE = 'screen'
 _SCREEN_PREV_SCOPE = 'screen_prev'
+# An AFT-rig curtain quad: a flat color fill at its tree position among
+# the instance blits (covers earlier blits, capped by later ones).
+_FILL_SCOPE = 'fill'
 # The second, independently-modded playfield capture (dual-player NotITG).
 # A 'field2' copy blits `_field2_pixmap` instead of the primary field
 # pixmap; produced only when the frame carries a second_field spec.
@@ -51,6 +54,12 @@ def _field_entry(entry):
 
 def _field_scope(entry) -> str:
     return entry[2] if len(entry) >= 3 else _DEFAULT_FIELD_SCOPE
+
+
+def _field_extra(entry):
+    """The scope's optional payload (4th element): a fill's rgb, or an
+    aft sampler's (source name, capture-live?) freeze key."""
+    return entry[3] if len(entry) >= 4 else None
 
 
 from analysis.player.render import culling, theme
@@ -146,6 +155,9 @@ class QtPlayerRenderer:
         # This frame's node-point capture, taken lazily during the
         # instance blits and promoted to `_prev_screen` at composite end.
         self._screen_capture = None
+        # Preserve-texture freezes: the last capture each AFT source
+        # blitted while its node was visible, held across hidden frames.
+        self._aft_frozen: dict = {}
         self._frame_stats = FrameStats()
         # Set by GL hosts (PlayerCanvas); frames whose effects carry
         # shader passes route chart painting through it. None = raster
@@ -467,6 +479,9 @@ class QtPlayerRenderer:
         if prev_t is not None and not (0.0 <= t - prev_t <= _SEEK_GAP_S):
             self._prev_screen = None
             self._prev_screen_t = None
+            # Retained freezes predate the jump too; they re-prime from
+            # the next frame their source node draws.
+            self._aft_frozen.clear()
 
     def _begin_screen_composite(self, frame, ctx, painter):
         """Redirect the whole chart region into an offscreen pixmap when
@@ -652,7 +667,27 @@ class QtPlayerRenderer:
             painter.restore()
         for entry in frame.fields:
             transform, opacity, scope = _field_entry(entry)
+            extra = _field_extra(entry)
             if opacity < 1.0 / 255.0:
+                continue
+            if scope == _FILL_SCOPE:
+                # An AFT-rig curtain quad at its tree position: covers
+                # every blit made before it, capped by the ones after.
+                # The AFT node sits BEFORE the curtains in the rig's
+                # tree (gat: nodes at 5718/5738, quads after), so the
+                # node-point capture must snapshot the composite before
+                # the curtain lands - otherwise a 'screen' sampler
+                # above the quad blits the blackout back at itself.
+                if (self._screen_pixmap is not None
+                        and self._screen_capture is None):
+                    self._screen_capture = self._screen_pixmap.copy()
+                painter.save()
+                painter.setClipRect(QRectF(*ctx.chart_rect))
+                painter.setOpacity(min(1.0, opacity))
+                r, g, b = extra or (1.0, 1.0, 1.0)
+                painter.fillRect(QRectF(*ctx.chart_rect),
+                                 QColor.fromRgbF(r, g, b))
+                painter.restore()
                 continue
             if scope == _SCREEN_SCOPE and self._screen_pixmap is None:
                 continue
@@ -673,9 +708,11 @@ class QtPlayerRenderer:
                 painter.setClipRect(box, Qt.ClipOperation.IntersectClip)
             painter.setOpacity(min(1.0, opacity))
             if scope == _SCREEN_SCOPE:
-                painter.drawPixmap(0, 0, self._screen_capture)
+                painter.drawPixmap(
+                    0, 0, self._aft_source(extra, self._screen_capture))
             elif scope == _SCREEN_PREV_SCOPE:
-                painter.drawPixmap(0, 0, self._prev_screen)
+                painter.drawPixmap(
+                    0, 0, self._aft_source(extra, self._prev_screen))
             elif scope == _FIELD2_SCOPE:
                 # The second player's independently-modded field capture.
                 painter.drawPixmap(0, 0, self._field2_pixmap)
@@ -690,6 +727,22 @@ class QtPlayerRenderer:
             # so 'screen_prev' copies have next frame's source.
             self._screen_capture = self._screen_pixmap.copy()
         self._backdrop_pixmap = None
+
+    def _aft_source(self, extra, live_pixmap):
+        """The pixmap an AFT sampler blits, honouring preserve-texture
+        freezes. `extra` is the sampler's (source name, capture-live?)
+        pair: while the source node draws (live), the fresh capture is
+        blitted and retained; while the node is hidden its texture stops
+        updating, so the retained capture is blitted instead (gat's
+        DelayFrame still-frames and the frozen ending toss). No pair, or
+        no retained capture yet, falls back to the live pixmap."""
+        if extra is None:
+            return live_pixmap
+        name, live = extra
+        if live:
+            self._aft_frozen[name] = live_pixmap
+            return live_pixmap
+        return self._aft_frozen.get(name, live_pixmap)
 
     @staticmethod
     def _begin_scene_transform(frame, painter, ctx) -> bool:

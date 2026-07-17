@@ -29,18 +29,29 @@ def test_build_timelines_rest_defaults_and_overrides():
 
 def test_design_transform_min_fit_letterboxes():
     sb = Storyboard(design_w=1920, design_h=1080, fit='min')
-    k, ox, oy = _design_transform(sb, (0, 0, 960, 1080))
-    assert k == pytest.approx(0.5)                # width-bound
+    kx, ky, ox, oy = _design_transform(sb, (0, 0, 960, 1080))
+    assert kx == pytest.approx(0.5)               # width-bound
+    assert ky == pytest.approx(0.5)
     assert ox == pytest.approx(0.0)
     assert oy == pytest.approx((1080 - 540) / 2)  # vertically centered
 
 
 def test_design_transform_height_fit_extends_sideways():
     sb = Storyboard(design_w=640, design_h=480, fit='height')
-    k, ox, oy = _design_transform(sb, (0, 0, 1000, 480))
-    assert k == pytest.approx(1.0)
+    kx, ky, ox, oy = _design_transform(sb, (0, 0, 1000, 480))
+    assert kx == pytest.approx(1.0)
+    assert ky == pytest.approx(1.0)
     assert ox == pytest.approx((1000 - 640) / 2)
     assert oy == pytest.approx(0.0)
+
+
+def test_design_transform_stretch_fit_fills_each_axis():
+    sb = Storyboard(design_w=640, design_h=480, fit='stretch')
+    kx, ky, ox, oy = _design_transform(sb, (10, 20, 1280, 720))
+    assert kx == pytest.approx(2.0)
+    assert ky == pytest.approx(1.5)
+    assert ox == pytest.approx(10.0)
+    assert oy == pytest.approx(20.0)
 
 
 # ── fluXis .fsb compiler --------------------------------------------------

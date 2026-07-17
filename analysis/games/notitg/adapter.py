@@ -249,13 +249,15 @@ class NotitgAdapter(EtternaAdapter):
         return effects
 
     def design_space(self):
-        """NotITG presents a hard-cropped 640x480 screen: letterbox that
-        exact box ('min') centered in the chart region and clip to it, so
-        actors that run offscreen crop at the design edges and the
-        centered box lines up with the notefield center (see
+        """NotITG renders a fixed 640x480 design screen and STRETCHES it
+        to the window - widescreen play widens the content rather than
+        letterboxing it (reference footage fills 16:9 edge-to-edge), and
+        offscreen actors crop at the window edge. Stretch each axis to
+        fill the chart region and clip to it (see
         field_instances._design_map, kept in lockstep)."""
-        from analysis.player.render.document import DesignSpace, FIT_MIN
-        return DesignSpace(width=640.0, height=480.0, fit=FIT_MIN, clip=True)
+        from analysis.player.render.document import DesignSpace, FIT_STRETCH
+        return DesignSpace(width=640.0, height=480.0, fit=FIT_STRETCH,
+                           clip=True)
 
     def storyboard(self, replay):
         """Modfile actors (prank overlays, quads, text, ActorFrame

@@ -25,6 +25,7 @@ from analysis.games.notitg import field_compose, modfile
 from analysis.games.notitg.sim.loop import (
     load_chart, run_declarative, run_sim)
 from analysis.games.notitg.sim.record import chase_events, coalesce_applied
+from analysis.player.render.effects.timeline import EventTimeline
 from analysis.player.render.mods.channels import ModChannels
 
 
@@ -57,6 +58,7 @@ def _compile_via_sim(sm_path, end_seconds):
     actor_keyframes = env.actor_keyframes()
     osc_context = _osc_context(env, doc, end_seconds)
     fonts = modfile._font_resolver(doc.lua_dir)
+    _mark_aft_fills(doc, env)
     tree = modfile.compile_element_tree(
         doc.root, doc.to_seconds, doc.start_beat, named_keyframes,
         fonts=fonts, actor_keyframes=actor_keyframes,
@@ -178,6 +180,40 @@ def _mod_events(result) -> list:
 # (or its NoteField child) re-renders that player's notefield.
 _PLAYER_CHILDREN = ('PlayerP1', 'PlayerP2')
 
+# Drawable leaf kinds an AFT-rig fill can be (the rig's fullscreen
+# curtains are Quads and bg.png sprites).
+_FILL_KINDS = frozenset({'Sprite', 'Quad', 'Layer'})
+
+
+def _mark_aft_fills(doc, env) -> None:
+    """Tag the AFT rig's curtain quads (`actor._aft_fill = True`) so the
+    element compiler skips them and `_sim_field_instances` re-emits them
+    as ordered fill instances.
+
+    The rig's fullscreen quads (gat's ShowAFT/ShowAFT2/ShowAFT3 black
+    and white curtains) sit BETWEEN the field proxies and the
+    aft-sampler sprites in engine draw order: they black out the
+    proxies underneath while the frozen captures flash above. As
+    storyboard elements they draw outside the field-blit pass - either
+    over the samplers (a solid black screen) or under the proxies
+    (receptors showing through the blackout) - so draw order can only
+    be honoured by blitting them inside the instance pass at their
+    tree position. A quad belongs to the rig when it shares a message
+    command with an AFT node or sampler sprite."""
+    rig_messages: set = set()
+    fill_candidates = []
+    for actor in _iter_xml(doc.root):
+        sim = env.actors.get(env.actor_id(actor))
+        if sim is None:
+            continue
+        if sim.is_aft or sim.aft_source:
+            rig_messages.update(actor.message_commands())
+        elif actor.kind in _FILL_KINDS and not actor.children:
+            fill_candidates.append(actor)
+    for actor in fill_candidates:
+        if rig_messages & set(actor.message_commands()):
+            actor._aft_fill = True
+
 
 def _sim_field_instances(doc, env, actor_keyframes, osc_context,
                          named_keyframes, field_oscillators,
@@ -214,13 +250,21 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
         if sim is None:
             continue
         aft_order = None
+        aft_live = None
+        color = None
         if sim.aft_source:
             kind, player = 'aft', 0
             node = aft_nodes.get(sim.aft_source)
             aft_order = ('pre' if node is not None and rec_id < node
                          else 'post')
+            aft_live = _aft_node_visible(env, node)
         elif sim.proxy_target in proxy_players:
             kind, player = 'proxy', proxy_players[sim.proxy_target]
+        elif getattr(actor, '_aft_fill', False):
+            kind, player = 'fill', 0
+            color = EventTimeline(
+                (actor_keyframes.get(rec_id) or {}).get('color', []),
+                rest=(1.0, 1.0, 1.0))
         else:
             continue
         chain = _chain(actor, parents)
@@ -233,8 +277,37 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
                              if env.actor_id(a) in names), 'copy')
             name = f'{ancestor}_{rec_id}'
         instances.append(field_compose.instance(name, kind, player, links,
-                                                t0=t0, aft_order=aft_order))
+                                                t0=t0, aft_order=aft_order,
+                                                aft_live=aft_live,
+                                                color=color))
     return instances
+
+
+def _aft_node_visible(env, node_id):
+    """A 0/1 timeline of the source AFT node's visibility, or None when
+    the node is unknown. An AFT captures only while it draws
+    (`EnablePreserveTexture` holds the last capture across hidden
+    frames), so a sampler shows a FROZEN capture whenever its node is
+    hidden - a still-frames rig flashes its node visible for a few
+    hundredths of a second to grab one freeze, and hiding the node
+    freezes the toss capture."""
+    sim = env.actors.get(node_id)
+    if sim is None:
+        return None
+    hidden = sim.keyframes().get('hidden')
+    if not hidden:
+        return None
+    return _HiddenAsVisible(EventTimeline(hidden, rest=(0.0,)))
+
+
+class _HiddenAsVisible:
+    """`sample(t) -> (1.0 visible,)` over a hidden channel."""
+
+    def __init__(self, hidden):
+        self._hidden = hidden
+
+    def sample(self, t):
+        return (0.0 if self._hidden.sample(t)[0] >= 0.5 else 1.0,)
 
 
 def _dual_players(mod_channels, named_keyframes) -> bool:

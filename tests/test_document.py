@@ -18,7 +18,7 @@ from analysis.player.render.document import (CaptureContent, CaptureRange,
                                              FIT_HEIGHT, FIT_MIN, Node,
                                              NotefieldContent, RectContent,
                                              SpriteContent, StreamTable,
-                                             TextContent, Timeline)
+                                             TextContent, Timeline, FIT_STRETCH)
 from analysis.player.render.document.builder import document_from_player
 from analysis.player.render.effects.timeline import EventTimeline, Keyframe
 from analysis.player.render.storyboard.model import Element, build_timelines
@@ -47,7 +47,7 @@ def test_design_space_per_game():
         'quaver': (640.0, 480.0, FIT_HEIGHT, False),
         'osu': (640.0, 480.0, FIT_HEIGHT, False),
         'fluxis': (1366.0, 768.0, FIT_MIN, False),
-        'notitg': (640.0, 480.0, FIT_MIN, True),
+        'notitg': (640.0, 480.0, FIT_STRETCH, True),
     }
     games = game_mod.all_games()
     for name, (w, h, fit, clip) in expected.items():
@@ -189,7 +189,7 @@ def _storyboard(elements):
 def test_builder_wraps_design_space():
     doc = document_from_player(_fake_player(None))
     assert (doc.design.width, doc.design.fit, doc.design.clip) == (
-        640.0, FIT_MIN, True)
+        640.0, FIT_STRETCH, True)
     assert doc.nodes == {} and doc.roots == ()
 
 
@@ -246,4 +246,4 @@ def test_storyboard_design_mapping_reads_through_adapter():
     # design mapping.
     for game in ('notitg', 'osu', 'fluxis', 'etterna'):
         ds = game_mod.get(game).design_space()
-        assert ds.fit in (FIT_MIN, FIT_HEIGHT)
+        assert ds.fit in (FIT_MIN, FIT_HEIGHT, FIT_STRETCH)

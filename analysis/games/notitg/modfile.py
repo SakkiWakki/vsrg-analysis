@@ -343,6 +343,11 @@ def _mod_event(row, to_seconds, beat_based):
         return None
 
     end_field = (v1 + v2) if apply_type == 'len' else v2
+    # The template reader applies a row only while `start <= now <= end`;
+    # an inverted window (an 'end' row whose author meant 'len', gat's
+    # `{847.5, 1, ..., 'end'}`) can never satisfy both and never applies.
+    if end_field < v1:
+        return None
     if beat_based:
         start_s = to_seconds(v1)
         end_s = to_seconds(end_field)
@@ -471,6 +476,11 @@ def _compile_actor(actor, start_time, named_keyframes, fonts, below=None,
                    actor_keyframes=None, osc_context=None):
     if below is None:
         below = []
+    if getattr(actor, '_aft_fill', False):
+        # An AFT-rig curtain quad: re-emitted as a 'fill' field instance
+        # at its tree position (see producers._mark_aft_fills), never a
+        # storyboard element.
+        return None
     if getattr(actor, '_background_layer', False):
         element = _compile_background_actor(actor, start_time, named_keyframes,
                                            fonts, actor_keyframes, osc_context)

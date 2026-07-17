@@ -105,21 +105,28 @@ def _sheet_frame(el, t: float) -> int:
 
 
 def _design_transform(storyboard, chart_rect):
-    """(scale, offset_x, offset_y) mapping design space to screen."""
+    """(scale_x, scale_y, offset_x, offset_y) mapping design space to
+    screen: 'min' letterboxes the whole design rect, 'height' scales by
+    height alone, 'stretch' scales each axis independently to fill the
+    region (NotITG: the engine stretches its 640x480 design screen to
+    the window)."""
     x, y, w, h = chart_rect
-    if storyboard.fit == 'height':
-        k = h / storyboard.design_h
-    else:
-        k = min(w / storyboard.design_w, h / storyboard.design_h)
-    ox = x + (w - storyboard.design_w * k) / 2.0
-    oy = y + (h - storyboard.design_h * k) / 2.0
-    return k, ox, oy
+    match storyboard.fit:
+        case 'stretch':
+            kx, ky = w / storyboard.design_w, h / storyboard.design_h
+        case 'height':
+            kx = ky = h / storyboard.design_h
+        case _:
+            kx = ky = min(w / storyboard.design_w, h / storyboard.design_h)
+    ox = x + (w - storyboard.design_w * kx) / 2.0
+    oy = y + (h - storyboard.design_h * ky) / 2.0
+    return kx, ky, ox, oy
 
 
-def _design_box_rect(storyboard, k, ox, oy) -> QRectF:
-    """The mapped design rect in screen space - NotITG's hard 640x480
-    crop box. Content painted past its edges is clipped away."""
-    return QRectF(ox, oy, storyboard.design_w * k, storyboard.design_h * k)
+def _design_box_rect(storyboard, kx, ky, ox, oy) -> QRectF:
+    """The mapped design rect in screen space - NotITG's hard crop box.
+    Content painted past its edges is clipped away."""
+    return QRectF(ox, oy, storyboard.design_w * kx, storyboard.design_h * ky)
 
 
 def _bitmaptext_width(font, text: str) -> float:
@@ -242,17 +249,22 @@ class StoryboardEffect:
 
     def _layer_draw(self, indices, t):
         def draw(ctx, painter):
-            k, ox, oy = _design_transform(self._sb, ctx.chart_rect)
-            clipped = self._sb.clip_design_box
-            if clipped:
-                painter.save()
-                painter.setClipRect(_design_box_rect(self._sb, k, ox, oy),
-                                    Qt.ClipOperation.IntersectClip)
+            kx, ky, ox, oy = _design_transform(self._sb, ctx.chart_rect)
+            painter.save()
+            if self._sb.clip_design_box:
+                painter.setClipRect(
+                    _design_box_rect(self._sb, kx, ky, ox, oy),
+                    Qt.ClipOperation.IntersectClip)
+            # One world transform maps design space to screen; elements
+            # paint in raw design coordinates (per-axis scales shear
+            # rotated content exactly as the engine's stretch does).
+            painter.translate(ox, oy)
+            painter.scale(kx, ky)
             for i in indices:
-                self._paint_element(painter, self._elements[i], t, k, ox, oy,
+                self._paint_element(painter, self._elements[i], t, 1.0,
+                                    0.0, 0.0,
                                     self._sb.design_w, self._sb.design_h)
-            if clipped:
-                painter.restore()
+            painter.restore()
         return draw
 
     # -- element painting -------------------------------------------------
