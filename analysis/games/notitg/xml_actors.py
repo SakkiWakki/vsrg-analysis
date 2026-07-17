@@ -59,6 +59,31 @@ class Actor:
         return {name: value for name, value in self.attrs.items()
                 if name.endswith('Command')}
 
+    def message_commands(self) -> dict:
+        """`{message_name: body}` for every `<Name>MessageCommand` attr.
+        These run when `MESSAGEMAN:Broadcast('Name')` fires (on every
+        actor that defines the command); the body is the raw attribute
+        value (a `%`-Lua chunk or a classic command string)."""
+        return {name[:-len('MessageCommand')]: value
+                for name, value in self.attrs.items()
+                if name.endswith('MessageCommand')
+                and name != 'MessageCommand'}
+
+    def named_commands(self) -> dict:
+        """`{command_name: body}` for the plain `<Name>Command` attrs an
+        actor exposes to `play/queuecommand('Name')` - every `*Command`
+        that is neither the load-time Init/On nor a broadcast
+        `*MessageCommand`. `Name` keeps its case (SM command names are
+        case-sensitive: `Spawn`, `HideQ`, `Cast`)."""
+        out = {}
+        for name, value in self.attrs.items():
+            if not name.endswith('Command') or name.endswith('MessageCommand'):
+                continue
+            if name in ('InitCommand', 'OnCommand'):
+                continue
+            out[name[:-len('Command')]] = value
+        return out
+
 
 @dataclass
 class LuaChunk:

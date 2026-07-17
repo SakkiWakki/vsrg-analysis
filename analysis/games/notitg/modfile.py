@@ -167,30 +167,62 @@ def _resolve_lua_dir(sm_path, entries) -> Path | None:
 
 def _load_document(lua_dir: Path):
     """Parse default.xml, splicing in any `<Layer File=...>` includes so
-    included actors (modhelpers.xml helper definitions) are present in
-    document order."""
+    included actors (modhelpers.xml helper definitions, the chara
+    subtree) are present in document order. Every actor is annotated with
+    the directory its XML came from (`_base_dir`) so a Sprite's `Texture=`
+    / `File=` reference resolves against ITS file's location, not the top
+    lua dir (chara sprites reference `shame/idle.sprite` relative to
+    `lua/chara`)."""
     entry = lua_dir / 'default.xml'
     root_parsed = xml_actors.parse_actor_xml(
         entry.read_text(encoding='utf-8', errors='replace'))
 
     lua_chunks = list(root_parsed.lua_chunks)
     classic = list(root_parsed.classic_commands)
+    _tag_base_dir(root_parsed.root, lua_dir)
     _splice_includes(root_parsed.root, lua_dir, lua_chunks, classic)
     return root_parsed.root, lua_chunks, classic
 
 
+def _tag_base_dir(actor, base_dir) -> None:
+    actor._base_dir = base_dir
+    for child in actor.children:
+        _tag_base_dir(child, base_dir)
+
+
 def _splice_includes(actor, lua_dir, lua_chunks, classic) -> None:
     for child in list(actor.children):
-        include = child.attrs.get('File', '')
-        if include.lower().endswith('.xml'):
-            included = lua_dir / include
-            if included.exists():
-                sub = xml_actors.parse_actor_xml(
-                    included.read_text(encoding='utf-8', errors='replace'))
-                child.children.append(sub.root)
-                lua_chunks[:0] = sub.lua_chunks
-                classic.extend(sub.classic_commands)
+        # Recurse into the child's OWN children first (captured now, so
+        # an appended include subtree - already fully spliced - is not
+        # re-processed under the wrong base dir).
         _splice_includes(child, lua_dir, lua_chunks, classic)
+        included = _include_path(child.attrs.get('File', ''), lua_dir)
+        if included is None:
+            continue
+        sub = xml_actors.parse_actor_xml(
+            included.read_text(encoding='utf-8', errors='replace'))
+        _tag_base_dir(sub.root, included.parent)
+        _splice_includes(sub.root, included.parent, sub.lua_chunks,
+                         sub.classic_commands)
+        child.children.append(sub.root)
+        lua_chunks[:0] = sub.lua_chunks
+        classic.extend(sub.classic_commands)
+
+
+def _include_path(include, lua_dir) -> Path | None:
+    """The actor-XML file a `File=` reference includes, or None. A `.xml`
+    reference is the file directly; a bare directory name (`File="chara"`,
+    gat's `<ZZZZZLAER File="chara"/>`) resolves to that dir's default.xml
+    (SM's implicit directory-actor rule). Anything else (a texture path)
+    is not an actor include."""
+    if not include:
+        return None
+    if include.lower().endswith('.xml'):
+        candidate = lua_dir / include
+        return candidate if candidate.exists() else None
+    directory = lua_dir / include
+    entry = directory / 'default.xml'
+    return entry if entry.is_dir() is False and entry.exists() else None
 
 
 def _timing(sm_data: dict):
@@ -210,23 +242,16 @@ def _beat_to_seconds(sm_data, chart):
     return convert
 
 
-def _run_chunks(lua_chunks, start_beat, to_seconds):
-    """Run every load-time CODE chunk under a shared stubbed host, in
-    document order, then harvest the mod tables. Each chunk runs with a
-    fresh recording `self`, so an InitCommand's `self:x(..)` pokes record
-    and a trailing `NAME = self` binds a global to that recorder (the
-    poke target for the mod_actions closures). Per-chunk failures warn
-    and are skipped so a partial harvest survives."""
+def _run_chunks(root, start_beat, to_seconds):
+    """Load the actor tree under a shared stubbed host: one persistent
+    recorder per actor, InitCommand/OnCommand run with `self` bound to
+    it, and every `<Name>MessageCommand` / `<Name>Command` registered so
+    later broadcasts and play/queuecommands run on the SAME recorder.
+    A trailing `NAME = self` still binds a global (the poke target for the
+    mod_actions closures). Per-chunk failures warn; a partial harvest
+    survives."""
     env = StubEnvironment(start_beat, to_seconds=to_seconds)
-    warnings = []
-    for chunk in lua_chunks:
-        if chunk.attr not in _LOAD_TIME_ATTRS:
-            continue
-        try:
-            env.run_actor_chunk(chunk.body,
-                                name=f'{chunk.actor.kind}.{chunk.attr}')
-        except Exception as exc:
-            warnings.append(f'{chunk.actor.kind}.{chunk.attr}: {exc}')
+    warnings = env.load_actors(root)
     return env, warnings
 
 
@@ -441,7 +466,9 @@ def _leaf_element(actor, start_time, named_keyframes, precomputed=None,
                   fonts=None):
     text = actor.attrs.get('Text', '')
     font = _resolve_font(actor, fonts)
-    kind = _element_kind(actor.kind, has_text=bool(text), font=font)
+    asset = None if font is not None else _resolve_asset(actor)
+    kind = _element_kind(actor.kind, has_text=bool(text), font=font,
+                         has_image=_is_image_asset(asset))
     if kind is None:
         return None
 
@@ -450,17 +477,74 @@ def _leaf_element(actor, start_time, named_keyframes, precomputed=None,
     drawable = _drawable_props(keyframes)
     if not any(drawable.values()):
         return None
-
-    asset = None if font is not None else (
-        actor.attrs.get('Texture') or actor.attrs.get('File'))
     return Element(
         kind=kind, z=0, z_index=0,
         t_start=start_time, t_end=float('inf'),
         anchor=(0.5, 0.5), origin=(0.5, 0.5),
         timelines=build_timelines(keyframes=drawable),
-        asset=str(asset) if asset else None,
+        asset=asset,
         text=str(text), font=font,
     )
+
+
+# StepMania's built-in flat-color texture: the renderer synthesizes it,
+# so the reference stays a name (never resolved to a file on disk).
+_BUILTIN_TEXTURES = frozenset({'white'})
+
+
+def _resolve_asset(actor) -> str | None:
+    """Absolute path to a Sprite's texture, resolved against the actor's
+    OWN XML directory (`_base_dir`), or None. The reference comes from
+    `Texture=` / `Load=` / `File=`; SM resolves it relative to the file
+    that declared the actor, so a chara sprite's `shame/idle.sprite`
+    resolves under `lua/chara`, not the top lua dir. A `.sprite` file is
+    an animation manifest whose first `Texture=` names the real image; we
+    resolve that image so the sprite shows its idle frame. `white` stays
+    a name (the renderer synthesizes it)."""
+    reference = (actor.attrs.get('Texture') or actor.attrs.get('Load')
+                 or actor.attrs.get('File'))
+    if not reference:
+        return None
+    if reference in _BUILTIN_TEXTURES:
+        return reference
+    base_dir = getattr(actor, '_base_dir', None)
+    if base_dir is None:
+        return reference
+    return _resolve_texture_path(reference, Path(base_dir))
+
+
+_IMAGE_SUFFIXES = ('.png', '.jpg', '.jpeg', '.gif', '.bmp')
+
+
+def _resolve_texture_path(reference: str, base_dir: Path) -> str | None:
+    """Resolve a texture reference to an existing image file under
+    `base_dir`, following SM's leniencies: an explicit path is used as
+    is; a `.sprite`/`.actor` manifest yields its inner `Texture=`; a bare
+    name matches a file with any image extension (SM omits them)."""
+    candidate = (base_dir / reference)
+    if candidate.suffix.lower() == '.sprite':
+        return _sprite_manifest_texture(candidate, base_dir)
+    if candidate.exists():
+        return str(candidate)
+    for suffix in _IMAGE_SUFFIXES:
+        with_ext = candidate.with_name(candidate.name + suffix)
+        if with_ext.exists():
+            return str(with_ext)
+    return str(candidate)
+
+
+def _sprite_manifest_texture(sprite_path: Path, base_dir: Path) -> str | None:
+    """The image an SM `.sprite` manifest points at: its `[Sprite]`
+    section's `Texture=<image>`, resolved beside the manifest. Returns the
+    manifest path itself when it has no readable Texture line."""
+    if not sprite_path.exists():
+        return str(sprite_path)
+    for line in sprite_path.read_text(
+            encoding='utf-8', errors='replace').splitlines():
+        key, _sep, value = line.partition('=')
+        if key.strip().lower() == 'texture' and value.strip():
+            return _resolve_texture_path(value.strip(), sprite_path.parent)
+    return str(sprite_path)
 
 
 def _resolve_font(actor, fonts):
@@ -487,14 +571,27 @@ def _drawable_props(keyframes):
             if prop in _DRAWABLE_PROPS and frames}
 
 
-def _element_kind(actor_kind: str, has_text=False, font=None):
+def _is_image_asset(asset) -> bool:
+    """True when a resolved asset is a real image reference (an existing
+    file or the synthesized `white`), so an untyped `Actor`/`Layer` that
+    loads one - gat's chara sprites, `<Actor File="shame/idle.sprite">` -
+    counts as a Sprite even without a `Type=`."""
+    if not asset:
+        return False
+    if asset in _BUILTIN_TEXTURES:
+        return True
+    return Path(asset).exists()
+
+
+def _element_kind(actor_kind: str, has_text=False, font=None,
+                  has_image=False):
     if font is not None:
         return 'bitmaptext'
     if actor_kind in _TEXT_KINDS or has_text:
         return 'text'
     if actor_kind in _SPRITE_KINDS:
         return 'sprite' if actor_kind == 'Sprite' else 'rect'
-    return None
+    return 'sprite' if has_image else None
 
 
 def compile_modfile(sm_path) -> dict | None:
@@ -518,14 +615,14 @@ def _compile_modfile(sm_path):
         return None
 
     sm_data = sm_chart.parse_sm(sm_path)
-    root, lua_chunks, classic_commands = _load_document(lua_dir)
+    root, _lua_chunks, classic_commands = _load_document(lua_dir)
 
     _bpms, _offset, chart = _timing(sm_data)
     to_seconds = _beat_to_seconds(sm_data, chart)
     start_beat = min((b for b, _n, k in entries if k == 'FGCHANGES'),
                      default=0.0)
 
-    env, chunk_warnings = _run_chunks(lua_chunks, start_beat, to_seconds)
+    env, chunk_warnings = _run_chunks(root, start_beat, to_seconds)
     fired, failed = env.replay_mod_actions()
     named_keyframes = env.named_actor_keyframes()
     named_meta = env.named_actor_meta()

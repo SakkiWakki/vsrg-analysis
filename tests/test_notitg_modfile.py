@@ -242,7 +242,7 @@ def test_replay_records_shader_flag_from_closure_at_fire_beat():
     assert env.shader_flags == [(32.0, 55, None)]
 
 
-def test_replay_swallows_string_payloads_and_survives_faults():
+def test_replay_broadcasts_string_payloads_and_survives_faults():
     env = StubEnvironment(start_beat=0.0)
     env.run("mod_actions = {\n"
             "  {4, 'SomeBroadcast'},\n"
@@ -250,7 +250,10 @@ def test_replay_swallows_string_payloads_and_survives_faults():
             "  {12, function() ok = true end},\n"
             "}", name='t')
     fired, failed = env.replay_mod_actions()
-    assert fired == 2 and failed == 1
+    # String payloads are MESSAGEMAN:Broadcast triggers: they now fire
+    # (dispatching their message commands) rather than being skipped. An
+    # unregistered message name dispatches to nothing but still counts.
+    assert fired == 3 and failed == 1
     assert env._host.env['ok'] is True
 
 
@@ -657,3 +660,142 @@ def test_gat_pilot_extracts_scroll_multipliers():
     sc, _skipped = compile_scroll_multipliers(result['mod_events'])
     # gat rides its 2x base with frequent xmod changes.
     assert len(sc) > 20
+
+
+# -- message dispatch -----------------------------------------------------
+
+def _load(xml):
+    parsed = xml_actors.parse_actor_xml(xml)
+    env = StubEnvironment(start_beat=0.0)
+    warnings = env.load_actors(parsed.root)
+    return env, warnings
+
+
+def test_message_command_helpers_split_by_name():
+    parsed = xml_actors.parse_actor_xml(
+        '<LAER Type="Sprite" InitCommand="%function(self) end"'
+        ' OnCommand="x,1" HideCommand="hidden,1"'
+        ' SetupFUCKMessageCommand="%function(self) end"/>')
+    actor = parsed.root
+    assert set(actor.message_commands()) == {'SetupFUCK'}
+    assert set(actor.named_commands()) == {'Hide'}
+
+
+def test_broadcast_binds_pool_actor_then_poke_records():
+    """The SetupFUCK pattern: a CODE actor defines a pool + getter, pool
+    members register themselves via a broadcast message command, and a
+    later poke through the getter lands as a keyframe on the SAME
+    recorder the message command bound."""
+    env, _w = _load(
+        '<ActorFrame><children>'
+        '<CODE Type="Quad" InitCommand="%function(self)'
+        '  pool = {}'
+        '  function pool_get() return pool[1] end'
+        'end"/>'
+        '<LAER Type="Sprite" SetUpMessageCommand="%function(self)'
+        '  table.insert(pool, self)'
+        '  self:x(100)'
+        'end"/>'
+        '</children></ActorFrame>')
+    # No pokes until the pool is built.
+    assert env._host.env['pool'] is not None
+    # Fire the broadcast: the pool actor registers and takes x=100.
+    env._dispatch_message('SetUp')
+    # A later poke through the getter reaches the same recorder.
+    env.run("member = pool_get(); member:y(50)", name='poke')
+    recorder = env._recorder_for_table(env._host.env['member'])
+    frames = recorder.keyframes()
+    assert [kf.values for kf in frames['x']] == [(100.0,)]
+    assert [kf.values for kf in frames['y']] == [(50.0,)]
+
+
+def test_playcommand_runs_named_command_on_actor():
+    env, _w = _load(
+        '<LAER Type="Sprite" InitCommand="%function(self) a = self end"'
+        ' SpawnCommand="zoom,2"/>')
+    env.run("a:playcommand('Spawn')", name='play')
+    recorder = env._recorder_for_table(env._host.env['a'])
+    frames = recorder.keyframes()
+    assert [kf.values for kf in frames['scale_x']] == [(2.0,)]
+
+
+def test_queuecommand_starts_after_pending_tween():
+    """queuecommand runs after the actor's in-flight tween, so its
+    keyframe clock is advanced by the pending tween length (SM's
+    next-frame queue, approximated by the tween duration)."""
+    env, _w = _load(
+        '<LAER Type="Sprite" InitCommand="%function(self) a = self end"'
+        ' MoveCommand="y,300"/>')
+    # Open a 2s tween, then queue Move: the queued y keyframe starts at 2s.
+    env.run("a:linear(2); a:queuecommand('Move')", name='queue')
+    recorder = env._recorder_for_table(env._host.env['a'])
+    move_kf = recorder.keyframes()['y'][-1]
+    assert move_kf.t == pytest.approx(2.0)
+
+
+def test_playcommand_starts_at_current_clock():
+    env, _w = _load(
+        '<LAER Type="Sprite" InitCommand="%function(self) a = self end"'
+        ' MoveCommand="y,300"/>')
+    env.run("a:linear(2); a:playcommand('Move')", name='play')
+    recorder = env._recorder_for_table(env._host.env['a'])
+    move_kf = recorder.keyframes()['y'][-1]
+    # playcommand does NOT wait for the tween: clock unchanged from load.
+    assert move_kf.t == pytest.approx(0.0)
+
+
+def test_recursive_dispatch_is_capped():
+    """A message command that re-broadcasts itself must terminate at the
+    depth cap instead of recursing forever."""
+    env, _w = _load(
+        '<LAER Type="Sprite" LoopMessageCommand="%function(self)'
+        '  self:x(1)'
+        '  MESSAGEMAN:Broadcast("Loop")'
+        'end"/>')
+    # Must return (capped), not blow the Python/Lua stack.
+    env._dispatch_message('Loop')
+    assert env._dispatch_depth == 0
+
+
+# -- asset resolution -----------------------------------------------------
+
+def test_sprite_texture_resolves_against_actor_base_dir(tmp_path):
+    from analysis.games.notitg import modfile
+
+    (tmp_path / 'hold.png').write_bytes(b'x')
+    parsed = xml_actors.parse_actor_xml(
+        '<LAER Type="Sprite" Texture="hold" OnCommand="diffusealpha,1"/>')
+    parsed.root._base_dir = tmp_path
+    element = modfile._leaf_element(parsed.root, 0.0, {})
+    assert element.asset == str(tmp_path / 'hold.png')
+
+
+def test_untyped_actor_with_image_file_becomes_sprite(tmp_path):
+    from analysis.games.notitg import modfile
+
+    (tmp_path / 'darkcircle.png').write_bytes(b'x')
+    parsed = xml_actors.parse_actor_xml(
+        '<Layer File="darkcircle" OnCommand="diffusealpha,1"/>')
+    parsed.root._base_dir = tmp_path
+    element = modfile._leaf_element(parsed.root, 0.0, {})
+    assert element is not None and element.kind == 'sprite'
+    assert element.asset == str(tmp_path / 'darkcircle.png')
+
+
+def test_sprite_manifest_yields_inner_texture(tmp_path):
+    from analysis.games.notitg import modfile
+
+    (tmp_path / 'shame_idle.png').write_bytes(b'x')
+    (tmp_path / 'idle.sprite').write_text(
+        '[Sprite]\nTexture=shame_idle.png\nFrame0000=0\n')
+    resolved = modfile._resolve_texture_path('idle.sprite', tmp_path)
+    assert resolved == str(tmp_path / 'shame_idle.png')
+
+
+def test_white_texture_stays_a_name(tmp_path):
+    from analysis.games.notitg import modfile
+
+    parsed = xml_actors.parse_actor_xml('<Sprite Type="Sprite" Texture="white"'
+                                        ' OnCommand="diffusealpha,1"/>')
+    parsed.root._base_dir = tmp_path
+    assert modfile._resolve_asset(parsed.root) == 'white'

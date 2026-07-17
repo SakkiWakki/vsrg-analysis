@@ -117,6 +117,16 @@ class RecordingActor:
         self._pending_dur = 0.0
         self._pending_ease = _FALLBACK_TWEEN_EASING
 
+    def advance_clock_by_pending(self) -> None:
+        """Advance the local clock past the open tween, as a
+        `queuecommand` does: SM runs the queued command on the next frame,
+        after the in-flight tween finishes, so its keyframes start where
+        the current tween ends. Approximation (SM's real delay is one
+        frame, not the exact tween length); documented as such."""
+        self._clock += self._pending_dur
+        self._pending_dur = 0.0
+        self._pending_ease = _FALLBACK_TWEEN_EASING
+
     def keyframes(self) -> dict:
         """property -> list[Keyframe], only for properties actually
         poked. Empty when the actor was never touched."""
