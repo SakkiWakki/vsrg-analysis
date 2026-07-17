@@ -47,6 +47,7 @@ chunk runs under try/except and partial output is fine.
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from dataclasses import replace
 from pathlib import Path
@@ -57,7 +58,7 @@ from analysis.games.notitg import (
 from analysis.games.notitg.mod_stubs import StubEnvironment
 from analysis.games.notitg.paths import find_notitg_dirs
 from analysis.games.notitg.recording_actor import RecordingActor
-from analysis.player.render.effects.timeline import EventTimeline
+from analysis.player.render.effects.timeline import EventTimeline, Keyframe
 from analysis.player.render.storyboard import bitmap_font
 from analysis.player.render.storyboard.model import Element, build_timelines
 
@@ -433,7 +434,7 @@ def _compile_elements(classic_commands, to_seconds, start_beat,
 
 
 def compile_element_tree(root, to_seconds, start_beat, named_keyframes=None,
-                         fonts=None, actor_keyframes=None):
+                         fonts=None, actor_keyframes=None, osc_context=None):
     """HIERARCHICAL compile: the actor tree becomes a tree of storyboard
     Elements. An ActorFrame with drawable descendants becomes a 'group'
     whose transform composes onto its children; a Sprite/Quad/BitmapText
@@ -457,19 +458,19 @@ def compile_element_tree(root, to_seconds, start_beat, named_keyframes=None,
     below = []
     for child in root.children:
         element = _compile_actor(child, start_time, named_keyframes, fonts,
-                                 below, actor_keyframes)
+                                 below, actor_keyframes, osc_context)
         if element is not None:
             children.append(element)
     return below + children
 
 
 def _compile_actor(actor, start_time, named_keyframes, fonts, below=None,
-                   actor_keyframes=None):
+                   actor_keyframes=None, osc_context=None):
     if below is None:
         below = []
     if getattr(actor, '_background_layer', False):
         element = _compile_background_actor(actor, start_time, named_keyframes,
-                                           fonts, actor_keyframes)
+                                           fonts, actor_keyframes, osc_context)
         if element is not None:
             below.append(element)
         return None
@@ -477,12 +478,12 @@ def _compile_actor(actor, start_time, named_keyframes, fonts, below=None,
     child_elements = []
     for child in actor.children:
         element = _compile_actor(child, start_time, named_keyframes, fonts,
-                                 below, actor_keyframes)
+                                 below, actor_keyframes, osc_context)
         if element is not None:
             child_elements.append(element)
 
     keyframes = _merged_keyframes(actor, start_time, named_keyframes,
-                                  actor_keyframes)
+                                  actor_keyframes, osc_context)
     if child_elements:
         return _group_element(actor, start_time, keyframes,
                               tuple(child_elements))
@@ -518,7 +519,7 @@ def _is_aft_backdrop(actor) -> bool:
 
 
 def _compile_background_actor(actor, start_time, named_keyframes, fonts,
-                              actor_keyframes=None):
+                              actor_keyframes=None, osc_context=None):
     """Compile a background-layer subtree as one top-level element at the
     background z. The subtree is self-contained (its own gat_all_bg /
     gat_bg transforms), so hoisting it past the identity top frames keeps
@@ -527,12 +528,12 @@ def _compile_background_actor(actor, start_time, named_keyframes, fonts,
     for child in actor.children:
         element = _compile_background_actor(child, start_time,
                                            named_keyframes, fonts,
-                                           actor_keyframes)
+                                           actor_keyframes, osc_context)
         if element is not None:
             child_elements.append(element)
 
     keyframes = _merged_keyframes(actor, start_time, named_keyframes,
-                                  actor_keyframes)
+                                  actor_keyframes, osc_context)
     if child_elements:
         element = _group_element(actor, start_time, keyframes,
                                 tuple(child_elements))
@@ -546,7 +547,8 @@ def _with_z(element, z):
     return replace(element, z=z)
 
 
-def _merged_keyframes(actor, start_time, named_keyframes, actor_keyframes=None):
+def _merged_keyframes(actor, start_time, named_keyframes, actor_keyframes=None,
+                      osc_context=None):
     """All keyframes for one actor.
 
     When the actor carries a load-pass `_recorder_id` (the modfile compile
@@ -560,11 +562,18 @@ def _merged_keyframes(actor, start_time, named_keyframes, actor_keyframes=None):
     The FLAT path (tests / charts compiled without a StubEnvironment) has
     no recorder ids: it re-poks the classic InitCommand/OnCommand strings
     on a fresh recorder and merges whatever the actor's bound global
-    recorded from the closures."""
-    recorded = _recorded_keyframes(actor, actor_keyframes)
-    if recorded is not None:
-        return recorded
+    recorded from the closures.
 
+    An actor that ran an effect oscillator (`osc_context` carries its
+    span) has the sine synthesised into dense keyframes on the affected
+    property, riding its tweened base motion."""
+    keyframes = _recorded_keyframes(actor, actor_keyframes)
+    if keyframes is None:
+        keyframes = _flat_keyframes(actor, start_time, named_keyframes)
+    return _apply_oscillators(actor, keyframes, osc_context)
+
+
+def _flat_keyframes(actor, start_time, named_keyframes):
     recorder = RecordingActor(clock=start_time)
     for attr in ('InitCommand', 'OnCommand'):
         value = actor.attrs.get(attr, '')
@@ -580,6 +589,21 @@ def _merged_keyframes(actor, start_time, named_keyframes, actor_keyframes=None):
     return keyframes
 
 
+def _apply_oscillators(actor, keyframes, osc_context):
+    """Fold this actor's oscillator spans into its keyframes, when it ran
+    any. Keyed by the actor's load-pass recorder id; a chart with no
+    oscillators (osc_context None) or an actor that ran none returns the
+    keyframes unchanged."""
+    if osc_context is None:
+        return keyframes
+    rec_id = getattr(actor, '_recorder_id', None)
+    spans = osc_context.spans_by_id.get(rec_id) if rec_id is not None else None
+    if not spans:
+        return keyframes
+    return compile_oscillator_keyframes(spans, keyframes, osc_context.clock,
+                                        osc_context.rng)
+
+
 def _recorded_keyframes(actor, actor_keyframes):
     """The actor's load-pass recorder keyframes (a fresh dict of lists so
     the caller may mutate it), or None when no recorder id is available."""
@@ -590,6 +614,263 @@ def _recorded_keyframes(actor, actor_keyframes):
         return None
     return {prop: list(frames)
             for prop, frames in actor_keyframes[rec_id].items()}
+
+
+# Effect-oscillator synthesis ------------------------------------------
+#
+# SM's Actor::UpdateInternal drives an actor's own pos/rotation by a sine
+# of the effect clock every frame (Actor.cpp). We synthesise that motion
+# into dense keyframes on the affected 2D property so the static-keyframe
+# renderer animates it. Deterministic: the clock is song beat/time and
+# vibrate's RNG is seeded, so a chart always compiles the same shake.
+
+# Dense-sample spacing in SECONDS. Oscillator periods are ~1 beat
+# (~0.29s at gat's 205bpm); ~120Hz keeps >30 samples per period so the
+# linear-interpolated keyframes trace the sine without aliasing (the same
+# over-sampling logic as the hold-body sampler, memory item 78).
+_OSC_SAMPLE_STEP_S = 1.0 / 120.0
+
+# Cap per span so a very long open effect (a vibrate left running for the
+# whole song) cannot explode the keyframe count; at ~120Hz this bounds a
+# single span to ~50s of dense samples, past which it holds its last value
+# (a longer shake reads the same).
+_OSC_MAX_SAMPLES = 6000
+
+# Each oscillator kind's per-property contribution as f(pct, mag, beat_or
+# _time_elapsed). Returns {property: delta} added onto the actor's base
+# value at that sample. `pct` is the SM fraction through the period
+# (Actor.cpp:276); `mag` is the (x, y, z) effect magnitude in force;
+# `elapsed` is beats (beat clock) or seconds (time clock) since the span
+# start, used by spin's continuous accumulation.
+_TWO_PI = 2.0 * math.pi
+
+
+def _osc_deltas(kind, pct, mag, elapsed, rng):
+    """The 2D-property deltas one oscillator kind contributes at a sample.
+
+    - bob: pos += mag * sin(pct*2pi)          (Actor.cpp:353)
+    - bounce: pos += mag * sin(pct*pi)        (Actor.cpp:344, abs-sine)
+    - wag: rotation += mag.z * sin(pct*2pi)   (Actor.cpp:332; z drives 2D)
+    - spin: rotation += mag.z * elapsed        (Actor.cpp:599, continuous)
+    - vibrate: pos += mag * randomf(-1,1)      (Actor.cpp:338, seeded RNG)
+
+    Only the x/y position and z rotation have 2D-storyboard analogues; the
+    z-position and x/y-rotation components of bob/bounce/vibrate are 3D and
+    dropped (same as the recorder's 3D-channel handling)."""
+    match kind:
+        case 'bob':
+            s = math.sin(pct * _TWO_PI)
+            return {'x': mag[0] * s, 'y': mag[1] * s}
+        case 'bounce':
+            s = math.sin(pct * math.pi)
+            return {'x': mag[0] * s, 'y': mag[1] * s}
+        case 'wag':
+            return {'rotation': mag[2] * math.sin(pct * _TWO_PI)}
+        case 'spin':
+            return {'rotation': mag[2] * elapsed}
+        case 'vibrate':
+            return {'x': mag[0] * rng.uniform(-1.0, 1.0),
+                    'y': mag[1] * rng.uniform(-1.0, 1.0)}
+    return {}
+
+
+class _OscillatorClock:
+    """Maps a sample time (seconds) to the effect clock's phase source.
+
+    A beat clock (`bgm`/`beat`) reads the song BEAT at the sample time
+    (SM's `m_fSecsIntoEffect = g_fCurrentBGMBeat`); a time clock
+    (`timer`/`music`) reads the song SECOND directly. Built once per
+    compile over the span range so the beat inverter is shared."""
+
+    def __init__(self, to_seconds, beat_range):
+        self._to_seconds = to_seconds
+        self._to_beats = _sec_to_beat_inverter(to_seconds, beat_range)
+
+    def phase_source(self, clock_name, seconds) -> float:
+        if clock_name in _EFFECT_TIME_CLOCK_NAMES:
+            return seconds
+        return self._to_beats(seconds)
+
+
+# Clock-name sets mirrored from recording_actor so the synthesis reads the
+# same vocabulary the recorder tagged the span with.
+_EFFECT_TIME_CLOCK_NAMES = frozenset({'timer', 'music'})
+
+
+def _sec_to_beat_inverter(to_seconds, beat_range):
+    """A `seconds -> beat` inverter over `beat_range = (lo, hi)`, by bisect
+    on a dense (beat, seconds) table (to_seconds is monotonic in beat).
+    Mirror of update_integrator's inverter, local so the synthesis is
+    self-contained."""
+    from bisect import bisect_right
+
+    lo, hi = beat_range
+    if hi <= lo:
+        hi = lo + 1.0
+    steps = max(2, int((hi - lo) * 8.0) + 1)
+    beats = [lo + (hi - lo) * i / (steps - 1) for i in range(steps)]
+    times = [to_seconds(b) for b in beats]
+
+    def to_beats(t):
+        idx = bisect_right(times, t) - 1
+        if idx < 0:
+            return beats[0]
+        if idx >= steps - 1:
+            return beats[-1]
+        span = times[idx + 1] - times[idx]
+        frac = (t - times[idx]) / span if span > 0 else 0.0
+        return beats[idx] + (beats[idx + 1] - beats[idx]) * frac
+    return to_beats
+
+
+def _span_keyframes(span, osc_clock, rng):
+    """Dense step keyframes per affected 2D property for one oscillator
+    span, or {} when it produces no 2D motion.
+
+    Samples the analytic sine at `_OSC_SAMPLE_STEP_S` over [start, end],
+    computing SM's `pct = frac(phase + offset, period)` from the effect
+    clock's phase source at each sample. Each sample is a STEP keyframe
+    (duration 0) that holds until the next - piecewise-constant, so the
+    value AT a sample time is exactly that sample (the EventTimeline eases
+    prev->target over a keyframe's duration, so a nonzero duration would
+    put a sample's own value one step in its future). At 120Hz over a
+    ~1-beat period this traces the sine finely; a trailing rest returns the
+    delta to zero when the effect stops."""
+    start, end = span.start, span.end
+    if end <= start:
+        return {}
+    n = min(_OSC_MAX_SAMPLES, int((end - start) / _OSC_SAMPLE_STEP_S) + 1)
+    phase0 = osc_clock.phase_source(span.clock, start)
+    per_prop: dict = {}
+    for i in range(n + 1):
+        t = min(end, start + i * _OSC_SAMPLE_STEP_S)
+        phase = osc_clock.phase_source(span.clock, t)
+        pct = _effect_pct(phase, span.period, span.offset)
+        mag = span.magnitude_at(t)
+        deltas = _osc_deltas(span.kind, pct, mag, phase - phase0, rng)
+        for prop, delta in deltas.items():
+            per_prop.setdefault(prop, []).append(
+                Keyframe(t, (delta,), 0.0, _STEP_EASE))
+    _append_rest(per_prop, end)
+    return per_prop
+
+
+# Step keyframes hold their value until the next (duration 0); the easing
+# id is unused then, but 0 (linear) is the neutral default.
+_STEP_EASE = 0
+
+
+def _effect_pct(phase, period, offset) -> float:
+    """SM's fraction through the effect period at a phase value
+    (Actor.cpp:271-278): `secsIntoPeriod = fmod(phase + offset, period)`;
+    `pct = secsIntoPeriod / period`, clamped to [0, 1]. Delay is 0 for
+    every gat effect, so total period == period."""
+    if period <= 0:
+        return 0.0
+    into = math.fmod(phase + offset, period)
+    if into < 0:
+        into += period
+    return max(0.0, min(1.0, into / period))
+
+
+def _append_rest(per_prop, end) -> None:
+    """A trailing rest (delta 0) a hair past the span end, so the
+    oscillator delta returns to zero when the effect stops rather than
+    holding its last sample forever (the renderer holds the last keyframe
+    otherwise)."""
+    for frames in per_prop.values():
+        frames.append(Keyframe(end + _OSC_SAMPLE_STEP_S, (0.0,), 0.0,
+                               _STEP_EASE))
+
+
+def compile_oscillator_keyframes(spans, base_keyframes, osc_clock, rng):
+    """Fold an actor's oscillator spans into its base keyframe dict.
+
+    The oscillator drives a DELTA on top of the actor's tweened base
+    position/rotation. We cannot add curves inside the EventTimeline model,
+    so we bake the base value at each dense sample and store base+delta as
+    the keyframe value on that property - the synthesised stream then
+    supersedes the sparse base keyframes for the property's oscillating
+    span, and the trailing rest keyframe hands motion back to the base
+    after (a stopeffect). Properties the oscillator never touches are left
+    untouched.
+
+    Mutates and returns `base_keyframes` (a dict of {prop: [Keyframe]})."""
+    for span in spans:
+        deltas = _span_keyframes(span, osc_clock, rng)
+        for prop, delta_frames in deltas.items():
+            # x, y and rotation all rest at 0, so the base sits at 0 before
+            # its first keyframe - the delta rides whatever base motion is
+            # tweened in.
+            base_tl = EventTimeline(base_keyframes.get(prop, []), rest=(0.0,))
+            merged = [_add_base(kf, base_tl) for kf in delta_frames]
+            base_keyframes[prop] = _merge_base_outside(
+                base_keyframes.get(prop, []), merged, span)
+    return base_keyframes
+
+
+def _add_base(delta_kf, base_tl):
+    """A delta keyframe rebased onto the actor's tweened value at its time:
+    keyframe value = base(t) + delta, so the shake rides the base motion."""
+    base = base_tl.sample(delta_kf.t)[0]
+    return replace(delta_kf, values=(base + delta_kf.values[0],))
+
+
+def _merge_base_outside(base_frames, synth_frames, span):
+    """Keep the actor's base keyframes OUTSIDE the span (before start /
+    after the trailing rest) and replace the inside with the synthesised
+    stream, so the sparse base motion still plays either side of the
+    oscillator. Sorted by time for the EventTimeline."""
+    margin = _OSC_SAMPLE_STEP_S
+    kept = [kf for kf in base_frames
+            if kf.t < span.start or kf.t > span.end + margin]
+    return sorted(kept + synth_frames, key=lambda k: k.t)
+
+
+class _OscContext:
+    """Everything the tree compiler needs to synthesise oscillators: the
+    per-recorder-id spans, the shared effect clock, and the seeded RNG for
+    vibrate. Absent (None) when no actor ran an effect oscillator, so the
+    common no-oscillator chart pays nothing."""
+
+    __slots__ = ('spans_by_id', 'clock', 'rng')
+
+    def __init__(self, spans_by_id, clock, rng):
+        self.spans_by_id = spans_by_id
+        self.clock = clock
+        self.rng = rng
+
+
+def _build_osc_context(env, to_seconds, start_beat, lua_dir):
+    """Build the oscillator compile context, or None when the chart has no
+    effect oscillators. The RNG is seeded per-chart (the same determinism
+    contract as the spawner scatter, mod_stubs), so a chart's vibrate shake
+    compiles identically every run."""
+    import random
+
+    spans_by_id = env.actor_oscillator_spans()
+    if not spans_by_id:
+        return None
+    clock = _OscillatorClock(to_seconds, _osc_beat_range(spans_by_id,
+                                                         to_seconds, start_beat))
+    rng = random.Random(f'notitg-osc:{lua_dir}')
+    return _OscContext(spans_by_id, clock, rng)
+
+
+def _osc_beat_range(spans_by_id, to_seconds, start_beat):
+    """(lo_beat, hi_beat) covering every oscillator span's time range, for
+    the beat inverter. Spans carry SECOND clocks; since `to_seconds` is
+    monotone in beat, we double `hi_beat` from a small start until its
+    mapped time passes the last span end - a handful of steps, bounded so a
+    pathological span cannot loop forever."""
+    last_end = max((span.end for spans in spans_by_id.values()
+                    for span in spans), default=to_seconds(start_beat))
+    hi = start_beat + 8.0
+    for _ in range(32):
+        if to_seconds(hi) >= last_end:
+            break
+        hi = start_beat + (hi - start_beat) * 2.0
+    return (start_beat, hi)
 
 
 def _group_element(actor, start_time, keyframes, children):
@@ -888,6 +1169,7 @@ def _compile_modfile(sm_path):
     named_keyframes = env.named_actor_keyframes()
     named_meta = env.named_actor_meta()
     actor_keyframes = env.actor_keyframes()
+    osc_context = _build_osc_context(env, to_seconds, start_beat, lua_dir)
 
     mod_events = _normalize_mod_events(env, to_seconds)
     mod_events.extend(_normalize_applied_mods(env, to_seconds))
@@ -895,7 +1177,8 @@ def _compile_modfile(sm_path):
     proxy_grid = env.proxy_grid()
     fonts = _font_resolver(lua_dir)
     tree = compile_element_tree(root, to_seconds, start_beat, named_keyframes,
-                                fonts=fonts, actor_keyframes=actor_keyframes)
+                                fonts=fonts, actor_keyframes=actor_keyframes,
+                                osc_context=osc_context)
     return {
         'mod_events': mod_events,
         'shader_flags': _normalize_shader_flags(env, to_seconds),
@@ -906,8 +1189,11 @@ def _compile_modfile(sm_path):
         'has_background': _has_background_actors(tree, sm_path),
         'field_copies': _all_field_copies(
             root, named_keyframes, named_meta, to_seconds, start_beat,
-            actor_keyframes, proxy_grid),
+            actor_keyframes, proxy_grid, osc_context),
         'screen_transform': _screen_transform_timelines(env),
+        'screen_oscillator': _screen_oscillator_timelines(env, osc_context),
+        'field_oscillators': _field_oscillator_timelines(env, osc_context),
+        'field_vanish': _field_vanish_timelines(env),
         'aft_bg_visible': _aft_bg_visible_timeline(root, bg_stem,
                                                    actor_keyframes),
         'base_field_hidden': _base_field_hidden_timeline(env),
@@ -976,7 +1262,7 @@ _FIELD_PROPS = ('x', 'y', 'rotation', 'scale_x', 'scale_y',
 
 
 def _field_copies(root, named_keyframes, named_meta, to_seconds,
-                  start_beat, actor_keyframes=None) -> list:
+                  start_beat, actor_keyframes=None, osc_context=None) -> list:
     """Actors that draw a copy of the playfield - AFT-screen copy
     sprites (`aft_source` set) and Proxy notefield actors - as
     ready-to-sample transform timelines for the field producer.
@@ -988,6 +1274,10 @@ def _field_copies(root, named_keyframes, named_meta, to_seconds,
     relative addx/addy moves resolve together. Ordinary named actors
     (mod-driver quads, rotators) are excluded: only actors whose texture
     IS the captured field become field instances.
+
+    A copy actor that ran an effect oscillator (gat's `Proxy(pn):vibrate()`
+    /`wag()`) has the sine baked into its x/y/rotation here, so the copy
+    shakes; `osc_context` carries the spans.
 
     Copies with a per-frame data-holder-quad DRIVER (aft_drivers) also
     get compile-time grid-sampled keyframes over the driver window,
@@ -1002,7 +1292,7 @@ def _field_copies(root, named_keyframes, named_meta, to_seconds,
         if source is None:
             continue
         keyframes = _merged_keyframes(actor, start_time, named_keyframes,
-                                      actor_keyframes)
+                                      actor_keyframes, osc_context)
         field_keyframes = {prop: keyframes[prop] for prop in _FIELD_PROPS
                            if keyframes.get(prop)}
         _merge_driven_keyframes(field_keyframes, name, quad_timelines,
@@ -1024,13 +1314,14 @@ _GRID_SOURCE = {1: 'P1p', 2: 'P2p'}
 
 
 def _all_field_copies(root, named_keyframes, named_meta, to_seconds,
-                      start_beat, actor_keyframes, proxy_grid) -> list:
+                      start_beat, actor_keyframes, proxy_grid,
+                      osc_context=None) -> list:
     """AFT/Proxy field copies plus the gat_updateproxies 3x3 grid copies.
     The grid frames self-assign no global (they live in the `gat_proxies`
     table), so they come through `env.proxy_grid()` rather than the
     named-actor path, and their world transform is composed here."""
     copies = _field_copies(root, named_keyframes, named_meta, to_seconds,
-                           start_beat, actor_keyframes)
+                           start_beat, actor_keyframes, osc_context)
     copies.extend(_proxy_grid_copies(proxy_grid))
     return copies
 
@@ -1128,10 +1419,10 @@ class _SumTimeline:
 def _screen_transform_timelines(env) -> dict | None:
     """The whole-scene camera the per-frame update drives via the top
     screen: gat_updateproxies zooms and offsets `SCREENMAN:GetTopScreen()`
-    for a screen-zoom camera, and `screen:effectmagnitude` a scene vibrate.
-    Returns {prop: EventTimeline} (x/y/scale) or None when nothing poked
-    the screen (every non-gat chart). effectmagnitude (a jitter with no
-    still-frame analogue) is not modeled."""
+    for a screen-zoom camera. Returns {prop: EventTimeline} (x/y/scale) or
+    None when nothing poked the screen (every non-gat chart). The screen's
+    `effectmagnitude` vibrate is a SEPARATE channel (`screen_oscillator`),
+    since it is a synthesised sine, not a tweened transform."""
     keyframes = env.screen_keyframes()
     moved = {prop: keyframes[prop] for prop in ('x', 'y', 'scale_x',
              'scale_y')
@@ -1139,6 +1430,20 @@ def _screen_transform_timelines(env) -> dict | None:
     if not moved:
         return None
     return build_timelines(rests=_SCREEN_RESTS, keyframes=moved)
+
+
+def _screen_oscillator_timelines(env, osc_context) -> dict | None:
+    """The whole-scene vibrate the screen's effect oscillator drives, as
+    `{prop: EventTimeline}` of the x/y jitter DELTA, or None when the
+    screen ran no oscillator. gat's datamosh section (t~312-382) pokes
+    `screen:vibrate()` with a per-frame `effectmagnitude(gat_vib:GetX()..)`
+    envelope - a scene shake the screen-camera consumer adds onto its
+    transform. Delta only (like the field oscillators), so it composes onto
+    the screen transform without baking a base in."""
+    if osc_context is None:
+        return None
+    return _oscillator_delta_timelines(env.screen_oscillator_spans(),
+                                       osc_context)
 
 
 def _deviates(frames, rest) -> bool:
@@ -1157,6 +1462,93 @@ _SCREEN_RESTS = {'x': 0.0, 'y': 0.0, 'scale_x': 1.0, 'scale_y': 1.0}
 # (`P1:hidden(1)`). PlayerP1 is player 0's real NoteField; hiding it means
 # the copies replace the base field, so the renderer skips the base draw.
 _BASE_PLAYER_NAME = 'PlayerP1'
+
+
+def _field_oscillator_timelines(env, osc_context):
+    """Per-player field oscillator deltas as `{player: {prop: EventTimeline}}`
+    for the field consumers, or None when neither player field oscillates.
+
+    gat's t~8-48 section pokes `Plr(pn)` (= the engine PlayerP1/PlayerP2
+    NoteFields, fetched via GetChild) with bounce/bob/wag - a whole-field
+    shake/rotate the field-instances/field-3d layer applies, not a
+    storyboard element. Each player's spans synthesise to x/y/rotation
+    delta timelines (delta only - the field's base transform is the note
+    pipeline's, so these ADD onto it, unlike the tree path that bakes
+    base+delta). None when no oscillator ran (the common case)."""
+    if osc_context is None:
+        return None
+    out = {}
+    for player, name in enumerate(_PLAYER_FIELD_NAMES, start=1):
+        spans = env.player_oscillator_spans(name)
+        deltas = _oscillator_delta_timelines(spans, osc_context)
+        if deltas:
+            out[player] = deltas
+    return out or None
+
+
+# The engine player actor names, in player order (Plr(1) -> PlayerP1).
+_PLAYER_FIELD_NAMES = ('PlayerP1', 'PlayerP2')
+
+# Field oscillator delta channels (x/y position shake, z rotation) and
+# their rest of 0 - a delta ADDED onto the field's base transform.
+_OSC_DELTA_RESTS = {'x': 0.0, 'y': 0.0, 'rotation': 0.0}
+
+
+def _oscillator_delta_timelines(spans, osc_context):
+    """{prop: EventTimeline} of the raw oscillator DELTA (no base baked in)
+    for a set of spans, or None when they produce no 2D motion. Used for
+    the field layer, which composes the delta onto its own base transform
+    (the note pipeline), so the delta must stay separated from any base."""
+    if not spans:
+        return None
+    per_prop: dict = {}
+    for span in spans:
+        for prop, frames in _span_keyframes(span, osc_context.clock,
+                                            osc_context.rng).items():
+            per_prop.setdefault(prop, []).extend(frames)
+    if not per_prop:
+        return None
+    return {prop: EventTimeline(sorted(frames, key=lambda k: k.t),
+                                rest=(_OSC_DELTA_RESTS[prop],))
+            for prop, frames in per_prop.items()}
+
+
+def _field_vanish_timelines(env):
+    """Per-player fov vanish-point streams as `{player: {'vanish_x',
+    'vanish_y': EventTimeline}}`, or None when no player field recorded a
+    SetVanishPoint. gat drives `SetVanishPoint(GetX(), GetY())` per frame on
+    the Proxy actors (P1p..P6p), the source the 3D field projection reads to
+    project off-centre; players 1/2 map to P1p/P2p (the P1/P2 notefield
+    proxies). The field_3d consumer projects through these instead of the
+    default screen-centre vanish."""
+    out = {}
+    for player, name in enumerate(_VANISH_PROXY_NAMES, start=1):
+        vanish = _proxy_vanish_timelines(env, name)
+        if vanish:
+            out[player] = vanish
+    return out or None
+
+
+# The proxy actors whose per-frame SetVanishPoint drives each player field's
+# perspective centre (Proxy(1) -> P1p). Only P1p/P2p feed the two rendered
+# player fields; P3p..P6p are extra copies read by the field producer.
+_VANISH_PROXY_NAMES = ('P1p', 'P2p')
+_VANISH_RESTS = {'vanish_x': 320.0, 'vanish_y': 240.0}
+
+
+def _proxy_vanish_timelines(env, name):
+    """{'vanish_x'/'vanish_y': EventTimeline} for one proxy's recorded
+    SetVanishPoint stream, or None when it never set one. Read from the
+    named-actor keyframes (the proxy self-assigns its global `P1p = self`)
+    so the full merged stream - InitCommand + per-frame vanish pokes - is
+    present."""
+    keyframes = env.named_actor_keyframes().get(name) or {}
+    vanish = {prop: keyframes[prop] for prop in _VANISH_RESTS
+              if keyframes.get(prop)}
+    if not vanish:
+        return None
+    return {prop: EventTimeline(frames, rest=(_VANISH_RESTS[prop],))
+            for prop, frames in vanish.items()}
 
 
 def _base_field_hidden_timeline(env):
