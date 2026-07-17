@@ -564,93 +564,46 @@ def test_boomerang_visibility_is_documented_fade():
 # GROUP 5: MISMATCH repros (xfail with analysis for the fix agent to flip)
 # ===========================================================================
 
-@pytest.mark.xfail(reason=(
-    "BUG (class i): tiny is modeled as a per-note ZOOM only. The engine "
-    "(GetZoom :1582) uses zoom *= pow(0.5, tiny), but the production "
-    "tiny_zoom uses 1 - tiny*0.5 - a DIFFERENT curve. They agree only at "
-    "tiny in {0, 1} (both give 1.0 and 0.5). At tiny=2 engine=0.25, "
-    "port=0.0 (arrow vanishes); at tiny=-1 engine=2.0, port=1.5; at "
-    "tiny=0.5 engine=0.707, port=0.75. gat strobes tiny/mini sections so "
-    "the amplitude error is visible. FIX: arrow_effects.tiny_zoom should "
-    "return pow(0.5, tiny_percent). Additionally the engine tiny COMPRESSES "
-    "SPACING (GetXPos :1025 multiplies the whole pixel offset incl. the "
-    "column term by min(pow(0.5,tiny),1)); the port models no spacing "
-    "change - a separate, larger gap (the real-state x comparison fences "
-    "tiny-active samples for exactly this reason). This test targets only "
-    "the zoom-curve half."),
-    strict=True)
 def test_tiny_zoom_curve_matches_engine():
+    # FIXED: tiny_zoom returns pow(0.5, tiny) (GetZoom :1582), agreeing with
+    # the engine at every tiny (not just {0,1}). The X-spacing compression
+    # half (GetXPos :1025) is consumer-side in note_mods._tiny_compressed_dx
+    # and covered by test_mods.test_tiny_spacing_compresses_columns.
     for tiny in (0.5, 2.0, -1.0, 1.5):
         got = ae.tiny_zoom(tiny)
         want = math.pow(0.5, tiny)
         assert got == pytest.approx(want), f'tiny={tiny} got={got} want={want}'
 
 
-@pytest.mark.xfail(reason=(
-    "BUG (class i): the waveform SQUARE kernel drops the engine's <0.01 "
-    "angle guard. RageSquare (RageMath.cpp:584) nudges any angle < 0.01 up "
-    "by 2*PI, which for a small POSITIVE angle in [0, 0.01) flips the "
-    "result from +1 to -1. arrow_effects.rage_square uses np.mod (always "
-    "[0,2*PI)) and returns +1 there, and its docstring wrongly claims the "
-    "guard is a no-op. A note whose square/squarez phase lands in that "
-    "narrow band gets a FULL ARROW_SIZE sign flip (+32px vs -32px at 100%). "
-    "This is a thin band (angle 0..0.01) but hits every note crossing it "
-    "exactly at the receptor region. FIX: port the <0.01 -> +2*PI guard "
-    "into rage_square (scalar: where a<0.01, use a+2*PI before the >=PI "
-    "test)."),
-    strict=True)
 def test_square_small_positive_angle_guard():
+    # FIXED: rage_square now applies the <0.01 -> +2*PI guard (RageMath.cpp:
+    # 584), so a small positive angle folds past PI and returns -1 like the
+    # engine.
     # An angle in [0, 0.01): engine wraps to ~2*PI (>= PI) -> -1; port -> +1.
     angle = 0.005
     assert ae.rage_square(angle) == ref.rage_square(angle)
 
 
-@pytest.mark.xfail(reason=(
-    "BUG (class i): blink's Quantize uses np.floor, but the engine's "
-    "Quantize (RageUtil.h:175) casts with int() which TRUNCATES toward "
-    "zero. For a negative sine (blink samples sin(t*10), which is negative "
-    "half the time) floor and trunc differ by one interval. Engine: "
-    "int((f + i/2)/i)*i; port: floor((f + i/2)/i)*i. At f=-0.5, i=0.3333: "
-    "(f+i/2)/i = -0.9999 -> int()=0 (trunc) vs floor()=-1, so quantized f "
-    "= 0.0 (engine) vs -0.3333 (port), a visible-flicker phase error in "
-    "blink's fade. FIX: arrow_effects._quantize should truncate toward "
-    "zero (np.trunc) to match int() semantics, matching the reference's "
-    "_quantize."),
-    strict=True)
 def test_blink_quantize_truncates_toward_zero():
-    # A t_now whose sin(t*10) is negative and lands where trunc != floor.
+    # FIXED: _quantize now truncates toward zero (np.trunc), matching the
+    # engine's int() cast (RageUtil.h:175), so blink_adjust agrees with the
+    # reference across the negative-sine frames where floor != trunc. The
+    # sweep spans t where sin(t*10) is negative (the region that exposed the
+    # bug) and asserts exact parity everywhere.
     rng = random.Random(11)
-    mismatch_found = False
     for _ in range(2000):
         t = rng.uniform(0.0, 60.0)
         got = ae.blink_adjust(1.0, t)
-        f = math.sin(t * 10.0)
-        f = ref._quantize(f, ref.BLINK_MOD_FREQUENCY)
+        f = ref._quantize(math.sin(t * 10.0), ref.BLINK_MOD_FREQUENCY)
         want = ref._scale(f, 0.0, 1.0, -1.0, 0.0)
-        if abs(got - want) > 1e-9:
-            mismatch_found = True
-            assert got == pytest.approx(want), (
-                f't={t} sin={math.sin(t * 10.0)} got={got} want={want}')
-    # If no random t exercised the trunc/floor split, the test is vacuous;
-    # force a known-divergent value so the xfail stays meaningful.
-    assert mismatch_found, "expected at least one trunc/floor divergence"
+        assert got == pytest.approx(want), (
+            f't={t} sin={math.sin(t * 10.0)} got={got} want={want}')
 
 
-@pytest.mark.xfail(reason=(
-    "BUG (class i): tornadoz / tantornadoz use the wrong tornado WINDOW "
-    "WIDTH in wide fields (>4 cols). The engine (ArrowEffects::Init :358) "
-    "narrows the window from 3 to 2 ONLY for dimension 0 (x): `if "
-    "(dimension == 0 && wide_field) width = 2;`. The Z window (dimension 2) "
-    "stays width 3. The port's _tornado_window ignores the dimension and "
-    "narrows to 2 for every axis whenever keycount > 4, so tornadoz's "
-    "arccos window is too narrow at 5/6/8 keys - a wrong z-push, hence a "
-    "wrong per-note zoom. (4K is unaffected: width is 3 for both there, so "
-    "gat is fine; 6K/8K NotITG/Etterna charts using tornadoz diverge.) FIX: "
-    "thread a `dimension` arg through _tornado_window / _tornado_offset and "
-    "apply the width-2 narrowing only for dimension 0, mirroring the engine "
-    "Init loop."),
-    strict=True)
 def test_tornadoz_window_width_ignores_dimension():
+    # FIXED: _tornado_window takes a `dimension` arg; the width-2 narrowing
+    # in a wide field applies only to dimension 0 (X). tornadoz (dim 2) keeps
+    # width 3, matching ArrowEffects::Init :358.
     keycount = 8  # wide field: engine z-width 3, port width 2
     cols = np.arange(keycount)
     yoff = np.full(keycount, 300.0)
@@ -661,20 +614,10 @@ def test_tornadoz_window_width_ignores_dimension():
     np.testing.assert_allclose(prod_z, want, rtol=1e-6, atol=1e-4)
 
 
-@pytest.mark.xfail(reason=(
-    "BUG (class i, minor): reverse_fractions omits the per-column numbered "
-    "`reverse<c>` term. The engine GetReversePercentForColumn "
-    "(PlayerOptions.cpp:1688) adds `m_fReverse[iCol]` alongside the "
-    "reverse/split/alternate/cross scrolls before the >2 wrap. The port's "
-    "reverse_fractions reads only reverse/split/alternate/cross, so a chart "
-    "that reverses a SINGLE column (a Mirin `reverse0`/`reverse3` style "
-    "poke) gets no per-column scroll flip and the wrap lands on a different "
-    "branch. gat uses only whole-field reverse (=1 baseline), so this is "
-    "latent for it; charts with numbered reverse diverge. FIX: fold a "
-    "numbered-`reverse<c>` lookup into reverse_fractions the same way the "
-    "other mods pick up per-column variants."),
-    strict=True)
 def test_reverse_numbered_per_column():
+    # FIXED: reverse_fractions folds the per-column numbered `reverse<c>`
+    # term in alongside the global reverse (m_fReverse[iCol],
+    # PlayerOptions.cpp:1688) before the >2 wrap.
     keycount = 4
     p = {'reverse': 0.2849, 'split': 1.4885, 'alternate': 1.7792,
          'reverse3': 0.6038}
@@ -685,19 +628,11 @@ def test_reverse_numbered_per_column():
     np.testing.assert_allclose(got, want, rtol=1e-9, atol=1e-9)
 
 
-@pytest.mark.xfail(reason=(
-    "BUG (class i, minor): EXPAND is applied to past-receptor notes "
-    "(y_offset < 0). The engine's GetYOffset returns early for y<0 "
-    "(:595 `if (fYOffset < 0) return fYOffset * fScrollSpeed;`) BEFORE "
-    "expand ever modifies fScrollSpeed, so a y<0 note keeps unscaled speed. "
-    "accel_y_offset's `past = y < 0` mask guards boost/brake/wave but NOT "
-    "the trailing `out = out * SCALE(expand,...)`, so it scales y<0 notes "
-    "too. Visible only for notes drawn behind the judgment line under "
-    "expand - small, but a real divergence. FIX: apply the expand multiply "
-    "only where y_offset >= 0 (or short-circuit past-receptor notes to "
-    "their raw offset, matching the engine early-out)."),
-    strict=True)
 def test_expand_skips_past_receptor_notes():
+    # FIXED: accel_y_offset's final np.where(past, y, out) restores the raw
+    # offset for y<0 notes, so the expand multiply (like boost/brake/wave and
+    # the boomerang fold) never touches past-receptor notes - matching the
+    # engine early-out at :595.
     p = {'expand': 0.5, '_expand_phase': 1.0}
     yoff = np.array([-100.0])
     got = ae.accel_y_offset(p, yoff.copy())[0]
@@ -705,21 +640,10 @@ def test_expand_skips_past_receptor_notes():
     assert got == pytest.approx(want)
 
 
-@pytest.mark.xfail(reason=(
-    "BUG (class i): the BOOMERANG position parabola folds past-receptor "
-    "notes (y_offset < 0), which the engine never does. GetYOffset's y<0 "
-    "early-out (:595) returns before the boomerang fold (:646), so a y<0 "
-    "note keeps its raw offset; accel_y_offset applies boomerang_y_offset "
-    "to the WHOLE array (the `past` mask guards only boost/brake/wave). At "
-    "y=-100 the port folds to -170.8 while the engine leaves it at -100 - a "
-    "visible 70px displacement of every note drawn behind the judgment "
-    "line under boomerang. NOTE the docstring on accel_y_offset asserts the "
-    "opposite ('the engine, which folds y<0 too') - that justification is "
-    "incorrect; the engine's early-out precedes the fold. FIX: apply the "
-    "boomerang fold only where y_offset >= 0 (compute on the guarded array), "
-    "and correct the docstring."),
-    strict=True)
 def test_boomerang_skips_past_receptor_notes():
+    # FIXED: accel_y_offset restores the raw offset for y<0 notes via the
+    # final np.where(past, y, out), so the boomerang fold (:646) never touches
+    # past-receptor notes; the misleading docstring was corrected too.
     p = {'boomerang': 0.5}
     yoff = np.array([-100.0])
     got = ae.accel_y_offset(p, yoff.copy())[0]
@@ -727,18 +651,9 @@ def test_boomerang_skips_past_receptor_notes():
     assert got == pytest.approx(want)
 
 
-@pytest.mark.xfail(reason=(
-    "BUG (class i): the WAVE accel mod ignores its `waveperiod` companion. "
-    "The engine (GetYOffset :629) computes wave as `wave * WAVE_MOD_MAGNITUDE"
-    " * sin(y / ((waveperiod * WAVE_MOD_HEIGHT) + WAVE_MOD_HEIGHT))` "
-    "= sin(y / (waveperiod*38 + 38)); accel_y_offset hardcodes the "
-    "denominator to 38.0 (`wave * 20 * sin(y/38)`), so any chart that "
-    "stretches wave via waveperiod gets the wrong spatial frequency. With "
-    "the default period (0) they agree. FIX: read percents['waveperiod'] "
-    "and use ((waveperiod*38)+38) as the denominator, mirroring the engine's"
-    " WAVE_MOD_HEIGHT metric."),
-    strict=True)
 def test_wave_period_companion_ignored():
+    # FIXED: accel_y_offset reads waveperiod and uses ((waveperiod*38)+38) as
+    # the wave denominator (GetYOffset :629, WAVE_MOD_HEIGHT = 38).
     p = {'wave': 0.31, 'waveperiod': 1.0}
     got = ae.accel_y_offset(p, np.array([300.0]))[0]
     want = ref.get_y_offset_accel(p, 300.0)

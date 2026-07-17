@@ -538,11 +538,23 @@ def test_expand_scales_whole_offset():
 # --- tiny / dark ----------------------------------------------------
 
 def test_tiny_shrinks_notes():
-    # tiny 100% = half size, 200% = zero, same curve as mini but zoom-only.
-    p = {'tiny': 1.0}
-    r = note_offsets(p, np.array([0]), np.array([100.0]),
+    # tiny zoom = pow(0.5, tiny) (GetZoom :1582): 100% halves, 200% quarters,
+    # -100% doubles. A DIFFERENT curve from mini's 1 - p*0.5.
+    r = note_offsets({'tiny': 1.0}, np.array([0]), np.array([100.0]),
                      t_now=0.0, beat_now=0.0, keycount=4)
     assert r.zoom[0] == pytest.approx(0.5)
+    assert ae.tiny_zoom(2.0) == pytest.approx(0.25)
+    assert ae.tiny_zoom(-1.0) == pytest.approx(2.0)
+    assert ae.tiny_zoom(0.5) == pytest.approx(math.pow(0.5, 0.5))
+
+
+def test_tiny_spacing_gates_at_one():
+    # X-spacing multiplier (GetXPos :1025) = min(pow(0.5,tiny), 1): positive
+    # tiny tightens spacing, negative tiny (arrows grow) is gated to 1.
+    assert ae.tiny_spacing(1.0) == pytest.approx(0.5)
+    assert ae.tiny_spacing(2.0) == pytest.approx(0.25)
+    assert ae.tiny_spacing(-1.0) == pytest.approx(1.0)  # gated, not 2.0
+    assert ae.tiny_spacing(0.0) == 1.0
 
 
 def test_dark_hides_receptor_alpha():
@@ -654,6 +666,20 @@ def test_centered_converges_receptor_to_midscreen():
     np.testing.assert_allclose(ctx.receptor_offsets['dy'], [150.0] * 4)
 
 
+def test_tiny_spacing_compresses_columns():
+    # tiny's X-spacing compression (GetXPos :1025): with no x-mods, each
+    # column's dx pulls toward field center by (spacing-1)*column_offset.
+    # 4K column offsets = [-96,-32,32,96]; tiny=1 => spacing 0.5 => dx =
+    # -0.5*column = [+48,+16,-16,-48] (scale 1, lane_w = ARROW_SIZE).
+    player = _FakePlayer([0, 1, 2, 3], 4)
+    ctx = _FakeCtx(player, [100.0] * 4, judge_y=100, chart_h=400)
+    _mods([ModEvent(0.0, 1.0, -1, 'tiny')]).apply(ctx)
+    np.testing.assert_allclose(ctx.candidate_dx, [48.0, 16.0, -16.0, -48.0])
+    # Receptors compress the same way (evaluated per column).
+    np.testing.assert_allclose(ctx.receptor_offsets['dx'],
+                               [48.0, 16.0, -16.0, -48.0])
+
+
 def test_split_reverses_only_right_half():
     # split 100%: cols 2,3 engine-reverse (= our native downscroll, stay
     # put); cols 0,1 remain engine-default and mirror to 360.
@@ -690,9 +716,14 @@ def test_rage_triangle_shape():
 
 
 def test_rage_square_shape():
-    # +1 for [0, PI), -1 for [PI, 2PI). Wraps and handles negatives.
-    ang = np.array([0.0, math.pi / 2, math.pi, 3 * math.pi / 2, -math.pi / 2])
-    np.testing.assert_allclose(ae.rage_square(ang), [1.0, 1.0, -1.0, -1.0, -1.0])
+    # +1 for [0.01, PI), -1 for [PI, 2PI). Wraps and handles negatives.
+    # RageMath.cpp:584 nudges a wrapped angle < 0.01 up by 2*PI, so angle 0
+    # (and any tiny positive angle) lands past PI and returns -1, NOT +1.
+    ang = np.array([math.pi / 2, math.pi, 3 * math.pi / 2, -math.pi / 2])
+    np.testing.assert_allclose(ae.rage_square(ang), [1.0, -1.0, -1.0, -1.0])
+    # The <0.01 small-angle guard: angle 0.005 (and exactly 0) flip to -1.
+    np.testing.assert_allclose(ae.rage_square(np.array([0.0, 0.005])),
+                               [-1.0, -1.0])
 
 
 def test_digital_x_steps_quantize_sine():
