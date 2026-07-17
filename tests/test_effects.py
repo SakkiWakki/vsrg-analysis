@@ -252,6 +252,17 @@ def test_composite_concatenates_field_instances():
     assert not frame.is_identity
 
 
+def test_composite_preserves_screen_scope_field():
+    """A 'screen'-scope field entry survives compositing unchanged and is
+    detected by the renderer's screen-copy predicate."""
+    from analysis.player.render.qt_renderer import QtPlayerRenderer
+    frame = composite([_Effect(EffectFrame(
+        fields=((None, 1.0, 'field'),
+                (QTransform().scale(1, -1), 1.0, 'screen'))))], _ctx())
+    assert frame.fields[1][2] == 'screen'
+    assert QtPlayerRenderer._has_screen_copy(frame)
+
+
 def test_fluxis_adapter_wires_camera():
     from analysis.games.fluxis.adapter import FluxisAdapter
     from analysis.player.render.effects.camera import CameraEffect

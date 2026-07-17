@@ -32,11 +32,21 @@ class EffectFrame:
       field layers render once into a transparent offscreen buffer and
       blit once per instance (NotITG proxies, fluXis extra playfields);
       `(None, 1.0)` is the untouched original. Empty = single identity
-      field, drawn direct. `scope` (default 'field') is 'full' when a
-      copy replicates the whole chart region incl. background (NotITG
-      AFT copies whose ShowAFTBG grabs the background); those copies also
-      blit a backdrop capture (background clear + below-draws) under
-      their transform. Other games omit scope for the zero-cost path.
+      field, drawn direct. `scope` (default 'field'):
+        - 'field'  blits the transparent notefield capture (the shared
+          background shows through every copy).
+        - 'full'   also blits a backdrop capture (background clear +
+          below-draws) under the copy transform, replicating the whole
+          chart region incl. background.
+        - 'screen' blits the PREVIOUS frame's whole chart-area composite
+          (backdrop + field + the copy blits themselves). This is SM's
+          ActorFrameTexture: an AFT holds the composed screen as of the
+          previous frame, so the copy is one frame delayed and its
+          repeated application is the engine's feedback (echo/DelayFrame
+          trails). When any 'screen' copy is present the renderer
+          composites the chart region offscreen this frame and retains it
+          for next frame; on a seek the retention is invalidated.
+      Other games omit scope for the zero-cost path.
     """
     transform: QTransform | None = None
     draws: tuple = ()

@@ -134,25 +134,29 @@ def test_invisible_copy_is_dropped():
     assert NotitgFieldInstances([copy]).at(_Ctx(1.0)) is None
 
 
-def test_proxy_copy_is_field_scope_never_full():
+def test_proxy_copy_is_field_scope_never_screen():
     from analysis.player.render.effects.timeline import EventTimeline, Keyframe
     copy = _copy('P1p', {'alpha': [Keyframe(0.0, (1.0,), 0.0, 0)]})
-    # An AFT-bg timeline that is fully "bg visible": a proxy still ignores
-    # it (proxies re-render the NoteField only, never the background).
+    # An AFT-bg timeline (now unused) is passed for producer compatibility;
+    # a proxy re-renders the NoteField only, so it is always field-only.
     aft_bg = EventTimeline([Keyframe(0.0, (1.0,), 0.0, 0)], rest=(1.0,))
     frame = NotitgFieldInstances([copy], aft_bg_timeline=aft_bg).at(_Ctx(1.0))
     _transform, _opacity, scope = frame.fields[1]
     assert scope == 'field'
 
 
-def test_aft_copy_scope_follows_bg_timeline():
+def test_aft_copy_is_screen_scope_unconditionally():
+    """AFT copies blit the previous-frame screen composite ('screen'
+    scope) regardless of the (now-unused) bg-in-capture timeline."""
     from analysis.player.render.effects.timeline import EventTimeline, Keyframe
     copy = _copy('gat_aft', {'alpha': [Keyframe(0.0, (1.0,), 0.0, 0)]})
-    # bg-in-capture: off until t=5, on after.
+    # Even a bg-off-then-on timeline no longer changes the scope.
     aft_bg = EventTimeline([Keyframe(5.0, (1.0,), 0.0, 0)], rest=(0.0,))
     fx = NotitgFieldInstances([copy], aft_bg_timeline=aft_bg)
-    assert fx.at(_Ctx(1.0)).fields[1][2] == 'field'
-    assert fx.at(_Ctx(9.0)).fields[1][2] == 'full'
+    assert fx.at(_Ctx(1.0)).fields[1][2] == 'screen'
+    assert fx.at(_Ctx(9.0)).fields[1][2] == 'screen'
+    # And with no timeline supplied at all.
+    assert NotitgFieldInstances([copy]).at(_Ctx(1.0)).fields[1][2] == 'screen'
 
 
 def test_base_hidden_suppresses_identity_original():
