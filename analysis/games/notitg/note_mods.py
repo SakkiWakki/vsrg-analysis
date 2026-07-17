@@ -60,6 +60,14 @@ Double-apply guard (field-3D vs 2D foreshortening):
   that gat drives in disjoint sections; the guard fires only on the rare
   same-axis overlap (measured: a 0.5s transition), preferring the real 3D path.
 
+Tiny X-spacing (consumer-side):
+- tiny's sprite zoom (pow(0.5,tiny)) rides candidate_zoom from
+  arrow_effects, but its X-spacing compression (GetXPos :1025 multiplies
+  the whole x offset incl. the column term by min(pow(0.5,tiny),1)) is
+  applied HERE, in `_tiny_compressed_dx`: arrow_effects.dx carries only
+  the mods (the note layer adds lane_x separately), so this consumer folds
+  in the column-term compression that pulls columns toward field center.
+
 Simplifications (documented, revisit with the oracle):
 - beat(t) inverts the BPM segments only (stops/warps shift beat_now
   slightly during those regions; note beats come exactly from rows).
@@ -72,8 +80,9 @@ import numpy as np
 
 from analysis.games.etterna.sm_chart import beat_to_time
 from analysis.player.render.mods.arrow_effects import (
-    ARROW_SIZE, accel_y_offset, note_offsets, receptor_alpha_from_dark,
-    receptor_offsets, reverse_fractions)
+    ARROW_SIZE, accel_y_offset, column_offsets, note_offsets,
+    receptor_alpha_from_dark, receptor_offsets, reverse_fractions,
+    tiny_spacing)
 
 _ACTIVE_EPS = 1e-4
 
@@ -216,13 +225,31 @@ class NotitgNoteMods:
         ctx.candidate_head_y += dy
         ctx.candidate_tail_y += dy
         ctx.candidate_press_y += dy
-        ctx.candidate_dx = offs.dx * scale
+        ctx.candidate_dx = self._tiny_compressed_dx(
+            percents, cols, offs.dx, p.keycount, scale)
         ctx.candidate_alpha = offs.alpha_mult
         ctx.candidate_rot_deg = offs.rotation_deg
         ctx.candidate_zoom = offs.zoom
 
         self._stash_hold_body_samples(ctx, percents, cols, idx, head_off,
                                       tail_off, scale, ppe, t)
+
+    def _tiny_compressed_dx(self, percents, cols, dx_engine, keycount, scale):
+        """Screen-space per-note dx with tiny's X-spacing compression folded
+        in. The engine (GetXPos :1025) multiplies the WHOLE x offset - the
+        summed x-mods AND the column's own x-offset from field center - by
+        min(pow(0.5,tiny),1). Our `dx` carries only the mods (the note layer
+        adds lane_x = field_center + column_offset*scale separately), so we
+        emit dx' such that lane_x + dx' reproduces the engine total:
+            dx'_engine = spacing*dx + (spacing-1)*column_offset.
+        The (spacing-1)*column_offset term pulls the lane toward field center
+        (tighter spacing); spacing*dx compresses the mod amplitude with it."""
+        dx = np.asarray(dx_engine, dtype=np.float64) * scale
+        spacing = tiny_spacing(float(percents.get('tiny', 0.0)))
+        if spacing == 1.0:
+            return dx
+        column = column_offsets(keycount)[cols] * scale
+        return spacing * dx + (spacing - 1.0) * column
 
     def _stash_hold_body_samples(self, ctx, percents, cols, idx, head_off,
                                  tail_off, scale, ppe, t) -> None:
@@ -274,13 +301,17 @@ class NotitgNoteMods:
         # the body (drunk/wave/digital ...); a constant dx (flip/movex, or
         # reverse-only frames) leaves it a straight strip the rect path
         # already draws. Skip those holds so the rect fallback stays.
+        spacing = tiny_spacing(float(percents.get('tiny', 0.0)))
+        column_px = column_offsets(p.keycount) * scale
         samples = {}
         for pos, screen_ys, start, count in segments['holds']:
             fine = sample.dx[start:start + count * _BODY_BOX_FILTER]
             dx = fine.reshape(count, _BODY_BOX_FILTER).mean(axis=1)
             if np.ptp(dx) < _ACTIVE_EPS:
                 continue
-            samples[pos] = (lane_x_fn(int(cols[pos])) + dx * scale, screen_ys)
+            body_x = (lane_x_fn(int(cols[pos])) + spacing * dx * scale
+                      + (spacing - 1.0) * column_px[int(cols[pos])])
+            samples[pos] = (body_x, screen_ys)
         if samples:
             ctx.hold_body_samples = samples
 
@@ -460,8 +491,9 @@ class NotitgNoteMods:
                                 beat_now=self._beat_at(t), keycount=keycount)
         dy = offs.dy * scale + self._receptor_reverse_dy(ctx, percents, cols, judge_y)
         alpha = offs.alpha_mult * receptor_alpha_from_dark(percents.get('dark', 0.0))
+        dx = self._tiny_compressed_dx(percents, cols, offs.dx, keycount, scale)
         return {
-            'dx': offs.dx * scale, 'dy': dy,
+            'dx': dx, 'dy': dy,
             'rotation_deg': offs.rotation_deg, 'zoom': offs.zoom,
             'alpha': alpha,
         }

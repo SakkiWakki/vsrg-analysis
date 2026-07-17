@@ -164,6 +164,7 @@ TORNADO_OFFSET_FREQUENCY = 6.0
 BUMPY_HEIGHT = 16.0
 BEAT_OFFSET_HEIGHT = 15.0
 BEAT_PI_HEIGHT = 2.0
+WAVE_MOD_HEIGHT = 38.0
 BOOMERANG_PEAK_PERCENTAGE = 0.75
 EXPAND_MULTIPLIER_FREQUENCY = 3.0
 
@@ -200,7 +201,10 @@ def _scale(x, l1, h1, l2, h2):
 
 
 def _quantize(f, interval):
-    return np.floor((f + interval / 2.0) / interval).astype(np.float64) * interval
+    """Quantize (RageUtil.h:175): int((f + i/2)/i)*i. The int() cast
+    TRUNCATES toward zero (C semantics), so np.trunc - not np.floor -
+    matches it for the negative arguments blink's sine reaches."""
+    return np.trunc((f + interval / 2.0) / interval).astype(np.float64) * interval
 
 
 def _select_tan(angle, cosecant=False):
@@ -237,12 +241,14 @@ def drunk_x(percent, cols, y_offset, t_now, keycount, arrow_size=ARROW_SIZE,
     return percent * (kernel * arrow_size * DRUNK_ARROW_MAGNITUDE)
 
 
-def _tornado_window(cols, keycount, arrow_size):
+def _tornado_window(cols, keycount, arrow_size, dimension):
     """The per-note [min_x, max_x] arccos window shared by tornado and
     tan-tornado (CalculateTornadoOffsetFromMagnitude, ArrowEffects.cpp:217).
-    Window half-width is 2 in wide fields (>4 cols), else 3."""
+    Window half-width narrows from 3 to 2 in wide fields (>4 cols) ONLY for
+    dimension 0 (X); the Z window (dimension 2) keeps width 3 there
+    (ArrowEffects::Init :358 `if (dimension == 0 && wide) width = 2`)."""
     xoffsets = column_offsets(keycount, arrow_size)
-    width = 2 if keycount > 4 else 3
+    width = 2 if (dimension == 0 and keycount > 4) else 3
     col_i = cols.astype(np.int64)
     start = np.clip(col_i - width, 0, keycount - 1)
     end = np.clip(col_i + width, 0, keycount - 1)
@@ -257,13 +263,14 @@ def _tornado_window(cols, keycount, arrow_size):
 
 
 def _tornado_offset(percent, cols, y_offset, keycount, arrow_size,
-                    offset, period, is_tan):
+                    offset, period, is_tan, dimension=0):
     """CalculateTornadoOffsetFromMagnitude (ArrowEffects.cpp:217-239). The
     column's real x maps to [-1, 1] within its arccos window; (y_offset +
     offset) advances the phase at frequency (period+1)*6; cos (or tan/cosec
     for the tan variant) maps back to a windowed x. `offset`/`period` are the
-    tornadooffset/tornadoperiod companions (default 0 = identity)."""
-    real, min_x, max_x = _tornado_window(cols, keycount, arrow_size)
+    tornadooffset/tornadoperiod companions (default 0 = identity). `dimension`
+    (0 = X, 2 = Z) selects the window width, wider on Z in a wide field."""
+    real, min_x, max_x = _tornado_window(cols, keycount, arrow_size, dimension)
     span = np.where(max_x == min_x, 1.0, max_x - min_x)
     between = np.clip(_scale(real, min_x, min_x + span, -1.0, 1.0), -1.0, 1.0)
     freq = TORNADO_OFFSET_FREQUENCY
@@ -293,9 +300,12 @@ def reverse_fractions(percents: dict, cols: np.ndarray, keycount: int) -> np.nda
     """Per-column reverse fraction r_col, ported from OpenITG
     PlayerOptions::GetReversePercentForColumn (PlayerOptions.cpp:539-562).
 
-    The scroll family is four additive percents whose column membership
-    matches the engine's integer tests exactly:
+    The scroll family is a global reverse plus per-column numbered reverse
+    plus three membership-gated percents, whose column membership matches
+    the engine's integer tests exactly:
       - reverse   : every column.
+      - reverse<c>: the single numbered column c (m_fReverse[iCol],
+        PlayerOptions.cpp:1688), added alongside the global reverse.
       - split     : columns in the RIGHT half (iCol >= N/2, integer div).
       - alternate : ODD columns (iCol % 2 == 1).
       - cross     : the MIDDLE half [N/4, N-1-N/4] inclusive.
@@ -313,8 +323,12 @@ def reverse_fractions(percents: dict, cols: np.ndarray, keycount: int) -> np.nda
     alternate = float(percents.get('alternate', 0.0))
     cross = float(percents.get('cross', 0.0))
 
+    reverse_col = np.full(keycount, reverse, dtype=np.float64)
+    for c in range(keycount):
+        reverse_col[c] += float(percents.get(f'reverse{c}', 0.0))
+
     col_i = cols.astype(np.int64)
-    f = np.full(col_i.shape, reverse, dtype=np.float64)
+    f = reverse_col[col_i]
     f += np.where(col_i >= keycount // 2, split, 0.0)
     f += np.where((col_i % 2) == 1, alternate, 0.0)
 
@@ -463,12 +477,15 @@ def rage_triangle(angle):
 
 
 def rage_square(angle):
-    """Vectorized port of RageMath.cpp RageSquare: a square wave, -1 for
-    the second half of each 2*PI period, +1 for the first. The engine's
-    <0.01 guard (which nudges a near-zero angle up by 2*PI to keep holds
-    from flickering right before the receptor) leaves the return value +1
-    either way, so it is a no-op on the wave and omitted."""
+    """Vectorized port of RageMath.cpp RageSquare (RageMath.cpp:584): a
+    square wave, -1 for the second half of each 2*PI period, +1 for the
+    first. The engine's <0.01 guard nudges a near-zero wrapped angle up by
+    2*PI (a hold-flicker hack); for a small POSITIVE angle in [0, 0.01)
+    that pushes it past PI, flipping the result from +1 to -1, so it is NOT
+    a no-op - a note whose phase lands in that band gets the opposite
+    sign."""
     a = np.mod(np.asarray(angle, dtype=np.float64), 2.0 * PI)
+    a = np.where(a < 0.01, a + 2.0 * PI, a)
     return np.where(a >= PI, -1.0, 1.0)
 
 
@@ -574,16 +591,21 @@ def accel_y_offset(percents: dict, y_offset: np.ndarray,
         [-400, 400].
       - BRAKE (:73-82): notes slow near the receptor. scale = y/H;
         fNewY = y * scale; adjust = brake * (fNewY - y), clamped [-400, 400].
-      - WAVE (:83-84): adjust += wave * 20 * sin(y / 38).
+      - WAVE (:83-84): adjust += wave * 20 * sin(y / (waveperiod*38 + 38)),
+        the waveperiod companion stretching the spatial frequency
+        (WAVE_MOD_HEIGHT = 38; default period 0 -> /38).
       - EXPAND (:123-133): a periodic SCROLL-SPEED multiplier (cos of a
         wall-clock timer). WALLCLOCK -> we key it to song time via the
         `_expand_phase` percent the caller injects (radians); multiplier =
         SCALE(cos(phase), -1,1, 0.75,1.75), applied as
         SCALE(expand, 0,1, 1, mult) scaling the whole offset.
 
-    Notes past the receptor (y < 0) are returned untouched for boost/brake/
-    wave (a deliberate deviation kept for scrub stability); BOOMERANG folds
-    the whole range (see below).
+    Notes past the receptor (y < 0) are returned untouched for the WHOLE
+    accel section: the engine's GetYOffset early-out (:595 `if (fYOffset <
+    0) return fYOffset * fScrollSpeed;`) returns before boost/brake/wave,
+    before the boomerang fold, and before the expand speed multiply, so a
+    past note keeps its raw offset. We match that with a final
+    `np.where(past, y, out)` rather than folding y<0 notes.
 
     BOOMERANG (:646-655) now IMPLEMENTED. It rewrites the (already
     accel-adjusted) offset into a downward parabola
@@ -595,9 +617,9 @@ def accel_y_offset(percents: dict, y_offset: np.ndarray,
     no peak contract, so we express the visibility half of boomerang here as
     an alpha companion (see `boomerang_visibility`): an arrow whose raw offset
     is beyond the fold has "boomeranged back" and the engine would have culled
-    or grayed it, so we fade it. The position parabola runs for every note
-    (matching the engine, which folds y<0 too); the y<0 skip only guards the
-    boost/brake/wave block above it."""
+    or grayed it, so we fade it. The position parabola runs for every
+    APPROACHING note (y>=0); the y<0 early-out above precedes it, so past
+    notes are never folded."""
     boost = float(percents.get('boost', 0.0))
     brake = float(percents.get('brake', 0.0))
     wave = float(percents.get('wave', 0.0))
@@ -618,9 +640,11 @@ def accel_y_offset(percents: dict, y_offset: np.ndarray,
         new_y = y * scale
         adjust += np.clip(brake * (new_y - y), -400.0, 400.0)
     if wave:
-        adjust += wave * 20.0 * np.sin(y / 38.0)
+        wave_period = float(percents.get('waveperiod', 0.0))
+        adjust += wave * 20.0 * np.sin(
+            y / ((wave_period * WAVE_MOD_HEIGHT) + WAVE_MOD_HEIGHT))
 
-    out = np.where(past, y, y + adjust)
+    out = y + adjust
     if boomerang:
         out = boomerang_y_offset(out, field_height)
     if expand:
@@ -628,7 +652,10 @@ def accel_y_offset(percents: dict, y_offset: np.ndarray,
         mult = _scale(np.cos(phase), -1.0, 1.0, 0.75, 1.75)
         out = out * _scale(expand, 0.0, 1.0, 1.0, mult)
 
-    return out
+    # Engine early-out (:595): a past-receptor note (y<0) returns its raw
+    # offset before boost/brake/wave, the boomerang fold, AND the expand
+    # multiply. Restore it here so every past note keeps y untouched.
+    return np.where(past, y, out)
 
 
 def boomerang_y_offset(y_offset, field_height: float = SCREEN_HEIGHT):
@@ -902,13 +929,25 @@ def zoom_from_mini(mini_percent):
 
 
 def tiny_zoom(tiny_percent):
-    """NotITG tiny: shrinks arrows WITHOUT changing spacing (docs:
-    "200% will cause the arrows to disappear entirely"). Same 1 - p*0.5
-    curve as mini but applied only to the sprite zoom, never to spacing.
-    In our 2D pipeline mini already contributes zoom-only (spacing is not
-    rescaled here), so the two differ only in that tiny never touches the
-    field transform; both fold into the per-note zoom multiplier."""
-    return 1.0 - tiny_percent * 0.5
+    """NotITG tiny sprite zoom (GetZoom, ArrowEffects.cpp:1582): zoom *=
+    pow(0.5, tiny), so 100% halves, 200% quarters, -100% doubles. This is
+    a DIFFERENT curve from mini's 1 - p*0.5 (they agree only at 0 and 1);
+    tiny additionally compresses the X spacing (see `tiny_spacing`), which
+    mini does NOT."""
+    return np.power(0.5, tiny_percent)
+
+
+def tiny_spacing(tiny_percent):
+    """NotITG tiny X-spacing compression (GetXPos, ArrowEffects.cpp:1025):
+    the engine multiplies the WHOLE accumulated x offset - the summed mods
+    AND the column's own x-offset from field center - by
+    min(pow(0.5, tiny), 1). So POSITIVE tiny pulls the columns toward center
+    (tighter spacing) as well as shrinking each sprite, while negative tiny
+    (arrows grow) is GATED at 1 and leaves spacing unchanged. Returns the
+    scalar column-space multiplier (1.0 when tiny is 0)."""
+    if tiny_percent == 0.0:
+        return 1.0
+    return min(float(np.power(0.5, tiny_percent)), 1.0)
 
 
 def pulse_zoom(inner, outer, y_offset, offset=0.0, period=0.0,
@@ -1009,14 +1048,18 @@ def _drunk_pair(percents, cols, y_offset, t_now, keycount, arrow_size, suffix):
 
 
 def _tornado_pair(percents, cols, y_offset, keycount, arrow_size, suffix):
-    """The tornado + tantornado pair for one axis. Companions offset/period."""
+    """The tornado + tantornado pair for one axis. Companions offset/period.
+    The engine window width depends on the axis (dimension 0 = X, 2 = Z), so
+    the Z pair keeps width 3 in a wide field where X narrows to 2."""
     plain, tan = 'tornado' + suffix, 'tantornado' + suffix
+    dimension = 2 if suffix == 'z' else 0
     out = np.zeros(cols.shape[0], dtype=np.float64)
     for name, is_tan in ((plain, False), (tan, True)):
         if _get(percents, name):
             out += _tornado_offset(_get(percents, name), cols, y_offset, keycount,
                                    arrow_size, _get(percents, name + 'offset'),
-                                   _get(percents, name + 'period'), is_tan)
+                                   _get(percents, name + 'period'), is_tan,
+                                   dimension=dimension)
     return out
 
 
