@@ -418,11 +418,18 @@ class StubEnvironment:
         return rec_id, table
 
     def _actor_poke(self, rec_id, verb=None, *args) -> None:
-        if self._recording_frozen:
-            return
         recorder = self._recorders.get(_to_int(rec_id))
-        if recorder is not None and isinstance(verb, str):
-            recorder.poke(verb, list(args))
+        if recorder is None or not isinstance(verb, str):
+            return
+        if self._recording_frozen:
+            # A mod_actions closure re-fired inside the update integration:
+            # keyframe recording is frozen, but a poke that resets an
+            # accumulator a per-frame driver reads back (gat's Toss quad
+            # re-anchor) must still land on the live mirror state.
+            if self._integration_clock is not None:
+                recorder.live_poke(verb, list(args))
+            return
+        recorder.poke(verb, list(args))
 
     def _actor_get(self, rec_id, verb=None):
         """Return a recorder getter's value for a driver closure. Falls
