@@ -89,10 +89,16 @@ def _element_node_id(prefix: str, index: int) -> str:
     return f'{prefix}{index}'
 
 
-def _wrap_element(el, node_id, parent, layer, index_counter):
+def _wrap_element(el, node_id, parent, layer, index_counter, source):
     """Build a Node from a storyboard Element, recursing into a group's
     children. `index_counter` is a one-element list used as a shared
-    mutable counter so child ids stay globally unique across the tree."""
+    mutable counter so child ids stay globally unique across the tree.
+    `source` accumulates node_id -> Element: the phase-3 renderer walks
+    the node tree for structure/gating and resolves each node's draw
+    payload (anchor/origin/flip/sheet/font/... the model has not promoted
+    to first-class content yet) from this index. The mapping is emitted in
+    the SAME pass that assigns node_ids, so it can never drift from the
+    tree."""
     content = _leaf_content(el)
     child_nodes = []
     child_ids = []
@@ -102,7 +108,7 @@ def _wrap_element(el, node_id, parent, layer, index_counter):
             child_id = _element_node_id('sb', index_counter[0])
             child_nodes.extend(
                 _wrap_element(child, child_id, node_id, layer,
-                              index_counter))
+                              index_counter, source))
             child_ids.append(child_id)
 
     node = Node(node_id=node_id, parent=parent, layer=layer,
@@ -110,24 +116,28 @@ def _wrap_element(el, node_id, parent, layer, index_counter):
                 t_start=el.t_start, t_end=el.t_end,
                 properties=dict(el.timelines), children=tuple(child_ids),
                 content=content)
+    source[node_id] = el
     return [node, *child_nodes]
 
 
 def _storyboard_nodes(storyboard):
-    """Flatten a Storyboard's element tree into (node_table, root_ids).
-    Each top-level Element becomes a root Node; a group's children become
-    child Nodes. Empty when the game has no storyboard."""
+    """Flatten a Storyboard's element tree into (node_table, root_ids,
+    element_index). Each top-level Element becomes a root Node; a group's
+    children become child Nodes. `element_index` maps node_id -> the
+    source Element (see `_wrap_element`). All empty when the game has no
+    storyboard."""
     nodes = {}
     roots = []
+    source = {}
     counter = [0]
     for el in storyboard.elements:
         node_id = _element_node_id('sb', counter[0])
         layer = Timeline(_ConstCurve(_element_stratum(el.z)))
-        for node in _wrap_element(el, node_id, None, layer, counter):
+        for node in _wrap_element(el, node_id, None, layer, counter, source):
             nodes[node.node_id] = node
         roots.append(node_id)
         counter[0] += 1
-    return nodes, tuple(roots)
+    return nodes, tuple(roots), source
 
 
 class _ConstCurve:
@@ -142,6 +152,20 @@ class _ConstCurve:
         return (self._value,)
 
 
+def storyboard_document(storyboard, design):
+    """Build the (CompiledDocument, element_index) pair for one
+    `storyboard` under `design`. The document is the group/layer tree the
+    renderer walks; `element_index` (node_id -> Element) is the draw-
+    payload lookup the phase-3 storyboard renderer resolves each leaf
+    through until the model promotes those fields (phases 4-5). An empty
+    storyboard yields an empty tree and index."""
+    nodes, roots, index = (_storyboard_nodes(storyboard) if storyboard
+                           else ({}, (), {}))
+    document = CompiledDocument(design=design, nodes=nodes, roots=roots,
+                               strata=DEFAULT_STRATA)
+    return document, index
+
+
 def document_from_player(player) -> CompiledDocument:
     """Wrap `player`'s compiled per-game outputs into a CompiledDocument.
     Reads the adapter's design space and, when present, the storyboard
@@ -149,7 +173,5 @@ def document_from_player(player) -> CompiledDocument:
     effects pipeline; this is the skeleton the outputs migrate into."""
     design = player._adapter.design_space()
     storyboard = player._adapter.storyboard(player.replay)
-    nodes, roots = (_storyboard_nodes(storyboard) if storyboard
-                    else ({}, ()))
-    return CompiledDocument(design=design, nodes=nodes, roots=roots,
-                            strata=DEFAULT_STRATA)
+    document, _index = storyboard_document(storyboard, design)
+    return document

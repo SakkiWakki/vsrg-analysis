@@ -129,6 +129,31 @@ def _is_white(quantized) -> bool:
     return quantized == (q, q, q)
 
 
+class _ElementWalk:
+    """The group-descent source for the direct Element-tree walk: a
+    group's live children are its in-window `el.children`, carrying no
+    node handle. `_paint_children` calls `children(group_el, node, t)`;
+    the document renderer swaps in a walker that reads the node tree
+    instead, keeping the paint math untouched."""
+
+    def children(self, el, node, t):
+        return tuple((child, None) for child in el.children
+                     if child.t_start <= t < child.t_end)
+
+
+_ELEMENT_WALK = _ElementWalk()
+
+# Phase-3 consolidation switch. When True, StoryboardEffect renders by
+# walking the compiled-document node tree (group edges compose transforms,
+# layer slots band draws, the REQUIRED visibility timeline gates) instead
+# of the parallel Element arrays -- the document becomes the single source
+# the player draws from. Both paths are proven byte-identical
+# (tests/test_document_equivalence.py) and oracle-stable, so the default
+# is the document path; flip to False to fall back to the direct Element
+# walk (kept as the equivalence reference and a safety valve).
+USE_DOCUMENT_PATH = True
+
+
 class StoryboardEffect:
     def __init__(self, storyboard):
         # Only TOP-LEVEL elements own z-slots; a group draws its whole
@@ -148,11 +173,35 @@ class StoryboardEffect:
         self._pixmaps = {}
         self._tinted = {}
         self._text_metrics = {}
+        self._document_renderer = (self._build_document_renderer(storyboard)
+                                   if USE_DOCUMENT_PATH else None)
+
+    def _build_document_renderer(self, storyboard):
+        """Build the node-tree renderer this effect delegates `at` to when
+        the document path is on. Local imports break the render.document <->
+        render.storyboard construction cycle (document.render imports this
+        module for the paint helpers); this runs once per effect, not on
+        the hot path."""
+        from analysis.player.render.document.builder import storyboard_document
+        from analysis.player.render.document.design_space import DesignSpace
+        from analysis.player.render.document.render import (
+            DocumentStoryboardRenderer)
+
+        design = DesignSpace(width=storyboard.design_w,
+                             height=storyboard.design_h,
+                             fit=storyboard.fit, clip=storyboard.clip_design_box)
+        document, index = storyboard_document(storyboard, design)
+        return DocumentStoryboardRenderer(document, index, storyboard, self)
 
     def __bool__(self):
         return bool(self._elements)
 
     def at(self, ctx) -> EffectFrame | None:
+        if self._document_renderer is not None:
+            return self._document_renderer.at(ctx)
+        return self._at_element_walk(ctx)
+
+    def _at_element_walk(self, ctx) -> EffectFrame | None:
         t = float(ctx.t_now)
         active = (self._starts <= t) & (t < self._ends)
         if not active.any():
@@ -185,7 +234,8 @@ class StoryboardEffect:
     # -- element painting -------------------------------------------------
 
     def _paint_element(self, painter, el, t, k, ox, oy,
-                       ref_w, ref_h, inherited_alpha=1.0) -> None:
+                       ref_w, ref_h, inherited_alpha=1.0,
+                       walker=_ELEMENT_WALK, node=None) -> None:
         # SM's `hidden` bit hard-gates the draw independently of alpha, so
         # an actor carrying a diffusealpha crossfade stays dark while
         # hidden (the ShowAFTBG capture sprite sits `hidden,1` until its
@@ -228,12 +278,13 @@ class StoryboardEffect:
             painter.setCompositionMode(
                 QPainter.CompositionMode.CompositionMode_Plus)
         if el.kind == 'group':
-            self._paint_children(painter, el, t, alpha)
+            self._paint_children(painter, el, t, alpha, walker, node)
         else:
             self._paint_kind(painter, el, t, w, h)
         painter.restore()
 
-    def _paint_children(self, painter, el, t, group_alpha) -> None:
+    def _paint_children(self, painter, el, t, group_alpha,
+                        walker=_ELEMENT_WALK, node=None) -> None:
         """Draw a group's subtree in the group's own transformed space.
         The group bracket already applied its translate/rotate/scale, so
         the painter origin is now the frame's local (0, 0): children
@@ -241,11 +292,16 @@ class StoryboardEffect:
         a zero-size anchor box) at k=1. Each child re-checks its own
         window, so one outside [t_start, t_end) is skipped while siblings
         still draw; if the whole group is outside its window the caller
-        never reaches here."""
-        for child in el.children:
-            if child.t_start <= t < child.t_end:
-                self._paint_element(painter, child, t, 1.0, 0.0, 0.0,
-                                    0.0, 0.0, group_alpha)
+        never reaches here.
+
+        `walker` supplies the child sequence: the default walks the
+        Element tree (`el.children`); the document renderer passes a walker
+        that walks the compiled-document node tree instead, so the SAME
+        transform/paint math runs but the group descent and the window
+        gate come from the node model (see render/document/render.py)."""
+        for child_el, child_node in walker.children(el, node, t):
+            self._paint_element(painter, child_el, t, 1.0, 0.0, 0.0,
+                                0.0, 0.0, group_alpha, walker, child_node)
 
     def _paint_kind(self, painter, el, t, w, h) -> None:
         color = self._qcolor(el.sample('color', t))
