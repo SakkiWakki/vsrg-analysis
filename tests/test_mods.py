@@ -1227,7 +1227,7 @@ def test_hold_body_passes_through_head_and_tail():
     # to within the box filter's smoothing (each sample is the mean over
     # its ~8px cell; for drunk's ~300px period that is a sub-pixel shave).
     head_x = ctx.lane_x(1) + ctx.candidate_dx[0]
-    assert xs[0] == pytest.approx(head_x, abs=0.5)
+    assert xs[0] == pytest.approx(head_x, abs=0.1)
 
 
 def test_hold_body_bends_under_drunk():

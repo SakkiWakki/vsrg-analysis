@@ -79,6 +79,17 @@ _BODY_WINDOW_PAD = 0.6
 # visual converges to the local mean band - which is what the filter
 # yields.
 _BODY_BOX_FILTER = 4
+# Below this spatial wavelength (engine px) a waveform kernel is zeroed
+# for body evaluation: 3x the sample spacing, safely above Nyquist.
+_BODY_MIN_WAVELENGTH = 3.0 * _BODY_SAMPLE_SPACING
+# Waveform kernel -> its period companion (wavelength ~ 2*AS*(1+period)).
+_WAVEFORM_PERIODS = {
+    'digital': 'digitalperiod', 'zigzag': 'zigzagperiod',
+    'sawtooth': 'sawtoothperiod', 'square': 'squareperiod',
+    'bounce': 'bounceperiod', 'digitalz': 'digitalzperiod',
+    'zigzagz': 'zigzagzperiod', 'bouncez': 'bouncezperiod',
+    'tandigital': 'tandigitalperiod',
+}
 
 
 class NotitgNoteMods:
@@ -203,9 +214,9 @@ class NotitgNoteMods:
             return
 
         sample = note_offsets(
-            percents, segments['cols'], segments['offs'], t_now=t,
-            beat_now=self._beat_at(t), keycount=p.keycount,
-            note_beats=segments['beats'])
+            self._band_limited(percents), segments['cols'],
+            segments['offs'], t_now=t, beat_now=self._beat_at(t),
+            keycount=p.keycount, note_beats=segments['beats'])
 
         # A body only needs the polyline when its dx actually VARIES along
         # the body (drunk/wave/digital ...); a constant dx (flip/movex, or
@@ -257,7 +268,11 @@ class NotitgNoteMods:
             cell = (f1 - f0) / max(count - 1, 1)
             jitter = (np.arange(_BODY_BOX_FILTER) / _BODY_BOX_FILTER
                       - 0.5 + 0.5 / _BODY_BOX_FILTER) * cell
-            fine = np.clip((frac[:, None] + jitter[None, :]).ravel(), f0, f1)
+            # Deliberately unclamped: an endpoint cell samples a hair past
+            # the window so its mean stays centered on the endpoint (the
+            # offset kernels are pure functions of y_offset, defined
+            # everywhere), keeping cap attachment exact.
+            fine = (frac[:, None] + jitter[None, :]).ravel()
             n_fine = count * _BODY_BOX_FILTER
             cols_parts.append(np.full(n_fine, cols[pos], dtype=np.int64))
             offs_parts.append(head_off[pos] + fine * (tail_off[pos] - head_off[pos]))
@@ -297,6 +312,28 @@ class NotitgNoteMods:
         spacing = _BODY_SAMPLE_SPACING * scale
         return int(np.clip(round(float(visible_span_px) / spacing) + 1,
                            2, _MAX_BODY_SAMPLES))
+
+    def _band_limited(self, percents):
+        """Body-evaluation percents with unresolvable waveform kernels
+        zeroed. A waveform's spatial wavelength is ~2*AS*(1+period); when
+        a negative period companion pushes it under the sampling cutoff,
+        point sampling aliases (near-resonance leaves low-frequency ghost
+        curves no smoothing can remove), while the engine's per-strip
+        rendering of it converges to the straight mean band - which is
+        exactly what a zeroed kernel draws. Heads keep the full percents:
+        a single point sample cannot alias."""
+        limited = None
+        for mod, period_mod in _WAVEFORM_PERIODS.items():
+            if abs(percents.get(mod, 0.0)) < _ACTIVE_EPS:
+                continue
+            wavelength = 2.0 * ARROW_SIZE * (
+                1.0 + percents.get(period_mod, 0.0))
+            if wavelength >= _BODY_MIN_WAVELENGTH:
+                continue
+            if limited is None:
+                limited = dict(percents)
+            limited[mod] = 0.0
+        return percents if limited is None else limited
 
     def _remap_accel(self, percents, ys, judge_y, scale):
         """Accel-remapped y_offset (engine px) for a candidate y array."""
