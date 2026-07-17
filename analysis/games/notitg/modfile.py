@@ -486,13 +486,35 @@ def _compile_actor(actor, start_time, named_keyframes, fonts, below=None,
     if child_elements:
         return _group_element(actor, start_time, keyframes,
                               tuple(child_elements))
-    return _leaf_element(actor, start_time, named_keyframes,
+    leaf = _leaf_element(actor, start_time, named_keyframes,
                          precomputed=keyframes, fonts=fonts)
+    if leaf is not None and _is_aft_backdrop(actor):
+        # The AFT rig's fullscreen backdrops (the ShowAFT black quad,
+        # the ShowAFTBG bg image) sit UNDER the proxies in engine tree
+        # order; as ordinary elements they would draw over the field
+        # and copies (they only started rendering once fills gained
+        # w/h), so they route to the below-field band instead.
+        below.append(_with_z(leaf, _AFT_BACKDROP_Z))
+        return None
+    return leaf
 
 
 # The background band z: below the notes/field (z=0) but a valid
 # storyboard slot. gat's whole BGCHANGES tree lands here.
 _BACKGROUND_Z = -100
+
+# AFT backdrop quads sit above the background band but still under the
+# field/copies (engine tree order: the rig's backdrops precede the
+# proxies).
+_AFT_BACKDROP_Z = -50
+
+# Message commands identifying the AFT rig's fullscreen backdrops.
+_AFT_BACKDROP_MESSAGES = ('ShowAFT', 'ShowAFTBG', 'HideAFT')
+
+
+def _is_aft_backdrop(actor) -> bool:
+    commands = actor.message_commands()
+    return any(name in commands for name in _AFT_BACKDROP_MESSAGES)
 
 
 def _compile_background_actor(actor, start_time, named_keyframes, fonts,
