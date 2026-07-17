@@ -146,44 +146,76 @@ def _arg_float(value, default=None):
     return result if result is not None else default
 
 
-# Values within this of the linear interpolation of their neighbours are
-# reconstructed by EventTimeline, so the recorded point is redundant. In
-# design pixels / degrees this is sub-visible.
+# Collapsed run points must be reproduced by the EMITTED keyframes to
+# within this under EventTimeline's own playback (step-hold for
+# instants, eased ramp for tweens). In design pixels / degrees this is
+# sub-visible.
 _SIMPLIFY_EPS = 1e-3
+
+_EASE_LINEAR = 0
 
 
 def _simplify_instants(frames):
-    """Drop instant (duration 0) keyframes a linear interpolation of the
-    surrounding points reconstructs to `_SIMPLIFY_EPS`.
+    """Collapse runs of instant (duration 0) keyframes into the exact
+    shape EventTimeline plays back.
 
-    Only single-value scalar runs of instant points are collapsed (the
-    per-frame-driver case); any keyframe carrying a tween (duration > 0),
-    a multi-component value, or an ease-from `start` override is a
-    structural point kept verbatim, and it also breaks the run so
-    interpolation never spans it. Endpoints of every run are kept, so a
-    constant hold becomes two points and a linear ramp two points."""
+    EventTimeline holds an instant's value until the next keyframe - it
+    never interpolates between instants - so a dropped point must be
+    reproduced by what remains, not by interpolation the sampler does
+    not do. A run of collinear per-frame-driver instants therefore
+    becomes ONE linear tween easing from the run head's value to the
+    last value over the run's span, and a constant run becomes its head
+    alone: the transition stays at the run START (a `hidden` flip
+    recorded at its true time never migrates to the run's end).
+
+    Only single-value scalar numeric instants join runs; any keyframe
+    carrying a tween, a multi-component value, or an ease-from `start`
+    override is structural, kept verbatim, and breaks the run. So does
+    a same-time pair (a zero-tween chain step)."""
     if len(frames) < 3:
         return frames
-    out = [frames[0]]
-    for i in range(1, len(frames) - 1):
-        prev, cur, nxt = out[-1], frames[i], frames[i + 1]
-        if not _collapsible(prev, cur, nxt):
-            out.append(cur)
-    out.append(frames[-1])
+    out = []
+    i, n = 0, len(frames)
+    while i < n:
+        head = frames[i]
+        if not _plain_instant(head):
+            out.append(head)
+            i += 1
+            continue
+        # Grow the run while the chord from `head` to each new point
+        # reproduces every interior point to _SIMPLIFY_EPS: each accepted
+        # point narrows the feasible slope corridor, and a point is
+        # accepted only when its own chord slope lies inside it.
+        j = i + 1
+        lo, hi = float('-inf'), float('inf')
+        while j < n and _plain_instant(frames[j]):
+            dt = frames[j].t - head.t
+            if dt <= 0.0:
+                break
+            slope = (frames[j].values[0] - head.values[0]) / dt
+            if not lo <= slope <= hi:
+                break
+            tol = _SIMPLIFY_EPS / dt
+            lo, hi = max(lo, slope - tol), min(hi, slope + tol)
+            j += 1
+        out.extend(_collapse_run(frames[i:j]))
+        i = j
     return out
 
 
-def _collapsible(prev, cur, nxt) -> bool:
-    if any(k.duration > 0.0 or k.start is not None or len(k.values) != 1
-           or not isinstance(k.values[0], (int, float))
-           for k in (prev, cur, nxt)):
-        return False
-    span = nxt.t - prev.t
-    if span <= 0.0:
-        return False
-    f = (cur.t - prev.t) / span
-    lerp = prev.values[0] + (nxt.values[0] - prev.values[0]) * f
-    return abs(cur.values[0] - lerp) <= _SIMPLIFY_EPS
+def _plain_instant(kf) -> bool:
+    return (kf.duration <= 0.0 and kf.start is None and len(kf.values) == 1
+            and isinstance(kf.values[0], (int, float)))
+
+
+def _collapse_run(run):
+    if len(run) < 3:
+        return run
+    head, last = run[0], run[-1]
+    if abs(last.values[0] - head.values[0]) <= _SIMPLIFY_EPS:
+        return [head]
+    return [Keyframe(head.t, last.values, last.t - head.t, _EASE_LINEAR,
+                     start=head.values)]
 
 
 class OscSpan:
@@ -704,6 +736,7 @@ class SimActor:
         self._set_immediate('frame', float(index))
 
     def _animate(self, enabled: bool) -> None:
+        self._set_immediate('frame_paused', 0.0 if enabled else 1.0)
         if enabled:
             return
         current = self._current.get('frame', 0.0)

@@ -935,7 +935,7 @@ def _leaf_element(actor, start_time, named_keyframes, precomputed=None,
     keyframes = precomputed if precomputed is not None \
         else _merged_keyframes(actor, start_time, named_keyframes)
     drawable = _fill_size_as_wh(kind, _drawable_props(keyframes))
-    state_pin = _state_pin(keyframes)
+    state_pin = _state_pin(keyframes, states, start_time)
     # A frame pin is real content (a sprite animated purely by
     # setstate/animate pokes), so it keeps an otherwise-untweened actor
     # alive alongside any transform/color keyframes.
@@ -976,19 +976,35 @@ def _load_classic_verbs(actor):
             yield from xml_actors.parse_command_string(value)
 
 
-# Frame-index keyframes the recorder emits from setstate/animate pokes.
-# When present, a pin timeline overrides the sheet's auto-animation.
-_STATE_PIN_PROP = 'frame'
+# Keyframe channels the recorder emits from setstate/animate pokes.
+_STATE_PROP = 'frame'
+_STATE_PAUSED_PROP = 'frame_paused'
 
 
-def _state_pin(keyframes):
-    """An EventTimeline of the sprite's frame index over time, from
-    recorded `setstate`/`animate` pokes, or None when the actor never
-    pinned a frame (the sheet then auto-animates through its states)."""
-    frames = keyframes.get(_STATE_PIN_PROP)
-    if not frames:
+def _state_pin(keyframes, states, start_time):
+    """A `StateAnchors` sampler of the sprite's frame index over time,
+    from recorded `setstate`/`animate` pokes, or None when the actor
+    never poked its state (the sheet then auto-animates). A `setstate`
+    is a RESTART anchor - the state list keeps playing from that state
+    (SM `SetState`) - while an `animate(off)` pause holds the anchored
+    frame until resumed."""
+    state_kfs = keyframes.get(_STATE_PROP) or ()
+    paused_kfs = keyframes.get(_STATE_PAUSED_PROP) or ()
+    if not state_kfs and not paused_kfs:
         return None
-    return EventTimeline(frames, rest=(0.0,))
+
+    events = sorted([(kf.t, _STATE_PROP, kf.values[0]) for kf in state_kfs]
+                    + [(kf.t, _STATE_PAUSED_PROP, kf.values[0])
+                       for kf in paused_kfs])
+    anchors = []
+    state, paused = 0.0, False
+    for t, prop, value in events:
+        if prop == _STATE_PROP:
+            state = value
+        else:
+            paused = value != 0.0
+        anchors.append((t, state, not paused))
+    return sprite_sheet.StateAnchors(anchors, states, t_start=start_time)
 
 
 # StepMania's built-in flat-color texture: the renderer synthesizes it,

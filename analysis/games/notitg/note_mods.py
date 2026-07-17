@@ -182,12 +182,69 @@ class NotitgNoteMods:
         scale = ctx.lane_w / ARROW_SIZE
         judge_y = float(ctx.judge_y)
 
+        ppe = self._px_per_engine(ctx, t, scale)
         if ctx.candidates:
-            ppe = self._px_per_engine(ctx, t, scale)
             self._apply_to_notes(ctx, percents, scale, ppe, judge_y, t)
         # Receptors carry the scroll orientation even on empty frames.
         ctx.receptor_offsets = self._receptor_offsets(
             ctx, percents, ctx.player.keycount, scale, t, judge_y)
+        # Chart streams (mines/lifts/fakes) draw through their own layer
+        # from a separate array set, so they never enter `ctx.candidates`.
+        # Expose the same mod evaluation as a provider they can call per
+        # visible batch, so a mine scrolling to a column's receptor picks
+        # up exactly the displacement that column's taps do.
+        ctx.chart_stream_offsets = (
+            lambda cols, ys, rows:
+            self._stream_offsets(ctx, percents, scale, ppe, judge_y, t,
+                                 cols, ys, rows))
+
+    def _stream_offsets(self, ctx, percents, scale, ppe, judge_y, t,
+                        cols, screen_ys, rows):
+        """Per-note mod displacement for an arbitrary note stream, in OUR
+        pixel space. `cols`/`screen_ys`/`rows` are parallel arrays for the
+        visible notes (screen_ys is each note's pre-mod scroll y). Returns
+        `(dx, dy, rotation_deg, zoom, alpha)` numpy arrays; dx/dy are pixel
+        deltas to add to the note's (lane_x, screen_y), the rest ride the
+        same head-center transform bracket the notes layer uses.
+
+        Mirrors `_apply_to_notes`: accel reshapes the y_offset -> position
+        map first, then the summed position mods contribute dx/dy, then the
+        reverse family flips distance about the (possibly mirrored) receptor.
+        Chart streams carry no press offset and no LN tail, so only the head
+        position is remapped."""
+        cols = np.asarray(cols, dtype=np.int64)
+        ys = np.asarray(screen_ys, dtype=np.float64)
+        p = ctx.player
+        active = any(abs(v) >= _ACTIVE_EPS for v in percents.values())
+        if not active:
+            zero = np.zeros(cols.shape, dtype=np.float64)
+            return zero, zero, zero.copy(), np.ones(cols.shape), np.ones(cols.shape)
+
+        head_off = self._remap_accel(percents, ys, judge_y, ppe)
+        remapped_y = judge_y - head_off * ppe
+        note_beats = np.asarray(rows, dtype=np.float64) / 48.0
+        offs = note_offsets(
+            percents, cols, head_off,
+            t_now=t, beat_now=self._beat_at(t), keycount=p.keycount,
+            note_beats=note_beats)
+
+        r = self._effective_reverse(percents, cols, p.keycount)
+        centered = float(percents.get('centered', 0.0))
+        reversed_y = self._reverse_ys(ctx, remapped_y, r, centered, judge_y)
+
+        dy = (reversed_y - ys) + offs.dy * scale
+        dx = self._tiny_compressed_dx(percents, cols, offs.dx, p.keycount, scale)
+        return dx, dy, offs.rotation_deg, offs.zoom, offs.alpha_mult
+
+    def _reverse_ys(self, ctx, ys, r, centered, judge_y):
+        """The reverse-family remap of a single y array (see
+        `_reverse_arrays`, which applies the same map to head/tail/press)."""
+        mirror_y = self._reverse_geom(ctx, judge_y)
+        _rx, ry, _w, h = ctx.chart_rect
+        center_y = ry + h / 2.0
+        receptor_y = judge_y + r * (mirror_y - judge_y)
+        receptor_y = receptor_y + centered * (center_y - receptor_y)
+        return receptor_y + (1.0 - 2.0 * r) * (np.asarray(ys) - judge_y)
 
     def _apply_to_notes(self, ctx, percents, scale, ppe, judge_y, t) -> None:
         p = ctx.player
@@ -472,18 +529,12 @@ class NotitgNoteMods:
         """y' places the receptor at lerp(judge_y, mirror_y, r) and flips
         the note's distance below the receptor by (1 - 2r). centered slides
         the receptor toward field center (mid-screen) by its percent."""
-        mirror_y = self._reverse_geom(ctx, judge_y)
-        rx, ry, _w, h = ctx.chart_rect
-        center_y = ry + h / 2.0
-
-        def remap(ys):
-            receptor_y = judge_y + r * (mirror_y - judge_y)
-            receptor_y = receptor_y + centered * (center_y - receptor_y)
-            return receptor_y + (1.0 - 2.0 * r) * (np.asarray(ys) - judge_y)
-
-        ctx.candidate_head_y = remap(ctx.candidate_head_y)
-        ctx.candidate_tail_y = remap(ctx.candidate_tail_y)
-        ctx.candidate_press_y = remap(ctx.candidate_press_y)
+        ctx.candidate_head_y = self._reverse_ys(
+            ctx, ctx.candidate_head_y, r, centered, judge_y)
+        ctx.candidate_tail_y = self._reverse_ys(
+            ctx, ctx.candidate_tail_y, r, centered, judge_y)
+        ctx.candidate_press_y = self._reverse_ys(
+            ctx, ctx.candidate_press_y, r, centered, judge_y)
 
     def _receptor_offsets(self, ctx, percents, keycount, scale, t, judge_y) -> dict:
         """Per-column receptor mods in OUR pixel space. `receptor_offsets`

@@ -34,7 +34,7 @@ def draw_mines(ctx: RenderContext, painter) -> None:
     _draw_chart_sprites(ctx, painter,
                         p.notes.mine_times, p.notes.mine_cols, p.notes.mine_sv,
                         p.notes.mine_until,
-                        sprite='mine', keyed=False)
+                        sprite='mine', keyed=False, rows=p.notes.mine_rows)
     _draw_hold_mine_spans(ctx, painter)
     _draw_mine_detonations(ctx, painter)
 
@@ -223,12 +223,16 @@ def _cull_indices(sorted_keys: np.ndarray,
 
 
 def _draw_chart_sprites(ctx, painter, times, cols, sv_times, active_until, *,
-                        sprite, keyed):
+                        sprite, keyed, rows=None):
     """Cull + blit a chart-stream sprite bucket (mines/lifts/fakes).
 
     - `sprite` ; sprite cache key
     - `keyed`  ; True when the sprite keys on `col` (lifts, fakes).
       False for palette-independent glyphs like mines.
+    - `rows`   ; per-note beat rows (parallel to `times`); when the game
+      supplies a per-note mod provider (`ctx.chart_stream_offsets`), these
+      feed it so the stream picks up the same NotITG modfield displacement
+      the column's taps get. None or no provider = the plain lane rail.
 
     Every chart-stream pixmap blits centered on its anchor y (square
     mines, head-shaped lifts/fakes), so the y-offset is `pm.height() / 2`
@@ -246,26 +250,80 @@ def _draw_chart_sprites(ctx, painter, times, cols, sv_times, active_until, *,
 
     cache = ctx.sprite_cache
     lane_x = ctx.lane_x
+    ys = np.array([_chart_sprite_y(ctx, float(times[k]), sv_times, k)
+                   for k in indices], dtype=np.float64)
+    mods = _chart_stream_mods(ctx, cols[indices], ys, rows, indices)
 
     # Both pixmap shapes anchor `y` at the pixmap's vertical center
     # (mines' `(lane_w, lane_w)` square -> `lane_w/2`; head-shaped
     # pixmaps -> `pm.height() / 2`, which adapts to whichever skin is
     # active without the blit site needing to know).
-    if keyed:
-        for k in indices:
-            c = int(cols[k])
-            pm = cache.get(sprite, ctx, col=c)
-            y = _chart_sprite_y(ctx, float(times[k]), sv_times, k)
-            painter.drawPixmap(QPointF(float(lane_x(c)),
-                                        float(y - pm.height() / 2)), pm)
-    else:
-        pm = cache.get(sprite, ctx)
-        y_offset = pm.height() / 2
-        for k in indices:
-            c = int(cols[k])
-            y = _chart_sprite_y(ctx, float(times[k]), sv_times, k)
-            painter.drawPixmap(QPointF(float(lane_x(c)),
-                                        float(y - y_offset)), pm)
+    for n, k in enumerate(indices):
+        c = int(cols[k])
+        pm = cache.get(sprite, ctx, col=c) if keyed else cache.get(sprite, ctx)
+        _blit_chart_sprite(painter, pm, float(lane_x(c)), float(ys[n]), c, ctx,
+                           mods.at(n) if mods is not None else None)
+
+
+def _chart_stream_mods(ctx, cols, ys, rows, indices):
+    """The stream's per-note mod offsets, or None when no provider is wired
+    or the stream carries no rows. `rows` is parallel to the full stream, so
+    it is gathered down to the visible `indices`."""
+    provider = getattr(ctx, 'chart_stream_offsets', None)
+    if provider is None or rows is None:
+        return None
+    dx, dy, rot, zoom, alpha = provider(cols, ys, np.asarray(rows)[indices])
+    return _StreamMods(dx, dy, rot, zoom, alpha)
+
+
+class _StreamMods:
+    """Column-major mod arrays with a per-index accessor. Small enough to
+    stay a thin holder; `at` returns the tuple the blit site consumes."""
+
+    __slots__ = ('dx', 'dy', 'rot', 'zoom', 'alpha')
+
+    def __init__(self, dx, dy, rot, zoom, alpha):
+        self.dx, self.dy, self.rot, self.zoom, self.alpha = dx, dy, rot, zoom, alpha
+
+    def at(self, n):
+        return (float(self.dx[n]), float(self.dy[n]), float(self.rot[n]),
+                float(self.zoom[n]), float(self.alpha[n]))
+
+
+def _blit_chart_sprite(painter, pm, lx, y, col, ctx, mod) -> None:
+    """Blit one chart-stream pixmap centered on `(lx, y)`'s anchor. When
+    `mod` is present ((dx, dy, rot, zoom, alpha)) the sprite is displaced and
+    drawn inside the same head-center rotate/zoom/alpha bracket the notes
+    layer uses (see layers/notes.py `_draw_view`), so a modded mine spins,
+    scales, and fades exactly like a tap in its column."""
+    y_top = y - pm.height() / 2
+    if mod is None:
+        painter.drawPixmap(QPointF(lx, float(y_top)), pm)
+        return
+    dx, dy, rot, zoom, alpha = mod
+    lx += dx
+    y += dy
+    y_top += dy
+    faded = alpha < 1.0
+    transformed = rot or zoom != 1.0
+    if not faded and not transformed:
+        painter.drawPixmap(QPointF(float(lx), float(y_top)), pm)
+        return
+    if faded and alpha < 1.0 / 255.0:
+        return
+    painter.save()
+    if faded:
+        painter.setOpacity(painter.opacity() * alpha)
+    if transformed:
+        cx = lx + pm.width() / 2.0
+        painter.translate(cx, float(y))
+        if rot:
+            painter.rotate(rot)
+        if zoom != 1.0:
+            painter.scale(zoom, zoom)
+        painter.translate(-cx, -float(y))
+    painter.drawPixmap(QPointF(float(lx), float(y_top)), pm)
+    painter.restore()
 
 
 def _chart_sprite_y(ctx, t, sv_times, k):

@@ -612,19 +612,20 @@ class RecordingActor:
         self._emit('hidden', (1.0 if hidden else 0.0,))
 
     def _set_state(self, index) -> None:
-        """`setstate(i)` pins the sprite to grid frame `i` at the current
-        clock (SM `SetState`). Recorded as a step keyframe on the `frame`
-        channel, which the compiler turns into a pin timeline that
-        overrides the sheet's auto-animation."""
+        """`setstate(i)` jumps the animation to state `i` at the current
+        clock (SM `SetState`) and it KEEPS playing from there. Recorded as
+        a step keyframe on the `frame` channel, which the compiler turns
+        into a restart anchor for the sheet's state list."""
         if index is None:
             return
         self._emit('frame', (float(index),))
 
     def _animate(self, enabled: bool) -> None:
         """`animate(false)` freezes the sprite on its current frame (SM
-        `EnableAnimation(false)`); we pin that frame from the clock on.
-        `animate(true)` with no prior `setstate` leaves the sheet on its
-        default auto-animation (no pin emitted)."""
+        `EnableAnimation(false)`), recorded on the `frame_paused` channel;
+        we also pin the current state so the freeze anchors there.
+        `animate(true)` resumes the animation."""
+        self._emit('frame_paused', (0.0 if enabled else 1.0,))
         if enabled:
             return
         current = self._current.get('frame', (0.0,))[0]

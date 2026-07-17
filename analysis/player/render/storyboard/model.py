@@ -38,9 +38,9 @@ resolves it through `render.storyboard.asset_size` so a sheet, a
 doubleres texture, or a res-hinted image all size correctly. With no
 `state_pin`, the sheet auto-animates through
 `sheet_states` (SM's sprite animation, tied to the effect clock);
-`state_pin` is an optional EventTimeline of a frame index over time
-(recorded `setstate`/`animate` pokes) that overrides the animation when
-present. A plain 1x1 sprite leaves `sheet_cols`/`sheet_rows` at 1 and
+`state_pin` is an optional frame-index sampler (`sample(t) -> (frame,)`,
+e.g. a `sprite_sheet.StateAnchors` built from recorded
+`setstate`/`animate` pokes) that overrides the animation when present. A plain 1x1 sprite leaves `sheet_cols`/`sheet_rows` at 1 and
 draws whole, exactly as before.
 
 A 'group' is an ActorFrame: it draws nothing itself but carries its
@@ -113,7 +113,7 @@ class Element:
     sheet_cols: int = 1       # SM NxM grid: columns of frames in the sheet
     sheet_rows: int = 1       # rows of frames in the sheet
     sheet_states: tuple = ()  # ((frame_index, delay_seconds), ...) auto-anim
-    state_pin: object = None  # EventTimeline of a frame index, or None
+    state_pin: object = None  # frame-index sampler (sample(t)), or None
     # Size conventions (doubleres/res hint/manifest logical override) the
     # renderer feeds to render.storyboard.asset_size.resolve to turn raw
     # pixels into the frame's LOGICAL size. None = a plain asset whose

@@ -31,12 +31,13 @@ from pathlib import Path
 
 from analysis.player.render.storyboard.asset_size import (AssetSizeSpec,
                                                           LogicalSize, resolve)
-from analysis.player.render.storyboard.sprite_sheet import (frame_at_time,
-                                                            frame_source_rect)
+from analysis.player.render.storyboard.sprite_sheet import (
+    StateAnchors, frame_at_time, frame_at_time_anchored, frame_source_rect)
 
 __all__ = ['grid_from_filename', 'default_states', 'parse_sprite_states',
            'size_spec_from_filename', 'AssetSizeSpec', 'LogicalSize',
-           'resolve', 'frame_at_time', 'frame_source_rect']
+           'resolve', 'frame_at_time', 'frame_at_time_anchored',
+           'frame_source_rect', 'StateAnchors']
 
 _GRID_TOKEN = re.compile(r'(?:^|\s)(\d+)x(\d+)(?=\.|$|\s)', re.IGNORECASE)
 

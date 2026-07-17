@@ -94,10 +94,11 @@ def _is_sheet(el) -> bool:
 
 
 def _sheet_frame(el, t: float) -> int:
-    """The frame index a sheet sprite shows at time `t`: the pinned frame
-    from a recorded setstate/animate timeline when present, otherwise the
-    auto-animated frame stepped through `sheet_states` on the effect
-    clock (relative to the element's own start)."""
+    """The frame index a sheet sprite shows at time `t`: the recorded
+    setstate/animate sampler when present (anchored restarts of the
+    state list), otherwise the auto-animated frame stepped through
+    `sheet_states` on the effect clock (relative to the element's own
+    start)."""
     if el.state_pin is not None:
         return int(round(el.state_pin.sample(t)[0]))
     return frame_at_time(el.sheet_states, t - el.t_start)
