@@ -83,9 +83,41 @@ _CURVES = (
 _FALLBACK = _out_pow(5)   # OutQuint
 
 
+# StepMania tween curves (verbatim Actor::UpdateTweening, openitg
+# Actor.cpp:522-526), addressed by NEGATIVE ids so future osu.Framework
+# enum growth (elastic/back/bounce live above 23) can never collide.
+# bounce dips below 0 at its ends' neighborhood and spring overshoots 1;
+# both are intentional (only `u` is clamped, never the output).
+EASE_SM_BOUNCE_BEGIN = -1
+EASE_SM_BOUNCE_END = -2
+EASE_SM_SPRING = -3
+
+
+def _sm_bounce_begin(u):
+    return 1.0 - math.sin(1.1 + u * (math.pi - 1.1)) / 0.89
+
+
+def _sm_bounce_end(u):
+    return math.sin(1.1 + (1.0 - u) * (math.pi - 1.1)) / 0.89
+
+
+def _sm_spring(u):
+    return 1.0 - math.cos(u * math.pi * 2.5) / (1.0 + u * 3.0)
+
+
+_SM_CURVES = {
+    EASE_SM_BOUNCE_BEGIN: _sm_bounce_begin,
+    EASE_SM_BOUNCE_END: _sm_bounce_end,
+    EASE_SM_SPRING: _sm_spring,
+}
+
+
 def ease(kind: int, u: float) -> float:
     """Eased progress for raw progress `u` in [0, 1]."""
     u = max(0.0, min(1.0, float(u)))
     if 0 <= kind < len(_CURVES):
         return _CURVES[kind](u)
+    sm_curve = _SM_CURVES.get(kind)
+    if sm_curve is not None:
+        return sm_curve(u)
     return _FALLBACK(u)
