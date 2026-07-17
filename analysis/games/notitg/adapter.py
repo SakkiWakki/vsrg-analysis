@@ -40,8 +40,8 @@ _ITG_WINDOWS_MS = (
 )
 
 _PLAYER_TRANSFORM_PROPS = {
-    'x': 0.0, 'y': 0.0, 'rotation': 0.0,
-    'scale_x': 1.0, 'scale_y': 1.0, 'hidden': 0.0,
+    'x': 0.0, 'y': 0.0, 'rotation': 0.0, 'rotation_y': 0.0,
+    'skew_x': 0.0, 'scale_x': 1.0, 'scale_y': 1.0, 'hidden': 0.0,
 }
 
 

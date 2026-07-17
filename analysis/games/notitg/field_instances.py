@@ -43,6 +43,8 @@ tween keyframes - sampling the timelines at t interpolates them.
 """
 from __future__ import annotations
 
+import math
+
 from PySide6.QtCore import QRectF
 from PySide6.QtGui import QTransform
 
@@ -126,6 +128,7 @@ def player_placement(player_timelines, rest_dx_design, t, k, scope):
     rx = rest_dx_design
     ry = 0.0
     rotation = 0.0
+    skew = 0.0
     sx = sy = 1.0
     if player_timelines is not None:
         # Recorded x/y are absolute design-space and the player recorder
@@ -133,21 +136,35 @@ def player_placement(player_timelines, rest_dx_design, t, k, scope):
         # is authoritative from t=0: a chart that never moves the player
         # samples the seed (= the metric rest), the intro bounce eases
         # from it, and both-at-center is the overlap gimmick.
-        rx = player_timelines['x'].sample(t)[0] - _SCREEN_CX
-        ry = player_timelines['y'].sample(t)[0] - _SCREEN_CY
-        rotation = player_timelines['rotation'].sample(t)[0]
-        sx = player_timelines['scale_x'].sample(t)[0]
-        sy = player_timelines['scale_y'].sample(t)[0]
+        def sample(prop, rest):
+            tl = player_timelines.get(prop)
+            return tl.sample(t)[0] if tl is not None else rest
+        rx = sample('x', _SCREEN_CX) - _SCREEN_CX
+        ry = sample('y', _SCREEN_CY) - _SCREEN_CY
+        rotation = sample('rotation', 0.0)
+        skew = sample('skew_x', 0.0)
+        sx = sample('scale_x', 1.0)
+        sy = sample('scale_y', 1.0)
+        # rotation_y foreshortening: a y-axis turn narrows the field by
+        # |cos| about its own centre - the standing 2D approximation
+        # until the true 3D projection tier consumes the recorded
+        # rotation_y directly (same trick as the confusionx kernel).
+        rot_y = sample('rotation_y', 0.0)
+        if rot_y:
+            sx *= abs(math.cos(math.radians(rot_y)))
     if sx == 0.0 or sy == 0.0:
         return None
-    if rx == 0.0 and ry == 0.0 and rotation == 0.0 and sx == 1.0 and sy == 1.0:
+    if rx == 0.0 and ry == 0.0 and rotation == 0.0 and skew == 0.0 \
+            and sx == 1.0 and sy == 1.0:
         return (None, 1.0, scope)
     t_screen = QTransform()
     t_screen.translate(rx * k, ry * k)
-    if rotation or sx != 1.0 or sy != 1.0:
+    if rotation or skew or sx != 1.0 or sy != 1.0:
         t_screen.translate(_SCREEN_CX * k, _SCREEN_CY * k)
         if rotation:
             t_screen.rotate(rotation)
+        if skew:
+            t_screen.shear(skew, 0.0)
         t_screen.scale(sx, sy)
         t_screen.translate(-_SCREEN_CX * k, -_SCREEN_CY * k)
     return (t_screen, 1.0, scope)
