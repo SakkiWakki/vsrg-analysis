@@ -67,16 +67,24 @@ class RasterCaptureBackend:
             painter.end()
         return self._pool.get(slot)
 
-    def snapshot(self, slot: str, recycle=None):
-        """An immutable copy of the slot's current pixels (legal
-        mid-paint). `recycle` is a released handle the backend may
-        reuse as the copy's storage; the raster copy never needs it."""
+    def snapshot(self, slot: str):
+        """An immutable copy of the slot's current pixels. Legal
+        mid-paint; the GL backend additionally requires an open blits
+        batch targeting the slot (the AFT node capture is always taken
+        that way)."""
         pm = self._pool.get(slot)
         return pm.copy() if pm is not None else None
 
+    def retain(self, handle):
+        """Take shared ownership of a snapshot handle (the AFT freeze
+        dict keeping a capture another slot also holds). Every retained
+        reference needs its own `release`; QPixmaps are implicitly
+        shared so raster just hands the handle back."""
+        return handle
+
     def release(self, handle) -> None:
-        """The renderer no longer holds `handle`; QPixmaps just get
-        garbage-collected."""
+        """One reference to a snapshot handle dropped (None accepted);
+        QPixmaps just get garbage-collected."""
 
     def blit(self, painter, handle, clip, transform=None, src_box=None,
              opacity=1.0) -> None:

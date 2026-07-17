@@ -1,6 +1,7 @@
 """Native Qt renderer for the embedded replay player."""
 from __future__ import annotations
 
+import os
 import time
 
 import numpy as np
@@ -35,6 +36,10 @@ _FILL_SCOPE = 'fill'
 # primary; produced only when the frame carries a second_field spec.
 _FIELD2_SCOPE = 'field2'
 
+# Debug kill switch: force the pooled-QPixmap capture backend even on a
+# GL host, for A/B comparison against the FBO composite path.
+_FORCE_RASTER_CAPTURE = os.environ.get('VSRG_CAPTURE_BACKEND') == 'raster'
+
 # A chart-time advance larger than this (or any backward step) between
 # rendered frames reads as a seek, not smooth playback: the retained
 # previous-frame screen composite is no longer this frame's visual
@@ -62,7 +67,7 @@ def _field_extra(entry):
     return entry[3] if len(entry) >= 4 else None
 
 
-from analysis.player.render import culling, theme
+from analysis.player.render import culling, gl_capture, theme
 from analysis.player.render.capture import RasterCaptureBackend
 from analysis.player.render.frame_stats import FrameStats
 from analysis.player.hud.sidebar_api import SidebarContext
@@ -137,10 +142,13 @@ class QtPlayerRenderer:
         self._hud_pixmap = None
         self._hud_rendered_at = 0.0
         self._hud_snapshot = None
-        # Offscreen capture slots + blit/snapshot ops (render/capture.py).
-        # Raster (pooled QPixmaps) by default; a GL host swaps in the
-        # FBO-backed backend.
-        self._capture = RasterCaptureBackend()
+        # Offscreen capture slots + blit/snapshot ops. Raster (pooled
+        # QPixmaps, capture.py) by default; frames painting on a GL
+        # context route to the FBO-backed backend (gl_capture.py). Both
+        # persist so their pooled targets survive across frames.
+        self._raster_capture = RasterCaptureBackend()
+        self._gl_capture = None
+        self._capture = self._raster_capture
         # Drawable handles for this frame's closed capture slots, reset
         # by each begin. `_field2_src` is the second, independently-
         # modded field capture for dual-player NotITG charts
@@ -231,6 +239,7 @@ class QtPlayerRenderer:
         return registry.render_plan(self._layer_draw_fns())
 
     def draw(self, player, painter, t_now):
+        self._select_capture_backend(painter)
         ctx = self.build_context(player, painter, t_now)
         # Per-rendered-frame cadence sample; published on the player so
         # the frame-analyzer component (whose own draw is throttled to
@@ -473,6 +482,38 @@ class QtPlayerRenderer:
         return any(_field_scope(entry) in (_SCREEN_SCOPE, _SCREEN_PREV_SCOPE)
                    for entry in frame.fields)
 
+    def _select_capture_backend(self, painter) -> None:
+        """Route this frame's capture slots to the FBO backend when the
+        host painter renders on a GL context (the canvas widget),
+        raster otherwise (tests, offscreen platform, GL breakage,
+        VSRG_CAPTURE_BACKEND=raster). A switch drops every retained
+        capture - the handles belong to the other backend - and the
+        retention re-primes over the next frame, like after a seek."""
+        use_gl = (not _FORCE_RASTER_CAPTURE and gl_capture.usable(painter)
+                  and (self._gl_capture is None
+                       or not self._gl_capture.broken))
+        if use_gl and self._gl_capture is None:
+            self._gl_capture = gl_capture.GLCaptureBackend()
+        backend = self._gl_capture if use_gl else self._raster_capture
+        if backend is not self._capture:
+            self._drop_retained_captures()
+            self._capture = backend
+
+    def _drop_retained_captures(self) -> None:
+        """Release every capture handle the renderer retains across
+        frames, returning their storage to the current backend."""
+        self._capture.release(self._prev_screen)
+        self._prev_screen = None
+        self._prev_screen_t = None
+        self._capture.release(self._screen_capture)
+        self._screen_capture = None
+        for handle in self._aft_frozen.values():
+            self._capture.release(handle)
+        self._aft_frozen.clear()
+        self._field_src = None
+        self._field2_src = None
+        self._backdrop_src = None
+
     def _sync_prev_screen(self, ctx) -> None:
         """Drop the retained previous-frame AFT capture on a seek
         discontinuity. Playback advances chart time smoothly forward by
@@ -656,11 +697,12 @@ class QtPlayerRenderer:
                 batch.blit(self._backdrop_src)
             for entry in frame.fields:
                 self._blit_field_instance(batch, entry, box)
-        if self._screen_open and self._screen_capture is None:
-            # No 'screen' sampler drew this frame, but the node still
-            # captures - its draw position follows the instance blits -
-            # so 'screen_prev' copies have next frame's source.
-            self._take_screen_capture()
+            if self._screen_open and self._screen_capture is None:
+                # No 'screen' sampler drew this frame, but the node
+                # still captures - its draw position follows the
+                # instance blits - so 'screen_prev' copies have next
+                # frame's source.
+                self._take_screen_capture()
         self._backdrop_src = None
 
     def _take_screen_capture(self) -> None:
@@ -715,21 +757,27 @@ class QtPlayerRenderer:
         batch.blit(source, transform=transform, src_box=box,
                    opacity=opacity)
 
-    def _aft_source(self, extra, live_pixmap):
-        """The pixmap an AFT sampler blits, honouring preserve-texture
-        freezes. `extra` is the sampler's (source name, capture-live?)
-        pair: while the source node draws (live), the fresh capture is
-        blitted and retained; while the node is hidden its texture stops
-        updating, so the retained capture is blitted instead (gat's
-        DelayFrame still-frames and the frozen ending toss). No pair, or
-        no retained capture yet, falls back to the live pixmap."""
+    def _aft_source(self, extra, live_capture):
+        """The capture handle an AFT sampler blits, honouring
+        preserve-texture freezes. `extra` is the sampler's (source name,
+        capture-live?) pair: while the source node draws (live), the
+        fresh capture is blitted and retained; while the node is hidden
+        its texture stops updating, so the retained capture is blitted
+        instead (gat's DelayFrame still-frames and the frozen ending
+        toss). No pair, or no retained capture yet, falls back to the
+        live capture. Freeze retention shares the capture handle with
+        the screen retention chain, so it holds its own backend
+        reference (retain/release)."""
         if extra is None:
-            return live_pixmap
+            return live_capture
         name, live = extra
         if live:
-            self._aft_frozen[name] = live_pixmap
-            return live_pixmap
-        return self._aft_frozen.get(name, live_pixmap)
+            frozen = self._aft_frozen.get(name)
+            if frozen is not live_capture:
+                self._capture.release(frozen)
+                self._aft_frozen[name] = self._capture.retain(live_capture)
+            return live_capture
+        return self._aft_frozen.get(name, live_capture)
 
     @staticmethod
     def _begin_scene_transform(frame, painter, ctx) -> bool:

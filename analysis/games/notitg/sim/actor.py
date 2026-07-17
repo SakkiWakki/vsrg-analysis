@@ -110,6 +110,14 @@ _DEFAULT_EFFECT_OFFSET = 0.0
 # per-frame ticks are 1/60 apart, real gaps between sections are long.
 _DRIVEN_SPAN_GAP = 0.5
 
+# Fields outside SM's TweenState (Actor.h: TweenState carries
+# pos/rot/zoom/skew/diffuse/glow/aux; m_bHidden, sprite state, and the
+# vanish point are plain actor members): written immediately and never
+# snapshotted into queued tweens.
+_NON_TWEEN_PROPS = frozenset({
+    'hidden', 'frame', 'frame_paused', 'text', 'vanish_x', 'vanish_y',
+})
+
 # The sim dispatches off verb_surface's generated tables (the full actor
 # verb surface), which are supersets of lua_api's harvest-path tables: the
 # scalar table adds zbias / basezoomz / skewy / the per-axis rotation
@@ -639,11 +647,20 @@ class SimActor:
     def _begin_tweening(self, duration, ease_id) -> None:
         """Append a queue entry whose state copies the tail (or current
         when the queue is empty), per Actor.cpp:609. Commands never
-        inherit. Overflow finishes everything first (Actor.cpp:616)."""
+        inherit. Overflow finishes everything first (Actor.cpp:616).
+
+        The immediate fields (hidden, sprite state, text, vanish) live
+        OUTSIDE SM's TweenState, so they never enter the snapshot: a
+        queued tween beginning later must not replay the hidden bit that
+        was current when it was QUEUED over a SetHidden made since (the
+        show-then-queued-hide idiom relies on this)."""
         if len(self._tweens) > _TWEEN_OVERFLOW:
             self._finish_tweening()
-        base = (dict(self._tweens[-1].state) if self._tweens
-                else dict(self._current))
+        if self._tweens:
+            base = dict(self._tweens[-1].state)
+        else:
+            base = {prop: value for prop, value in self._current.items()
+                    if prop not in _NON_TWEEN_PROPS}
         if not self._tweens and self.queue_notify is not None:
             self.queue_notify()
         self._tweens.append(_Tween(duration, ease_id, base))
