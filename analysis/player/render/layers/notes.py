@@ -58,9 +58,6 @@ class _NoteView:
     state: str       # upcoming | tap | held | released | missed | missed_note
     note_color: tuple
     jcolor: tuple
-    # Quaver: tail sprite flips when SV at the LN's end_time is negative.
-    # Other games leave this False ; the renderer just skips the flip.
-    flip_tail: bool = False
     # fluXis tick notes; drawn bright yellow via the 'tick' sprite state.
     is_tick: bool = False
     # Per-note mod alpha (NotITG stealth/hidden family); 1 = opaque.
@@ -71,84 +68,72 @@ class _NoteView:
     # spins/scales -- documented in `_draw_view`).
     rotation_deg: float = 0.0
     zoom: float = 1.0
-    # Quaver: under SV reversal an LN body covers a wider span than
-    # head->tail. `body_min_y` / `body_max_y` are screen-y bounds of the
-    # convex hull of cum positions over the LN's chart-time interval.
-    # NaN means "use the legacy head/tail span" (every non-LN, non-Quaver
-    # note, plus Quaver LNs whose SV doesn't reverse inside the body).
-    body_min_y: float = float('nan')
-    body_max_y: float = float('nan')
-    # NotITG per-note-mod hold-body warp: (xs, ys) polyline (our px)
-    # tracing this hold's body bent by drunk/wave/digital etc. None =
-    # draw the straight head/tail rect (every mod-free frame + game).
-    body_samples: object = None
+    # The hold's body as a path: `(xs, ys)` arrays where `xs` is the
+    # per-sample LEFT edge (lane_x + any per-note dx) and `ys` the screen
+    # y, running head -> tail. Every LN body is this path; the renderer
+    # strokes a constant-width ribbon along it and seats the head/tail
+    # caps on its endpoints oriented by the local tangent. Three
+    # producers feed it (`_build`): mod-bent samples (drunk/wave), SV
+    # folds (negative-SV holds bend back on themselves), or -- for a
+    # plain vertical unmodded hold -- `None`, which selects the rect
+    # fast-path (byte-identical to the historical straight blit).
+    body_path: object = None
 
 
-def _ln_body_y_extent(ctx, i, p):
-    """Screen-y bounds of an LN body, reconstructed each frame.
+def _sv_fold_path(ctx, i, pos, p, head_y, tail_y):
+    """Body path `(xs, ys)` for an LN whose SV folds inside its span.
 
-    Mirrors Quaver's `UpdateLongNoteSize`:
-        start_cum = playhead_cum if t_now >= t_head else head_cum
-        earliest = min(start_cum, tail_cum)
-        latest   = max(start_cum, tail_cum)
-        for (t_change, c_change) in waypoints:
-            if t_change > max(t_now, t_head):
-                earliest = min(earliest, c_change)
-                latest   = max(latest,   c_change)
+    Under negative / reversing SV the body is not a straight head->tail
+    segment: it doubles back on itself. We trace it through the SAME
+    time->y pipeline the renderer uses for note positions (`batch_time_to_y`)
+    by projecting a handful of sample times -- the head, every SV
+    sign-change instant still ahead of the (dynamically shrinking)
+    playhead, and the tail. Between two consecutive breakpoints the
+    scroll velocity is constant, so linear interpolation of those
+    projected ys is exact; the polyline is the body verbatim.
 
-    Past sign-change points fall out of the body, so the bar shrinks
-    live as the playhead crosses each reversal. Legacy-LN charts have
-    empty waypoint arrays so the loop is a no-op and the body just
-    spans `[head, tail]`.
+    Reversal breakpoints already fold out live as the playhead crosses
+    them (Quaver's `UpdateLongNoteSize`), so the visible body shrinks and
+    the tail cap's orientation falls out of the path's end tangent -- the
+    former `flip_tail` special case dissolves.
 
-    Returns `(NaN, NaN)` when the engine isn't in SV mode or this
-    isn't a Quaver-cached LN ; the caller falls back to the simpler
-    head/tail rect."""
-    head_cum_arr = getattr(p, '_ln_head_cum', None)
-    tail_cum_arr = getattr(p, '_ln_tail_cum', None)
-    if head_cum_arr is None or tail_cum_arr is None:
-        return float('nan'), float('nan')
-    if i >= len(head_cum_arr) or not math.isfinite(head_cum_arr[i]):
-        return float('nan'), float('nan')
+    Returns `None` (caller keeps the straight head->tail path) when the
+    engine isn't in SV mode, this isn't a Quaver-cached LN, or the span
+    holds no reversal (a monotone body is already the straight path)."""
+    change_arr = getattr(p, '_ln_change_times', None)
+    if change_arr is None or i >= len(change_arr):
+        return None
     frame = ctx.frame
     if not getattr(frame, 'use_sv', False):
-        return float('nan'), float('nan')
-
-    engine = p._sv_engine
-    groups = getattr(p, '_note_sv_groups', None)
-    if groups is not None and hasattr(engine, 'cumulative_at_groups'):
-        gid = str(groups[i])
-        playhead_cum = float(engine.cumulative_at_groups(
-            float(frame.raw_t), [gid])[0])
-        mult = float(engine.render_multiplier_at_groups(
-            float(frame.raw_t), [gid])[0])
-    else:
-        playhead_cum = float(frame.visual_cum_now)
-        mult = float(frame.render_multiplier)
+        return None
+    change_times = change_arr[i]
+    if change_times is None or not change_times.size:
+        return None
 
     head_t = float(p.times[i])
-    t_now = ctx.t_now
-    held = t_now >= head_t
-    start_cum = playhead_cum if held else float(head_cum_arr[i])
-    tail_cum = float(tail_cum_arr[i])
-    earliest = min(start_cum, tail_cum)
-    latest = max(start_cum, tail_cum)
+    end_t = float(p.notes.ln_tail_times[i])
+    # Past reversals have already folded out of the body; start the trace
+    # at the deeper of the head and the playhead once held.
+    start_t = max(head_t, ctx.t_now) if ctx.t_now >= head_t else head_t
+    future = change_times[change_times > start_t]
+    if not future.size:
+        return None
 
-    change_times = p._ln_change_times[i]
-    change_cums = p._ln_change_cums[i]
-    if change_times is not None and change_times.size:
-        future_after = max(t_now, head_t)
-        future = change_times > future_after
-        if future.any():
-            future_cums = change_cums[future]
-            earliest = min(earliest, float(future_cums.min()))
-            latest = max(latest, float(future_cums.max()))
+    sample_t = np.concatenate(([start_t], future, [end_t]))
+    groups = getattr(p, '_note_sv_groups', None)
+    cand_groups = (np.full(sample_t.shape, groups[i])
+                   if groups is not None else None)
+    ys = p.batch_time_to_y(sample_t, frame, groups=cand_groups)
+    # The head cap already sits at `head_y`; when held the trace begins at
+    # the playhead, so pin the first sample there for a seamless join.
+    ys = np.asarray(ys, dtype=np.float64)
+    if ctx.t_now < head_t:
+        ys[0] = head_y
+    ys[-1] = tail_y
 
-    judge_y = ctx.judge_y
-    scroll_speed = float(ctx.player.scroll_speed)
-    y_lo = judge_y - (earliest - playhead_cum) * mult * scroll_speed
-    y_hi = judge_y - (latest - playhead_cum) * mult * scroll_speed
-    return min(y_lo, y_hi), max(y_lo, y_hi)
+    lx = float(ctx.lane_x(p.notes.columns_list[i]))
+    xs = np.full(ys.shape, lx, dtype=np.float64)
+    return xs, ys
 
 
 def _classify(ctx, press_t, release_t, is_ln, miss) -> str:
@@ -210,6 +195,7 @@ def _build(ctx, i, pos) -> _NoteView | None:
     off = p.offsets[i]
     press_t = note_t + off
 
+    head_y = float(ctx.candidate_head_y[pos])
     rel_off = None
     release_t = None
     y_end = 0
@@ -220,38 +206,20 @@ def _build(ctx, i, pos) -> _NoteView | None:
     else:
         end_t = None
 
-    flip_tail = False
-    body_min_y = float('nan')
-    body_max_y = float('nan')
-    if is_ln:
-        ln_flip = getattr(p, '_ln_tail_flip', None)
-        if ln_flip is not None and i < len(ln_flip):
-            flip_tail = bool(ln_flip[i])
-        body_min_y, body_max_y = _ln_body_y_extent(ctx, i, p)
-        # Quaver anchors the tail sprite at LatestHeldPosition (the
-        # body's max-y boundary in down-scroll), not at the note's
-        # end_time projection. When SV reverses near the LN end the two
-        # diverge ; the body grows past end_t in cum-space and the tail
-        # rides that boundary. `y_end` becomes whichever side of the
-        # body is "deeper" along the scroll direction.
-        if math.isfinite(body_max_y):
-            head_y = float(ctx.candidate_head_y[pos])
-            # Down-scroll: tail farther from judge_y = larger y. We pick
-            # whichever extreme is on the opposite side from the head.
-            y_end = body_max_y if head_y <= body_max_y else body_min_y
-
     mod_dx = getattr(ctx, 'candidate_dx', None)
+    body_path = _ln_body_path(ctx, i, pos, p, head_y, y_end) if is_ln else None
+    if body_path is not None:
+        # The tail cap seats on the path's LAST sample (deepest point of a
+        # fold, the bent end of a mod body); keep `y_end` in sync so the
+        # on-screen / release-guide anchoring reads the same point.
+        y_end = float(body_path[1][-1])
+
     mod_alpha = getattr(ctx, 'candidate_alpha', None)
     mod_rot = getattr(ctx, 'candidate_rot_deg', None)
     mod_zoom = getattr(ctx, 'candidate_zoom', None)
-    body_samples = None
-    if is_ln:
-        samples = getattr(ctx, 'hold_body_samples', None)
-        if samples is not None:
-            body_samples = samples.get(pos)
     return _NoteView(
         i=i, col=col,
-        y=float(ctx.candidate_head_y[pos]), y_end=y_end,
+        y=head_y, y_end=y_end,
         press_y=float(ctx.candidate_press_y[pos]),
         lx=int(ctx.lane_x(col)
                + (mod_dx[pos] if mod_dx is not None else 0.0)),
@@ -268,11 +236,28 @@ def _build(ctx, i, pos) -> _NoteView | None:
         state=_classify(ctx, press_t, release_t, is_ln, p.misses[i]),
         note_color=p.palette[col],
         jcolor=p.judge_colors[p.note_judges[i]],
-        flip_tail=flip_tail,
-        body_min_y=body_min_y,
-        body_max_y=body_max_y,
-        body_samples=body_samples,
+        body_path=body_path,
     )
+
+
+def _ln_body_path(ctx, i, pos, p, head_y, tail_y):
+    """The hold's body path `(xs, ys)`, or `None` for a plain straight
+    body (rect fast-path). Three producers, in priority order:
+
+    1. mod-bent samples (`ctx.hold_body_samples`, NotITG drunk/wave/...)
+       -- already the full displaced polyline;
+    2. SV folds (`_sv_fold_path`) -- negative-SV holds that double back;
+    3. otherwise `None`, so a straight vertical unmodded hold renders via
+       the byte-identical rect blit.
+
+    Mods win over SV folds: when a per-note mod is displacing the body,
+    its samples already carry the final displaced geometry."""
+    samples = getattr(ctx, 'hold_body_samples', None)
+    if samples is not None:
+        bent = samples.get(pos)
+        if bent is not None:
+            return bent
+    return _sv_fold_path(ctx, i, pos, p, head_y, tail_y)
 
 
 # ── public entry points ──────────────────────────────────────────
@@ -376,11 +361,14 @@ def _draw_ln(ctx, painter, n):
     span = _ln_body_span(ctx, n, hide)
     if span is not None:
         top, bot, body_state = span
-        if bot > top:
-            if n.body_samples is not None:
-                _draw_ln_body_warped(ctx, painter, n, top, bot, body_state)
-            else:
-                _draw_ln_body_tile(ctx, painter, n, top, bot, body_state)
+        # A hold IS a path: stroke a constant-width ribbon along its
+        # samples. `body_path is None` is the plain vertical unmodded
+        # body, drawn via the byte-identical rect fast-path. `top`/`bot`
+        # are the visible y-window every source clips to.
+        if n.body_path is not None and n.state in ('upcoming', 'held'):
+            _draw_ln_body_stroke(ctx, painter, n, top, bot, body_state)
+        elif bot > top:
+            _draw_ln_body_tile(ctx, painter, n, top, bot, body_state)
 
     # ── tail sprite ──
     on_screen = -ctx.screen_margin <= n.y_end <= p.H + ctx.screen_margin
@@ -396,27 +384,24 @@ def _draw_ln(ctx, painter, n):
 
 
 def _ln_body_span(ctx, n, hide) -> tuple | None:
-    """Return `(top_y, bot_y, sprite_state)` for an LN body. None means
-    no body draws.
+    """Return `(top_y, bot_y, sprite_state)` for an LN body -- the visible
+    y-window the body clips to plus its sprite state. None means no body
+    draws.
 
-    For Quaver, `n.body_min_y` / `n.body_max_y` already reflect Quaver's
-    `EarliestHeldPosition` / `LatestHeldPosition`: when held, the start
-    side is the playhead's cum (not the head's), and future sign-change
-    points extend the body. So both upcoming and held states just read
-    those bounds directly. Other games leave them NaN ; the legacy
-    head/tail span path handles them."""
-    use_dyn = (math.isfinite(n.body_min_y) and math.isfinite(n.body_max_y)
-               and n.state in ('upcoming', 'held'))
+    When the hold carries a `body_path` (SV fold or mod bend) the window
+    is the path's own y-extent, so a folded noodle that reaches past the
+    straight head/tail span still clips correctly. Otherwise the window
+    is the straight head->tail span (or the judge-line clamp for released
+    holds)."""
     if n.state == 'missed':
         return n.y_end, n.y, 'miss_ln'
     match n.state:
+        case 'upcoming' | 'held' if n.body_path is not None:
+            ys = n.body_path[1]
+            return float(ys.min()), float(ys.max()), 'normal'
         case 'upcoming':
-            if use_dyn:
-                return n.body_min_y, n.body_max_y, 'normal'
             return n.y_end, n.y, 'normal'
         case 'held':
-            if use_dyn:
-                return n.body_min_y, n.body_max_y, 'normal'
             return n.y_end, (ctx.judge_y if hide else n.y), 'normal'
         case 'released' if not hide:
             return n.y_end, ctx.judge_y, 'released'
@@ -435,10 +420,14 @@ def _draw_ln_body_tile(ctx, painter, n, top, bot, state):
 
 def _clip_body_samples(xs, ys, top, bot):
     """Restrict a hold's (xs, ys) body polyline to the visible [top, bot]
-    y-window, inserting interpolated endpoints where it crosses either
-    edge. The samples run monotonically in y from head to tail (either
-    direction); we walk consecutive segments and keep the in-window part.
-    Returns (xs, ys) arrays or None if nothing lies inside."""
+    y-window, inserting interpolated points where it crosses either edge.
+
+    PATH ORDER is preserved (samples are walked head -> tail, not sorted)
+    so a folded noodle -- where `ys` runs down then back up -- keeps both
+    arms in trace order for the stroker. Samples outside the window are
+    dropped; the crossing points are inserted where they occur so a
+    segment straddling an edge is cut cleanly. Returns (xs, ys) arrays or
+    None if fewer than two points survive."""
     out_x, out_y = [], []
 
     def add(x, y):
@@ -449,30 +438,34 @@ def _clip_body_samples(xs, ys, top, bot):
         f = (edge - y0) / (y1 - y0)
         return x0 + f * (x1 - x0), edge
 
-    for k in range(len(ys)):
+    n = len(ys)
+    for k in range(n):
         y = ys[k]
         if top <= y <= bot:
             add(xs[k], y)
-        if k + 1 < len(ys):
+        if k + 1 < n:
             y0, y1 = ys[k], ys[k + 1]
             x0, x1 = xs[k], xs[k + 1]
-            for edge in (top, bot):
-                if (y0 - edge) * (y1 - edge) < 0.0:
-                    add(*at_edge(x0, y0, x1, y1, edge))
+            # Insert edge crossings in the order the segment meets them so
+            # path order survives (a segment can cross both edges).
+            crossings = [edge for edge in (top, bot)
+                         if (y0 - edge) * (y1 - edge) < 0.0]
+            crossings.sort(key=lambda e: abs(e - y0))
+            for edge in crossings:
+                add(*at_edge(x0, y0, x1, y1, edge))
     if len(out_y) < 2:
         return None
-    order = np.argsort(out_y)
-    return np.asarray(out_x)[order], np.asarray(out_y)[order]
+    return np.asarray(out_x), np.asarray(out_y)
 
 
-def _draw_ln_body_warped(ctx, painter, n, top, bot, state):
-    """Draw a hold body as a BENT vertical strip through the per-note-mod
-    sample polyline (`n.body_samples`), so drunk/wave/digital deform the
-    body the way ITGmania's per-strip rendering does, instead of the
-    straight head/tail rect. The strip is a filled ribbon of lane width
-    centered on the polyline, tiled with the same body sprite as a brush
-    (vertical tiling matches the rect path)."""
-    xs, ys = n.body_samples
+def _draw_ln_body_stroke(ctx, painter, n, top, bot, state):
+    """Draw a hold body as a constant-width ribbon stroked along its path
+    (`n.body_path`). This is the ONE body renderer for every non-straight
+    hold: mod-bent bodies (drunk/wave/digital) and SV folds alike -- the
+    producer differs, the stroke is identical. The strip is a filled
+    ribbon of lane width centered on the polyline, tiled with the same
+    body sprite as a brush (vertical tiling matches the rect path)."""
+    xs, ys = n.body_path
     clipped = _clip_body_samples(xs, ys, top, bot)
     if clipped is None:
         return
@@ -514,31 +507,21 @@ def _draw_ln_body_warped(ctx, painter, n, top, bot, state):
 def _draw_ln_tail_sprite(ctx, painter, n):
     state = _tail_state(n)
     pm = ctx.sprite_cache.get('ln_tail', ctx, col=n.col, state=state)
-    if n.body_samples is not None and _draw_tail_on_curve(ctx, painter, n, pm):
+    if n.body_path is not None and _draw_tail_on_curve(ctx, painter, n, pm):
         return
-    if n.flip_tail:
-        # Quaver tails flip vertically when the SV at end_time is
-        # negative (the LN is being drawn pointing the other way).
-        # Mirror around the tail's centerline by translating down then
-        # scaling Y by -1, draw, restore.
-        painter.save()
-        cx = float(n.lx)
-        cy = float(n.y_end)
-        painter.translate(cx, cy)
-        painter.scale(1.0, -1.0)
-        painter.drawPixmap(QPointF(0.0, -pm.height() / 2), pm)
-        painter.restore()
-    else:
-        _blit_lane_pixmap(ctx, painter, pm, n.lx,
-                          n.y_end - pm.height() / 2, n.col)
+    _blit_lane_pixmap(ctx, painter, pm, n.lx,
+                      n.y_end - pm.height() / 2, n.col)
 
 
 def _draw_tail_on_curve(ctx, painter, n, pm) -> bool:
-    """Seat the tail cap on the END of the bent body path, rotated to the
-    local tangent, so it traces the arrow-effect curve instead of sitting
-    detached at the straight-lane position. Returns False when the path is
-    degenerate (caller falls back to the straight blit)."""
-    xs, ys = n.body_samples
+    """Seat the tail cap on the END of the body path, rotated to the local
+    tangent, so it caps whatever the path does there: a mod-bent curve, or
+    a fold whose end tangent points back UP the lane (which is how the old
+    `flip_tail` vertical mirror emerges naturally -- a folded noodle's end
+    segment runs opposite the head, so the tangent already flips the cap).
+    Returns False when the path is degenerate (caller falls back to the
+    straight blit)."""
+    xs, ys = n.body_path
     if len(ys) < 2:
         return False
 
@@ -556,8 +539,6 @@ def _draw_tail_on_curve(ctx, painter, n, pm) -> bool:
     painter.save()
     painter.translate(end_x, end_y)
     painter.rotate(angle_deg)
-    if n.flip_tail:
-        painter.scale(1.0, -1.0)
     painter.drawPixmap(QPointF(-w / 2.0, -pm.height() / 2.0), pm)
     painter.restore()
     return True
