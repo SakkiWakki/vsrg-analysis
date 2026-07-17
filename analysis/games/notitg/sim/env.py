@@ -40,6 +40,11 @@ from analysis.player.render.lua import LuaHost
 # per-update drain cap and tween-overflow guard on the actor.
 _MAX_DISPATCH_DEPTH = 24
 
+# Engine starting positions for the real players (ScreenGameplay:
+# each enabled player at its PlayerP{n}X style metric, Y=center; the
+# classic versus split is center +-160 in the 640 design space).
+_PLAYER_START_X = {'PlayerP1': 160.0, 'PlayerP2': 480.0}
+
 # The sim bridge routes two extra getters (GetSecsIntoEffect/GetText)
 # the harvest path leaves unrouted; swap the generated __GETTER set
 # literal inside the shared bootstrap. The guard catches literal drift -
@@ -595,13 +600,24 @@ class SimEnvironment:
         """SCREENMAN:GetTopScreen():GetChild(name) - a persistent
         per-name recorder. The players' pokes record the base-field
         visibility stream (P1:hidden(1)); any other child (NoteField,
-        Judgment) is a harmless poke-able target for proxy SetTarget."""
+        Judgment) is a harmless poke-able target for proxy SetTarget.
+
+        Player recorders are seeded with the ENGINE's starting state
+        (ScreenGameplay places each player at its style X metric,
+        Y=center): a chart's first position tween eases FROM that value,
+        exactly as SetX eases from the current engine position - without
+        it the intro bounce would ease from 0 (offscreen)."""
         if not isinstance(name, str):
             return self._host.env['__permissive']()
         rec_id = self._screen_children.get(name)
         if rec_id is None:
             rec_id = self._new_actor()
             self._screen_children[name] = rec_id
+            start_x = _PLAYER_START_X.get(name)
+            if start_x is not None:
+                actor = self._actors[rec_id]
+                actor.poke('x', [start_x])
+                actor.poke('y', [240.0])
         return self._tables[rec_id]
 
     # -- engine singletons -------------------------------------------------

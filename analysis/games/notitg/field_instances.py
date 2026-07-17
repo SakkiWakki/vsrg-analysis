@@ -128,17 +128,13 @@ def player_placement(player_timelines, rest_dx_design, t, k, scope):
     rotation = 0.0
     sx = sy = 1.0
     if player_timelines is not None:
-        # Recorded x/y are absolute design-space; the field rests at
-        # (rest_dx_design + center, center), so the recorded absolute
-        # position replaces the rest when the chart poked it (a poke of
-        # SCREEN_CENTER_X-160 = the versus split; both at center = the
-        # overlap gimmick). x/y rest at 0 in the stream, meaning
-        # "unpoked" -> keep the metric rest.
-        px = player_timelines['x'].sample(t)[0]
-        py = player_timelines['y'].sample(t)[0]
-        if px != 0.0 or py != 0.0:
-            rx = px - _SCREEN_CX
-            ry = py - _SCREEN_CY
+        # Recorded x/y are absolute design-space and the player recorder
+        # is SEEDED with the engine's starting position, so the stream
+        # is authoritative from t=0: a chart that never moves the player
+        # samples the seed (= the metric rest), the intro bounce eases
+        # from it, and both-at-center is the overlap gimmick.
+        rx = player_timelines['x'].sample(t)[0] - _SCREEN_CX
+        ry = player_timelines['y'].sample(t)[0] - _SCREEN_CY
         rotation = player_timelines['rotation'].sample(t)[0]
         sx = player_timelines['scale_x'].sample(t)[0]
         sy = player_timelines['scale_y'].sample(t)[0]
