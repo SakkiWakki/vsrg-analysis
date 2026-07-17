@@ -75,6 +75,20 @@ _SCALAR_SETTERS = {
 }
 _ADD_SETTERS = {'addx': 'x', 'addy': 'y', 'addz': 'z'}
 
+
+def _live_reset_props(prop) -> tuple:
+    return prop if isinstance(prop, tuple) else (prop,)
+
+
+# verb -> (properties it resets, is-relative). Feeds `live_poke`'s
+# accumulator re-anchor during a sampling pass: absolute setters replace
+# the running value, `add*` setters offset it. Derived from the setter
+# tables so the two stay in step.
+_LIVE_RESET = {verb: (_live_reset_props(prop), False)
+               for verb, prop in _SCALAR_SETTERS.items()}
+_LIVE_RESET.update({verb: ((prop,), True)
+                    for verb, prop in _ADD_SETTERS.items()})
+
 # Absolute-size setters. SM's `zoomto(w, h)`/`setsize(w, h)` set the
 # on-screen size in design pixels DIRECTLY (unlike `zoom`, a multiplier
 # of the logical size). The renderer overrides natural*scale with these
@@ -250,6 +264,44 @@ class RecordingActor:
         self._baseline = None
         self._sample_clock = None
         self._live_props = set()
+
+    def live_poke(self, verb: str, args: list) -> None:
+        """Reset an ALREADY-LIVE accumulator property, without emitting a
+        keyframe, during a sampling pass.
+
+        The update integrator re-fires the scheduled `mod_actions` with
+        keyframe recording frozen (their persistent timelines were already
+        captured by the one-shot replay), but some closures RESET an
+        accumulator a per-frame driver reads back - gat's `Toss` message
+        re-anchors each toss quad (`a.actor:y(SCREEN_HEIGHT+100)`) so the
+        next tick's `gat_update_toss` reads the reset position, not the
+        runaway fall total. Dropping the poke leaves the accumulator
+        running away; recording it would double the compiled timeline.
+
+        The reset applies ONLY to a property the pass is already
+        accumulating (`prop in _live_props`): those are the quads the
+        per-frame body drives via `add*`, whose running value `get()` reads
+        off `_current`. A property the pass never poked stays on its
+        baseline timeline (the message's own tween curve, already
+        captured), so a message that merely tweens a data-holder quad the
+        driver READS - gat's slam quads (`SlamLeft1`) that the split loop
+        samples but never pokes - is untouched here and keeps its curve.
+        Only scalar/add setters carry an accumulator value; tween opens and
+        `hidden` have nothing to reset."""
+        props, relative = _LIVE_RESET.get(verb, (None, False))
+        amount = _as_float(args[0]) if args else None
+        if self._baseline is not None and props is not None and amount is not None:
+            self._reset_live(props, amount, relative)
+
+    def _reset_live(self, props, amount, relative) -> None:
+        """Re-anchor each ALREADY-LIVE property in `props` (see
+        `live_poke`): absolute setters replace the running value with
+        `amount`, `add*` setters offset it. A property the pass never poked
+        is skipped so it keeps its baseline curve."""
+        for target in props:
+            if target in self._live_props:
+                base = self.get(target) if relative else 0.0
+                self._current[target] = (base + amount,)
 
     def _track_driven(self, t: float) -> None:
         spans = self._driven_spans
