@@ -498,6 +498,10 @@ class SimEnvironment:
         host.expose('GAMESTATE', singleton(host.to_lua({
             'GetSongBeat': lambda _self: self._beat,
             'GetSongBeatNoOffset': lambda _self: self._beat,
+            'GetSongTime': lambda _self: self._now,
+            # Charts gate their whole modfile on a minimum engine build
+            # (tonumber(GetVersionDate()) >= ...); report a modern one.
+            'GetVersionDate': lambda _self: '20990101',
             'SetShaderFlag': self._set_shader_flag,
             'SetShaderFlagNum': self._set_shader_flag_num,
             'ApplyGameCommand': self._apply_game_command,
@@ -522,7 +526,21 @@ class SimEnvironment:
             'GetDisplayHeight': lambda _self: 480.0,
             'GetVendor': lambda _self: '',
         })))
-        for name in ('STATSMAN', 'SONGMAN', 'THEME', 'GAMEMAN',
+        # STATSMAN's score chain returns numbers (end-of-song bonus
+        # closures do arithmetic on GetPossibleDancePoints); a permissive
+        # table there faults the final action.
+        player_stats = singleton(host.to_lua({
+            'GetPossibleDancePoints': lambda _self: 0.0,
+            'GetActualDancePoints': lambda _self: 0.0,
+            'SetActualDancePoints': lambda _self, *_a: None,
+        }))
+        stage_stats = singleton(host.to_lua({
+            'GetPlayerStageStats': lambda _self, _p=None: player_stats,
+        }))
+        host.expose('STATSMAN', singleton(host.to_lua({
+            'GetCurStageStats': lambda _self: stage_stats,
+        })))
+        for name in ('SONGMAN', 'THEME', 'GAMEMAN',
                      'NOTESKIN', 'INPUTFILTER', 'PROFILEMAN'):
             host.expose(name, singleton(None))
 

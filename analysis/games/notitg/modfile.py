@@ -239,17 +239,20 @@ def _tag_background_layer(actor) -> None:
 
 def _include_path(include, lua_dir) -> Path | None:
     """The actor-XML file a `File=` reference includes, or None. A `.xml`
-    reference is the file directly; a bare directory name (`File="chara"`,
-    gat's `<ZZZZZLAER File="chara"/>`) resolves to that dir's default.xml
-    (SM's implicit directory-actor rule). Anything else (a texture path)
-    is not an actor include."""
+    reference is the file directly; a bare name resolves like SM does:
+    the sibling `<name>.xml` file (`<Layer File="easing" />`) or a
+    directory's default.xml (`File="chara"`, the implicit
+    directory-actor rule). Anything else (a texture path) is not an
+    actor include."""
     if not include:
         return None
     if include.lower().endswith('.xml'):
         candidate = lua_dir / include
         return candidate if candidate.exists() else None
-    directory = lua_dir / include
-    entry = directory / 'default.xml'
+    sibling = lua_dir / f'{include}.xml'
+    if sibling.exists():
+        return sibling
+    entry = lua_dir / include / 'default.xml'
     return entry if entry.is_dir() is False and entry.exists() else None
 
 
