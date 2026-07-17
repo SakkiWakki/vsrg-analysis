@@ -237,16 +237,17 @@ def _field_model(rx, ry, rz, skewx):
 
     SM rotates/skews an actor about its own origin; the field plane's
     content is expressed in design pixels, so we translate the centre to
-    the origin, apply the fused Rxyz then SkewX (Actor::BeginDraw order:
-    rotate before skew), and translate back. A row point maps
-    `v @ (T(-c) @ Rxyz @ SkewX @ T(c))`."""
+    the origin, apply SkewX then the fused Rxyz (Actor::BeginDraw pushes
+    translate/scale, rotation, then skew, and the matrix stack's local
+    multiplies apply to content in reverse push order - skew acts before
+    rotation), and translate back. A row point maps
+    `v @ (T(-c) @ SkewX @ Rxyz @ T(c))`."""
     to_origin = transform3d.translate(-_DESIGN_CX, -_DESIGN_CY)
-    rot = transform3d.rotate_xyz(rx, ry, rz)
     back = transform3d.translate(_DESIGN_CX, _DESIGN_CY)
-    model = to_origin @ rot
+    model = to_origin
     if skewx:
         model = model @ transform3d.skew_x(skewx)
-    return model @ back
+    return model @ transform3d.rotate_xyz(rx, ry, rz) @ back
 
 
 def _screen_transform(chart_rect, H):

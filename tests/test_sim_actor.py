@@ -335,11 +335,13 @@ def test_oscillator_span_records_and_reads():
 
 def test_secs_into_effect_timer_clock_wraps_at_period():
     # CLOCK_TIMER accumulates and wraps at period + delay
-    # (Actor.cpp:571-575); default period 1.0.
+    # (Actor.cpp:571-575); bob's setter defaults the period to 2.0.
     a = SimActor()
     a.poke('bob', [])
     a.poke('effectmagnitude', [0, 10, 0])
     a.update_to(1.5)
+    assert a.read('GetSecsIntoEffect') == pytest.approx(1.5)
+    a.update_to(2.5)
     assert a.read('GetSecsIntoEffect') == pytest.approx(0.5)
 
 

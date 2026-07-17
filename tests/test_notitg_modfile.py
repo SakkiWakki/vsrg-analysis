@@ -604,15 +604,36 @@ def test_oscillator_span_magnitude_at_step_holds():
     assert span.magnitude_at(9.0) == (30.0, 0.0, 0.0)   # holds last
 
 
-def test_recording_actor_oscillator_ignored_when_no_motion():
-    """A span that never sets a magnitude (and is not a spin) produces no
-    motion, so it is dropped - only motion-bearing spans are reported."""
+def test_bare_kind_verbs_record_engine_default_magnitudes():
+    """A kind setter overwrites the magnitude with its engine default
+    (Actor.h): a bare `vibrate()` records (10,10,10) - the +-10px
+    per-frame shake charts lean on for the receptor mirage - and a bare
+    `bob()` records (0,0,20) (z-only: no 2D motion, but the span is
+    real and kept)."""
     from analysis.games.notitg.recording_actor import RecordingActor
 
     actor = RecordingActor(clock=0.0)
+    actor.poke('vibrate', [])
+    actor.poke('stopeffect', [])
     actor.poke('bob', [])
     actor.poke('stopeffect', [])
-    assert actor.oscillator_spans() == ()
+    vib, bob = actor.oscillator_spans()
+    assert vib.magnitude_at(0.0) == (10.0, 10.0, 10.0)
+    assert bob.magnitude_at(0.0) == (0.0, 0.0, 20.0)
+    assert bob.period == 2.0
+    assert vib.explicit_end and bob.explicit_end
+
+
+def test_open_span_is_not_explicitly_ended():
+    """A span still running when recording ends is marked non-explicit,
+    so the synthesis extends it to the compile end (the engine keeps an
+    un-stopped effect going)."""
+    from analysis.games.notitg.recording_actor import RecordingActor
+
+    actor = RecordingActor(clock=0.0)
+    actor.poke('vibrate', [])
+    (span,) = actor.oscillator_spans()
+    assert not span.explicit_end
 
 
 def test_recording_actor_set_vanish_point_records_channels():

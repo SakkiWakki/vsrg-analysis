@@ -192,7 +192,16 @@ def run_declarative(root, to_seconds, start_beat, end_seconds,
     env = SimEnvironment(load_s, rng_seed, to_seconds=to_seconds)
     env.set_time(load_s, to_beats(load_s))
     warnings = env.load_actors(root)
-    env.replay_mod_actions()
+    # ONE CLOCK: mod-actions are staged and fired at their true times
+    # INSIDE the sweep below, so tween-queue state evolves
+    # contemporaneously with the update body's reads (a driver sampling
+    # a quad's GetX at a tick sees the value in force at that moment).
+    # The rig's queue-carried Update re-arm is suppressed - the sweep
+    # owns the update body; the queue-borne copy double-ran the drivers
+    # at frozen drain clocks.
+    env.prepare_mod_actions()
+    env.suppressed_queued_commands = frozenset(
+        {update_integrator._UPDATE_COMMAND})
 
     from analysis.games.notitg.xml_actors import _strip_lua_wrapper
 
@@ -227,6 +236,7 @@ def run_declarative(root, to_seconds, start_beat, end_seconds,
     next_body_t = load_s
     while t < end_seconds:
         t = min(t + step, end_seconds)
+        env.fire_mod_actions_until(t)
         env.set_time(t, to_beats(t))
         env.drain(t)
         if body and t >= next_body_t:
@@ -240,6 +250,7 @@ def run_declarative(root, to_seconds, start_beat, end_seconds,
     # drain to the end expands every remaining chain at queue-exact times
     # - no tick grid. Runs after the sweep so all timestamps stay
     # monotonic (sync only advances forward).
+    env.fire_mod_actions_until(end_seconds)
     env.set_time(end_seconds, to_beats(end_seconds))
     env.drain(end_seconds)
     return SimResult(env=env, ticks=ticks, end_seconds=end_seconds,

@@ -9,9 +9,9 @@ pytest.importorskip('PySide6')
 
 from PySide6.QtCore import QPointF
 
+from analysis.games.notitg import field_compose
 from analysis.games.notitg.field_instances import (NotitgFieldInstances,
-                                                   _copy_transform, _design_map,
-                                                   design_box)
+                                                   _design_map, design_box)
 from analysis.games.notitg.modfile import compile_modfile
 from analysis.games.notitg.recording_actor import RecordingActor
 from analysis.player.render.storyboard import bitmap_font
@@ -80,29 +80,6 @@ def test_basezoom_records_separately_from_zoom():
 
 # -- field-instance transform ---------------------------------------------
 
-def test_identity_copy_is_screen_identity():
-    k, ox, oy = _design_map((100.0, 0.0, 400.0, 600.0))
-    transform = _copy_transform(320, 240, 0, 1, 1, k, ox, oy)
-    assert transform.isIdentity()
-
-
-def test_copy_translation_scales_by_design_ratio():
-    chart_rect = (100.0, 0.0, 400.0, 600.0)
-    k, ox, oy = _design_map(chart_rect)
-    centre = QPointF(ox + 320 * k, oy + 240 * k)
-    shifted = _copy_transform(420, 240, 0, 1, 1, k, ox, oy).map(centre)
-    assert shifted.x() == pytest.approx(centre.x() + 100 * k)
-    assert shifted.y() == pytest.approx(centre.y())
-
-
-def test_vertical_mirror_flips_about_screen_centre():
-    chart_rect = (100.0, 0.0, 400.0, 600.0)
-    k, ox, oy = _design_map(chart_rect)
-    point = QPointF(ox + 320 * k, oy + 100 * k)  # design (320, 100)
-    mirrored = _copy_transform(320, 240, 0, 1, -1, k, ox, oy).map(point)
-    assert mirrored.y() == pytest.approx(oy + (480 - 100) * k)
-
-
 class _Ctx:
     chart_rect = (100.0, 0.0, 400.0, 600.0)
 
@@ -110,59 +87,88 @@ class _Ctx:
         self.t_now = t
 
 
-def _copy(name, keyframes):
-    from analysis.player.render.storyboard.model import build_timelines
-    rests = {'x': 0.0, 'y': 0.0, 'rotation': 0.0, 'scale_x': 1.0,
-             'scale_y': 1.0, 'base_scale_x': 1.0, 'base_scale_y': 1.0,
-             'alpha': 1.0}
-    return {'name': name, 'source': name,
-            'timelines': build_timelines(rests=rests, keyframes=keyframes)}
+def _kf(t, value):
+    from analysis.player.render.effects.timeline import Keyframe
+    return Keyframe(t, (value,), 0.0, 0)
+
+
+def _instance(name, kind, player, keyframes):
+    return field_compose.instance(
+        name, kind, player, [field_compose.link_timelines(keyframes)])
+
+
+def _proxy(name='P1p', keyframes=None, player=1):
+    return _instance(name, 'proxy', player, keyframes or {})
+
+
+def test_identity_copy_is_screen_identity():
+    """A copy at the design centre with unit scale IS the identity: the
+    consumer emits it with no transform (the untransformed-blit path)."""
+    copy = _proxy(keyframes={'x': [_kf(0.0, 320.0)],
+                             'y': [_kf(0.0, 240.0)]})
+    frame = NotitgFieldInstances([copy]).at(_Ctx(1.0))
+    transform, opacity, _scope = frame.fields[1]
+    assert transform is None and opacity == 1.0
+
+
+def test_copy_translation_scales_by_design_ratio():
+    chart_rect = _Ctx.chart_rect
+    k, ox, oy = _design_map(chart_rect)
+    copy = _proxy(keyframes={'x': [_kf(0.0, 420.0)],
+                             'y': [_kf(0.0, 240.0)]})
+    frame = NotitgFieldInstances([copy]).at(_Ctx(1.0))
+    centre = QPointF(ox + 320 * k, oy + 240 * k)
+    shifted = frame.fields[1][0].map(centre)
+    assert shifted.x() == pytest.approx(centre.x() + 100 * k)
+    assert shifted.y() == pytest.approx(centre.y())
+
+
+def test_vertical_mirror_flips_about_screen_centre():
+    chart_rect = _Ctx.chart_rect
+    k, ox, oy = _design_map(chart_rect)
+    copy = _proxy(keyframes={'x': [_kf(0.0, 320.0)],
+                             'y': [_kf(0.0, 240.0)],
+                             'scale_y': [_kf(0.0, -1.0)]})
+    frame = NotitgFieldInstances([copy]).at(_Ctx(1.0))
+    point = QPointF(ox + 320 * k, oy + 100 * k)  # design (320, 100)
+    mirrored = frame.fields[1][0].map(point)
+    assert mirrored.y() == pytest.approx(oy + (480 - 100) * k)
 
 
 def test_identity_original_always_present_with_copies():
-    from analysis.player.render.effects.timeline import Keyframe
-    copy = _copy('P1p', {'x': [Keyframe(0.0, (160.0,), 0.0, 0)],
-                         'alpha': [Keyframe(0.0, (1.0,), 0.0, 0)]})
+    copy = _proxy(keyframes={'x': [_kf(0.0, 160.0)]})
     frame = NotitgFieldInstances([copy]).at(_Ctx(1.0))
     assert frame.fields[0] == (None, 1.0, 'field')
     assert len(frame.fields) == 2
 
 
 def test_invisible_copy_is_dropped():
-    from analysis.player.render.effects.timeline import Keyframe
-    copy = _copy('P1p', {'alpha': [Keyframe(0.0, (0.0,), 0.0, 0)]})
+    copy = _proxy(keyframes={'alpha': [_kf(0.0, 0.0)]})
+    assert NotitgFieldInstances([copy]).at(_Ctx(1.0)) is None
+
+
+def test_hidden_copy_is_dropped():
+    copy = _proxy(keyframes={'hidden': [_kf(0.0, 1.0)]})
     assert NotitgFieldInstances([copy]).at(_Ctx(1.0)) is None
 
 
 def test_proxy_copy_is_field_scope_never_screen():
-    from analysis.player.render.effects.timeline import EventTimeline, Keyframe
-    copy = _copy('P1p', {'alpha': [Keyframe(0.0, (1.0,), 0.0, 0)]})
-    # An AFT-bg timeline (now unused) is passed for producer compatibility;
-    # a proxy re-renders the NoteField only, so it is always field-only.
-    aft_bg = EventTimeline([Keyframe(0.0, (1.0,), 0.0, 0)], rest=(1.0,))
-    frame = NotitgFieldInstances([copy], aft_bg_timeline=aft_bg).at(_Ctx(1.0))
+    frame = NotitgFieldInstances([_proxy()]).at(_Ctx(1.0))
     _transform, _opacity, scope = frame.fields[1]
     assert scope == 'field'
 
 
-def test_aft_copy_is_screen_scope_unconditionally():
+def test_aft_copy_is_screen_scope():
     """AFT copies blit the previous-frame screen composite ('screen'
-    scope) regardless of the (now-unused) bg-in-capture timeline."""
-    from analysis.player.render.effects.timeline import EventTimeline, Keyframe
-    copy = _copy('gat_aft', {'alpha': [Keyframe(0.0, (1.0,), 0.0, 0)]})
-    # Even a bg-off-then-on timeline no longer changes the scope.
-    aft_bg = EventTimeline([Keyframe(5.0, (1.0,), 0.0, 0)], rest=(0.0,))
-    fx = NotitgFieldInstances([copy], aft_bg_timeline=aft_bg)
-    assert fx.at(_Ctx(1.0)).fields[1][2] == 'screen'
-    assert fx.at(_Ctx(9.0)).fields[1][2] == 'screen'
-    # And with no timeline supplied at all.
+    scope); background presence in the capture is automatic."""
+    copy = _instance('gat_aft', 'aft', 0, {})
     assert NotitgFieldInstances([copy]).at(_Ctx(1.0)).fields[1][2] == 'screen'
 
 
 def test_base_hidden_suppresses_identity_original():
-    from analysis.player.render.effects.timeline import EventTimeline, Keyframe
-    copy = _copy('P1p', {'alpha': [Keyframe(0.0, (1.0,), 0.0, 0)]})
-    base_hidden = EventTimeline([Keyframe(2.0, (1.0,), 0.0, 0)], rest=(0.0,))
+    from analysis.player.render.effects.timeline import EventTimeline
+    copy = _proxy(keyframes={'x': [_kf(0.0, 100.0)]})
+    base_hidden = EventTimeline([_kf(2.0, 1.0)], rest=(0.0,))
     fx = NotitgFieldInstances([copy], base_hidden=base_hidden)
     # Base visible: identity + copy.
     shown = fx.at(_Ctx(1.0)).fields
@@ -180,28 +186,32 @@ def _spec():
     return SecondFieldSpec(note_mods=object())
 
 
+def _players():
+    return [field_compose.player_instance(1, None),
+            field_compose.player_instance(2, None)]
+
+
 def test_dual_originals_at_p1_p2_offsets_with_scopes():
-    """A dual chart emits two identity originals: P1 shifted left blitting
-    the primary capture ('field'), P2 shifted right blitting the second
-    capture ('field2'). The offsets are the theme +-160 design px scaled
-    by the design map (chart_rect 400x600 -> min-fit box side 400, k so
-    that 640*k <= 400 and 480*k <= 400 => k = 400/640 = 0.625)."""
+    """A dual chart's player instances rest at the versus seats: P1
+    shifted left blitting the primary capture ('field'), P2 shifted
+    right blitting the second capture ('field2'). The offsets are the
+    theme +-160 design px scaled by the design map (chart_rect 400x600
+    -> min-fit box side 400, k = 400/640 = 0.625)."""
     spec = _spec()
-    frame = NotitgFieldInstances([], second_field=spec).at(_Ctx(1.0))
+    frame = NotitgFieldInstances(_players(), second_field=spec).at(_Ctx(1.0))
     assert frame.second_field is spec
     p1, p2 = frame.fields
     assert p1[2] == 'field' and p2[2] == 'field2'
     k = 400.0 / 640.0
     # P1 left by 160 design px, P2 right by 160 design px.
-    assert p1[0].dx() == -160.0 * k
-    assert p2[0].dx() == 160.0 * k
+    assert p1[0].dx() == pytest.approx(-160.0 * k)
+    assert p2[0].dx() == pytest.approx(160.0 * k)
 
 
 def test_dual_routes_p2_proxy_to_field2_p1_to_field():
-    from analysis.player.render.effects.timeline import Keyframe
-    p1 = _copy('P1p', {'alpha': [Keyframe(0.0, (1.0,), 0.0, 0)]})
-    p2 = _copy('P2p', {'alpha': [Keyframe(0.0, (1.0,), 0.0, 0)]})
-    frame = NotitgFieldInstances([p1, p2], second_field=_spec()).at(_Ctx(1.0))
+    copies = [_proxy('P1p', player=1), _proxy('P2p', player=2)]
+    frame = NotitgFieldInstances(_players() + copies,
+                                 second_field=_spec()).at(_Ctx(1.0))
     scopes = [entry[2] for entry in frame.fields]
     # Two originals ('field','field2') then the two proxy copies.
     assert scopes.count('field2') == 2   # P2 original + P2p copy
@@ -210,8 +220,7 @@ def test_dual_routes_p2_proxy_to_field2_p1_to_field():
 
 
 def test_single_player_never_forwards_second_field():
-    from analysis.player.render.effects.timeline import Keyframe
-    copy = _copy('P2p', {'alpha': [Keyframe(0.0, (1.0,), 0.0, 0)]})
+    copy = _proxy('P2p', player=2)
     frame = NotitgFieldInstances([copy]).at(_Ctx(1.0))
     # No spec -> P2p is still the primary 'field' capture, nothing 'field2'.
     assert frame.second_field is None
@@ -221,9 +230,9 @@ def test_single_player_never_forwards_second_field():
 def test_dual_hidden_base_keeps_capture_path():
     """A fully-hidden dual frame still forwards the spec (so the second
     capture renders) with a non-empty placeholder fields list."""
-    from analysis.player.render.effects.timeline import EventTimeline, Keyframe
-    base_hidden = EventTimeline([Keyframe(0.0, (1.0,), 0.0, 0)], rest=(1.0,))
-    frame = NotitgFieldInstances([], base_hidden=base_hidden,
+    from analysis.player.render.effects.timeline import EventTimeline
+    base_hidden = EventTimeline([_kf(0.0, 1.0)], rest=(1.0,))
+    frame = NotitgFieldInstances(_players(), base_hidden=base_hidden,
                                  second_field=_spec()).at(_Ctx(1.0))
     assert frame.second_field is not None
     assert frame.fields  # non-empty placeholder -> renderer captures

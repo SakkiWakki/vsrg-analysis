@@ -57,6 +57,7 @@ from analysis.games.notitg.lua_api import (
     _ADD_SETTERS, _FALLBACK_TWEEN_EASING, _REST, _SCALAR_GETTERS,
     _SCALAR_SETTERS, _SIZE_AXIS_SETTERS, _SIZE_PAIR_SETTERS, _TWEEN_EASING,
     _as_float, _as_int)
+from analysis.games.notitg.recording_actor import KIND_DEFAULTS
 from analysis.games.notitg.sim import verb_surface
 from analysis.player.render.effects.easing import (
     EASE_SM_BOUNCE_BEGIN, EASE_SM_BOUNCE_END, EASE_SM_SPRING, ease)
@@ -171,7 +172,8 @@ class OscSpan:
     the oscillator keyframe synthesis consumes either."""
 
     __slots__ = ('kind', 'start', 'end', 'period', 'offset', 'clock',
-                 'magnitude_samples', 'last_clock', '_clock_index', 'extra')
+                 'magnitude_samples', 'last_clock', '_clock_index', 'extra',
+                 'explicit_end')
 
     def __init__(self, kind, start, period, offset, clock):
         self.kind = kind
@@ -186,6 +188,10 @@ class OscSpan:
         # Fork params with no dedicated slot (effecttiming, the color
         # families' effectcolor1/2) - recorded for future synthesis.
         self.extra: dict = {}
+        # True when the chart itself stopped the effect (stopeffect or a
+        # replacing kind verb); False = still running when recording
+        # ended, so the synthesis extends it to the compile end.
+        self.explicit_end = False
 
     def touch(self, clock) -> None:
         self.last_clock = max(self.last_clock, float(clock))
@@ -213,6 +219,7 @@ class OscSpan:
         out.last_clock = self.last_clock
         out.magnitude_samples = list(self.magnitude_samples)
         out.extra = dict(self.extra)
+        out.explicit_end = self.explicit_end
         return out
 
 
@@ -692,17 +699,29 @@ class SimActor:
         return False
 
     def _open_effect(self, kind) -> None:
-        if self._osc_open is not None and self._osc_open.kind == kind:
+        """Open (or re-affirm) an effect span. The 2D kind setters
+        overwrite period/magnitude with their engine defaults (a bare
+        `vibrate()` shakes +-10px), recorded as a magnitude sample; the
+        color/zoom families have no magnitude defaults and record their
+        params via `extra` (see KIND_DEFAULTS in recording_actor)."""
+        defaults = KIND_DEFAULTS.get(kind)
+        if self._osc_open is None or self._osc_open.kind != kind:
+            self._close_effect()
+            period = defaults[0] if defaults else _DEFAULT_EFFECT_PERIOD
+            self._osc_open = OscSpan(kind, self._now, period,
+                                     _DEFAULT_EFFECT_OFFSET,
+                                     _DEFAULT_EFFECT_CLOCK)
+        elif defaults:
+            self._osc_open.period = defaults[0]
+        if defaults:
+            self._osc_open.set_magnitude(self._now, defaults[1])
+        else:
             self._osc_open.touch(self._now)
-            return
-        self._close_effect()
-        self._osc_open = OscSpan(kind, self._now, _DEFAULT_EFFECT_PERIOD,
-                                 _DEFAULT_EFFECT_OFFSET,
-                                 _DEFAULT_EFFECT_CLOCK)
 
     def _close_effect(self) -> None:
         span = self._osc_open
         if span is not None:
+            span.explicit_end = True
             span.end = max(self._now, span.start)
             if span.magnitude_samples or span.kind in _SELF_EVIDENT_KINDS:
                 self._osc_spans.append(span)

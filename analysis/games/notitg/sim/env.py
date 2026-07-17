@@ -126,6 +126,13 @@ class SimEnvironment:
         self._synthetic_children: dict = {}
         self._update_chunk = None
         self._body_chunks: dict = {}
+        self._staged_actions: list = []
+        self._next_action = 0
+        # Queue-carried command names the sweep owns and _fire_queued
+        # must NOT execute (the rig's Update re-arm: the sweep runs the
+        # update body itself, so the queue-borne copy would double-run
+        # the drivers at frozen drain clocks).
+        self.suppressed_queued_commands: frozenset = frozenset()
         self._classic_cache: dict = {}
         self._queued: set = set()
         self._install()
@@ -218,6 +225,45 @@ class SimEnvironment:
                 failed += 1
                 self._record_fault(f'action@{beat}', exc)
         return fired, failed
+
+    def prepare_mod_actions(self) -> int:
+        """Stage the `mod_actions` rows for INTERLEAVED firing: the
+        declarative sweep calls `fire_mod_actions_until(t)` each tick, so
+        actions fire at their true times WITHIN the one walk of song
+        time. Queue state then evolves contemporaneously with the update
+        body's reads - a driver sampling `GetX` at a sweep tick sees the
+        value in force at that moment, not the whole-song end state the
+        ahead-of-time replay left behind. Returns the staged count."""
+        rows = self.read_table('mod_actions')
+        ordered = sorted(enumerate(rows),
+                         key=lambda pair: (_beat_of(pair[1]), pair[0]))
+        self._staged_actions = [
+            (self._to_seconds(_beat_of(row)), _beat_of(row), payload)
+            for _order, row in ordered
+            if (payload := row.get(2) if isinstance(row, dict) else None)
+            is not None and (callable(payload) or isinstance(payload, str))]
+        self._next_action = 0
+        return len(self._staged_actions)
+
+    def fire_mod_actions_until(self, t: float) -> None:
+        """Fire every staged action with fire time <= `t`, in order, each
+        at its own clock (time set + queues drained to the fire moment,
+        exactly as the standalone replay did). The caller re-asserts its
+        own tick time afterwards."""
+        while self._next_action < len(self._staged_actions):
+            fire_s, beat, payload = self._staged_actions[self._next_action]
+            if fire_s > t:
+                return
+            self._next_action += 1
+            self.set_time(fire_s, beat)
+            self.drain(fire_s)
+            try:
+                if callable(payload):
+                    payload()
+                else:
+                    self._broadcast(None, payload)
+            except Exception as exc:
+                self._record_fault(f'action@{beat}', exc)
 
     # -- results the loop harvests ----------------------------------------
 
@@ -459,7 +505,7 @@ class SimEnvironment:
         try:
             if name.startswith('!'):
                 self._broadcast(None, name[1:])
-            else:
+            elif name not in self.suppressed_queued_commands:
                 body = self._named_commands.get(rec_id, {}).get(name)
                 if body is not None:
                     self._run_command_body(rec_id, body, f'cmd:{name}')

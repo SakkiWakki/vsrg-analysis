@@ -79,11 +79,23 @@ _EFFECT_PARAM_VERBS = frozenset({
     'effectmagnitude', 'effectperiod', 'effectoffset', 'effectclock'})
 
 # SM Actor defaults (Actor.cpp:55,59): period 1, magnitude (0,0,10),
-# offset 0. gat always sets magnitude/period explicitly, so these only
-# matter for a span opened with no param pokes.
+# offset 0.
 _DEFAULT_EFFECT_PERIOD = 1.0
 _DEFAULT_EFFECT_MAGNITUDE = (0.0, 0.0, 10.0)
 _DEFAULT_EFFECT_OFFSET = 0.0
+
+# Each kind SETTER overwrites the period/magnitude with its own defaults
+# (Actor.h SetEffectVibrate/Wag/Bob/Bounce/Spin) - a bare `vibrate()`
+# shakes +-10px immediately, so opening (or re-affirming) a span must
+# record the kind's magnitude as an actual sample, not fall through to
+# the constructor default.
+KIND_DEFAULTS = {
+    'vibrate': (_DEFAULT_EFFECT_PERIOD, (10.0, 10.0, 10.0)),
+    'spin': (_DEFAULT_EFFECT_PERIOD, (0.0, 0.0, 180.0)),
+    'wag': (2.0, (0.0, 0.0, 20.0)),
+    'bob': (2.0, (0.0, 0.0, 20.0)),
+    'bounce': (2.0, (0.0, 0.0, 20.0)),
+}
 
 
 class _OscSpan:
@@ -100,7 +112,8 @@ class _OscSpan:
     at each dense sample."""
 
     __slots__ = ('kind', 'start', 'end', 'period', 'offset', 'clock',
-                 'magnitude_samples', 'last_clock', '_clock_index')
+                 'magnitude_samples', 'last_clock', '_clock_index',
+                 'explicit_end')
 
     def __init__(self, kind, start, period, offset, clock):
         self.kind = kind
@@ -116,6 +129,11 @@ class _OscSpan:
         # integrator resets the recorder clock after a pass, so we cannot
         # rely on the recorder's clock at close time).
         self.last_clock = float(start)
+        # True when the chart itself stopped the effect (stopeffect or a
+        # replacing kind verb). False = the span was still running when
+        # recording ended; the engine keeps it going, so the synthesis
+        # extends it to the compile end instead of its last poke.
+        self.explicit_end = False
 
     def touch(self, clock) -> None:
         self.last_clock = max(self.last_clock, float(clock))
@@ -157,6 +175,7 @@ def _copy_span(span):
                    span.clock)
     out.last_clock = span.last_clock
     out.magnitude_samples = list(span.magnitude_samples)
+    out.explicit_end = span.explicit_end
     return out
 
 
@@ -384,18 +403,25 @@ class RecordingActor:
         return False
 
     def _open_effect(self, kind) -> None:
-        """Open (or continue) an oscillator span of `kind`. Re-poking the
-        SAME kind that is already open is a no-op - gat's update loop calls
-        `a:vibrate()` every tick, and each is a re-affirmation of the same
-        continuous effect, not a new span. A DIFFERENT kind closes the open
-        span and starts a fresh one."""
-        if self._osc_open is not None and self._osc_open.kind == kind:
-            self._osc_open.touch(self._clock)
-            return
-        self._close_effect()
-        self._osc_open = _OscSpan(kind, self._clock, _DEFAULT_EFFECT_PERIOD,
-                                  _DEFAULT_EFFECT_OFFSET,
-                                  _DEFAULT_EFFECT_CLOCK)
+        """Open (or continue) an oscillator span of `kind`. The kind
+        setter overwrites period and magnitude with the kind's engine
+        defaults (a bare `vibrate()` shakes +-10px), recorded as a
+        magnitude sample so a same-tick `effectmagnitude` poke, arriving
+        after, wins at that clock. Re-poking the SAME open kind keeps the
+        span (a continuous effect, its phase unbroken - gat's update loop
+        calls `a:vibrate()` every tick) while still re-applying the
+        defaults, exactly as the engine setter does. A DIFFERENT kind
+        closes the open span and starts a fresh one."""
+        period, magnitude = KIND_DEFAULTS.get(
+            kind, (_DEFAULT_EFFECT_PERIOD, _DEFAULT_EFFECT_MAGNITUDE))
+        if self._osc_open is None or self._osc_open.kind != kind:
+            self._close_effect()
+            self._osc_open = _OscSpan(kind, self._clock, period,
+                                      _DEFAULT_EFFECT_OFFSET,
+                                      _DEFAULT_EFFECT_CLOCK)
+        else:
+            self._osc_open.period = period
+        self._osc_open.set_magnitude(self._clock, magnitude)
 
     def _close_effect(self) -> None:
         """Close the open span at the CURRENT clock (a `stopeffect` or a
@@ -403,6 +429,7 @@ class RecordingActor:
         up to this moment - not just to its last param poke). Kept only if
         it produces motion."""
         if self._osc_open is not None:
+            self._osc_open.explicit_end = True
             self._finalize_span(self._osc_open, self._clock)
             self._osc_open = None
 

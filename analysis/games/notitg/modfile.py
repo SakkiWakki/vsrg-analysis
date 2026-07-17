@@ -603,6 +603,12 @@ def _apply_oscillators(actor, keyframes, osc_context):
     spans = osc_context.spans_by_id.get(rec_id) if rec_id is not None else None
     if not spans:
         return keyframes
+    # Recorded ends only, NEVER the open-span extension: the bake
+    # replaces the actor's base keyframes across the span window, so an
+    # extended-to-compile-end span would wipe the actor's remaining
+    # animation and freeze it at the sample cap. The live field channels
+    # (OscDeltaChannel) are the extension-capable form; the tree bake
+    # keeps engine behavior only over the span's recorded activity.
     return compile_oscillator_keyframes(spans, keyframes, osc_context.clock,
                                         osc_context.rng)
 
@@ -726,20 +732,33 @@ def _sec_to_beat_inverter(to_seconds, beat_range):
     return to_beats
 
 
-def _span_keyframes(span, osc_clock, rng):
-    """Dense step keyframes per affected 2D property for one oscillator
-    span, or {} when it produces no 2D motion.
+def _effective_end(span, end_seconds) -> float:
+    """The time an oscillator span actually stops. A span the chart
+    closed itself (stopeffect / a replacing kind verb) ends exactly
+    there; a span still running when recording ended keeps going in the
+    engine, so it extends to the compile end when one is known."""
+    if span.explicit_end or end_seconds is None:
+        return span.end
+    return max(span.end, float(end_seconds))
 
-    Samples the analytic sine at `_OSC_SAMPLE_STEP_S` over [start, end],
-    computing SM's `pct = frac(phase + offset, period)` from the effect
-    clock's phase source at each sample. Each sample is a STEP keyframe
-    (duration 0) that holds until the next - piecewise-constant, so the
-    value AT a sample time is exactly that sample (the EventTimeline eases
+
+def _span_keyframes(span, osc_clock, rng, end=None):
+    """Dense step keyframes per affected 2D property for one oscillator
+    span over [span.start, end] (default: the span's own recorded end),
+    or {} when it produces no 2D motion.
+
+    Samples the analytic sine at `_OSC_SAMPLE_STEP_S`, computing SM's
+    `pct = frac(phase + offset, period)` from the effect clock's phase
+    source at each sample. Each sample is a STEP keyframe (duration 0)
+    that holds until the next - piecewise-constant, so the value AT a
+    sample time is exactly that sample (the EventTimeline eases
     prev->target over a keyframe's duration, so a nonzero duration would
     put a sample's own value one step in its future). At 120Hz over a
     ~1-beat period this traces the sine finely; a trailing rest returns the
     delta to zero when the effect stops."""
-    start, end = span.start, span.end
+    start = span.start
+    if end is None:
+        end = span.end
     if end <= start:
         return {}
     n = min(_OSC_MAX_SAMPLES, int((end - start) / _OSC_SAMPLE_STEP_S) + 1)
@@ -786,7 +805,8 @@ def _append_rest(per_prop, end) -> None:
                                _STEP_EASE))
 
 
-def compile_oscillator_keyframes(spans, base_keyframes, osc_clock, rng):
+def compile_oscillator_keyframes(spans, base_keyframes, osc_clock, rng,
+                                 end_seconds=None):
     """Fold an actor's oscillator spans into its base keyframe dict.
 
     The oscillator drives a DELTA on top of the actor's tweened base
@@ -800,7 +820,8 @@ def compile_oscillator_keyframes(spans, base_keyframes, osc_clock, rng):
 
     Mutates and returns `base_keyframes` (a dict of {prop: [Keyframe]})."""
     for span in spans:
-        deltas = _span_keyframes(span, osc_clock, rng)
+        end = _effective_end(span, end_seconds)
+        deltas = _span_keyframes(span, osc_clock, rng, end)
         for prop, delta_frames in deltas.items():
             # x, y and rotation all rest at 0, so the base sits at 0 before
             # its first keyframe - the delta rides whatever base motion is
@@ -808,7 +829,7 @@ def compile_oscillator_keyframes(spans, base_keyframes, osc_clock, rng):
             base_tl = EventTimeline(base_keyframes.get(prop, []), rest=(0.0,))
             merged = [_add_base(kf, base_tl) for kf in delta_frames]
             base_keyframes[prop] = _merge_base_outside(
-                base_keyframes.get(prop, []), merged, span)
+                base_keyframes.get(prop, []), merged, span.start, end)
     return base_keyframes
 
 
@@ -819,55 +840,67 @@ def _add_base(delta_kf, base_tl):
     return replace(delta_kf, values=(base + delta_kf.values[0],))
 
 
-def _merge_base_outside(base_frames, synth_frames, span):
-    """Keep the actor's base keyframes OUTSIDE the span (before start /
+def _merge_base_outside(base_frames, synth_frames, start, end):
+    """Keep the actor's base keyframes OUTSIDE [start, end] (before start /
     after the trailing rest) and replace the inside with the synthesised
     stream, so the sparse base motion still plays either side of the
     oscillator. Sorted by time for the EventTimeline."""
     margin = _OSC_SAMPLE_STEP_S
     kept = [kf for kf in base_frames
-            if kf.t < span.start or kf.t > span.end + margin]
+            if kf.t < start or kf.t > end + margin]
     return sorted(kept + synth_frames, key=lambda k: k.t)
 
 
 class _OscContext:
     """Everything the tree compiler needs to synthesise oscillators: the
-    per-recorder-id spans, the shared effect clock, and the seeded RNG for
-    vibrate. Absent (None) when no actor ran an effect oscillator, so the
-    common no-oscillator chart pays nothing."""
+    per-recorder-id spans, the shared effect clock, the seeded RNG for
+    baked vibrate, the chart-stable integer seed for live vibrate
+    channels, and the compile end open spans extend to. Absent (None)
+    when no actor ran an effect oscillator, so the common no-oscillator
+    chart pays nothing."""
 
-    __slots__ = ('spans_by_id', 'clock', 'rng')
+    __slots__ = ('spans_by_id', 'clock', 'rng', 'seed', 'end_seconds')
 
-    def __init__(self, spans_by_id, clock, rng):
+    def __init__(self, spans_by_id, clock, rng, seed, end_seconds):
         self.spans_by_id = spans_by_id
         self.clock = clock
         self.rng = rng
+        self.seed = seed
+        self.end_seconds = end_seconds
 
 
-def _build_osc_context(env, to_seconds, start_beat, lua_dir):
+def _build_osc_context(env, to_seconds, start_beat, lua_dir,
+                       end_seconds=None):
     """Build the oscillator compile context, or None when the chart has no
-    effect oscillators. The RNG is seeded per-chart (the same determinism
-    contract as the spawner scatter, mod_stubs), so a chart's vibrate shake
-    compiles identically every run."""
+    effect oscillators. The RNG and the integer seed are per-chart (the
+    same determinism contract as the spawner scatter, mod_stubs), so a
+    chart's vibrate shake compiles identically every run. `end_seconds`
+    (the compile end) is what still-open spans run to; None keeps every
+    span at its recorded end."""
     import random
+    import zlib
 
     spans_by_id = env.actor_oscillator_spans()
     if not spans_by_id:
         return None
-    clock = _OscillatorClock(to_seconds, _osc_beat_range(spans_by_id,
-                                                         to_seconds, start_beat))
+    clock = _OscillatorClock(
+        to_seconds, _osc_beat_range(spans_by_id, to_seconds, start_beat,
+                                    end_seconds))
     rng = random.Random(f'notitg-osc:{lua_dir}')
-    return _OscContext(spans_by_id, clock, rng)
+    seed = zlib.crc32(f'notitg-osc:{lua_dir}'.encode())
+    return _OscContext(spans_by_id, clock, rng, seed, end_seconds)
 
 
-def _osc_beat_range(spans_by_id, to_seconds, start_beat):
-    """(lo_beat, hi_beat) covering every oscillator span's time range, for
-    the beat inverter. Spans carry SECOND clocks; since `to_seconds` is
-    monotone in beat, we double `hi_beat` from a small start until its
-    mapped time passes the last span end - a handful of steps, bounded so a
+def _osc_beat_range(spans_by_id, to_seconds, start_beat, end_seconds=None):
+    """(lo_beat, hi_beat) covering every oscillator span's time range
+    (including the compile end still-open spans extend to), for the beat
+    inverter. Spans carry SECOND clocks; since `to_seconds` is monotone
+    in beat, we double `hi_beat` from a small start until its mapped time
+    passes the last span end - a handful of steps, bounded so a
     pathological span cannot loop forever."""
-    last_end = max((span.end for spans in spans_by_id.values()
-                    for span in spans), default=to_seconds(start_beat))
+    last_end = max((_effective_end(span, end_seconds)
+                    for spans in spans_by_id.values() for span in spans),
+                   default=to_seconds(start_beat))
     hi = start_beat + 8.0
     for _ in range(32):
         if to_seconds(hi) >= last_end:
@@ -1448,8 +1481,8 @@ def _screen_oscillator_timelines(env, osc_context) -> dict | None:
     the screen transform without baking a base in."""
     if osc_context is None:
         return None
-    return _oscillator_delta_timelines(env.screen_oscillator_spans(),
-                                       osc_context)
+    return oscillator_delta_channels(env.screen_oscillator_spans(),
+                                     osc_context, seed=osc_context.seed)
 
 
 def _deviates(frames, rest) -> bool:
@@ -1471,14 +1504,15 @@ _BASE_PLAYER_NAME = 'PlayerP1'
 
 
 def _field_oscillator_timelines(env, osc_context):
-    """Per-player field oscillator deltas as `{player: {prop: EventTimeline}}`
-    for the field consumers, or None when neither player field oscillates.
+    """Per-player field oscillator deltas as `{player: {prop:
+    OscDeltaChannel}}` (live channels, sampled at frame time) for the
+    field consumers, or None when neither player field oscillates.
 
     gat's t~8-48 section pokes `Plr(pn)` (= the engine PlayerP1/PlayerP2
     NoteFields, fetched via GetChild) with bounce/bob/wag - a whole-field
     shake/rotate the field-instances/field-3d layer applies, not a
-    storyboard element. Each player's spans synthesise to x/y/rotation
-    delta timelines (delta only - the field's base transform is the note
+    storyboard element. Each player's spans become x/y/rotation delta
+    channels (delta only - the field's base transform is the note
     pipeline's, so these ADD onto it, unlike the tree path that bakes
     base+delta). None when no oscillator ran (the common case)."""
     if osc_context is None:
@@ -1486,7 +1520,8 @@ def _field_oscillator_timelines(env, osc_context):
     out = {}
     for player, name in enumerate(_PLAYER_FIELD_NAMES, start=1):
         spans = env.player_oscillator_spans(name)
-        deltas = _oscillator_delta_timelines(spans, osc_context)
+        deltas = oscillator_delta_channels(spans, osc_context,
+                                           seed=osc_context.seed + player)
         if deltas:
             out[player] = deltas
     return out or None
@@ -1495,28 +1530,93 @@ def _field_oscillator_timelines(env, osc_context):
 # The engine player actor names, in player order (Plr(1) -> PlayerP1).
 _PLAYER_FIELD_NAMES = ('PlayerP1', 'PlayerP2')
 
-# Field oscillator delta channels (x/y position shake, z rotation) and
-# their rest of 0 - a delta ADDED onto the field's base transform.
-_OSC_DELTA_RESTS = {'x': 0.0, 'y': 0.0, 'rotation': 0.0}
+# The 2D properties each oscillator kind drives (mirrors _osc_deltas).
+_SPAN_PROPS = {
+    'bob': ('x', 'y'), 'bounce': ('x', 'y'), 'vibrate': ('x', 'y'),
+    'wag': ('rotation',), 'spin': ('rotation',),
+}
+
+# The engine re-rolls vibrate's random offset once per rendered frame;
+# 60Hz cells reproduce that cadence deterministically at any render rate
+# (a faster display holds each cell, a slower one skips cells).
+_VIBRATE_CELL_HZ = 60.0
+_U64 = (1 << 64) - 1
 
 
-def _oscillator_delta_timelines(spans, osc_context):
-    """{prop: EventTimeline} of the raw oscillator DELTA (no base baked in)
-    for a set of spans, or None when they produce no 2D motion. Used for
-    the field layer, which composes the delta onto its own base transform
-    (the note pipeline), so the delta must stay separated from any base."""
-    if not spans:
+def _rand_unit(seed, axis, cell) -> float:
+    """Deterministic uniform in [-1, 1) from a splitmix64-style hash of
+    (seed, axis, cell). The engine draws `randomf(-1,1)` per rendered
+    frame; a stateless hash reproduces that at any sample time with no
+    stored sequence (pure arithmetic, a rust port boundary)."""
+    x = (seed * 0x9E3779B97F4A7C15 + axis * 0xBF58476D1CE4E5B9
+         + cell * 0x94D049BB133111EB) & _U64
+    x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & _U64
+    x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & _U64
+    x ^= x >> 31
+    return x / float(1 << 63) - 1.0
+
+
+class OscDeltaChannel:
+    """LIVE oscillator delta for one 2D property - the scheduler-model
+    channel form of an actor's effect spans, evaluated at frame time and
+    never baked (no sample cap, no freeze). `.sample(t) -> (delta,)` is
+    the EventTimeline surface, so field_compose.overlay_deltas sums it
+    onto an instance link unchanged.
+
+    Sine kinds compute SM's analytic waveform from the effect clock.
+    Vibrate re-randomizes per frame cell with a seeded hash - the
+    per-frame teleport that reads as duplicated receptors (the mirage) -
+    scaled by the actor's zoom exactly as the engine multiplies GetZoom
+    into the offset."""
+
+    def __init__(self, spans, prop, clock, seed, end_seconds=None,
+                 zoom=None):
+        self._spans = tuple(spans)
+        self._prop = prop
+        self._clock = clock
+        self._seed = int(seed)
+        self._end = end_seconds
+        self._zoom = zoom
+
+    def sample(self, t):
+        t = float(t)
+        total = 0.0
+        for span in self._spans:
+            if span.start <= t < _effective_end(span, self._end) \
+                    and self._prop in _SPAN_PROPS.get(span.kind, ()):
+                total += self._span_delta(span, t)
+        return (total,)
+
+    def _span_delta(self, span, t) -> float:
+        if span.kind == 'vibrate':
+            axis = 0 if self._prop == 'x' else 1
+            magnitude = span.magnitude_at(t)[axis]
+            if magnitude == 0.0:
+                return 0.0
+            cell = int((t - span.start) * _VIBRATE_CELL_HZ)
+            zoom = self._zoom.sample(t)[0] if self._zoom is not None else 1.0
+            return magnitude * _rand_unit(self._seed, axis, cell) * zoom
+        phase = self._clock.phase_source(span.clock, t)
+        pct = _effect_pct(phase, span.period, span.offset)
+        elapsed = phase - self._clock.phase_source(span.clock, span.start)
+        deltas = _osc_deltas(span.kind, pct, span.magnitude_at(t), elapsed,
+                             rng=None)
+        return deltas.get(self._prop, 0.0)
+
+
+def oscillator_delta_channels(spans, osc_context, seed, zoom=None):
+    """{prop: OscDeltaChannel} of the raw oscillator DELTA (no base baked
+    in) for one actor's spans, or None when they drive no 2D property.
+    Used for the field-instance layer, which sums the delta onto the
+    instance's own transform link (field_compose.overlay_deltas), so the
+    delta must stay separated from any base."""
+    props = sorted({prop for span in spans
+                    for prop in _SPAN_PROPS.get(span.kind, ())})
+    if not props:
         return None
-    per_prop: dict = {}
-    for span in spans:
-        for prop, frames in _span_keyframes(span, osc_context.clock,
-                                            osc_context.rng).items():
-            per_prop.setdefault(prop, []).extend(frames)
-    if not per_prop:
-        return None
-    return {prop: EventTimeline(sorted(frames, key=lambda k: k.t),
-                                rest=(_OSC_DELTA_RESTS[prop],))
-            for prop, frames in per_prop.items()}
+    return {prop: OscDeltaChannel(spans, prop, osc_context.clock, seed,
+                                  osc_context.end_seconds, zoom=zoom)
+            for prop in props}
 
 
 def _field_vanish_timelines(env):

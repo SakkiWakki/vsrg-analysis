@@ -119,30 +119,37 @@ end"/>
 """
 
 
-def _proxy_copies():
+def _proxy_instances():
     from types import SimpleNamespace
 
-    from analysis.games.notitg.sim.producers import _sim_field_copies
+    from analysis.games.notitg.mod_channels import compile_mod_channels
+    from analysis.games.notitg.sim.producers import _sim_field_instances
     parsed = parse_actor_xml(_PROXY_CHART)
     result = run_sim(parsed.root, lambda b: b * 0.5, 0.0, 1.0)
+    env = result.env
     doc = SimpleNamespace(root=parsed.root)
-    return _sim_field_copies(doc, result.env, result.env.actor_keyframes(),
-                             None)
+    return _sim_field_instances(doc, env, env.actor_keyframes(), None,
+                                env.named_actor_keyframes(), None,
+                                compile_mod_channels([]),
+                                t0=result.load_seconds)
 
 
-def test_notefield_proxy_becomes_composed_field_copy():
-    copies = _proxy_copies()
-    # The Judgment proxy is NOT a field copy - GetChild hands back real
-    # per-name child recorders, so its target never matches a player
-    # notefield.
-    assert len(copies) == 1
-    (copy,) = copies
-    assert copy['source'] == 'P1p'
-    assert copy['name'].startswith('holder_')
-    # Parent-chain composition: root x(100) + inner frame x(20) + the
-    # proxy's own x(3).
-    assert copy['timelines']['x'].sample(0.5)[0] == pytest.approx(123.0)
-    assert copy['timelines']['hidden'].sample(0.5)[0] == 0.0
+def test_notefield_proxy_becomes_composed_field_instance():
+    instances = _proxy_instances()
+    # The Judgment proxy is NOT a field instance - GetChild hands back
+    # real per-name child recorders, so its target never matches a
+    # player notefield. No player-2 touch -> no player instances either.
+    assert len(instances) == 1
+    (inst,) = instances
+    assert inst['kind'] == 'proxy' and inst['player'] == 1
+    assert inst['name'].startswith('holder_')
+    # Parent-chain composition in the transform channel: root x(100) +
+    # inner frame x(20) + the proxy's own x(3) place the capture centre
+    # at design (123, 0).
+    H, alpha = inst['transform'].at(0.5)
+    assert alpha == 1.0
+    assert H[2, 0] == pytest.approx(123.0 - 320.0)
+    assert H[2, 1] == pytest.approx(0.0 - 240.0)
 
 
 

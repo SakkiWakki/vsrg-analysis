@@ -39,24 +39,6 @@ _ITG_WINDOWS_MS = (
     ('wayoff', 181.5),
 )
 
-_PLAYER_TRANSFORM_PROPS = {
-    'x': 0.0, 'y': 0.0, 'rotation': 0.0, 'rotation_y': 0.0,
-    'skew_x': 0.0, 'scale_x': 1.0, 'scale_y': 1.0, 'hidden': 0.0,
-}
-
-
-def _player_transform_timelines(keyframes):
-    """The recorded transform of a player group (its `PlayerP1`/`PlayerP2`
-    poke stream) as {prop: EventTimeline}, or None when the chart never
-    poked that player. The renderer samples these to seat the player's
-    field where the chart positions its group."""
-    if not keyframes:
-        return None
-    from analysis.player.render.effects.timeline import EventTimeline
-    return {prop: EventTimeline(keyframes.get(prop, []), rest=(rest,))
-            for prop, rest in _PLAYER_TRANSFORM_PROPS.items()}
-
-
 def _autoplay_arrays(chart) -> dict:
     judged = judged_notes(chart)
     count = len(judged)
@@ -190,34 +172,40 @@ class NotitgAdapter(EtternaAdapter):
         return NotitgNoteMods(channels, bpms, field_tilt_active=tilt_active,
                               player=player)
 
-    def _second_field(self, replay):
-        """A SecondFieldSpec (player-2 field group) when the modfile
-        touches player 2, else None.
+    def _field_instances(self, compiled) -> list:
+        """The compiled generic field-instance list (players + proxy/AFT
+        copies, each one composed transform channel). The engine-loop
+        compiler emits it directly; harvest dicts are converted through
+        the same builder so both paths feed one consumer contract."""
+        compiled = compiled or {}
+        instances = compiled.get('field_instances')
+        if instances is not None:
+            return instances
+        from analysis.games.notitg.field_compose import harvest_instances
+        from analysis.games.notitg.mod_channels import compile_mod_channels
+        channels = compile_mod_channels(compiled.get('mod_events') or [])
+        player_keyframes = compiled.get('player_field_keyframes') or {}
+        dual = 1 in channels.players or bool(player_keyframes.get('P2'))
+        return harvest_instances(compiled.get('field_copies'),
+                                 player_keyframes,
+                                 compiled.get('field_oscillators'),
+                                 dual=dual)
+
+    def _second_field(self, replay, instances):
+        """A SecondFieldSpec (the player-2 mod consumer for the second
+        field capture) when the compiled instances include the player
+        field groups, else None.
 
         NotITG P1/P2 are two real tournament players, each a field group
-        the chart positions and mods independently (item 43). The chart
-        touches player 2 when either a player-1 mod channel exists OR it
-        poked the `PlayerP2` actor (position/hidden/etc.) - a chart that
-        stacks both fields at centre with equal mods still means two
-        players. The spec carries both players' recorded transform
-        streams so each field seats where the chart puts its group. Zero
-        cost otherwise: no player-2 touch -> None -> single field, and
-        single-player / non-NotITG charts are untouched."""
+        the chart positions and mods independently (item 43). The compile
+        step decides dual-player (player-2 mod channels or PlayerP2
+        pokes) and emits both player instances; the spec only carries
+        the second capture's mod consumer. Zero cost otherwise: no
+        player instances -> None -> single field."""
         from analysis.games.notitg.field_instances import SecondFieldSpec
-        from analysis.games.notitg.mod_channels import compile_mod_channels
-        compiled = self._compiled_modfile(replay)
-        channels = (compiled or {}).get('mod_channels') \
-            or compile_mod_channels((compiled or {}).get('mod_events') or [])
-        player_keyframes = (compiled or {}).get('player_field_keyframes') or {}
-        p1_tl = _player_transform_timelines(player_keyframes.get('P1'))
-        p2_tl = _player_transform_timelines(player_keyframes.get('P2'))
-        if 1 not in channels.players and p2_tl is None:
+        if not any(inst['kind'] == 'player' for inst in instances):
             return None
-        oscillators = (compiled or {}).get('field_oscillators') or {}
-        return SecondFieldSpec(self._note_mods_for(replay, player=1),
-                               p1_timelines=p1_tl, p2_timelines=p2_tl,
-                               p1_osc=oscillators.get(1),
-                               p2_osc=oscillators.get(2))
+        return SecondFieldSpec(self._note_mods_for(replay, player=1))
 
     def scroll_multipliers(self, replay):
         from analysis.games.notitg.mod_channels import compile_scroll_multipliers
@@ -238,25 +226,26 @@ class NotitgAdapter(EtternaAdapter):
         effects = list(notitg_shader_effects(compiled.get('shader_flags')))
         base_hidden = compiled.get('base_field_hidden')
         sm_path, _index = split_chart_ref(replay.get('filepath', ''))
+        instances = self._field_instances(compiled)
+        field_owned = any(inst['kind'] == 'player' for inst in instances)
         field_3d = notitg_field_3d(
             sm_path, base_hidden=base_hidden,
             player_keyframes=compiled.get('player_field_keyframes'))
-        if field_3d is not None:
-            # Before the copies/camera: the field-3D transform warps the
-            # base playfield in column space; the copies replicate that
-            # capture and the scene camera wraps the whole result.
+        if field_3d is not None and not field_owned:
+            # Single-field charts only: the field-3D transform warps the
+            # base playfield capture. When the player instances exist
+            # they own the whole transform (their channels project the
+            # same recorded rotations), so applying the capture warp too
+            # would double every spin/tilt/skew. Its tilt_active guard
+            # still feeds note_mods either way (_note_mods_for).
             effects.append(field_3d)
         screen_transform = compiled.get('screen_transform')
         if screen_transform:
             effects.append(NotitgScreenCamera(screen_transform))
-        field_copies = compiled.get('field_copies') or ()
-        second_field = self._second_field(replay)
-        if field_copies or second_field is not None:
+        if instances:
             effects.append(NotitgFieldInstances(
-                field_copies,
-                aft_bg_timeline=compiled.get('aft_bg_visible'),
-                base_hidden=base_hidden,
-                second_field=second_field))
+                instances, base_hidden=base_hidden,
+                second_field=self._second_field(replay, instances)))
         return effects
 
     def design_space(self):
