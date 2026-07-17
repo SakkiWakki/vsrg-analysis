@@ -1,0 +1,178 @@
+# NotITG / StepMania actor Lua API - complete called surface.
+#
+# The authoritative list of every actor/GAMESTATE Lua method a NotITG
+# modfile can call, drawn from refs/notitg/gat_called_methods.txt (the gat
+# grep) + the ENGINE_ORACLE.md fork-additions and modifier-vocabulary
+# lists. tests/test_lua_api.py asserts every name here resolves to a
+# lua_api.VERB_REGISTRY entry (implemented / ignored-with-reason /
+# deferred-with-reason), so a chart calling an unmapped method fails CI.
+#
+# refs/ is gitignored and the raw gat grep is not committed; this file is
+# the committed, physical copy so the coverage test has a stable source.
+# One method name per line; blank lines and #-comments ignored.
+
+# -- position / scale / rotation (gat call counts in ENGINE_ORACLE 1b) --
+x
+y
+z
+addx
+addy
+addz
+zoom
+zoomx
+zoomy
+zoomz
+zoomto
+zoomtowidth
+zoomtoheight
+setsize
+setwidth
+setheight
+basezoom
+basezoomx
+basezoomy
+rotationx
+rotationy
+rotationz
+skewx
+skewy
+
+# -- tween verbs + control --
+linear
+tween
+accelerate
+decelerate
+smooth
+sleep
+finishtweening
+stoptweening
+stopeffect
+
+# -- visibility / color / sprite state --
+hidden
+visible
+diffuse
+diffusealpha
+setstate
+animate
+settext
+
+# -- crop family (SM SetCrop*) --
+croptop
+cropbottom
+cropleft
+cropright
+
+# -- effect oscillators (ENGINE_ORACLE 2e, GAP #3) --
+vibrate
+wag
+bob
+bounce
+spin
+pulse
+effectmagnitude
+effectperiod
+effectclock
+effectm
+luaeffect
+GetSecsIntoEffect
+GetEffectMagnitude
+
+# -- vanish / perspective (GAP #1) --
+SetVanishPoint
+GetRandomVanishTransform
+space
+distant
+randomvanish
+
+# -- getters --
+GetX
+GetY
+GetZ
+GetZoom
+GetZoomX
+GetZoomY
+GetRotationX
+GetRotationY
+GetRotationZ
+getrotation
+GetText
+
+# -- command / message dispatch --
+playcommand
+queuecommand
+queuemessage
+Broadcast
+
+# -- actor-tree navigation --
+GetChild
+GetTopScreen
+
+# -- capture / proxy / AFT surface --
+SetTarget
+GetTarget
+SetTexture
+SetTextureName
+GetTexture
+Create
+EnablePreserveTexture
+EnableAlphaBuffer
+EnableDepthBuffer
+EnableFloat
+
+# -- blend --
+blend
+
+# -- shader flags + programs --
+SetShaderFlag
+SetShaderFlagNum
+GetShaderFlag
+GetShader
+GetArrowShader
+GetReceptorShader
+GetHoldShader
+GetArrowPathShader
+ClearArrowShader
+ClearReceptorShader
+ClearHoldShader
+ClearShader
+uniform1f
+uniform1i
+uniform2f
+uniform3f
+uniform4f
+uniform1fv
+uniform2fv
+uniform3fv
+uniform4fv
+uniformMatrix2fv
+uniformMatrix3fv
+uniformMatrix4fv
+
+# -- notefield draw-split controls (NotITG fork) --
+AddDrawSplit
+DrawExtraPixelsLeft
+DrawExtraPixelsRight
+DrawHoldHeadForTapsOnSameRow
+
+# -- engine state queries (stubbed at load) --
+GetSongBeat
+GetSongBeatNoOffset
+ApplyGameCommand
+ApplyModifiers
+GetPreference
+SetPreference
+GetDisplayWidth
+GetDisplayHeight
+IsPlayerEnabled
+GetCurStageStats
+GetCurrentSong
+GetVendor
+KeyPress
+SystemMessage
+SetWidth
+SetHeight
+
+# -- explicitly ignored (cosmetic / no visual) --
+SetTextureFiltering
+customtexturerect

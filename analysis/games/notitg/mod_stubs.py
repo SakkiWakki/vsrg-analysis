@@ -17,10 +17,18 @@ explicitly; everything else is caught by the metatable fallback.
 """
 from __future__ import annotations
 
+from analysis.games.notitg.lua_api import COMMAND_NAMES, GETTER_NAMES
 from analysis.games.notitg.recording_actor import RecordingActor
 from analysis.games.notitg.xml_actors import (
     _strip_lua_wrapper, parse_command_string)
 from analysis.player.render.lua import LuaHost
+
+
+def _lua_name_set(names) -> str:
+    """A Lua set literal (`{GetX=true, GetY=true}`) from registry name
+    lists, so the bridge's `__GETTER` / `__COMMAND` sets are generated
+    from the one source of truth (lua_api) instead of hand-kept here."""
+    return '{' + ', '.join(f'{name}=true' for name in names) + '}'
 
 # Recursion guards for message dispatch: a broadcast may play commands
 # that broadcast again (gat's SetupEnding -> ShowScores -> ...). DEPTH
@@ -64,18 +72,14 @@ end
 -- without faulting on a table. __actor_get hands back the permissive
 -- sentinel for getters we do not model (`GetChild()` etc.), so those
 -- chains keep working as before.
-local __GETTER = {
-    GetX=true, GetY=true, GetZ=true, GetZoom=true, GetZoomX=true,
-    GetZoomY=true, GetRotationX=true, GetRotationY=true,
-    GetRotationZ=true, GetTexture=true, getrotation=true,
-}
+local __GETTER = __GETTER_SET
 -- Command-dispatch verbs an actor exposes to the message system:
 -- `a:playcommand('Name')` runs the actor's <Name>Command now;
 -- `a:queuecommand('Name')` runs it after the actor's pending tween
 -- time (an approximation of SM's next-frame queue). Both route to
 -- Python (__actor_command) with the recorder id so the dispatched
 -- body records onto the same recorder as `self`.
-local __COMMAND = {playcommand=true, queuecommand=true}
+local __COMMAND = __COMMAND_SET
 function __make_recorder(id)
     local t = {__recorder_id = id}
     setmetatable(t, {__index = function(_, key)
@@ -123,6 +127,13 @@ end
 if math.mod == nil then math.mod = math.fmod end
 if table.getn == nil then table.getn = function(t) return #t end end
 """
+
+# The `__GETTER` / `__COMMAND` routing sets are the registry's name lists,
+# rendered as Lua set literals so the bridge and the recorder cannot drift
+# on which calls return a value vs run a command.
+_PERMISSIVE_BOOTSTRAP = _PERMISSIVE_BOOTSTRAP.replace(
+    '__GETTER_SET', _lua_name_set(GETTER_NAMES)).replace(
+    '__COMMAND_SET', _lua_name_set(COMMAND_NAMES))
 
 
 # How far before beat 0 the actor load pass anchors when the FGCHANGES

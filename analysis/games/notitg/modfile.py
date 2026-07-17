@@ -794,6 +794,9 @@ _DRAWABLE_PROPS = frozenset({
     # Absolute on-screen size (SM zoomto/setsize). Rest is the unset
     # sentinel in model._SCALAR_RESTS; when set it overrides natural*scale.
     'size_x', 'size_y',
+    # SM crop family (recorded onto crop_* by the crop setters); the
+    # storyboard renderer insets the drawn/source rect by these fractions.
+    'crop_top', 'crop_bottom', 'crop_left', 'crop_right',
 })
 
 
