@@ -17,6 +17,14 @@ the vectorized ArrowEffects pipeline over the visible candidates, and
   space, so the receptor layer displaces the hit marks the same way the
   engine displaces receptors (drunk/tornado shift, confusion spin, ...).
 
+The pipeline is name-agnostic: it consumes whatever channels values_at
+returns, so mods the integrator injects per-frame (confusionxoffset /
+confusionyoffset / hallway among them) light up with no change here.
+arrow_effects reprojects the out-of-plane confusion tilts into channels
+this consumer already carries - confusionx as a per-note zoom, confusiony
+and hallway as per-note dx - so they ride the same candidate_zoom /
+candidate_dx / hold-body-bend / receptor stashes as the in-plane mods.
+
 Space conversion: the engine formulas work in ITG pixels (arrow size
 64 at a 480-tall field); our lane width is the arrow size, so
 `scale = lane_w / 64` converts both directions and `y_offset` is the
