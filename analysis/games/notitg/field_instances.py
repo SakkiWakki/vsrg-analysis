@@ -97,16 +97,24 @@ class SecondFieldSpec:
     the single-field capture); the per-side X placement lives in the blit
     transforms the field producer emits, not in the capture itself."""
 
-    def __init__(self, note_mods, p1_timelines=None, p2_timelines=None):
+    def __init__(self, note_mods, p1_timelines=None, p2_timelines=None,
+                 p1_osc=None, p2_osc=None):
         self.note_mods = note_mods
         # Recorded transform streams (x/y/rotation/scale/hidden) for each
         # player group, from the compiled dict, or None when the chart
         # never moved that player (it keeps the versus-split rest).
         self.p1_timelines = p1_timelines
         self.p2_timelines = p2_timelines
+        # Effect-oscillator DELTAS (x/y/rotation) per player - the
+        # vibrate 'spazz' (per-frame random teleport mirage), wag, bob -
+        # synthesized from the recorded spans; added on top of the
+        # transform stream.
+        self.p1_osc = p1_osc
+        self.p2_osc = p2_osc
 
 
-def player_placement(player_timelines, rest_dx_design, t, k, scope):
+def player_placement(player_timelines, rest_dx_design, t, k, scope,
+                     osc=None):
     """A field-instance entry seating a player's capture where the chart
     positions that player's group.
 
@@ -152,6 +160,12 @@ def player_placement(player_timelines, rest_dx_design, t, k, scope):
         rot_y = sample('rotation_y', 0.0)
         if rot_y:
             sx *= abs(math.cos(math.radians(rot_y)))
+    if osc is not None:
+        # Oscillator jitter deltas ride on top: vibrate's per-frame
+        # random offsets are the receptor 'spazz' mirage.
+        rx += osc['x'].sample(t)[0]
+        ry += osc['y'].sample(t)[0]
+        rotation += osc['rotation'].sample(t)[0]
     if sx == 0.0 or sy == 0.0:
         return None
     if rx == 0.0 and ry == 0.0 and rotation == 0.0 and skew == 0.0 \
@@ -268,9 +282,9 @@ class NotitgFieldInstances:
         else:
             originals = [
                 player_placement(spec.p1_timelines, _P1_FIELD_X - _SCREEN_CX,
-                                 t, k, _PROXY_SCOPE),
+                                 t, k, _PROXY_SCOPE, osc=spec.p1_osc),
                 player_placement(spec.p2_timelines, _P2_FIELD_X - _SCREEN_CX,
-                                 t, k, _FIELD2_SCOPE),
+                                 t, k, _FIELD2_SCOPE, osc=spec.p2_osc),
             ]
             originals = [o for o in originals if o is not None]
         instances = [*originals, *copies] or [(None, 0.0, _PROXY_SCOPE)]

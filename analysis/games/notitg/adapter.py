@@ -213,8 +213,11 @@ class NotitgAdapter(EtternaAdapter):
         p2_tl = _player_transform_timelines(player_keyframes.get('P2'))
         if 1 not in channels.players and p2_tl is None:
             return None
+        oscillators = (compiled or {}).get('field_oscillators') or {}
         return SecondFieldSpec(self._note_mods_for(replay, player=1),
-                               p1_timelines=p1_tl, p2_timelines=p2_tl)
+                               p1_timelines=p1_tl, p2_timelines=p2_tl,
+                               p1_osc=oscillators.get(1),
+                               p2_osc=oscillators.get(2))
 
     def scroll_multipliers(self, replay):
         from analysis.games.notitg.mod_channels import compile_scroll_multipliers
