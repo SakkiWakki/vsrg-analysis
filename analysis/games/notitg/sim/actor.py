@@ -62,7 +62,8 @@ from analysis.games.notitg.recording_actor import KIND_DEFAULTS
 from analysis.games.notitg.sim import verb_surface
 from analysis.player.render.effects.easing import (
     EASE_SM_BOUNCE_BEGIN, EASE_SM_BOUNCE_END, EASE_SM_SPRING, ease)
-from analysis.player.render.effects.timeline import Keyframe
+from analysis.player.render.effects.timeline import (Keyframe,
+                                                     simplify_instants)
 
 # The full SM tween-verb surface. lua_api's table carries the shared
 # five; the SM-only curves live here until cutover folds them back.
@@ -110,14 +111,6 @@ _DEFAULT_EFFECT_OFFSET = 0.0
 # per-frame ticks are 1/60 apart, real gaps between sections are long.
 _DRIVEN_SPAN_GAP = 0.5
 
-# Fields outside SM's TweenState (Actor.h: TweenState carries
-# pos/rot/zoom/skew/diffuse/glow/aux; m_bHidden, sprite state, and the
-# vanish point are plain actor members): written immediately and never
-# snapshotted into queued tweens.
-_NON_TWEEN_PROPS = frozenset({
-    'hidden', 'frame', 'frame_paused', 'text', 'vanish_x', 'vanish_y',
-})
-
 # The sim dispatches off verb_surface's generated tables (the full actor
 # verb surface), which are supersets of lua_api's harvest-path tables: the
 # scalar table adds zbias / basezoomz / skewy / the per-axis rotation
@@ -152,78 +145,6 @@ def _arg_float(value, default=None):
         except (SyntaxError, ZeroDivisionError, TypeError, ValueError):
             result = None
     return result if result is not None else default
-
-
-# Collapsed run points must be reproduced by the EMITTED keyframes to
-# within this under EventTimeline's own playback (step-hold for
-# instants, eased ramp for tweens). In design pixels / degrees this is
-# sub-visible.
-_SIMPLIFY_EPS = 1e-3
-
-_EASE_LINEAR = 0
-
-
-def _simplify_instants(frames):
-    """Collapse runs of instant (duration 0) keyframes into the exact
-    shape EventTimeline plays back.
-
-    EventTimeline holds an instant's value until the next keyframe - it
-    never interpolates between instants - so a dropped point must be
-    reproduced by what remains, not by interpolation the sampler does
-    not do. A run of collinear per-frame-driver instants therefore
-    becomes ONE linear tween easing from the run head's value to the
-    last value over the run's span, and a constant run becomes its head
-    alone: the transition stays at the run START (a `hidden` flip
-    recorded at its true time never migrates to the run's end).
-
-    Only single-value scalar numeric instants join runs; any keyframe
-    carrying a tween, a multi-component value, or an ease-from `start`
-    override is structural, kept verbatim, and breaks the run. So does
-    a same-time pair (a zero-tween chain step)."""
-    if len(frames) < 3:
-        return frames
-    out = []
-    i, n = 0, len(frames)
-    while i < n:
-        head = frames[i]
-        if not _plain_instant(head):
-            out.append(head)
-            i += 1
-            continue
-        # Grow the run while the chord from `head` to each new point
-        # reproduces every interior point to _SIMPLIFY_EPS: each accepted
-        # point narrows the feasible slope corridor, and a point is
-        # accepted only when its own chord slope lies inside it.
-        j = i + 1
-        lo, hi = float('-inf'), float('inf')
-        while j < n and _plain_instant(frames[j]):
-            dt = frames[j].t - head.t
-            if dt <= 0.0:
-                break
-            slope = (frames[j].values[0] - head.values[0]) / dt
-            if not lo <= slope <= hi:
-                break
-            tol = _SIMPLIFY_EPS / dt
-            lo, hi = max(lo, slope - tol), min(hi, slope + tol)
-            j += 1
-        out.extend(_collapse_run(frames[i:j]))
-        i = j
-    return out
-
-
-def _plain_instant(kf) -> bool:
-    return (kf.duration <= 0.0 and kf.start is None and len(kf.values) == 1
-            and isinstance(kf.values[0], (int, float)))
-
-
-def _collapse_run(run):
-    if len(run) < 3:
-        return run
-    head, last = run[0], run[-1]
-    if abs(last.values[0] - head.values[0]) <= _SIMPLIFY_EPS:
-        return [head]
-    return [Keyframe(head.t, last.values, last.t - head.t, _EASE_LINEAR,
-                     start=head.values)]
 
 
 class OscSpan:
@@ -316,6 +237,15 @@ class SimActor:
         self._effect_clock = 'timer'
         self.beat_fn = None
         self._current: dict = {}
+        # Props that entered through the SETTER path (_write_dest) - by
+        # construction exactly SM's TweenState fields, since immediates
+        # (hidden, sprite state, text, vanish) write through
+        # _set_immediate instead. Tween snapshots copy ONLY these: the
+        # write path is the tweenable/immediate classification, so a new
+        # property is immediate-safe by default and never replays a
+        # stale value over a later immediate write (Actor.h:56
+        # TweenState vs plain actor members).
+        self._tweenable: set = set()
         self._tweens: list = []
         self._ease_start: dict = {}
         self._head_begin_t = 0.0
@@ -478,16 +408,17 @@ class SimActor:
 
     def keyframes(self) -> dict:
         """property -> list[Keyframe], only for properties actually
-        poked, each run of collinear instant points collapsed to its
-        endpoints. A per-frame driver pokes an instant setter every tick
-        (60Hz), so a property that holds constant or ramps linearly for a
-        while records hundreds of redundant points; dropping the ones the
-        `EventTimeline`'s linear interpolation reconstructs (to tolerance)
-        is behavior-preserving and cuts the compiled size by orders of
+        poked, with runs of collinear instant points collapsed by
+        `timeline.simplify_instants` (which lives NEXT TO EventTimeline
+        so the collapse can never drift from the playback semantics it
+        must reproduce). A per-frame driver pokes an instant setter
+        every tick, so a property that holds constant or ramps linearly
+        records hundreds of redundant points; the collapse is
+        behavior-preserving and cuts the compiled size by orders of
         magnitude (the events-not-keyframes model). Tweened points (their
         own duration/easing) are structural and never dropped."""
         if self._kf_cache is None:
-            self._kf_cache = {prop: _simplify_instants(kfs)
+            self._kf_cache = {prop: simplify_instants(kfs)
                               for prop, kfs in self._frames.items() if kfs}
         return self._kf_cache
 
@@ -649,18 +580,17 @@ class SimActor:
         when the queue is empty), per Actor.cpp:609. Commands never
         inherit. Overflow finishes everything first (Actor.cpp:616).
 
-        The immediate fields (hidden, sprite state, text, vanish) live
-        OUTSIDE SM's TweenState, so they never enter the snapshot: a
-        queued tween beginning later must not replay the hidden bit that
-        was current when it was QUEUED over a SetHidden made since (the
-        show-then-queued-hide idiom relies on this)."""
+        Only setter-written props (`_tweenable`, SM's TweenState) enter
+        the snapshot: a queued tween beginning later must never replay
+        the hidden bit that was current when it was QUEUED over a
+        SetHidden made since (the show-then-queued-hide idiom)."""
         if len(self._tweens) > _TWEEN_OVERFLOW:
             self._finish_tweening()
         if self._tweens:
             base = dict(self._tweens[-1].state)
         else:
             base = {prop: value for prop, value in self._current.items()
-                    if prop not in _NON_TWEEN_PROPS}
+                    if prop in self._tweenable}
         if not self._tweens and self.queue_notify is not None:
             self.queue_notify()
         self._tweens.append(_Tween(duration, ease_id, base))
@@ -708,6 +638,7 @@ class SimActor:
         emission win."""
         if value is None:
             return
+        self._tweenable.add(prop)
         if self._tweens:
             tail = self._tweens[-1]
             tail.state[prop] = value

@@ -341,8 +341,22 @@ def draw_lns(ctx, painter) -> None:
     for n in ctx.note_views:
         if n is None or not n.is_ln:
             continue
-        _draw_alpha_only(ctx, painter, n, _draw_ln)
+        if _body_alphas(n) is not None:
+            # The body carries its own per-strip visibility (engine
+            # semantics: hidden/sudden evaluate each drawn part at ITS
+            # y), so it must not inherit the head's alpha - a blanked
+            # head leaves the body up, fading through the window.
+            _draw_ln(ctx, painter, n)
+        else:
+            _draw_alpha_only(ctx, painter, n, _draw_ln)
         _draw_view(ctx, painter, n, _draw_replay_note)
+
+
+def _body_alphas(n):
+    """The hold body's per-sample visibility array, or None when its
+    path carries none (SV folds, straight bodies)."""
+    path = n.body_path
+    return path[2] if path is not None and len(path) > 2 else None
 
 
 def _draw_replay_note(ctx, painter, n) -> None:
@@ -377,7 +391,15 @@ def _draw_ln(ctx, painter, n):
     on_screen = -ctx.screen_margin <= n.y_end <= p.H + ctx.screen_margin
     hidden = n.state == 'released' and (hide or n.rel_off is None)
     if on_screen and not hidden:
-        _draw_ln_tail_sprite(ctx, painter, n)
+        alphas = _body_alphas(n)
+        if alphas is None:
+            _draw_ln_tail_sprite(ctx, painter, n)
+        elif alphas[-1] >= 1.0 / 255.0:
+            # The tail cap fades at ITS OWN y (the body's last sample).
+            painter.save()
+            painter.setOpacity(painter.opacity() * min(1.0, alphas[-1]))
+            _draw_ln_tail_sprite(ctx, painter, n)
+            painter.restore()
 
     # ── release guide ──
     # Straight-lane analyzer UI: on a curved body the vertical stroke
@@ -452,7 +474,7 @@ def _draw_ln_body_tile(ctx, painter, n, top, bot, state):
         QRectF(n.lx, top, ctx.lane_width(n.col), bot - top), pm)
 
 
-def _clip_body_samples(xs, ys, top, bot):
+def _clip_body_samples(xs, ys, top, bot, alphas=None):
     """Restrict a hold's (xs, ys) body polyline to the visible [top, bot]
     y-window, inserting interpolated points where it crosses either edge.
 
@@ -460,36 +482,44 @@ def _clip_body_samples(xs, ys, top, bot):
     so a folded noodle -- where `ys` runs down then back up -- keeps both
     arms in trace order for the stroker. Samples outside the window are
     dropped; the crossing points are inserted where they occur so a
-    segment straddling an edge is cut cleanly. Returns (xs, ys) arrays or
-    None if fewer than two points survive."""
-    out_x, out_y = [], []
+    segment straddling an edge is cut cleanly. `alphas` (per-sample body
+    visibility) rides along, interpolated at the crossings. Returns
+    (xs, ys) or (xs, ys, alphas) arrays, or None if fewer than two
+    points survive."""
+    out_x, out_y, out_a = [], [], []
 
-    def add(x, y):
+    def add(x, y, a=None):
         out_x.append(float(x))
         out_y.append(float(y))
+        if alphas is not None:
+            out_a.append(1.0 if a is None else float(a))
 
-    def at_edge(x0, y0, x1, y1, edge):
+    def at_edge(k, y0, y1, edge):
         f = (edge - y0) / (y1 - y0)
-        return x0 + f * (x1 - x0), edge
+        x = xs[k] + f * (xs[k + 1] - xs[k])
+        a = None if alphas is None \
+            else alphas[k] + f * (alphas[k + 1] - alphas[k])
+        return x, edge, a
 
     n = len(ys)
     for k in range(n):
         y = ys[k]
         if top <= y <= bot:
-            add(xs[k], y)
+            add(xs[k], y, None if alphas is None else alphas[k])
         if k + 1 < n:
             y0, y1 = ys[k], ys[k + 1]
-            x0, x1 = xs[k], xs[k + 1]
             # Insert edge crossings in the order the segment meets them so
             # path order survives (a segment can cross both edges).
             crossings = [edge for edge in (top, bot)
                          if (y0 - edge) * (y1 - edge) < 0.0]
             crossings.sort(key=lambda e: abs(e - y0))
             for edge in crossings:
-                add(*at_edge(x0, y0, x1, y1, edge))
+                add(*at_edge(k, y0, y1, edge))
     if len(out_y) < 2:
         return None
-    return np.asarray(out_x), np.asarray(out_y)
+    if alphas is None:
+        return np.asarray(out_x), np.asarray(out_y)
+    return np.asarray(out_x), np.asarray(out_y), np.asarray(out_a)
 
 
 # pm.cacheKey() -> the sprite's central body color; one pixel read per
@@ -514,11 +544,13 @@ def _draw_ln_body_stroke(ctx, painter, n, top, bot, state):
     producer differs, the stroke is identical. The strip is a filled
     ribbon of lane width centered on the polyline, tiled with the same
     body sprite as a brush (vertical tiling matches the rect path)."""
-    xs, ys = n.body_path
-    clipped = _clip_body_samples(xs, ys, top, bot)
+    xs, ys = n.body_path[0], n.body_path[1]
+    alphas = _body_alphas(n)
+    clipped = _clip_body_samples(xs, ys, top, bot, alphas)
     if clipped is None:
         return
-    xs, ys = clipped
+    xs, ys = clipped[0], clipped[1]
+    alphas = clipped[2] if len(clipped) > 2 else None
 
     pm = ctx.sprite_cache.get('ln_body', ctx,
                               col=n.col, state=state, is_roll=n.is_roll)
@@ -535,27 +567,63 @@ def _draw_ln_body_stroke(ctx, painter, n, top, bot, state):
     # width, so a body flipping between this path and the rect tile
     # (producers skip constant-dx frames) keeps one thickness.
     center = xs + w / 2.0
-    spine = QPainterPath()
-    spine.moveTo(float(center[0]), float(ys[0]))
-    for i in range(1, len(ys)):
-        spine.lineTo(float(center[i]), float(ys[i]))
-
     stroker = QPainterPathStroker()
     stroker.setWidth(float(ln_body_width(
         getattr(ctx.player, 'skin', 'bar'), w)))
     stroker.setCapStyle(Qt.FlatCap)
     stroker.setJoinStyle(Qt.RoundJoin)
-    path = stroker.createStroke(spine)
 
     # Flat fill: tiling the body sprite under an axis-aligned brush prints
     # its edge/border pixels as seams across a diagonal ribbon (the brush
     # never rotates with the path). Warped bodies carry no noteskin
     # detail, so the sprite's flat body color is the faithful fill.
+    # Per-sample visibility (hidden/sudden evaluated per strip, engine
+    # ArrowGetPercentVisible) strokes the spine in runs of similar
+    # alpha; a fully-visible body is the single-run fast path.
     painter.save()
     painter.setPen(_NO_PEN)
     painter.setBrush(_body_fill_color(pm))
-    painter.drawPath(path)
+    if alphas is None:
+        spine = QPainterPath()
+        spine.moveTo(float(center[0]), float(ys[0]))
+        for i in range(1, len(ys)):
+            spine.lineTo(float(center[i]), float(ys[i]))
+        painter.drawPath(stroker.createStroke(spine))
+    else:
+        base_opacity = painter.opacity()
+        for lo, hi, level in _alpha_runs(alphas, len(ys)):
+            if level < 1.0 / 255.0:
+                continue
+            spine = QPainterPath()
+            spine.moveTo(float(center[lo]), float(ys[lo]))
+            for i in range(lo + 1, hi + 1):
+                spine.lineTo(float(center[i]), float(ys[i]))
+            painter.setOpacity(base_opacity * min(1.0, level))
+            painter.drawPath(stroker.createStroke(spine))
     painter.restore()
+
+
+# Per-strip body visibility quantization: runs of segments within one
+# step stroke as one path (few draw calls, no visible banding at 1/8).
+_BODY_ALPHA_STEP = 1.0 / 8.0
+
+
+def _alpha_runs(alphas, count):
+    """(start, end, alpha) index runs over a polyline's segments, merging
+    consecutive segments whose (endpoint-averaged, step-quantized)
+    visibility matches. No alphas -> one opaque run."""
+    if alphas is None:
+        return [(0, count - 1, 1.0)]
+    seg = (np.asarray(alphas[:-1]) + np.asarray(alphas[1:])) / 2.0
+    levels = np.round(seg / _BODY_ALPHA_STEP) * _BODY_ALPHA_STEP
+    runs = []
+    start = 0
+    for i in range(1, len(levels)):
+        if levels[i] != levels[start]:
+            runs.append((start, i, float(levels[start])))
+            start = i
+    runs.append((start, len(levels), float(levels[start])))
+    return runs
 
 
 def _draw_ln_tail_sprite(ctx, painter, n):

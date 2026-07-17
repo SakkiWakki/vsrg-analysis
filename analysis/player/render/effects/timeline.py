@@ -39,6 +39,78 @@ class Keyframe:
     start: tuple | None = None   # ease-from override (fluXis use-start)
 
 
+# Collapsed run points must be reproduced by the EMITTED keyframes to
+# within this under EventTimeline's own playback (step-hold for
+# instants, eased ramp for tweens). In design pixels / degrees this is
+# sub-visible.
+SIMPLIFY_EPS = 1e-3
+
+_EASE_LINEAR = 0
+
+
+def simplify_instants(frames):
+    """Collapse runs of instant (duration 0) keyframes into the exact
+    shape EventTimeline plays back.
+
+    EventTimeline holds an instant's value until the next keyframe - it
+    never interpolates between instants - so a dropped point must be
+    reproduced by what remains, not by interpolation the sampler does
+    not do. A run of collinear per-frame-driver instants therefore
+    becomes ONE linear tween easing from the run head's value to the
+    last value over the run's span, and a constant run becomes its head
+    alone: the transition stays at the run START (a `hidden` flip
+    recorded at its true time never migrates to the run's end).
+
+    Only single-value scalar numeric instants join runs; any keyframe
+    carrying a tween, a multi-component value, or an ease-from `start`
+    override is structural, kept verbatim, and breaks the run. So does
+    a same-time pair (a zero-tween chain step)."""
+    if len(frames) < 3:
+        return frames
+    out = []
+    i, n = 0, len(frames)
+    while i < n:
+        head = frames[i]
+        if not _plain_instant(head):
+            out.append(head)
+            i += 1
+            continue
+        # Grow the run while the chord from `head` to each new point
+        # reproduces every interior point to SIMPLIFY_EPS: each accepted
+        # point narrows the feasible slope corridor, and a point is
+        # accepted only when its own chord slope lies inside it.
+        j = i + 1
+        lo, hi = float('-inf'), float('inf')
+        while j < n and _plain_instant(frames[j]):
+            dt = frames[j].t - head.t
+            if dt <= 0.0:
+                break
+            slope = (frames[j].values[0] - head.values[0]) / dt
+            if not lo <= slope <= hi:
+                break
+            tol = SIMPLIFY_EPS / dt
+            lo, hi = max(lo, slope - tol), min(hi, slope + tol)
+            j += 1
+        out.extend(_collapse_run(frames[i:j]))
+        i = j
+    return out
+
+
+def _plain_instant(kf) -> bool:
+    return (kf.duration <= 0.0 and kf.start is None and len(kf.values) == 1
+            and isinstance(kf.values[0], (int, float)))
+
+
+def _collapse_run(run):
+    if len(run) < 3:
+        return run
+    head, last = run[0], run[-1]
+    if abs(last.values[0] - head.values[0]) <= SIMPLIFY_EPS:
+        return [head]
+    return [Keyframe(head.t, last.values, last.t - head.t, _EASE_LINEAR,
+                     start=head.values)]
+
+
 def keyframes_from_events(events, value_keys, rest) -> list:
     """Keyframes from `.ffx`-shaped event dicts: each event carries
     ms-keyed `time`/`duration`, an `ease` id, and one value per key in

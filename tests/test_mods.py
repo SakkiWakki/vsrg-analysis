@@ -1290,7 +1290,7 @@ def test_hold_body_passes_through_head_and_tail():
     ctx = _LnCtx(player, [50.0], [400.0], judge_y=300, chart_h=600)
     _mods([ModEvent(0.0, 1.0, -1, 'reverse'),
            ModEvent(0.0, 1.2, -1, 'drunk')]).apply(ctx)
-    xs, ys = ctx.hold_body_samples[0]
+    xs, ys, _alpha = ctx.hold_body_samples[0]
     assert ys[0] == pytest.approx(ctx.candidate_head_y[0])
     assert ys[-1] == pytest.approx(ctx.candidate_tail_y[0])
     # x at the endpoints matches the head's own displaced x (lane_x + dx)
@@ -1307,7 +1307,7 @@ def test_hold_body_bends_under_drunk():
     ctx = _LnCtx(player, [40.0], [500.0], judge_y=300, chart_h=600)
     _mods([ModEvent(0.0, 1.0, -1, 'reverse'),
            ModEvent(0.0, 1.5, -1, 'drunk')]).apply(ctx)
-    xs, _ys = ctx.hold_body_samples[0]
+    xs, _ys, _alpha = ctx.hold_body_samples[0]
     assert len(xs) >= 3
     assert not np.allclose(xs, xs[0])
 
@@ -1324,7 +1324,7 @@ def test_hold_body_sample_x_matches_direct_note_offsets():
                  lane_w=lane_w)
     _mods([ModEvent(0.0, 1.0, -1, 'reverse'),
            ModEvent(0.0, 1.3, -1, 'drunk')]).apply(ctx)
-    xs, ys = ctx.hold_body_samples[0]
+    xs, ys, _alpha = ctx.hold_body_samples[0]
     k = len(ys) // 2
     y_off = (ctx.judge_y - ys[k]) / (lane_w / ae.ARROW_SIZE)
     off = note_offsets({'drunk': 1.3}, np.array([0]), np.array([y_off]),
@@ -1363,7 +1363,7 @@ def test_hold_body_batches_multiple_holds():
            ModEvent(0.0, 1.2, -1, 'drunk')]).apply(ctx)
     assert set(ctx.hold_body_samples.keys()) == {0, 1}
     for pos in (0, 1):
-        xs, ys = ctx.hold_body_samples[pos]
+        xs, ys, _alpha = ctx.hold_body_samples[pos]
         assert ys[0] == pytest.approx(ctx.candidate_head_y[pos])
         assert ys[-1] == pytest.approx(ctx.candidate_tail_y[pos])
 
@@ -1406,7 +1406,7 @@ def test_held_hold_body_samples_start_at_receptor():
     ctx = _LnCtx(player, [450.0], [100.0], judge_y=300, chart_h=600)
     _mods([ModEvent(0.0, 1.0, -1, 'reverse'),
            ModEvent(0.0, 1.5, -1, 'drunk')]).apply(ctx)
-    xs, ys = ctx.hold_body_samples[0]
+    xs, ys, _alpha = ctx.hold_body_samples[0]
     assert ys[0] == pytest.approx(300.0)
     assert ys[-1] == pytest.approx(100.0)
     assert float(ys.max()) <= 300.0 + 1e-9

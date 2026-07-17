@@ -390,21 +390,26 @@ class NotitgNoteMods:
             segments['offs'], t_now=t, beat_now=self._beat_at(t),
             keycount=p.keycount, note_beats=segments['beats'])
 
-        # A body only needs the polyline when its dx actually VARIES along
-        # the body (drunk/wave/digital ...); a constant dx (flip/movex, or
-        # reverse-only frames) leaves it a straight strip the rect path
-        # already draws. Skip those holds so the rect fallback stays.
+        # A body only needs the polyline when something actually VARIES
+        # along it: a bending dx (drunk/wave/digital ...) or a per-strip
+        # visibility gradient (hidden/sudden fade the body's strips at
+        # their own y - the engine evaluates ArrowGetPercentVisible per
+        # drawn part, so a hold's body stays up while its head blanks).
+        # A constant-dx fully-visible body stays on the straight rect
+        # fast-path.
         spacing = tiny_spacing(float(percents.get('tiny', 0.0)))
         column_px = column_offsets(p.keycount) * scale
         samples = {}
         for pos, screen_ys, start, count in segments['holds']:
-            fine = sample.dx[start:start + count * _BODY_BOX_FILTER]
-            dx = fine.reshape(count, _BODY_BOX_FILTER).mean(axis=1)
-            if np.ptp(dx) < _ACTIVE_EPS:
+            window = slice(start, start + count * _BODY_BOX_FILTER)
+            dx = sample.dx[window].reshape(count, _BODY_BOX_FILTER).mean(axis=1)
+            alpha = sample.alpha_mult[window].reshape(
+                count, _BODY_BOX_FILTER).mean(axis=1)
+            if np.ptp(dx) < _ACTIVE_EPS and np.ptp(alpha) < _ACTIVE_EPS:
                 continue
             body_x = (lane_x_fn(int(cols[pos])) + spacing * dx * scale
                       + (spacing - 1.0) * column_px[int(cols[pos])])
-            samples[pos] = (body_x, screen_ys)
+            samples[pos] = (body_x, screen_ys, alpha)
         if samples:
             ctx.hold_body_samples = samples
 
