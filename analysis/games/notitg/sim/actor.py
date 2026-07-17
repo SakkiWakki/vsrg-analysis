@@ -81,9 +81,24 @@ _TWEEN_OVERFLOW = 50
 _MAX_DRAIN_STEPS = 10000
 
 _DEFAULT_EFFECT_CLOCK = 'bgm'
-_EFFECT_KINDS = frozenset({'vibrate', 'wag', 'bob', 'bounce', 'spin'})
+# The COMPLETE effect-kind verb surface, from the NotITG decompile
+# (Actor::PushSelf registrations, refs/notitg/decompile/c/actors/
+# Actor.clean.c:3445-3480; SetEffect* bodies @0x4ab230-0x4ab630).
+# Position/rotation kinds synthesize downstream today; the color/zoom
+# families (rainbow/diffuse*/glow*/pulse*) record spans for a future
+# color-oscillator synthesis.
+_EFFECT_KINDS = frozenset({
+    'vibrate', 'wag', 'floorwag', 'bob', 'bounce', 'spin',
+    'pulse', 'pulseramp', 'rainbow', 'diffuseshift', 'diffuseblink',
+    'diffuseramp', 'glowshift', 'glowblink', 'glowramp'})
 _EFFECT_PARAM_VERBS = frozenset({
-    'effectmagnitude', 'effectperiod', 'effectoffset', 'effectclock'})
+    'effectmagnitude', 'effectperiod', 'effectoffset', 'effectclock',
+    'effecttiming', 'effectcolor1', 'effectcolor2'})
+# Kinds that animate even with no effectmagnitude poke (spin integrates
+# a default; the color/zoom families draw from effectcolor/period).
+_SELF_EVIDENT_KINDS = frozenset({
+    'spin', 'pulse', 'pulseramp', 'rainbow', 'diffuseshift',
+    'diffuseblink', 'diffuseramp', 'glowshift', 'glowblink', 'glowramp'})
 
 # SM Actor defaults (Actor.cpp:55,59).
 _DEFAULT_EFFECT_PERIOD = 1.0
@@ -106,7 +121,7 @@ class OscSpan:
     the oscillator keyframe synthesis consumes either."""
 
     __slots__ = ('kind', 'start', 'end', 'period', 'offset', 'clock',
-                 'magnitude_samples', 'last_clock', '_clock_index')
+                 'magnitude_samples', 'last_clock', '_clock_index', 'extra')
 
     def __init__(self, kind, start, period, offset, clock):
         self.kind = kind
@@ -118,6 +133,9 @@ class OscSpan:
         self.magnitude_samples: list = []
         self._clock_index: list = []
         self.last_clock = float(start)
+        # Fork params with no dedicated slot (effecttiming, the color
+        # families' effectcolor1/2) - recorded for future synthesis.
+        self.extra: dict = {}
 
     def touch(self, clock) -> None:
         self.last_clock = max(self.last_clock, float(clock))
@@ -144,6 +162,7 @@ class OscSpan:
                       self.clock)
         out.last_clock = self.last_clock
         out.magnitude_samples = list(self.magnitude_samples)
+        out.extra = dict(self.extra)
         return out
 
 
@@ -330,7 +349,7 @@ class SimActor:
         if self._osc_open is not None:
             span = self._osc_open.copy()
             span.end = span.last_clock
-            if span.magnitude_samples or span.kind == 'spin':
+            if span.magnitude_samples or span.kind in _SELF_EVIDENT_KINDS:
                 spans.append(span)
         return tuple(spans)
 
@@ -577,7 +596,7 @@ class SimActor:
         span = self._osc_open
         if span is not None:
             span.end = max(self._now, span.start)
-            if span.magnitude_samples or span.kind == 'spin':
+            if span.magnitude_samples or span.kind in _SELF_EVIDENT_KINDS:
                 self._osc_spans.append(span)
             self._osc_open = None
 
@@ -607,6 +626,9 @@ class SimActor:
                 span.set_magnitude(self._now, tuple(
                     _as_float(args[i] if i < len(args) else None, 0.0)
                     for i in range(3)))
+            case 'effecttiming' | 'effectcolor1' | 'effectcolor2':
+                span.extra[verb] = tuple(
+                    _as_float(a, 0.0) for a in args)
 
     # -- emission --------------------------------------------------------
 

@@ -330,8 +330,22 @@ VERB_REGISTRY.update(_entries(
     native={'vibrate': 'position', 'wag': 'rotation', 'bob': 'position',
             'bounce': 'position', 'spin': 'rotation'},
     note='analytic oscillator sampled at playback t', source=_A))
+# The fork's complete effect-kind list (Actor::PushSelf, decompile
+# c/actors/Actor.clean.c:3445-3480; SetEffect* @0x4ab230-0x4ab630).
+# floorwag is a wag variant; pulse/pulseramp are zoom oscillators; the
+# rainbow/diffuse*/glow* families oscillate color. The sim actor records
+# spans for all of them; synthesis beyond the position/rotation kinds is
+# pending a color/zoom oscillator channel.
+_DECOMP = 'decompile Actor.clean.c:3445 (PushSelf)'
 VERB_REGISTRY.update(_entries(
-    ('effectmagnitude', 'effectperiod', 'effectclock', 'effectm', 'pulse'),
+    ('floorwag', 'pulse', 'pulseramp', 'rainbow', 'diffuseshift',
+     'diffuseblink', 'diffuseramp', 'glowshift', 'glowblink', 'glowramp'),
+    EFFECT_OSCILLATOR, DEFERRED, None,
+    note='fork effect kinds - recorded as spans; synthesis pending',
+    source=_DECOMP))
+VERB_REGISTRY.update(_entries(
+    ('effectmagnitude', 'effectperiod', 'effectclock', 'effectm',
+     'effecttiming', 'effectcolor1', 'effectcolor2'),
     EFFECT_OSCILLATOR, IMPLEMENTED, note='oscillator parameters', source=_A))
 VERB_REGISTRY['GetSecsIntoEffect'] = Verb(
     'GetSecsIntoEffect', GETTER, IMPLEMENTED, 'effect_secs',

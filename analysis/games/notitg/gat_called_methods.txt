@@ -176,3 +176,17 @@ SetHeight
 # -- explicitly ignored (cosmetic / no visual) --
 SetTextureFiltering
 customtexturerect
+# fork effect surface (decompile Actor.clean.c PushSelf, 2026-07-17)
+floorwag
+pulse
+pulseramp
+rainbow
+diffuseshift
+diffuseblink
+diffuseramp
+glowshift
+glowblink
+glowramp
+effecttiming
+effectcolor1
+effectcolor2
