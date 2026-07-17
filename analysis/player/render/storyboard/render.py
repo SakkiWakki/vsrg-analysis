@@ -27,9 +27,26 @@ from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QPainter, QPen,
                            QPixmap)
 
 from analysis.player.render.effects.base import EffectFrame
+from analysis.player.render.storyboard.sprite_sheet import (frame_at_time,
+                                                            frame_source_rect)
 
 _MIN_VISIBLE_ALPHA = 1.0 / 255.0
 _TINT_QUANT_LEVELS = 32
+
+
+def _is_sheet(el) -> bool:
+    """A sprite whose asset is an SM NxM grid (more than one frame)."""
+    return el.sheet_cols * el.sheet_rows > 1
+
+
+def _sheet_frame(el, t: float) -> int:
+    """The frame index a sheet sprite shows at time `t`: the pinned frame
+    from a recorded setstate/animate timeline when present, otherwise the
+    auto-animated frame stepped through `sheet_states` on the effect
+    clock (relative to the element's own start)."""
+    if el.state_pin is not None:
+        return int(round(el.state_pin.sample(t)[0]))
+    return frame_at_time(el.sheet_states, t - el.t_start)
 
 
 def _design_transform(storyboard, chart_rect):
@@ -186,7 +203,8 @@ class StoryboardEffect:
         match el.kind:
             case 'sprite' | 'frames':
                 pm = self._tinted_pixmap(self._asset_at(el, t), color)
-                painter.drawPixmap(rect, pm, QRectF(pm.rect()))
+                src = self._source_rect(el, t, pm)
+                painter.drawPixmap(rect, pm, src)
             case 'rect':
                 painter.fillRect(rect, color)
             case 'ellipse':
@@ -232,12 +250,28 @@ class StoryboardEffect:
                 painter.drawPixmap(dest, glyphs, QRectF(cx, cy, cw, ch))
             pen += advance
 
+    def _source_rect(self, el, t, pm) -> QRectF:
+        """The region of `pm` this sprite draws: one grid cell for an SM
+        NxM sheet (the current frame), else the whole pixmap."""
+        if not _is_sheet(el):
+            return QRectF(pm.rect())
+        frame = _sheet_frame(el, t)
+        x, y, w, h = frame_source_rect(frame, pm.width(), pm.height(),
+                                       el.sheet_cols, el.sheet_rows)
+        return QRectF(x, y, w, h)
+
     def _element_size(self, el, t):
-        """Natural (w, h) in design units, or None when undrawable."""
+        """Natural (w, h) in design units, or None when undrawable. A
+        sheet sprite's natural size is ONE frame, not the whole sheet."""
         match el.kind:
             case 'sprite' | 'frames':
                 pm = self._pixmap(self._asset_at(el, t))
-                return (pm.width(), pm.height()) if pm is not None else None
+                if pm is None:
+                    return None
+                if _is_sheet(el):
+                    return (pm.width() / el.sheet_cols,
+                            pm.height() / el.sheet_rows)
+                return (pm.width(), pm.height())
             case 'text':
                 _font, metrics = self._font_for(el)
                 bounds = metrics.boundingRect(el.text)

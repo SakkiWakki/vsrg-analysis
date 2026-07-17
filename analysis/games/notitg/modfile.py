@@ -50,10 +50,11 @@ import re
 from pathlib import Path
 
 from analysis.games.etterna import sm_chart
-from analysis.games.notitg import xml_actors
+from analysis.games.notitg import sprite_sheet, xml_actors
 from analysis.games.notitg.mod_stubs import StubEnvironment
 from analysis.games.notitg.paths import find_notitg_dirs
 from analysis.games.notitg.recording_actor import RecordingActor
+from analysis.player.render.effects.timeline import EventTimeline
 from analysis.player.render.storyboard import bitmap_font
 from analysis.player.render.storyboard.model import Element, build_timelines
 
@@ -466,7 +467,10 @@ def _leaf_element(actor, start_time, named_keyframes, precomputed=None,
                   fonts=None):
     text = actor.attrs.get('Text', '')
     font = _resolve_font(actor, fonts)
-    asset = None if font is not None else _resolve_asset(actor)
+    if font is not None:
+        asset, cols, rows, states = (None, 1, 1, ())
+    else:
+        asset, cols, rows, states = _resolve_sprite(actor)
     kind = _element_kind(actor.kind, has_text=bool(text), font=font,
                          has_image=_is_image_asset(asset))
     if kind is None:
@@ -475,7 +479,11 @@ def _leaf_element(actor, start_time, named_keyframes, precomputed=None,
     keyframes = precomputed if precomputed is not None \
         else _merged_keyframes(actor, start_time, named_keyframes)
     drawable = _drawable_props(keyframes)
-    if not any(drawable.values()):
+    state_pin = _state_pin(keyframes)
+    # A frame pin is real content (a sprite animated purely by
+    # setstate/animate pokes), so it keeps an otherwise-untweened actor
+    # alive alongside any transform/color keyframes.
+    if not any(drawable.values()) and state_pin is None:
         return None
     return Element(
         kind=kind, z=0, z_index=0,
@@ -484,7 +492,24 @@ def _leaf_element(actor, start_time, named_keyframes, precomputed=None,
         timelines=build_timelines(keyframes=drawable),
         asset=asset,
         text=str(text), font=font,
+        sheet_cols=cols, sheet_rows=rows, sheet_states=states,
+        state_pin=state_pin,
     )
+
+
+# Frame-index keyframes the recorder emits from setstate/animate pokes.
+# When present, a pin timeline overrides the sheet's auto-animation.
+_STATE_PIN_PROP = 'frame'
+
+
+def _state_pin(keyframes):
+    """An EventTimeline of the sprite's frame index over time, from
+    recorded `setstate`/`animate` pokes, or None when the actor never
+    pinned a frame (the sheet then auto-animates through its states)."""
+    frames = keyframes.get(_STATE_PIN_PROP)
+    if not frames:
+        return None
+    return EventTimeline(frames, rest=(0.0,))
 
 
 # StepMania's built-in flat-color texture: the renderer synthesizes it,
@@ -545,6 +570,43 @@ def _sprite_manifest_texture(sprite_path: Path, base_dir: Path) -> str | None:
         if key.strip().lower() == 'texture' and value.strip():
             return _resolve_texture_path(value.strip(), sprite_path.parent)
     return str(sprite_path)
+
+
+def _resolve_sprite(actor) -> tuple:
+    """A sprite's `(asset_path, sheet_cols, sheet_rows, sheet_states)`.
+
+    The grid comes from the resolved image's NxM filename token (SM
+    `GetFrameDimensionsFromFileName`); the state list is the `.sprite`
+    manifest's `Frame%04d=`/`Delay%04d=` pairs when the reference is a
+    manifest, else SM's default sequential animation (one state per
+    frame). A plain single-frame sprite yields (path, 1, 1, ())."""
+    asset = _resolve_asset(actor)
+    if asset is None or asset in _BUILTIN_TEXTURES:
+        return (asset, 1, 1, ())
+
+    cols, rows = sprite_sheet.grid_from_filename(asset)
+    frame_count = cols * rows
+    states = _manifest_states(actor, frame_count)
+    if not states and frame_count > 1:
+        states = sprite_sheet.default_states(frame_count)
+    return (asset, cols, rows, states)
+
+
+def _manifest_states(actor, frame_count: int) -> tuple:
+    """The `.sprite` state list for this actor's texture reference, or ()
+    when the reference is not a `.sprite` manifest (or defines no
+    frames). The manifest's `Frame`/`Delay` pairs override SM's default
+    sequence exactly as `Sprite::LoadFromNode` does."""
+    reference = (actor.attrs.get('Texture') or actor.attrs.get('Load')
+                 or actor.attrs.get('File'))
+    base_dir = getattr(actor, '_base_dir', None)
+    if not reference or base_dir is None:
+        return ()
+    manifest = Path(base_dir) / reference
+    if manifest.suffix.lower() != '.sprite' or not manifest.exists():
+        return ()
+    text = manifest.read_text(encoding='utf-8', errors='replace')
+    return sprite_sheet.parse_sprite_states(text, frame_count)
 
 
 def _resolve_font(actor, fonts):

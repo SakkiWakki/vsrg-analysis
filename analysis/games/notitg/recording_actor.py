@@ -71,6 +71,7 @@ _REST = {
     'rotation': 0.0, 'rotation_x': 0.0, 'rotation_y': 0.0,
     'alpha': 1.0, 'skew_x': 0.0, 'skew_y': 0.0,
     'color': (1.0, 1.0, 1.0),
+    'frame': 0.0,
 }
 
 # Actor getter verb -> the property whose CURRENT value it returns.
@@ -92,6 +93,11 @@ def _as_float(value, default=None):
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _as_int(value, default=None):
+    f = _as_float(value)
+    return int(f) if f is not None else default
 
 
 class RecordingActor:
@@ -169,6 +175,10 @@ class RecordingActor:
                 self._visibility(_as_float(arg0, 1.0) == 0.0)
             case 'SetTextureName' | 'SetTexture':
                 self._texture(verb, arg0)
+            case 'setstate':
+                self._set_state(_as_int(arg0))
+            case 'animate':
+                self._animate(_as_float(arg0, 1.0) != 0.0)
             # Any other verb pokes actor state we do not model; ignore it.
 
     def _poke_channel(self, verb, arg0) -> bool:
@@ -287,3 +297,22 @@ class RecordingActor:
 
     def _visibility(self, hidden: bool) -> None:
         self._emit('alpha', (0.0 if hidden else 1.0,))
+
+    def _set_state(self, index) -> None:
+        """`setstate(i)` pins the sprite to grid frame `i` at the current
+        clock (SM `SetState`). Recorded as a step keyframe on the `frame`
+        channel, which the compiler turns into a pin timeline that
+        overrides the sheet's auto-animation."""
+        if index is None:
+            return
+        self._emit('frame', (float(index),))
+
+    def _animate(self, enabled: bool) -> None:
+        """`animate(false)` freezes the sprite on its current frame (SM
+        `EnableAnimation(false)`); we pin that frame from the clock on.
+        `animate(true)` with no prior `setstate` leaves the sheet on its
+        default auto-animation (no pin emitted)."""
+        if enabled:
+            return
+        current = self._current.get('frame', (0.0,))[0]
+        self._emit('frame', (current,))

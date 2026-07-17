@@ -24,6 +24,17 @@ the anchor + offset). Kinds: 'sprite', 'frames' (sprite sequence),
 'bitmaptext' (a 'text' whose glyphs come from an SM bitmap-font atlas
 carried in `font`), 'group'.
 
+A 'sprite' whose asset is a StepMania NxM grid sheet carries the grid
+(`sheet_cols`/`sheet_rows`) and a `sheet_states` list of
+`(frame_index, delay_seconds)`: the renderer crops the CURRENT frame's
+cell instead of the whole sheet, and the element's natural size is ONE
+frame. With no `state_pin`, the sheet auto-animates through
+`sheet_states` (SM's sprite animation, tied to the effect clock);
+`state_pin` is an optional EventTimeline of a frame index over time
+(recorded `setstate`/`animate` pokes) that overrides the animation when
+present. A plain 1x1 sprite leaves `sheet_cols`/`sheet_rows` at 1 and
+draws whole, exactly as before.
+
 A 'group' is an ActorFrame: it draws nothing itself but carries its
 own property timelines, and its transform (translate about anchor +
 position, rotate/scale about its own origin) composes onto its
@@ -78,6 +89,10 @@ class Element:
     frame_delay: float = 0.0  # seconds per frame
     loop_forever: bool = True
     children: tuple = ()      # nested Elements for a 'group' (ActorFrame)
+    sheet_cols: int = 1       # SM NxM grid: columns of frames in the sheet
+    sheet_rows: int = 1       # rows of frames in the sheet
+    sheet_states: tuple = ()  # ((frame_index, delay_seconds), ...) auto-anim
+    state_pin: object = None  # EventTimeline of a frame index, or None
 
     def sample(self, prop: str, t: float):
         return self.timelines[prop].sample(t)
