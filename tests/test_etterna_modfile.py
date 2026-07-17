@@ -128,10 +128,11 @@ def test_mod_events_compile_to_held_channel_values():
     ]
     channels = compile_mod_channels(events)
     assert 'drunk' in channels.mods(0)
-    # Breakpoints at (0, 0.2) and (2, 0.8): the value interpolates
-    # linearly between them and holds the last value after the final one.
+    # speed 0 is the snap convention: each po:Drunk set is instant, so the
+    # value HOLDS at 0.2 until the t=2 set, then steps to 0.8 (a snapped
+    # value does not interpolate across the gap to the next set).
     assert channels.value('drunk', 0.0) == pytest.approx(0.2)
-    assert channels.value('drunk', 1.0) == pytest.approx(0.5)
+    assert channels.value('drunk', 1.0) == pytest.approx(0.2)
     assert channels.value('drunk', 3.0) == pytest.approx(0.8)
 
 
