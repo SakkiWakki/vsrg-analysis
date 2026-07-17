@@ -68,6 +68,10 @@ _SCALAR_RESTS = {
     # an element is drawn only when NOT hidden AND alpha is visible.
     'hidden': 0.0,
     'size_x': _SIZE_UNSET, 'size_y': _SIZE_UNSET,
+    # SM crop family (croptop/cropbottom/cropleft/cropright): the fraction
+    # (0..1) of the actor hidden from each edge before it draws. Rest 0 =
+    # uncropped, so an element never poked with a crop verb draws whole.
+    'crop_top': 0.0, 'crop_bottom': 0.0, 'crop_left': 0.0, 'crop_right': 0.0,
 }
 
 

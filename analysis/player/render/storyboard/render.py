@@ -65,6 +65,29 @@ def _draw_size(el, t, natural) -> tuple:
     return (w, h)
 
 
+_CROP_PROPS = ('crop_left', 'crop_top', 'crop_right', 'crop_bottom')
+
+
+def _crop_fractions(el, t) -> tuple:
+    """(left, top, right, bottom) crop fractions (0..1) for `el` at `t`,
+    each the share of the actor hidden from that edge (SM SetCrop*). An
+    element with no crop timelines (fluXis/osu sprites, plain test
+    elements never poked with a crop verb) reads all-zero, so the draw is
+    byte-identical to the uncropped path."""
+    return tuple(el.timelines[prop].sample(t)[0] if prop in el.timelines
+                 else 0.0 for prop in _CROP_PROPS)
+
+
+def _inset_rect(rect: QRectF, crop) -> QRectF:
+    """`rect` with each edge pulled in by its crop fraction of the rect's
+    own size - the drawn sub-region left after cropping."""
+    left, top, right, bottom = crop
+    w, h = rect.width(), rect.height()
+    return QRectF(rect.left() + left * w, rect.top() + top * h,
+                  w * max(0.0, 1.0 - left - right),
+                  h * max(0.0, 1.0 - top - bottom))
+
+
 def _is_sheet(el) -> bool:
     """A sprite whose asset is an SM NxM grid (more than one frame)."""
     return el.sheet_cols * el.sheet_rows > 1
@@ -306,10 +329,13 @@ class StoryboardEffect:
     def _paint_kind(self, painter, el, t, w, h) -> None:
         color = self._qcolor(el.sample('color', t))
         rect = QRectF(0.0, 0.0, w, h)
+        crop = _crop_fractions(el, t)
+        if crop != (0.0, 0.0, 0.0, 0.0):
+            rect = _inset_rect(rect, crop)
         match el.kind:
             case 'sprite' | 'frames':
                 pm = self._tinted_pixmap(self._asset_at(el, t), color)
-                src = self._source_rect(el, t, pm)
+                src = _inset_rect(self._source_rect(el, t, pm), crop)
                 painter.drawPixmap(rect, pm, src)
             case 'rect':
                 painter.fillRect(rect, color)
