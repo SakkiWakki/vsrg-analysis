@@ -44,6 +44,22 @@ Scroll direction and accel:
   the engine default (receptors on top, notes scrolling up), and a
   chart pinning reverse=1 (gat) reads back as our native downscroll.
 
+Double-apply guard (field-3D vs 2D foreshortening):
+- confusionx/confusionxoffset, confusiony/confusionyoffset and hallway are
+  the 2D foreshortening APPROXIMATIONS of an out-of-plane field tilt
+  (arrow_effects reprojects an X/Y field rotation into per-note zoom / dx).
+  When a REAL 3D field tilt is executing (the field_3d effect consuming the
+  P1 actor rotation_x/rotation_y pokes), those same axes must not also be
+  approximated in 2D, or the tilt applies twice. `field_tilt_active(t)`, when
+  supplied, reports whether the real 3D X/Y tilt is live at t; while it is,
+  this consumer zeroes the X/Y-tilt confusion channels so the projection owns
+  the tilt. The Z-spin confusion (confusion/confusionoffset) is UNTOUCHED - it
+  is an in-plane per-note receptor spin, a distinct mechanism that legitimately
+  coexists (gat drives it t~58-74 with the actor 3D channels at rest). The
+  per-note confusion channels and the P1 ACTOR rotation are separate SOURCES
+  that gat drives in disjoint sections; the guard fires only on the rare
+  same-axis overlap (measured: a 0.5s transition), preferring the real 3D path.
+
 Simplifications (documented, revisit with the oracle):
 - beat(t) inverts the BPM segments only (stops/warps shift beat_now
   slightly during those regions; note beats come exactly from rows).
@@ -60,6 +76,13 @@ from analysis.player.render.mods.arrow_effects import (
     receptor_offsets, reverse_fractions)
 
 _ACTIVE_EPS = 1e-4
+
+# The 2D per-note foreshortening approximations of an out-of-plane FIELD
+# tilt (X/Y rotation). Deferred to the real 3D projection while it drives
+# the same axes (see the module doc). confusion/confusionoffset (the Z
+# receptor spin) is deliberately absent: it is in-plane and coexists.
+_FIELD_TILT_CONFUSION = ('confusionx', 'confusionxoffset',
+                         'confusiony', 'confusionyoffset', 'hallway')
 _EXPAND_RATE = 3.0  # ArrowEffects.cpp:131 cos(g_fExpandSeconds*3)
 _MAX_BODY_SAMPLES = 96  # per-hold cap on the body polyline subdivision
 # Body sample spacing, engine px. Must sit well under the shortest
@@ -93,8 +116,9 @@ _WAVEFORM_PERIODS = {
 
 
 class NotitgNoteMods:
-    def __init__(self, channels, bpms):
+    def __init__(self, channels, bpms, field_tilt_active=None):
         self._channels = channels
+        self._field_tilt_active = field_tilt_active
         segments = []
         for beat, bpm in sorted(bpms):
             if bpm > 0:
@@ -114,6 +138,7 @@ class NotitgNoteMods:
     def apply(self, ctx) -> None:
         t = float(ctx.t_now)
         percents = self._with_expand_phase(self._channels.values_at(t), t)
+        percents = self._defer_field_tilt(percents, t)
         scale = ctx.lane_w / ARROW_SIZE
         judge_y = float(ctx.judge_y)
 
@@ -339,6 +364,18 @@ class NotitgNoteMods:
         """Accel-remapped y_offset (engine px) for a candidate y array."""
         y_offset = (judge_y - np.asarray(ys, dtype=np.float64)) / scale
         return accel_y_offset(percents, y_offset)
+
+    def _defer_field_tilt(self, percents, t):
+        """Zero the X/Y-tilt confusion channels while the real 3D field
+        tilt drives the same axes (see the module doc). No-op when no
+        field-3D predicate is wired or when it is inactive - the common
+        case, so the returned dict is the input untouched unless a tilt
+        channel is actually present AND the projection is live."""
+        if self._field_tilt_active is None or not self._field_tilt_active(t):
+            return percents
+        zeroed = {mod: 0.0 for mod in _FIELD_TILT_CONFUSION
+                  if abs(percents.get(mod, 0.0)) >= _ACTIVE_EPS}
+        return {**percents, **zeroed} if zeroed else percents
 
     def _with_expand_phase(self, percents, t):
         """Inject the expand periodic phase (song time for scrub-exactness;

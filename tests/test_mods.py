@@ -578,10 +578,46 @@ class _FakeCtx:
         self.candidate_press_y = np.asarray(heads, dtype=np.float64)
 
 
-def _mods(events):
+def _mods(events, field_tilt_active=None):
     from analysis.games.notitg.note_mods import NotitgNoteMods
     mc = ModChannels.compile(events)
-    return NotitgNoteMods(mc, [(0.0, 120.0)])
+    return NotitgNoteMods(mc, [(0.0, 120.0)],
+                          field_tilt_active=field_tilt_active)
+
+
+def test_field_tilt_defers_confusiony_dx():
+    """While the real 3D field tilt drives the same axes, the 2D
+    confusiony approximation is suppressed (no per-note dx): the projection
+    owns the horizontal foreshortening, so applying it again would double."""
+    player = _FakePlayer([0, 1, 2, 3], 4)
+    events = [ModEvent(0.0, 1.0, -1, 'confusionyoffset')]
+    ctx = _FakeCtx(player, [100.0] * 4, judge_y=100, chart_h=400)
+    _mods(events, field_tilt_active=lambda t: True).apply(ctx)
+    # confusiony zeroed -> no horizontal displacement from it.
+    assert np.allclose(getattr(ctx, 'candidate_dx', np.zeros(4)), 0.0)
+
+
+def test_field_tilt_inactive_keeps_confusiony():
+    """With no field-3D tilt live (predicate False or absent), the 2D
+    confusiony approximation applies as usual - the two mechanisms are the
+    same source only during the tilt, and coexist otherwise."""
+    player = _FakePlayer([0, 1, 2, 3], 4)
+    events = [ModEvent(0.0, 1.0, -1, 'confusionyoffset')]
+    ctx = _FakeCtx(player, [100.0] * 4, judge_y=100, chart_h=400)
+    _mods(events, field_tilt_active=lambda t: False).apply(ctx)
+    # Outer columns foreshorten toward centre -> nonzero dx.
+    assert np.abs(np.asarray(ctx.candidate_dx)).max() > 1e-6
+
+
+def test_field_tilt_leaves_zspin_confusion_alone():
+    """The guard defers only the X/Y-tilt confusion; the in-plane Z spin
+    (confusionoffset) is a distinct receptor mechanism that coexists with
+    the field tilt, so it still drives its receptor rotation."""
+    player = _FakePlayer([0, 1, 2, 3], 4)
+    events = [ModEvent(0.0, 1.0, -1, 'confusionoffset')]
+    ctx = _FakeCtx(player, [100.0] * 4, judge_y=100, chart_h=400)
+    _mods(events, field_tilt_active=lambda t: True).apply(ctx)
+    assert np.abs(np.asarray(ctx.receptor_offsets['rotation_deg'])).max() > 1e-6
 
 
 def test_reverse_100_reads_as_native_downscroll():
