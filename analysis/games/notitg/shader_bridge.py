@@ -81,9 +81,10 @@ def build_shader_events(shader_flags):
     """(events, skipped_keys): `.ffx`-shaped shader events for the mapped
     flag pulses, plus the sorted list of distinct keys that were skipped.
 
-    A flag key `k` set at time `t` turns its shader on; the next event
-    that clears it (key 0, or the paired clear `mod_shader` emits) turns
-    it off. Unpaired sets stay on until the chart's end (rare)."""
+    A flag key `k` written to a slot at time `t` turns its shader on; the
+    write that closes it (a `0` or a different key into the same slot)
+    turns it off. A genuinely unclosed set persists to the chart's end -
+    the chart's own oversight, never a fabricated off time."""
     flags = _clean(shader_flags)
     on_windows, skipped = _pair_pulses(flags)
 
@@ -95,6 +96,8 @@ def build_shader_events(shader_flags):
                        'start-params': {'strength': 0.0},
                        'end-params': {'strength': 1.0, 'strength2': mode_y,
                                       'strength3': mode_z}})
+        if t_off is None:
+            continue
         events.append({'shader': shader_id, 'time': t_off * 1000.0,
                        'duration': _PULSE_ON_MS,
                        'end-params': {'strength': 0.0, 'strength2': mode_y,
@@ -103,6 +106,11 @@ def build_shader_events(shader_flags):
 
 
 def _clean(shader_flags) -> list:
+    """(slot, key, t) triples sorted by time. `which` is the slot index
+    (`SetShaderFlagNum`'s second arg); plain `SetShaderFlag(key)` is
+    slot 0. The slot is what closes a flag - preserving it is what lets a
+    same-slot rewrite window-close the previous pass (the lifetime rule);
+    dropping it merged every flag into one latch that only key 0 closed."""
     out = []
     for row in shader_flags or []:
         if not isinstance(row, dict):
@@ -111,36 +119,44 @@ def _clean(shader_flags) -> list:
         t = row.get('t')
         if key is None or t is None:
             continue
-        out.append((int(key), float(t)))
-    out.sort(key=lambda r: r[1])
+        out.append((int(row.get('which') or 0), int(key), float(t)))
+    out.sort(key=lambda r: r[2])
     return out
 
 
 def _pair_pulses(flags):
-    """Turn the (key, t) set/clear stream into on-windows. Key 0 clears
-    whatever is currently on; a nonzero key sets that key on. Returns
-    (windows, skipped_keys)."""
+    """Turn the (slot, key, t) write stream into on-windows, honoring
+    NotITG's single-value-per-slot registry: each `SetShaderFlag(Num)`
+    write REPLACES that slot, so writing any new value (0 or another key)
+    closes whatever the slot held. Independent slots stay simultaneously
+    live. Returns (windows, skipped_keys); an unclosed window carries
+    t_off None (persists - no fabricated close)."""
     windows = []
     skipped = set()
-    open_since: dict = {}
-    for key, t in flags:
+    open_in_slot: dict = {}
+    for slot, key, t in flags:
+        if open_in_slot.get(slot, (None,))[0] == key:
+            continue
+        _close_slot(open_in_slot, slot, t, windows)
         if key == 0:
-            _close_all(open_since, t, windows)
             continue
         if key in _SKIPPED_KEYS or key not in _FLAG_SHADERS:
             skipped.add(key)
             continue
-        if key not in open_since:
-            open_since[key] = t
-    _close_all(open_since, None, windows)
+        open_in_slot[slot] = (key, t)
+    for slot in list(open_in_slot):
+        _close_slot(open_in_slot, slot, None, windows)
     return windows, skipped
 
 
-def _close_all(open_since, t, windows) -> None:
-    for key, t_on in open_since.items():
-        t_off = t if t is not None else t_on + 0.5
-        windows.append((key, t_on, t_off))
-    open_since.clear()
+def _close_slot(open_in_slot, slot, t, windows) -> None:
+    """Close the flag currently held in `slot` (if any) at time `t`,
+    emitting its (key, t_on, t_off) window. t None = no close observed
+    (the window persists to the chart's end)."""
+    held = open_in_slot.pop(slot, None)
+    if held is not None:
+        key, t_on = held
+        windows.append((key, t_on, t))
 
 
 # ─────────────────────────────────────────────────────────────────────
