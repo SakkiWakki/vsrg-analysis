@@ -121,9 +121,10 @@ _SIZE_UNSET = -1.0
 _REST = {
     'x': 0.0, 'y': 0.0, 'z': 0.0,
     'scale_x': 1.0, 'scale_y': 1.0, 'scale_z': 1.0,
-    'base_scale_x': 1.0, 'base_scale_y': 1.0,
+    'base_scale_x': 1.0, 'base_scale_y': 1.0, 'base_scale_z': 1.0,
     'rotation': 0.0, 'rotation_x': 0.0, 'rotation_y': 0.0,
     'alpha': 1.0, 'skew_x': 0.0, 'skew_y': 0.0,
+    'zbias': 0.0,
     'size_x': _SIZE_UNSET, 'size_y': _SIZE_UNSET,
     'crop_top': 0.0, 'crop_bottom': 0.0, 'crop_left': 0.0, 'crop_right': 0.0,
     'color': (1.0, 1.0, 1.0),
