@@ -18,7 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 
-from analysis.games.notitg.mod_channels import parse_modstring
+from analysis.games.notitg.mod_channels import (
+    parse_modstring, parse_speed_mods)
 
 # Calls further apart than this many seconds belong to different
 # windows. The template reapplies every Update (~0.02s); 2.5 ticks of
@@ -30,10 +31,20 @@ _WINDOW_GAP_S = 2.5 / 60.0
 _SAME_FRAME_S = 0.5 / 60.0
 
 
+# Speed-mod pseudo-channels: x/c/m tokens are not percent mods (the
+# channel compiler drops them) but the scroll-multiplier consumer reads
+# them from window rows, so they coalesce like any mod and render back
+# as their own token forms. Excluded from chase channels and clearall.
+_SPEED_CHANNELS = {'x': 'xmod', 'c': 'cmod', 'm': 'mmod'}
+_SPEED_TOKENS = {'xmod': '{value:g}x', 'cmod': 'c{value:g}',
+                 'mmod': 'm{value:g}'}
+
+
 @dataclass
 class ModWindow:
     """One contiguous application run of a single mod: `value` is the
-    engine fraction (percent / 100) chased at approach `speed`."""
+    engine fraction (percent / 100) chased at approach `speed` - or the
+    multiplier/rate for the speed pseudo-channels."""
     name: str
     value: float
     speed: float
@@ -47,12 +58,20 @@ class ModWindow:
     @property
     def modstring(self) -> str:
         """The window as a single-mod ApplyModifiers string."""
+        token = _SPEED_TOKENS.get(self.name)
+        if token is not None:
+            return f'*{self.speed:g} ' + token.format(value=self.value)
         return f'*{self.speed:g} {self.value * 100.0:g} {self.name}'
 
 
 @lru_cache(maxsize=4096)
 def _parsed(modstring: str) -> tuple:
     return tuple(parse_modstring(modstring))
+
+
+@lru_cache(maxsize=4096)
+def _parsed_speed(modstring: str) -> tuple:
+    return tuple(parse_speed_mods(modstring))
 
 
 # The template's per-frame `clearall` retargets every mod to 0 at this
@@ -100,6 +119,11 @@ def _frame_resolved(applied) -> list:
                 key = (name, index)
                 flush(key, t)
                 pending[key] = (t, beat, value, speed)
+        for speed, kind, value in _parsed_speed(modstring):
+            for index in indexes:
+                key = (_SPEED_CHANNELS[kind], index)
+                flush(key, t)
+                pending[key] = (t, beat, value, speed)
     for (name, index), held in pending.items():
         out.append((name, index, *held))
     out.sort(key=lambda row: row[2])
@@ -143,6 +167,8 @@ def chase_events(applied) -> list:
     last: dict = {}
     events: list = []
     for name, index, t, _beat, value, speed in _frame_resolved(applied):
+        if name in _SPEED_TOKENS:
+            continue
         key = (name, index)
         if last.get(key) == (value, speed):
             continue

@@ -100,5 +100,50 @@ def test_classic_oncommand_recorded_on_child():
     assert child.keyframes()['alpha'][0].values == (0.5,)
 
 
+_PROXY_CHART = """
+<ActorFrame InitCommand="%function(self)
+    holder = self
+    self:x(100);
+    P1 = SCREENMAN:GetTopScreen():GetChild('PlayerP1')
+end"><children>
+<Layer Type="ActorFrame" InitCommand="%function(self) self:x(20); end"
+><children>
+<Layer Type="ActorProxy" OnCommand="%function(self)
+    self:SetTarget(P1:GetChild('NoteField')); self:x(3)
+end"/>
+</children></Layer>
+<Layer Type="ActorProxy" OnCommand="%function(self)
+    self:SetTarget(P1:GetChild('Judgment'))
+end"/>
+</children></ActorFrame>
+"""
+
+
+def _proxy_copies():
+    from types import SimpleNamespace
+
+    from analysis.games.notitg.sim.producers import _sim_field_copies
+    parsed = parse_actor_xml(_PROXY_CHART)
+    result = run_sim(parsed.root, lambda b: b * 0.5, 0.0, 1.0)
+    doc = SimpleNamespace(root=parsed.root)
+    return _sim_field_copies(doc, result.env, result.env.actor_keyframes(),
+                             None)
+
+
+def test_notefield_proxy_becomes_composed_field_copy():
+    copies = _proxy_copies()
+    # The Judgment proxy is NOT a field copy - GetChild hands back real
+    # per-name child recorders, so its target never matches a player
+    # notefield.
+    assert len(copies) == 1
+    (copy,) = copies
+    assert copy['source'] == 'P1p'
+    assert copy['name'].startswith('holder_')
+    # Parent-chain composition: root x(100) + inner frame x(20) + the
+    # proxy's own x(3).
+    assert copy['timelines']['x'].sample(0.5)[0] == pytest.approx(123.0)
+    assert copy['timelines']['hidden'].sample(0.5)[0] == 0.0
+
+
 
 

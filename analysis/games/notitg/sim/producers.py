@@ -28,9 +28,10 @@ from analysis.games.notitg.sim.record import chase_events, coalesce_applied
 from analysis.player.render.mods.channels import ModChannels
 
 
-def compile_via_sim(sm_path, end_seconds: float) -> dict | None:
+def compile_via_sim(sm_path, end_seconds: float | None = None) -> dict | None:
     """The compiled-modfile dict via the engine loop, or None when the
-    chart has no modfile. Never raises (same contract as
+    chart has no modfile. `end_seconds` defaults to the chart's last
+    measure plus a tail. Never raises (same contract as
     `compile_modfile`)."""
     try:
         return _compile_via_sim(sm_path, end_seconds)
@@ -45,6 +46,8 @@ def _compile_via_sim(sm_path, end_seconds):
     doc = load_chart(sm_path)
     if doc is None:
         return None
+    if end_seconds is None:
+        end_seconds = doc.end_seconds
     result = run_sim(doc.root, doc.to_seconds, doc.start_beat, end_seconds,
                      rng_seed=doc.rng_seed)
     env = result.env

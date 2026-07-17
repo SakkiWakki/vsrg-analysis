@@ -94,6 +94,11 @@ def beat_inverter(to_seconds, end_seconds):
     return to_beats
 
 
+# Sim tail past the chart's last measure: end-of-song actions (score
+# pokes, outros) fire just past the notes.
+_END_TAIL_S = 4.0
+
+
 @dataclass
 class ChartDocument:
     """A chart's modfile document plus timing, loaded once and shared by
@@ -105,6 +110,7 @@ class ChartDocument:
     start_beat: float
     lua_dir: object
     rng_seed: int
+    end_seconds: float
 
 
 def load_chart(sm_path) -> ChartDocument | None:
@@ -122,8 +128,12 @@ def load_chart(sm_path) -> ChartDocument | None:
     to_seconds = modfile._beat_to_seconds(sm_data, chart)
     start_beat = min((b for b, _n, k in entries if k == 'FGCHANGES'),
                      default=0.0)
+    # SM notedata is comma-separated measures of 4 beats; the last
+    # measure bounds everything the chart schedules in song time.
+    measures = str(chart.get('notedata', '')).count(',') + 1
+    end_seconds = to_seconds(4.0 * measures) + _END_TAIL_S
     return ChartDocument(root, classic, to_seconds, start_beat, lua_dir,
-                         modfile._chart_rng_seed(lua_dir))
+                         modfile._chart_rng_seed(lua_dir), end_seconds)
 
 
 def run_chart_sim(sm_path, end_seconds: float,

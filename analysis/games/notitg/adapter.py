@@ -107,14 +107,23 @@ class NotitgAdapter(EtternaAdapter):
         return True
 
     def _compiled_modfile(self, replay):
-        """compile_modfile for this replay's chart, memoized on the replay
-        so note_mods / scroll_multipliers / effects share one harvest."""
+        """The compiled modfile for this replay's chart, memoized on the
+        replay so note_mods / scroll_multipliers / effects share one
+        compile. VSRG_NOTITG_SIM=1 routes through the engine-loop
+        compiler (DESIGN_engine_loop.md parity gate); default stays the
+        harvest path until cutover."""
+        import os
+
         cached = replay.get('_notitg_modfile')
         if cached is not None:
             return cached or None
-        from analysis.games.notitg.modfile import compile_modfile
         sm_path, _index = split_chart_ref(replay.get('filepath', ''))
-        compiled = compile_modfile(sm_path)
+        if os.environ.get('VSRG_NOTITG_SIM') == '1':
+            from analysis.games.notitg.sim.producers import compile_via_sim
+            compiled = compile_via_sim(sm_path)
+        else:
+            from analysis.games.notitg.modfile import compile_modfile
+            compiled = compile_modfile(sm_path)
         replay['_notitg_modfile'] = compiled or {}
         return compiled
 
@@ -149,7 +158,11 @@ class NotitgAdapter(EtternaAdapter):
         from analysis.games.notitg.mod_channels import compile_mod_channels
         from analysis.games.notitg.note_mods import NotitgNoteMods
         compiled = self._compiled_modfile(replay)
-        channels = compile_mod_channels((compiled or {}).get('mod_events') or [])
+        # The sim compiler precompiles channels from the exact per-frame
+        # chase (the mirin-dict pattern); harvest dicts fall back to
+        # window compilation.
+        channels = (compiled or {}).get('mod_channels') \
+            or compile_mod_channels((compiled or {}).get('mod_events') or [])
         sm_path, _index = split_chart_ref(replay.get('filepath', ''))
         bpms = parse_sm(sm_path)['bpms']
         field_3d = notitg_field_3d(
@@ -171,7 +184,11 @@ class NotitgAdapter(EtternaAdapter):
         from analysis.games.notitg.field_instances import SecondFieldSpec
         from analysis.games.notitg.mod_channels import compile_mod_channels
         compiled = self._compiled_modfile(replay)
-        channels = compile_mod_channels((compiled or {}).get('mod_events') or [])
+        # The sim compiler precompiles channels from the exact per-frame
+        # chase (the mirin-dict pattern); harvest dicts fall back to
+        # window compilation.
+        channels = (compiled or {}).get('mod_channels') \
+            or compile_mod_channels((compiled or {}).get('mod_events') or [])
         if 1 not in channels.players:
             return None
         return SecondFieldSpec(self._note_mods_for(replay, player=1))
