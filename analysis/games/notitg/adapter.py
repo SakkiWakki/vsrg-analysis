@@ -134,14 +134,23 @@ class NotitgAdapter(EtternaAdapter):
         """Always present for NotITG, even with no modfile: the consumer
         owns scroll orientation (engine-default upscroll comes from the
         zero-channel reverse baseline), so a chart without mods still
-        needs it."""
+        needs it.
+
+        A field-3D producer, when the chart has out-of-plane field-tilt
+        pokes, supplies the double-apply guard: while the real 3D tilt
+        runs, the consumer defers the 2D confusion-tilt approximation of
+        the same axes (see note_mods and field_3d module docs)."""
+        from analysis.games.notitg.field_3d import notitg_field_3d
         from analysis.games.notitg.mod_channels import compile_mod_channels
         from analysis.games.notitg.note_mods import NotitgNoteMods
         compiled = self._compiled_modfile(replay)
         channels = compile_mod_channels((compiled or {}).get('mod_events') or [])
         sm_path, _index = split_chart_ref(replay.get('filepath', ''))
         bpms = parse_sm(sm_path)['bpms']
-        return NotitgNoteMods(channels, bpms)
+        field_3d = notitg_field_3d(
+            sm_path, base_hidden=(compiled or {}).get('base_field_hidden'))
+        tilt_active = field_3d.tilt_active if field_3d is not None else None
+        return NotitgNoteMods(channels, bpms, field_tilt_active=tilt_active)
 
     def scroll_multipliers(self, replay):
         from analysis.games.notitg.mod_channels import compile_scroll_multipliers
@@ -152,6 +161,7 @@ class NotitgAdapter(EtternaAdapter):
         return events or None
 
     def effects(self, replay):
+        from analysis.games.notitg.field_3d import notitg_field_3d
         from analysis.games.notitg.field_instances import (
             NotitgFieldInstances, NotitgScreenCamera)
         from analysis.games.notitg.shader_bridge import notitg_shader_effects
@@ -159,6 +169,14 @@ class NotitgAdapter(EtternaAdapter):
         if not compiled:
             return []
         effects = list(notitg_shader_effects(compiled.get('shader_flags')))
+        base_hidden = compiled.get('base_field_hidden')
+        sm_path, _index = split_chart_ref(replay.get('filepath', ''))
+        field_3d = notitg_field_3d(sm_path, base_hidden=base_hidden)
+        if field_3d is not None:
+            # Before the copies/camera: the field-3D transform warps the
+            # base playfield in column space; the copies replicate that
+            # capture and the scene camera wraps the whole result.
+            effects.append(field_3d)
         screen_transform = compiled.get('screen_transform')
         if screen_transform:
             effects.append(NotitgScreenCamera(screen_transform))
@@ -167,7 +185,7 @@ class NotitgAdapter(EtternaAdapter):
             effects.append(NotitgFieldInstances(
                 field_copies,
                 aft_bg_timeline=compiled.get('aft_bg_visible'),
-                base_hidden=compiled.get('base_field_hidden')))
+                base_hidden=base_hidden))
         return effects
 
     def design_space(self):
