@@ -463,6 +463,21 @@ def _clip_body_samples(xs, ys, top, bot):
     return np.asarray(out_x), np.asarray(out_y)
 
 
+# pm.cacheKey() -> the sprite's central body color; one pixel read per
+# distinct sprite pixmap, then cached for the session.
+_BODY_FILL_CACHE: dict = {}
+
+
+def _body_fill_color(pm):
+    key = pm.cacheKey()
+    color = _BODY_FILL_CACHE.get(key)
+    if color is None:
+        img = pm.toImage()
+        color = img.pixelColor(img.width() // 2, img.height() // 2)
+        _BODY_FILL_CACHE[key] = color
+    return color
+
+
 def _draw_ln_body_stroke(ctx, painter, n, top, bot, state):
     """Draw a hold body as a constant-width ribbon stroked along its path
     (`n.body_path`). This is the ONE body renderer for every non-straight
@@ -500,11 +515,13 @@ def _draw_ln_body_stroke(ctx, painter, n, top, bot, state):
     stroker.setJoinStyle(Qt.RoundJoin)
     path = stroker.createStroke(spine)
 
-    brush = QBrush(pm)
-    brush.setTransform(QTransform().translate(float(xs[0]), float(ys[0])))
+    # Flat fill: tiling the body sprite under an axis-aligned brush prints
+    # its edge/border pixels as seams across a diagonal ribbon (the brush
+    # never rotates with the path). Warped bodies carry no noteskin
+    # detail, so the sprite's flat body color is the faithful fill.
     painter.save()
     painter.setPen(_NO_PEN)
-    painter.setBrush(brush)
+    painter.setBrush(_body_fill_color(pm))
     painter.drawPath(path)
     painter.restore()
 

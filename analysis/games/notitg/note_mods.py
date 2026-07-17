@@ -71,6 +71,14 @@ _BODY_SAMPLE_SPACING = 8.0
 # on-screen body, and clamped path ends stay far enough off screen that
 # a seated tail cap never becomes visible at the clamp edge.
 _BODY_WINDOW_PAD = 0.6
+# Sub-samples box-filtered into each body point. Waveforms whose spatial
+# period sits below the sample spacing (negative period companions push
+# it to ~2 engine px) cannot be resolved as geometry; unfiltered they
+# alias into single-sample reversals that the stroker rounds into lobes.
+# The engine draws strips every few px, so at those frequencies its
+# visual converges to the local mean band - which is what the filter
+# yields.
+_BODY_BOX_FILTER = 4
 
 
 class NotitgNoteMods:
@@ -205,7 +213,8 @@ class NotitgNoteMods:
         # already draws. Skip those holds so the rect fallback stays.
         samples = {}
         for pos, screen_ys, start, count in segments['holds']:
-            dx = sample.dx[start:start + count]
+            fine = sample.dx[start:start + count * _BODY_BOX_FILTER]
+            dx = fine.reshape(count, _BODY_BOX_FILTER).mean(axis=1)
             if np.ptp(dx) < _ACTIVE_EPS:
                 continue
             samples[pos] = (lane_x_fn(int(cols[pos])) + dx * scale, screen_ys)
@@ -241,12 +250,21 @@ class NotitgNoteMods:
             count = self._body_sample_count(
                 abs(tail_y[pos] - head_y[pos]) * (f1 - f0), scale)
             frac = np.linspace(f0, f1, count)
-            cols_parts.append(np.full(count, cols[pos], dtype=np.int64))
-            offs_parts.append(head_off[pos] + frac * (tail_off[pos] - head_off[pos]))
-            beats_parts.append(np.full(count, note_beats[pos]))
+            # Box filter: each body point is the mean of _BODY_BOX_FILTER
+            # sub-positions spread across its sample cell, so waveform
+            # frequencies below the sampling grid average out instead of
+            # aliasing (see the constant's comment).
+            cell = (f1 - f0) / max(count - 1, 1)
+            jitter = (np.arange(_BODY_BOX_FILTER) / _BODY_BOX_FILTER
+                      - 0.5 + 0.5 / _BODY_BOX_FILTER) * cell
+            fine = np.clip((frac[:, None] + jitter[None, :]).ravel(), f0, f1)
+            n_fine = count * _BODY_BOX_FILTER
+            cols_parts.append(np.full(n_fine, cols[pos], dtype=np.int64))
+            offs_parts.append(head_off[pos] + fine * (tail_off[pos] - head_off[pos]))
+            beats_parts.append(np.full(n_fine, note_beats[pos]))
             screen_ys = head_y[pos] + frac * (tail_y[pos] - head_y[pos])
             holds.append((int(pos), screen_ys, cursor, count))
-            cursor += count
+            cursor += n_fine
         if not holds:
             return {'cols': None, 'offs': None, 'beats': None, 'holds': []}
         return {

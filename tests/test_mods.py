@@ -1223,9 +1223,11 @@ def test_hold_body_passes_through_head_and_tail():
     xs, ys = ctx.hold_body_samples[0]
     assert ys[0] == pytest.approx(ctx.candidate_head_y[0])
     assert ys[-1] == pytest.approx(ctx.candidate_tail_y[0])
-    # x at the endpoints matches the head's own displaced x (lane_x + dx).
+    # x at the endpoints matches the head's own displaced x (lane_x + dx)
+    # to within the box filter's smoothing (each sample is the mean over
+    # its ~8px cell; for drunk's ~300px period that is a sub-pixel shave).
     head_x = ctx.lane_x(1) + ctx.candidate_dx[0]
-    assert xs[0] == pytest.approx(head_x)
+    assert xs[0] == pytest.approx(head_x, abs=0.5)
 
 
 def test_hold_body_bends_under_drunk():
@@ -1241,9 +1243,11 @@ def test_hold_body_bends_under_drunk():
 
 
 def test_hold_body_sample_x_matches_direct_note_offsets():
-    # Each body sample's dx is exactly note_offsets(drunk) at that sample's
-    # engine y_offset. reverse=1 keeps native space so y_offset = judge_y -
-    # screen_y (scale = lane_w/64 = 1 here). Verify one interior sample.
+    # Each body sample's dx is the BOX-FILTERED note_offsets(drunk) around
+    # that sample's engine y_offset: the mean over its ~8px cell, which for
+    # drunk's ~300px spatial period sits within a fraction of a px of the
+    # center-point value. reverse=1 keeps native space so y_offset =
+    # judge_y - screen_y (scale = lane_w/64 = 1 here).
     player = _LnPlayer([0], 4, [4.0])
     lane_w = ae.ARROW_SIZE
     ctx = _LnCtx(player, [100.0], [300.0], judge_y=300, chart_h=600,
@@ -1257,7 +1261,26 @@ def test_hold_body_sample_x_matches_direct_note_offsets():
                        t_now=0.0, beat_now=0.0, keycount=4,
                        note_beats=np.array([0.0]))
     expect_x = ctx.lane_x(0) + off.dx[0] * (lane_w / ae.ARROW_SIZE)
-    assert xs[k] == pytest.approx(expect_x, abs=1e-6)
+    assert xs[k] == pytest.approx(expect_x, abs=0.5)
+
+
+def test_hold_body_box_filter_suppresses_subgrid_wavelengths():
+    # A zigzag with a spatial period far below the 8px sample spacing
+    # cannot render as geometry (the engine's per-strip look converges to
+    # the mean band). The box filter must collapse it toward zero dx
+    # variation instead of aliasing into lobes: filtered peak-to-peak
+    # stays a small fraction of the raw +/-32px amplitude.
+    player = _LnPlayer([0], 4, [4.0])
+    ctx = _LnCtx(player, [100.0], [500.0], judge_y=300, chart_h=600)
+    # zigzagperiod -0.97 => period factor 0.03 => wavelength ~2 engine px.
+    _mods([ModEvent(0.0, 1.0, -1, 'reverse'),
+           ModEvent(0.0, 1.0, -1, 'zigzag'),
+           ModEvent(0.0, -0.97, -1, 'zigzagperiod')]).apply(ctx)
+    samples = getattr(ctx, 'hold_body_samples', None)
+    if samples is None:
+        return  # fully collapsed to constant dx: rect fast-path, ideal
+    xs, _ys = samples[0]
+    assert np.ptp(xs) < 8.0
 
 
 def test_hold_body_batches_multiple_holds():
