@@ -46,7 +46,18 @@ class EffectFrame:
           trails). When any 'screen' copy is present the renderer
           composites the chart region offscreen this frame and retains it
           for next frame; on a seek the retention is invalidated.
-      Other games omit scope for the zero-cost path.
+      Other games omit scope for the zero-cost path. A copy may name a
+      second field capture with the scope 'field2' (see `second_field`).
+    - `second_field`  a second, independently-modded playfield capture
+      for dual-player NotITG charts. When present, the renderer renders
+      the field layers a SECOND time with an alternate per-player
+      note-mod consumer swapped in (its own note positions, receptor
+      offsets, reverse baseline), into a separate pixmap. `fields`
+      instances with scope 'field2' blit from it; 'field' instances blit
+      the primary (player-0) capture as always. None (every other game,
+      single-player NotITG) leaves the render path untouched - the second
+      capture only happens when a producer supplies this. See
+      games/notitg/field_instances.NotitgDualField / SecondFieldSpec.
     """
     transform: QTransform | None = None
     draws: tuple = ()
@@ -54,6 +65,7 @@ class EffectFrame:
     shaders: tuple = ()
     scene_transform: QTransform | None = None
     fields: tuple = ()
+    second_field: object | None = None
 
 
 @runtime_checkable
@@ -81,13 +93,14 @@ class CompositeFrame:
     shaders: tuple = ()    # (shader_id, uniforms) in effect order
     scene_transform: QTransform | None = None
     fields: tuple = ()     # (transform, opacity) playfield instances
+    second_field: object | None = None  # dual-player second capture spec
 
     @property
     def is_identity(self) -> bool:
         return (self.transform is None and self.scene_transform is None
                 and not self.below and not self.above and not self.top
                 and self.opacity >= 1.0 and not self.shaders
-                and not self.fields)
+                and not self.fields and self.second_field is None)
 
 
 def composite(effects, ctx) -> CompositeFrame:
@@ -103,6 +116,7 @@ def composite(effects, ctx) -> CompositeFrame:
     opacity = 1.0
     shaders = []
     fields = []
+    second_field = None
     for effect in effects:
         frame = effect.at(ctx)
         if frame is None:
@@ -118,6 +132,8 @@ def composite(effects, ctx) -> CompositeFrame:
         opacity *= frame.opacity
         shaders.extend(frame.shaders)
         fields.extend(frame.fields)
+        if frame.second_field is not None:
+            second_field = frame.second_field
 
     def band(lo, hi):
         return tuple(sorted((d for d in draws if lo <= d[0] < hi),
@@ -130,4 +146,5 @@ def composite(effects, ctx) -> CompositeFrame:
                           opacity=max(0.0, min(1.0, opacity)),
                           shaders=tuple(shaders),
                           scene_transform=scene_transform,
-                          fields=tuple(fields))
+                          fields=tuple(fields),
+                          second_field=second_field)

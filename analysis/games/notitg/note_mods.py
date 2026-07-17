@@ -71,7 +71,11 @@ Tiny X-spacing (consumer-side):
 Simplifications (documented, revisit with the oracle):
 - beat(t) inverts the BPM segments only (stops/warps shift beat_now
   slightly during those regions; note beats come exactly from rows).
-- player 0 channels only until per-field routing lands.
+- one consumer samples ONE player's channels (`player`, default 0). A
+  dual-player NotITG chart builds a second consumer at player 1 whose
+  field the renderer draws as a separate capture (see field_instances
+  NotitgDualField); the two share the chart and candidate set but sample
+  disjoint (mod, player) channels, so gat's per-side mods diverge.
 - expand keyed to song time not wall clock (scrub-exactness).
 """
 from __future__ import annotations
@@ -125,9 +129,10 @@ _WAVEFORM_PERIODS = {
 
 
 class NotitgNoteMods:
-    def __init__(self, channels, bpms, field_tilt_active=None):
+    def __init__(self, channels, bpms, field_tilt_active=None, player=0):
         self._channels = channels
         self._field_tilt_active = field_tilt_active
+        self._player = int(player)
         segments = []
         for beat, bpm in sorted(bpms):
             if bpm > 0:
@@ -171,7 +176,8 @@ class NotitgNoteMods:
 
     def apply(self, ctx) -> None:
         t = float(ctx.t_now)
-        percents = self._with_expand_phase(self._channels.values_at(t), t)
+        percents = self._with_expand_phase(
+            self._channels.values_at(t, self._player), t)
         percents = self._defer_field_tilt(percents, t)
         scale = ctx.lane_w / ARROW_SIZE
         judge_y = float(ctx.judge_y)

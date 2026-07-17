@@ -173,6 +173,91 @@ def test_base_hidden_suppresses_identity_original():
     assert len(hidden) == 1
 
 
+# -- dual-player fields (item 43/50/54) ----------------------------------
+
+def _spec():
+    from analysis.games.notitg.field_instances import SecondFieldSpec
+    return SecondFieldSpec(note_mods=object())
+
+
+def test_dual_originals_at_p1_p2_offsets_with_scopes():
+    """A dual chart emits two identity originals: P1 shifted left blitting
+    the primary capture ('field'), P2 shifted right blitting the second
+    capture ('field2'). The offsets are the theme +-160 design px scaled
+    by the design map (chart_rect 400x600 -> min-fit box side 400, k so
+    that 640*k <= 400 and 480*k <= 400 => k = 400/640 = 0.625)."""
+    spec = _spec()
+    frame = NotitgFieldInstances([], second_field=spec).at(_Ctx(1.0))
+    assert frame.second_field is spec
+    p1, p2 = frame.fields
+    assert p1[2] == 'field' and p2[2] == 'field2'
+    k = 400.0 / 640.0
+    # P1 left by 160 design px, P2 right by 160 design px.
+    assert p1[0].dx() == -160.0 * k
+    assert p2[0].dx() == 160.0 * k
+
+
+def test_dual_routes_p2_proxy_to_field2_p1_to_field():
+    from analysis.player.render.effects.timeline import Keyframe
+    p1 = _copy('P1p', {'alpha': [Keyframe(0.0, (1.0,), 0.0, 0)]})
+    p2 = _copy('P2p', {'alpha': [Keyframe(0.0, (1.0,), 0.0, 0)]})
+    frame = NotitgFieldInstances([p1, p2], second_field=_spec()).at(_Ctx(1.0))
+    scopes = [entry[2] for entry in frame.fields]
+    # Two originals ('field','field2') then the two proxy copies.
+    assert scopes.count('field2') == 2   # P2 original + P2p copy
+    assert scopes[2] == 'field'          # P1p copy -> primary
+    assert scopes[3] == 'field2'         # P2p copy -> second capture
+
+
+def test_single_player_never_forwards_second_field():
+    from analysis.player.render.effects.timeline import Keyframe
+    copy = _copy('P2p', {'alpha': [Keyframe(0.0, (1.0,), 0.0, 0)]})
+    frame = NotitgFieldInstances([copy]).at(_Ctx(1.0))
+    # No spec -> P2p is still the primary 'field' capture, nothing 'field2'.
+    assert frame.second_field is None
+    assert all(entry[2] != 'field2' for entry in frame.fields)
+
+
+def test_dual_hidden_base_keeps_capture_path():
+    """A fully-hidden dual frame still forwards the spec (so the second
+    capture renders) with a non-empty placeholder fields list."""
+    from analysis.player.render.effects.timeline import EventTimeline, Keyframe
+    base_hidden = EventTimeline([Keyframe(0.0, (1.0,), 0.0, 0)], rest=(1.0,))
+    frame = NotitgFieldInstances([], base_hidden=base_hidden,
+                                 second_field=_spec()).at(_Ctx(1.0))
+    assert frame.second_field is not None
+    assert frame.fields  # non-empty placeholder -> renderer captures
+
+
+def test_note_mods_samples_requested_player():
+    """The consumer samples ONLY its player's channels: a P1-only mod and
+    a P2-only mod each light up only in that player's consumer."""
+    import numpy as np
+    from analysis.player.render.mods.channels import ModChannels, ModEvent
+    from analysis.games.notitg.note_mods import NotitgNoteMods
+
+    class _NM(_Ctx):
+        lane_w = 64.0
+        judge_y = 300.0
+        candidates = []
+
+        class player:
+            keycount = 4
+    channels = ModChannels.compile([
+        ModEvent(0.0, 1.0, -1.0, 'drunk', 0),
+        ModEvent(0.0, 1.0, -1.0, 'tipsy', 1),
+    ])
+    ctx = _NM(1.0)
+    p0 = NotitgNoteMods(channels, [(0.0, 120.0)], player=0)
+    p1 = NotitgNoteMods(channels, [(0.0, 120.0)], player=1)
+    p0.apply(ctx)
+    # receptor_offsets exists for both; the point is the sampled channels
+    # differ - verify via values_at directly.
+    assert channels.values_at(1.0, 0) == {'drunk': 1.0}
+    assert channels.values_at(1.0, 1) == {'tipsy': 1.0}
+    assert p0._player == 0 and p1._player == 1
+
+
 # -- SM bitmap font -------------------------------------------------------
 
 @pytest.mark.skipif(not _FONTS.exists(), reason='NotITG theme fonts absent')

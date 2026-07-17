@@ -134,12 +134,17 @@ class NotitgAdapter(EtternaAdapter):
         """Always present for NotITG, even with no modfile: the consumer
         owns scroll orientation (engine-default upscroll comes from the
         zero-channel reverse baseline), so a chart without mods still
-        needs it.
+        needs it. Player 0 (the primary field) is the one the base render
+        path applies; a dual-player chart's player-1 consumer rides the
+        second field capture (see `_second_field` / field_instances).
 
         A field-3D producer, when the chart has out-of-plane field-tilt
         pokes, supplies the double-apply guard: while the real 3D tilt
         runs, the consumer defers the 2D confusion-tilt approximation of
         the same axes (see note_mods and field_3d module docs)."""
+        return self._note_mods_for(replay, player=0)
+
+    def _note_mods_for(self, replay, player):
         from analysis.games.notitg.field_3d import notitg_field_3d
         from analysis.games.notitg.mod_channels import compile_mod_channels
         from analysis.games.notitg.note_mods import NotitgNoteMods
@@ -150,7 +155,26 @@ class NotitgAdapter(EtternaAdapter):
         field_3d = notitg_field_3d(
             sm_path, base_hidden=(compiled or {}).get('base_field_hidden'))
         tilt_active = field_3d.tilt_active if field_3d is not None else None
-        return NotitgNoteMods(channels, bpms, field_tilt_active=tilt_active)
+        return NotitgNoteMods(channels, bpms, field_tilt_active=tilt_active,
+                              player=player)
+
+    def _second_field(self, replay):
+        """A SecondFieldSpec (player-1 mod consumer for the second field
+        capture) when the modfile drives player-2 mods, else None.
+
+        UKSRT-style charts play the SAME chart on both sides with DIFFERENT
+        per-side effects (gat's `mod_insert(..., player)` rows, item 43).
+        The compiled channels already split by (mod, player); a player-1
+        channel present means the chart is dual-sided. Zero cost otherwise:
+        no player-1 channels -> None -> the renderer never renders a second
+        field, and single-player / non-NotITG charts are untouched."""
+        from analysis.games.notitg.field_instances import SecondFieldSpec
+        from analysis.games.notitg.mod_channels import compile_mod_channels
+        compiled = self._compiled_modfile(replay)
+        channels = compile_mod_channels((compiled or {}).get('mod_events') or [])
+        if 1 not in channels.players:
+            return None
+        return SecondFieldSpec(self._note_mods_for(replay, player=1))
 
     def scroll_multipliers(self, replay):
         from analysis.games.notitg.mod_channels import compile_scroll_multipliers
@@ -180,12 +204,14 @@ class NotitgAdapter(EtternaAdapter):
         screen_transform = compiled.get('screen_transform')
         if screen_transform:
             effects.append(NotitgScreenCamera(screen_transform))
-        field_copies = compiled.get('field_copies')
-        if field_copies:
+        field_copies = compiled.get('field_copies') or ()
+        second_field = self._second_field(replay)
+        if field_copies or second_field is not None:
             effects.append(NotitgFieldInstances(
                 field_copies,
                 aft_bg_timeline=compiled.get('aft_bg_visible'),
-                base_hidden=base_hidden))
+                base_hidden=base_hidden,
+                second_field=second_field))
         return effects
 
     def design_space(self):
