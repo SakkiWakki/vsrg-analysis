@@ -170,21 +170,33 @@ def draw_judgment(ctx, painter):
     # relative to t_now frame-to-frame and makes the band jitter.
     sv = p.sv_render if (p.sv_enabled and p._sv_engine.enabled) else None
     painter.setPen(_NO_PEN)
+    bands = []
     for name, w in reversed(p.windows):
         if sv is not None:
             half_top = sv.sv_distance(t_now - w, t_now) * sps
             half_bot = sv.sv_distance(t_now, t_now + w) * sps
         else:
             half_top = half_bot = w * sps
-        painter.setBrush(_judge_brush(p.judge_colors[name]))
-        painter.drawRect(QRectF(x0, judge_y - half_top, field_w,
-                                half_top + half_bot))
+        bands.append((_judge_brush(p.judge_colors[name]), half_top, half_bot))
+
+    bars = p._adapter.receptor_style() != 'line'
+    per_column = bars and getattr(ctx, 'receptor_offsets', None) is not None
+    if not per_column:
+        for brush, half_top, half_bot in bands:
+            painter.setBrush(brush)
+            painter.drawRect(QRectF(x0, judge_y - half_top, field_w,
+                                    half_top + half_bot))
 
     x_end = x0 + field_w
-    if p._adapter.receptor_style() == 'line':
+    if not bars:
         # Legacy single full-width line across the field.
         painter.setPen(_JUDGE_LINE_PEN)
         painter.drawLine(QPointF(x0, judge_y), QPointF(x_end, judge_y))
+    elif per_column:
+        # Receptors are displaced per column, so the window coloring
+        # adheres to each receptor's own frame instead of staying behind
+        # as a full-width band at the untransformed judge line.
+        _draw_column_judgments(ctx, painter, judge_y, bands)
     else:
         _draw_receptors(ctx, painter, judge_y)
 
@@ -194,6 +206,42 @@ def draw_judgment(ctx, painter):
         y = ctx.time_to_y(float(death_t))
         painter.setPen(_DEATH_LINE_PEN)
         painter.drawLine(QPointF(x0, y), QPointF(x_end, y))
+
+
+def _draw_column_judgments(ctx, painter, judge_y, bands):
+    """Window coloring + receptor notch per column, drawn together in the
+    receptor's local frame (its lane center + mod displacement, rotation
+    and zoom about its own center) so the judgment coloring rides every
+    receptor transform. Band widths span the lane; each column's bands
+    draw under its own notch."""
+    kc = ctx.keycount
+    dx, dy, rot, zoom, alpha = _receptor_offsets(ctx, kc)
+    painter.setPen(_NO_PEN)
+    for col in range(kc):
+        lane_w = ctx.lane_width(col)
+        if lane_w <= 0.5:
+            continue
+        cx = ctx.lane_center(col) + float(dx[col])
+        cy = judge_y + float(dy[col])
+        col_alpha = None if alpha is None else float(alpha[col])
+        col_zoom = None if zoom is None else float(zoom[col])
+
+        painter.save()
+        if col_alpha is not None and col_alpha < 1.0:
+            painter.setOpacity(painter.opacity() * max(0.0, col_alpha))
+        painter.translate(cx, cy)
+        if rot[col]:
+            painter.rotate(float(rot[col]))
+        if col_zoom is not None and col_zoom != 1.0:
+            painter.scale(col_zoom, col_zoom)
+        for brush, half_top, half_bot in bands:
+            painter.setBrush(brush)
+            painter.drawRect(QRectF(-lane_w / 2.0, -half_top, lane_w,
+                                    half_top + half_bot))
+        bar_w = lane_w * _RECEPTOR_LANE_FRAC
+        painter.fillRect(QRectF(-bar_w / 2.0, -_RECEPTOR_H / 2.0, bar_w,
+                                _RECEPTOR_H), _RECEPTOR_BRUSH)
+        painter.restore()
 
 
 def _draw_receptors(ctx, painter, judge_y):
