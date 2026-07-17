@@ -42,6 +42,27 @@ function(env)
 end
 """
 
+# Like the loader but returns the compiled function WITHOUT running it,
+# so a chunk executed many times (a per-frame driver body ticked over
+# its windows) compiles once instead of per call.
+_COMPILER_FACTORY = """
+function(env)
+    if setfenv then
+        return function(code, name)
+            local f, err = loadstring(code, name)
+            if not f then error(err, 0) end
+            setfenv(f, env)
+            return f
+        end
+    end
+    return function(code, name)
+        local f, err = load(code, name, 't', env)
+        if not f then error(err, 0) end
+        return f
+    end
+end
+"""
+
 
 class LuaScriptError(Exception):
     pass
@@ -59,6 +80,7 @@ class LuaHost:
         )
         self._env = self._build_env()
         self._load_in_env = self._lua.eval(_LOADER_FACTORY)(self._env)
+        self._compile_in_env = self._lua.eval(_COMPILER_FACTORY)(self._env)
 
     def _build_env(self):
         source = self._lua.globals()
@@ -100,6 +122,15 @@ class LuaHost:
         input is an expected failure mode, not a crash)."""
         try:
             return self._load_in_env(source, '@' + name)
+        except self._lua_error as exc:
+            raise LuaScriptError(str(exc)) from exc
+
+    def compile(self, source: str, name: str = 'script'):
+        """Compile a chunk in the sandbox and return the callable WITHOUT
+        running it - for chunks executed many times (a per-frame driver
+        body), where per-call recompilation would dominate."""
+        try:
+            return self._compile_in_env(source, '@' + name)
         except self._lua_error as exc:
             raise LuaScriptError(str(exc)) from exc
 

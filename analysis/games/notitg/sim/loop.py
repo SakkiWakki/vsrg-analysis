@@ -151,7 +151,7 @@ def run_sim(root, to_seconds, start_beat, end_seconds,
     streams; the environment's actors carry the keyframes."""
     load_s = load_anchor_seconds(start_beat, to_seconds)
     to_beats = beat_inverter(to_seconds, end_seconds)
-    env = SimEnvironment(load_s, rng_seed)
+    env = SimEnvironment(load_s, rng_seed, to_seconds=to_seconds)
     env.set_time(load_s, to_beats(load_s))
     warnings = env.load_actors(root)
 
@@ -163,5 +163,59 @@ def run_sim(root, to_seconds, start_beat, end_seconds,
         env.set_time(t, to_beats(t))
         env.drain(t)
         ticks += 1
+    return SimResult(env=env, ticks=ticks, end_seconds=end_seconds,
+                     load_seconds=load_s, warnings=warnings)
+
+
+def run_declarative(root, to_seconds, start_beat, end_seconds,
+                    rng_seed: int = 0, tick_hz: float = _TICK_HZ) -> SimResult:
+    """The fast compile: load the actors, fire the scheduled
+    `mod_actions`, then tick ONLY the bounded `perframe(a, b)` driver
+    windows - not the whole song.
+
+    The declarative bulk (mods/mods2 tables, tween commands) needs no
+    simulation: `producers` reads those tables straight into events. Only
+    the `UpdateCommand` per-frame drivers (walker/rotator reading other
+    actors' curves) need time-stepping, and they run in bounded sections
+    the template's `perframe(a, b)` gates declare. Ticking those windows
+    only - a small fraction of a whole-song 60Hz sweep - recovers the
+    driven-actor curves at a fraction of the cost."""
+    from analysis.games.notitg import update_integrator
+
+    load_s = load_anchor_seconds(start_beat, to_seconds)
+    to_beats = beat_inverter(to_seconds, end_seconds)
+    env = SimEnvironment(load_s, rng_seed, to_seconds=to_seconds)
+    env.set_time(load_s, to_beats(load_s))
+    warnings = env.load_actors(root)
+    env.replay_mod_actions()
+
+    from analysis.games.notitg.xml_actors import _strip_lua_wrapper
+
+    body = update_integrator._update_body(root)
+    windows = update_integrator._live_windows(body) if body else ()
+    if body:
+        # The raw attr is `%function(self) ... end`; the runnable chunk
+        # is the inner statements (`self` falls to the permissive stub,
+        # so the rig's own re-arm tail no-ops - the window sweep drives
+        # time instead).
+        body = _strip_lua_wrapper(body)
+    step = 1.0 / float(tick_hz)
+    ticks = 0
+    for start_beat_w, end_beat_w in windows:
+        t = to_seconds(start_beat_w)
+        w_end = to_seconds(end_beat_w)
+        while t < w_end:
+            t = min(t + step, w_end)
+            env.set_time(t, to_beats(t))
+            env.run_update_body(body)
+            ticks += 1
+
+    # Self-scheduling chains (a chara Idle loop re-queueing itself) are
+    # event lines already: the tween queue is deterministic, so ONE final
+    # drain to the end expands every remaining chain at queue-exact times
+    # - no tick grid. Runs after the window sweep so all timestamps stay
+    # monotonic (sync only advances forward).
+    env.set_time(end_seconds, to_beats(end_seconds))
+    env.drain(end_seconds)
     return SimResult(env=env, ticks=ticks, end_seconds=end_seconds,
                      load_seconds=load_s, warnings=warnings)

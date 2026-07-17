@@ -93,10 +93,12 @@ class SimEnvironment:
     The loop owns time: it calls `set_time(t, beat)` then `drain(t)`
     each tick; everything else happens through the chart's own Lua."""
 
-    def __init__(self, load_seconds: float, rng_seed: int = 0):
+    def __init__(self, load_seconds: float, rng_seed: int = 0,
+                 to_seconds=None):
         self._host = LuaHost(dialect='luajit21')
         self._host.run(_SIM_BOOTSTRAP, name='bootstrap')
         self._load_seconds = float(load_seconds)
+        self._to_seconds = to_seconds or (lambda beat: float(beat))
         self._now = float(load_seconds)
         self._beat = 0.0
         self._actors: dict = {}
@@ -117,7 +119,94 @@ class SimEnvironment:
         self._screen_children: dict = {}
         self._xml_child_names: dict = {}
         self._synthetic_children: dict = {}
+        self._update_chunk = None
+        self._body_chunks: dict = {}
+        self._classic_cache: dict = {}
         self._install()
+
+    # -- declarative tables (the classic template's event data) ----------
+
+    def read_table(self, name: str) -> list:
+        """A classic-template global Lua array (`mods`/`mods2`/
+        `mod_actions`) as a list of row dicts, or [] when absent. These
+        are DECLARATIVE events - `{beat, len, modstring, end|len, pn}` -
+        the load pass populates; reading them straight is the fast path
+        that needs no per-frame simulation."""
+        table = self._host.env[name] if name in self._host.env else None
+        if table is None:
+            return []
+        rows = []
+        index = 1
+        while True:
+            row = table[index]
+            if row is None:
+                break
+            rows.append(self._row_to_dict(row))
+            index += 1
+        return rows
+
+    @staticmethod
+    def _row_to_dict(row):
+        if not (hasattr(row, '__getitem__')
+                and not isinstance(row, (str, bytes))):
+            return row
+        out = {}
+        for key in (1, 2, 3, 4, 5):
+            try:
+                value = row[key]
+            except (KeyError, TypeError):
+                value = None
+            if value is not None:
+                out[key] = value
+        return out
+
+    def run_update_body(self, body: str) -> None:
+        """Run the `UpdateCommand` body once at the current sim time,
+        driving its per-frame closures (a walker reading another actor's
+        GetX, a rotator, the proxy grid). The body compiles ONCE (cached)
+        and the compiled function runs per tick - per-call recompilation
+        of an 800-line chunk would dominate the window sweep. Recorders
+        are synced to `now` first so pokes timestamp here;
+        `mod_time`/`GetSongBeat` see this tick. The mod_actions cursor
+        inside the body no-ops (already fired in the replay pass). Faults
+        are swallowed and counted."""
+        if self._update_chunk is None:
+            self._update_chunk = self._host.compile(body, name='update-body')
+        # No eager all-actor sync: pokes and getter reads _sync lazily,
+        # so only the actors the body actually touches advance per tick.
+        self._host.env['mod_time'] = self._now
+        try:
+            self._update_chunk()
+        except Exception as exc:
+            self._record_fault('update-body', exc)
+
+    def replay_mod_actions(self):
+        """Fire every `mod_actions` entry once in beat order, each at its
+        own fire time so a `GetSongBeat` branch inside sees that moment.
+        Function payloads are scheduled closures (actor pokes, spawns);
+        string payloads are `MESSAGEMAN:Broadcast(str)`. Each entry runs
+        guarded so one fault cannot abort the replay. Returns (fired,
+        failed)."""
+        rows = self.read_table('mod_actions')
+        ordered = sorted(enumerate(rows),
+                         key=lambda pair: (_beat_of(pair[1]), pair[0]))
+        fired = failed = 0
+        for _order, row in ordered:
+            payload = row.get(2) if isinstance(row, dict) else None
+            if not (callable(payload) or isinstance(payload, str)):
+                continue
+            beat = _beat_of(row)
+            self.set_time(self._to_seconds(beat), beat)
+            fired += 1
+            try:
+                if callable(payload):
+                    payload()
+                else:
+                    self._broadcast(None, payload)
+            except Exception as exc:
+                failed += 1
+                self._record_fault(f'action@{beat}', exc)
+        return fired, failed
 
     # -- results the loop harvests ----------------------------------------
 
@@ -375,11 +464,27 @@ class SimEnvironment:
             self._dispatch_depth -= 1
 
     def _run_lua_body(self, rec_id, body, name, load=False) -> None:
+        """Run a command body with `self` = the actor's recorder. Bodies
+        fire many times (a chara Idle chain re-queues itself for the
+        whole song), so each body string compiles ONCE and the cached
+        chunk is called thereafter - `self` resolves through the sandbox
+        env at call time, so one chunk serves every fire."""
+        chunk = self._body_chunks.get(body)
+        if chunk is None:
+            try:
+                chunk = self._host.compile(body, name=name)
+            except Exception as exc:
+                if load:
+                    self._warnings.append(f'{name}: {exc}')
+                else:
+                    self._record_fault(name, exc)
+                return
+            self._body_chunks[body] = chunk
         self._sync(rec_id)
         saved = self._host.env['self']
         self._host.env['self'] = self._tables[rec_id]
         try:
-            self._host.run(body, name=name)
+            chunk()
         except Exception as exc:
             if load:
                 self._warnings.append(f'{name}: {exc}')
@@ -391,7 +496,11 @@ class SimEnvironment:
     def _run_classic_body(self, rec_id, value) -> None:
         self._sync(rec_id)
         actor = self._actors[rec_id]
-        for verb, args in parse_command_string(value):
+        parsed = self._classic_cache.get(value)
+        if parsed is None:
+            parsed = parse_command_string(value)
+            self._classic_cache[value] = parsed
+        for verb, args in parsed:
             if verb in ('queuecommand', 'playcommand') and args:
                 self._actor_command(rec_id, verb, args[0])
             else:
@@ -576,3 +685,11 @@ class SimEnvironment:
         if isinstance(modstring, str):
             self._applied_mods.append(
                 (self._now, self._beat, modstring.strip(), None))
+
+
+def _beat_of(row) -> float:
+    value = row.get(1) if isinstance(row, dict) else None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0

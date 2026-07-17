@@ -23,7 +23,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from analysis.games.notitg import modfile
-from analysis.games.notitg.sim.loop import load_chart, run_sim
+from analysis.games.notitg.sim.loop import (
+    load_chart, run_declarative, run_sim)
 from analysis.games.notitg.sim.record import chase_events, coalesce_applied
 from analysis.player.render.mods.channels import ModChannels
 
@@ -48,8 +49,8 @@ def _compile_via_sim(sm_path, end_seconds):
         return None
     if end_seconds is None:
         end_seconds = doc.end_seconds
-    result = run_sim(doc.root, doc.to_seconds, doc.start_beat, end_seconds,
-                     rng_seed=doc.rng_seed)
+    result = run_declarative(doc.root, doc.to_seconds, doc.start_beat,
+                             end_seconds, rng_seed=doc.rng_seed)
     env = result.env
 
     named_keyframes = env.named_actor_keyframes()
@@ -65,13 +66,21 @@ def _compile_via_sim(sm_path, end_seconds):
     field_copies = _sim_field_copies(doc, env, actor_keyframes,
                                      osc_context)
 
+    # Mod events from TWO deterministic sources, no whole-song sim:
+    #   1. the declarative mods/mods2 tables (the bulk) - read straight
+    #      via the proven normalizer, exactly as the harvest path did;
+    #   2. the applied stream (ApplyGameCommand mods injected by the
+    #      per-frame drivers during the bounded UpdateCommand windows +
+    #      the mod_actions replay).
+    declarative = modfile._normalize_mod_events(_TableView(env), doc.to_seconds)
+    applied = _mod_events(result)
+    mod_events = declarative + applied
+
     return {
-        'mod_events': _mod_events(result),
-        # Precompiled channels from frame-resolved retarget events - the
-        # exact engine chase, no window reconstruction. Consumers prefer
-        # this over recompiling mod_events (the mirin-dict pattern).
-        'mod_channels': ModChannels.compile(
-            chase_events(result.applied_mods)),
+        'mod_events': mod_events,
+        # Precompiled channels: the declarative windows compiled through
+        # the approach-chase resolver, plus the driver-injected chase.
+        'mod_channels': _compile_channels(mod_events),
         'shader_flags': [{'beat': beat, 't': t, 'key': key, 'which': which}
                          for t, beat, key, which in result.shader_flags],
         'unsupported': {'count': 0, 'described': []},
@@ -115,6 +124,24 @@ def _compile_via_sim(sm_path, end_seconds):
 # to a zero-length window and its target never establishes (the classic
 # '*100000 1000 drunk' one-frame slam would vanish).
 _FRAME_HOLD_S = 1.0 / 60.0
+
+
+class _TableView:
+    """Adapts a SimEnvironment to the `.mods`/`.mods2` attribute surface
+    `modfile._normalize_mod_events` reads, so the proven declarative-table
+    normalizer runs against the sim's load-populated tables unchanged."""
+
+    def __init__(self, env):
+        self.mods = env.read_table('mods')
+        self.mods2 = env.read_table('mods2')
+
+
+def _compile_channels(mod_events):
+    """Mod channels from the combined event set (declarative windows +
+    driver-injected windows), all in the one row shape the approach-chase
+    resolver reads."""
+    from analysis.games.notitg.mod_channels import compile_mod_channels
+    return compile_mod_channels(mod_events)
 
 
 def _mod_events(result) -> list:

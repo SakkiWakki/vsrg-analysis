@@ -259,6 +259,10 @@ class SimActor:
         self._driven = False
         self._driven_spans: list = []
         self._in_update = False
+        # keyframes() memo, invalidated on emit: the harvest surfaces
+        # (named/actor/player keyframes, copies) each re-read every
+        # actor, and re-simplifying per read is quadratic in practice.
+        self._kf_cache: dict | None = None
 
     @property
     def now(self) -> float:
@@ -402,8 +406,10 @@ class SimActor:
         is behavior-preserving and cuts the compiled size by orders of
         magnitude (the events-not-keyframes model). Tweened points (their
         own duration/easing) are structural and never dropped."""
-        return {prop: _simplify_instants(kfs)
-                for prop, kfs in self._frames.items() if kfs}
+        if self._kf_cache is None:
+            self._kf_cache = {prop: _simplify_instants(kfs)
+                              for prop, kfs in self._frames.items() if kfs}
+        return self._kf_cache
 
     def oscillator_spans(self) -> tuple:
         spans = list(self._osc_spans)
@@ -741,6 +747,7 @@ class SimActor:
             start = (start,)
         self._frames.setdefault(prop, []).append(
             Keyframe(t, values, dur, ease_id, start=start))
+        self._kf_cache = None
         if self._driven:
             self._track_driven(t)
 
