@@ -46,6 +46,7 @@ chunk runs under try/except and partial output is fine.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import replace
 from pathlib import Path
@@ -268,17 +269,28 @@ def _beat_to_seconds(sm_data, chart):
     return convert
 
 
-def _run_chunks(root, start_beat, to_seconds):
+def _run_chunks(root, start_beat, to_seconds, rng_seed=0):
     """Load the actor tree under a shared stubbed host: one persistent
     recorder per actor, InitCommand/OnCommand run with `self` bound to
     it, and every `<Name>MessageCommand` / `<Name>Command` registered so
     later broadcasts and play/queuecommands run on the SAME recorder.
     A trailing `NAME = self` still binds a global (the poke target for the
     mod_actions closures). Per-chunk failures warn; a partial harvest
-    survives."""
-    env = StubEnvironment(start_beat, to_seconds=to_seconds)
+    survives. `rng_seed` seeds the sandbox `math.random` so the chart's
+    random spawner scatter (the FUCK datamosh pool) records reproducibly."""
+    env = StubEnvironment(start_beat, to_seconds=to_seconds, rng_seed=rng_seed)
     warnings = env.load_actors(root)
     return env, warnings
+
+
+def _chart_rng_seed(lua_dir) -> int:
+    """A stable per-chart RNG seed from the chart's modfile directory, so
+    `math.random`-driven spawns record the same scatter every compile
+    while different charts get different scatters. Content-agnostic (the
+    directory IS the chart's modfile identity) and 32-bit for LuaJIT's
+    `math.randomseed`."""
+    digest = hashlib.sha1(str(lua_dir).encode('utf-8')).digest()
+    return int.from_bytes(digest[:4], 'big')
 
 
 _BIND_RE = re.compile(r'\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*self\b')
@@ -583,7 +595,7 @@ def _leaf_element(actor, start_time, named_keyframes, precomputed=None,
 
     keyframes = precomputed if precomputed is not None \
         else _merged_keyframes(actor, start_time, named_keyframes)
-    drawable = _drawable_props(keyframes)
+    drawable = _fill_size_as_wh(kind, _drawable_props(keyframes))
     state_pin = _state_pin(keyframes)
     # A frame pin is real content (a sprite animated purely by
     # setstate/animate pokes), so it keeps an otherwise-untweened actor
@@ -597,9 +609,32 @@ def _leaf_element(actor, start_time, named_keyframes, precomputed=None,
         timelines=build_timelines(keyframes=drawable),
         asset=asset,
         text=str(text), font=font,
+        additive=_is_additive(actor),
         sheet_cols=spec.cols, sheet_rows=spec.rows, sheet_states=states,
         size_spec=spec, state_pin=state_pin,
     )
+
+
+def _is_additive(actor) -> bool:
+    """Whether the actor sets additive blending (`blend,add`) in its
+    load-time commands. gat's TargOn split judgment lines blend add so
+    the red bars glow over the field; the renderer honours Element.additive
+    with a plus composition mode."""
+    return any(_is_blend_add(verb, args)
+               for verb, args in _load_classic_verbs(actor))
+
+
+def _is_blend_add(verb, args) -> bool:
+    return verb == 'blend' and bool(args) and str(args[0]).strip() == 'add'
+
+
+def _load_classic_verbs(actor):
+    """(verb, args) pairs from an actor's classic (non-Lua) load-time
+    command strings."""
+    for attr in _LOAD_TIME_ATTRS:
+        value = actor.attrs.get(attr, '')
+        if value and not value.startswith('%'):
+            yield from xml_actors.parse_command_string(value)
 
 
 # Frame-index keyframes the recorder emits from setstate/animate pokes.
@@ -745,6 +780,33 @@ def _drawable_props(keyframes):
             if prop in _DRAWABLE_PROPS and frames}
 
 
+# Element kinds with no natural (pixmap/text) size: the renderer sizes
+# them from the model's `w`/`h` timelines (fluXis rect width/height).
+# NotITG Quads (`<Quad>` -> 'rect') carry their size in `zoomto`/`setsize`
+# -> `size_x`/`size_y` instead, so a fill quad recorded that way renders
+# at zero size unless we also expose it as `w`/`h`.
+_FILL_SIZE_KINDS = frozenset({'rect', 'ellipse', 'outline_rect',
+                              'outline_ellipse'})
+
+
+def _fill_size_as_wh(kind, drawable):
+    """Expose a fill primitive's `zoomto`/`setsize` size (recorded on
+    `size_x`/`size_y`) as the `w`/`h` the renderer sizes fill kinds from.
+
+    A Quad's absolute size is its whole size (no natural basis), so the
+    two representations agree; copying it to `w`/`h` lets the renderer's
+    fill-kind sizing path see it (the gat fullscreen flash quad and the
+    split TargOn judgment lines both size this way). Sprites keep their
+    pixmap size and are untouched."""
+    if kind not in _FILL_SIZE_KINDS:
+        return drawable
+    for size_prop, wh_prop in (('size_x', 'w'), ('size_y', 'h')):
+        frames = drawable.get(size_prop)
+        if frames:
+            drawable[wh_prop] = frames
+    return drawable
+
+
 def _is_image_asset(asset) -> bool:
     """True when a resolved asset is a real image reference (an existing
     file or the synthesized `white`), so an untyped `Actor`/`Layer` that
@@ -797,7 +859,8 @@ def _compile_modfile(sm_path):
     start_beat = min((b for b, _n, k in entries if k == 'FGCHANGES'),
                      default=0.0)
 
-    env, chunk_warnings = _run_chunks(root, start_beat, to_seconds)
+    env, chunk_warnings = _run_chunks(root, start_beat, to_seconds,
+                                      rng_seed=_chart_rng_seed(lua_dir))
     fired, failed = env.replay_mod_actions()
     integration = update_integrator.integrate_update(env, root, to_seconds)
     named_keyframes = env.named_actor_keyframes()
