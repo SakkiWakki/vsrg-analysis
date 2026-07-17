@@ -51,8 +51,9 @@ _TOKEN = re.compile(
     r'(?:(?P<no>no)\s+|(?P<percent>-?\d+(?:\.\d+)?)%?\s+)?'
     r'(?P<name>[a-z][a-z0-9 ]*?)$')
 
-_ENGINE_CONTROLS = {'clearall', 'overhead', 'incoming', 'space',
-                    'hallway', 'distant'}
+# Perspective/appearance controls with no consumer yet; hallway left
+# this set once arrow_effects gained its pinhole-recede kernel.
+_ENGINE_CONTROLS = {'clearall', 'overhead', 'incoming', 'space', 'distant'}
 _SPEED_MOD = re.compile(r'^(?:\d+(?:\.\d+)?x|c\d+|m\d+)$')
 
 # A speed token, optionally approach-prefixed: `*0.45 1.5x`, `2x`, `c400`,
