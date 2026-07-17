@@ -265,10 +265,15 @@ def compile_mod_channels(mod_events) -> ModChannels:
         if end < start:
             continue
         raw_player = row.get('player')
-        player = 0 if raw_player is None else max(0, int(raw_player) - 1)
+        # An absent player number means the classic reader applies the
+        # mod to BOTH players (ApplyGameCommand without a pn arg), so
+        # the window lands on both channels, not just player 0.
+        players = ((0, 1) if raw_player is None
+                   else (max(0, int(raw_player) - 1),))
         for percent, speed, name in parse_modstring(row['modstring']):
-            windows[(name, player)].append(
-                _Window(start, end, percent, speed, order))
+            for player in players:
+                windows[(name, player)].append(
+                    _Window(start, end, percent, speed, order))
 
     events = []
     for (name, player), chan_windows in windows.items():
