@@ -2,28 +2,41 @@
 
 The chart applies mods by calling `ApplyModifiers`/`ApplyGameCommand`
 every frame while a window is live (the classic template's clearall +
-reapply reader). The sim records each call as one (t, beat, modstring,
-player) row; `coalesce_applied` folds those into contiguous windows -
-one per (mod name, player) run of adjacent-in-time calls - splitting
-when the modstring's value changes or the calls stop. This replaces the
+reapply reader), and per-frame drivers inject more calls in the same
+frame. The engine's effective target per (mod, player) each frame is
+the LAST call of that frame - the table reader's `no movey0` loses to
+the walker's ramp applied after it. `coalesce_applied` therefore
+explodes each row into per-mod applications, keeps the last application
+per (mod, player) within each frame, and folds the survivors into
+contiguous windows split on value change or call gap. This replaces the
 harvest path's mods-table normalization AND its clearall decoding: the
-window edges here are where the chart actually started/stopped calling,
+window edges are where the chart actually started/stopped applying,
 which IS the engine truth.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
+
+from analysis.games.notitg.mod_channels import parse_modstring
 
 # Calls further apart than this many seconds belong to different
 # windows. The template reapplies every Update (~0.02s); 2.5 ticks of
 # slack tolerates tick jitter without merging real gaps.
 _WINDOW_GAP_S = 2.5 / 60.0
 
+# Applications closer together than half a tick are the same frame:
+# the later call is the frame's winner for that (mod, player).
+_SAME_FRAME_S = 0.5 / 60.0
+
 
 @dataclass
 class ModWindow:
-    """One contiguous application run of a mod."""
-    modstring: str
+    """One contiguous application run of a single mod: `value` is the
+    engine fraction (percent / 100) chased at approach `speed`."""
+    name: str
+    value: float
+    speed: float
     player: int | None
     t_start: float
     t_end: float
@@ -31,39 +44,54 @@ class ModWindow:
     beat_end: float
     calls: int = 1
 
-    def merge_call(self, t, beat) -> None:
-        self.t_end = t
-        self.beat_end = beat
-        self.calls += 1
+    @property
+    def modstring(self) -> str:
+        """The window as a single-mod ApplyModifiers string."""
+        return f'*{self.speed:g} {self.value * 100.0:g} {self.name}'
 
 
-def mod_name(modstring: str) -> str:
-    """The mod a modstring targets: its last whitespace token, lowered
-    ('*5 40 drunk' -> 'drunk', 'no dark' -> 'dark')."""
-    tokens = modstring.strip().lower().split()
-    while tokens and tokens[-1] == 'no':
-        tokens.pop()
-    return tokens[-1] if tokens else ''
+@lru_cache(maxsize=4096)
+def _parsed(modstring: str) -> tuple:
+    return tuple(parse_modstring(modstring))
 
 
 def coalesce_applied(applied) -> list:
-    """(t, beat, modstring, player) rows -> ModWindows, grouped by
-    (mod name, player), split on value change or time gap. Rows arrive
-    in call order (sim time is monotonic)."""
+    """(t, beat, modstring, player) rows -> per-mod ModWindows.
+    Rows arrive in call order (sim time is monotonic), so within one
+    frame a later application simply overwrites the pending frame entry
+    before it is folded into a window."""
     open_windows: dict = {}
+    pending: dict = {}
     out: list = []
-    for t, beat, modstring, player in applied:
-        key = (mod_name(modstring), player)
+
+    def fold(key, entry) -> None:
+        t, beat, value, speed = entry
         window = open_windows.get(key)
-        if window is not None and window.modstring == modstring \
+        if window is not None and window.value == value \
+                and window.speed == speed \
                 and t - window.t_end <= _WINDOW_GAP_S:
-            window.merge_call(t, beat)
-            continue
+            window.t_end = t
+            window.beat_end = beat
+            window.calls += 1
+            return
         if window is not None:
             out.append(window)
-        open_windows[key] = ModWindow(modstring, player, t, t, beat, beat)
+        name, player = key
+        open_windows[key] = ModWindow(name, value, speed, player,
+                                      t, t, beat, beat)
+
+    for t, beat, modstring, player in applied:
+        for value, speed, name in _parsed(modstring):
+            key = (name, player)
+            held = pending.get(key)
+            if held is not None and t - held[0] >= _SAME_FRAME_S:
+                fold(key, held)
+                held = None
+            pending[key] = (t, beat, value, speed)
+    for key, held in pending.items():
+        fold(key, held)
     out.extend(open_windows.values())
-    out.sort(key=lambda w: (w.t_start, w.modstring))
+    out.sort(key=lambda w: (w.t_start, w.name))
     return out
 
 

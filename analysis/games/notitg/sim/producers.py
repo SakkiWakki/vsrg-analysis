@@ -95,6 +95,14 @@ def _compile_via_sim(sm_path, end_seconds):
     }
 
 
+# A mod applied on frame N holds until the reader's next clearall +
+# reapply, one frame later - so every window's effective end is one
+# frame past its last call. Without this, a single-call spike coalesces
+# to a zero-length window and its target never establishes (the classic
+# '*100000 1000 drunk' one-frame slam would vanish).
+_FRAME_HOLD_S = 1.0 / 60.0
+
+
 def _mod_events(result) -> list:
     """Coalesced ApplyModifiers windows in `compile_mod_channels`'
     row shape. `apply_type` marks the provenance; the channel compiler
@@ -105,7 +113,7 @@ def _mod_events(result) -> list:
         'apply_type': 'sim',
         'player': window.player,
         't_start': window.t_start,
-        't_end': window.t_end,
+        't_end': window.t_end + _FRAME_HOLD_S,
         'time_based': True,
     } for window in coalesce_applied(result.applied_mods)]
 
