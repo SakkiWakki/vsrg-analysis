@@ -124,7 +124,7 @@ def test_identity_original_always_present_with_copies():
     copy = _copy('P1p', {'x': [Keyframe(0.0, (160.0,), 0.0, 0)],
                          'alpha': [Keyframe(0.0, (1.0,), 0.0, 0)]})
     frame = NotitgFieldInstances([copy]).at(_Ctx(1.0))
-    assert frame.fields[0] == (None, 1.0)
+    assert frame.fields[0] == (None, 1.0, 'field')
     assert len(frame.fields) == 2
 
 
@@ -132,6 +132,41 @@ def test_invisible_copy_is_dropped():
     from analysis.player.render.effects.timeline import Keyframe
     copy = _copy('P1p', {'alpha': [Keyframe(0.0, (0.0,), 0.0, 0)]})
     assert NotitgFieldInstances([copy]).at(_Ctx(1.0)) is None
+
+
+def test_proxy_copy_is_field_scope_never_full():
+    from analysis.player.render.effects.timeline import EventTimeline, Keyframe
+    copy = _copy('P1p', {'alpha': [Keyframe(0.0, (1.0,), 0.0, 0)]})
+    # An AFT-bg timeline that is fully "bg visible": a proxy still ignores
+    # it (proxies re-render the NoteField only, never the background).
+    aft_bg = EventTimeline([Keyframe(0.0, (1.0,), 0.0, 0)], rest=(1.0,))
+    frame = NotitgFieldInstances([copy], aft_bg_timeline=aft_bg).at(_Ctx(1.0))
+    _transform, _opacity, scope = frame.fields[1]
+    assert scope == 'field'
+
+
+def test_aft_copy_scope_follows_bg_timeline():
+    from analysis.player.render.effects.timeline import EventTimeline, Keyframe
+    copy = _copy('gat_aft', {'alpha': [Keyframe(0.0, (1.0,), 0.0, 0)]})
+    # bg-in-capture: off until t=5, on after.
+    aft_bg = EventTimeline([Keyframe(5.0, (1.0,), 0.0, 0)], rest=(0.0,))
+    fx = NotitgFieldInstances([copy], aft_bg_timeline=aft_bg)
+    assert fx.at(_Ctx(1.0)).fields[1][2] == 'field'
+    assert fx.at(_Ctx(9.0)).fields[1][2] == 'full'
+
+
+def test_base_hidden_suppresses_identity_original():
+    from analysis.player.render.effects.timeline import EventTimeline, Keyframe
+    copy = _copy('P1p', {'alpha': [Keyframe(0.0, (1.0,), 0.0, 0)]})
+    base_hidden = EventTimeline([Keyframe(2.0, (1.0,), 0.0, 0)], rest=(0.0,))
+    fx = NotitgFieldInstances([copy], base_hidden=base_hidden)
+    # Base visible: identity + copy.
+    shown = fx.at(_Ctx(1.0)).fields
+    assert shown[0] == (None, 1.0, 'field') and len(shown) == 2
+    # Base hidden: only the copy (no identity original).
+    hidden = fx.at(_Ctx(3.0)).fields
+    assert (None, 1.0, 'field') not in hidden
+    assert len(hidden) == 1
 
 
 # -- SM bitmap font -------------------------------------------------------

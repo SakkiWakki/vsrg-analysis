@@ -27,11 +27,16 @@ class EffectFrame:
       (fluXis camera; NotITG field mods). Draws at z >= SCENE_TOP_Z
       (pulse ring, foreground flash) stay in screen space, matching
       fluXis's nesting outside its CameraContainer.
-    - `fields`     playfield instances as `(transform, opacity)`
-      pairs. When any effect supplies them, the field layers render
-      once into an offscreen buffer and blit once per instance
-      (NotITG proxies, fluXis extra playfields); `(None, 1.0)` is the
-      untouched original. Empty = single identity field, drawn direct.
+    - `fields`     playfield instances as `(transform, opacity)` or
+      `(transform, opacity, scope)`. When any effect supplies them, the
+      field layers render once into a transparent offscreen buffer and
+      blit once per instance (NotITG proxies, fluXis extra playfields);
+      `(None, 1.0)` is the untouched original. Empty = single identity
+      field, drawn direct. `scope` (default 'field') is 'full' when a
+      copy replicates the whole chart region incl. background (NotITG
+      AFT copies whose ShowAFTBG grabs the background); those copies also
+      blit a backdrop capture (background clear + below-draws) under
+      their transform. Other games omit scope for the zero-cost path.
     """
     transform: QTransform | None = None
     draws: tuple = ()

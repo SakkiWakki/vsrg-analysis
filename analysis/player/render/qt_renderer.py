@@ -15,6 +15,23 @@ from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
 _HUD_REDRAW_HZ = 60
 _HUD_LAYERS = frozenset(('free_sections', 'hud'))
 
+# A field instance is `(transform, opacity)` or, for a per-copy capture
+# scope, `(transform, opacity, scope)`. A missing scope is 'field'
+# (transparent field-only capture) - the zero-cost path other games use.
+_DEFAULT_FIELD_SCOPE = 'field'
+
+
+def _field_entry(entry):
+    """(transform, opacity, scope) for a field instance, defaulting the
+    scope when the producer supplied only (transform, opacity)."""
+    if len(entry) >= 3:
+        return entry[0], entry[1], entry[2]
+    return entry[0], entry[1], _DEFAULT_FIELD_SCOPE
+
+
+def _field_scope(entry) -> str:
+    return entry[2] if len(entry) >= 3 else _DEFAULT_FIELD_SCOPE
+
 
 from analysis.player.render import culling, theme
 from analysis.player.render.frame_stats import FrameStats
@@ -90,6 +107,9 @@ class QtPlayerRenderer:
         self._hud_pixmap = None
         self._hud_rendered_at = 0.0
         self._hud_snapshot = None
+        self._field_pixmap = None
+        self._backdrop_pixmap = None
+        self._backdrop_painter = None
         self._frame_stats = FrameStats()
         # Set by GL hosts (PlayerCanvas); frames whose effects carry
         # shader passes route chart painting through it. None = raster
@@ -196,13 +216,19 @@ class QtPlayerRenderer:
         # the moved field -- visible as frame-trail smearing), and the
         # HUD never moves with the playfield. Below-draws (storyboards)
         # paint between the clear and the transformed field.
-        # 'full' capture scope (NotITG AFT): the field copies replicate
-        # the WHOLE chart region - background clear + below-draws + field
-        # layers - so the offscreen capture opens BEFORE the background
-        # layer and everything under the HUD paints into it. A plain
-        # screen clear still runs first so the area outside the chart
-        # region (behind the HUD) is cleared. 'field' scope (default,
-        # fluXis) captures only the field layers over the live screen.
+        #
+        # Field copies (EffectFrame.fields) come in two scopes. A 'field'
+        # copy replicates only the transparent field layers, so the shared
+        # background shows through every copy (fluXis extra playfields;
+        # NotITG ActorProxy copies). A 'full' copy replicates the whole
+        # chart region incl. background + below-draws (NotITG AFT copies
+        # whose ShowAFTBG grabs the background). To serve both from one
+        # frame, the field layers ALWAYS capture into a transparent
+        # `_field_pixmap`, and when any 'full' copy is present the
+        # background clear + below-draws capture into a separate
+        # `_backdrop_pixmap` (also blitted to screen once as the real
+        # backdrop). A 'full' copy then blits backdrop+field under its
+        # transform; a 'field' copy blits only the field pixmap.
         full_capture = self._full_field_capture(effect_frame, ctx)
         chart_wrapped = False
         scene_wrapped = False
@@ -221,30 +247,33 @@ class QtPlayerRenderer:
                     self._blit_field_instances(effect_frame, ctx,
                                                chart_painter)
                     field_painter = None
-            if full_capture and name == 'background' and field_painter is None:
-                # Clear the screen (outside the chart region, behind the
-                # HUD) directly, then redirect the background clear +
-                # below-draws + field layers into the capture pixmap.
+            if full_capture and name == 'background':
+                # A 'full' copy exists: redirect the background clear +
+                # below-draws into the backdrop pixmap (blitted to screen
+                # as the base backdrop by _blit_field_instances). A plain
+                # screen clear runs on the host first so the area outside
+                # the chart region (behind the HUD) is cleared; the
+                # background layer itself (this iteration's `fn`) then
+                # draws into the backdrop painter via `target` below.
                 _field_layer.draw_background(ctx, chart_painter)
-                field_painter = self._begin_field_capture(
-                    effect_frame, ctx, chart_painter)
+                self._begin_backdrop_capture(effect_frame, ctx, chart_painter)
             if in_field and not below_drawn:
                 # Scene (camera) bracket opens before the below-draws
                 # so background storyboards ride the camera; the
                 # canvas clear stays outside it in screen space. Under a
-                # 'full' capture the pixmap is already open, so below-
-                # draws land in it alongside the background clear.
-                below_target = field_painter or chart_painter
+                # 'full' capture the below-draws land in the backdrop
+                # pixmap alongside the background clear.
+                below_target = self._backdrop_painter or chart_painter
                 scene_wrapped = self._begin_scene_transform(
                     effect_frame, below_target, ctx)
                 self._draw_effect_below(effect_frame, ctx, below_target)
                 below_drawn = True
+                self._end_backdrop_capture()
                 # Field instances: the field layer group (its own
-                # transform bracket included) renders once into an
-                # offscreen buffer, then blits per instance.
-                if field_painter is None:
-                    field_painter = self._begin_field_capture(
-                        effect_frame, ctx, chart_painter)
+                # transform bracket included) renders once into a
+                # transparent offscreen buffer, then blits per instance.
+                field_painter = self._begin_field_capture(
+                    effect_frame, ctx, chart_painter)
                 chart_wrapped = self._begin_effect_transform(
                     effect_frame, field_painter or chart_painter, ctx)
             if is_hud:
@@ -258,9 +287,14 @@ class QtPlayerRenderer:
                 if hud_painter is None:
                     hud_painter = self._begin_hud_pixmap(ctx, painter)
                 target = hud_painter
+            elif captured:
+                # Captured layers draw into whichever offscreen buffer is
+                # open: the field pixmap for the field layers, or (for the
+                # background layer under a 'full' copy) the backdrop pixmap.
+                target = (field_painter or self._backdrop_painter
+                          or chart_painter)
             else:
-                target = (field_painter if captured and field_painter
-                          is not None else chart_painter)
+                target = chart_painter
             if visibility.get(name, True):
                 if fn is not None:
                     self._draw_layer(fn, ctx, target, name, is_hud)
@@ -338,67 +372,102 @@ class QtPlayerRenderer:
 
     @staticmethod
     def _full_field_capture(frame, ctx) -> bool:
-        """True when this frame's field copies must capture the whole
-        chart region (background + below-draws + field), not just the
-        field layers. Driven by the adapter's `field_capture_scope`
-        (NotITG AFT copies grab the background via ShowAFTBG)."""
+        """True when any field copy this frame is 'full' scope (carries
+        the background), so the backdrop (background clear + below-draws)
+        must be captured for those copies to blit. The identity original
+        and 'field' copies never need it."""
         if frame is None or not frame.fields:
             return False
-        player = getattr(ctx, 'player', None)
-        adapter = getattr(player, '_adapter', None)
-        if adapter is None:
-            return False
-        return adapter.field_capture_scope() == 'full'
+        return any(_field_scope(entry) == 'full' for entry in frame.fields)
 
-    def _begin_field_capture(self, frame, ctx, painter):
-        """Redirect the field layer group into a transparent pixmap
-        when this frame carries field instances; returns the capture
-        painter or None (single identity field, direct painting)."""
-        if (frame is None or not frame.fields or painter is None
-                or getattr(ctx, 'player', None) is None):
-            return None
+    def _new_capture_pixmap(self, ctx, painter):
+        """A transparent window-sized pixmap matching the painter's device
+        pixel ratio, for an offscreen field/backdrop capture."""
         from PySide6.QtGui import QPixmap
         p = ctx.player
         dpr = float(painter.device().devicePixelRatioF())
         pm = QPixmap(int(p.W * dpr), int(p.H * dpr))
         pm.setDevicePixelRatio(dpr)
         pm.fill(Qt.GlobalColor.transparent)
+        return pm
+
+    def _begin_backdrop_capture(self, frame, ctx, painter) -> None:
+        """Open a backdrop pixmap capturing the background clear +
+        below-draws, used as the source for 'full' field copies (their
+        capture includes the background). No-op unless this frame has a
+        'full' copy. The captured backdrop also becomes the base backdrop
+        blitted to screen, so it is never double-drawn."""
+        self._backdrop_pixmap = None
+        self._backdrop_painter = None
+        if (not self._full_field_capture(frame, ctx) or painter is None
+                or getattr(ctx, 'player', None) is None):
+            return
+        pm = self._new_capture_pixmap(ctx, painter)
+        self._backdrop_pixmap = pm
+        bp = QPainter(pm)
+        bp.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        self._backdrop_painter = bp
+
+    def _end_backdrop_capture(self) -> None:
+        if self._backdrop_painter is not None:
+            self._backdrop_painter.end()
+            self._backdrop_painter = None
+
+    def _begin_field_capture(self, frame, ctx, painter):
+        """Redirect the field layer group into a transparent pixmap
+        when this frame carries field instances; returns the capture
+        painter or None (no fields, direct painting)."""
+        self._field_pixmap = None
+        if (frame is None or not frame.fields or painter is None
+                or getattr(ctx, 'player', None) is None):
+            return None
+        pm = self._new_capture_pixmap(ctx, painter)
         self._field_pixmap = pm
         field_painter = QPainter(pm)
         field_painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         return field_painter
 
     def _blit_field_instances(self, frame, ctx, painter) -> None:
-        """One blit per field instance, clipped to the chart region so no
-        copy can land on the sidebar. Under a 'full' capture (NotITG AFT)
-        each copy is additionally clipped to the mapped design box in its
-        own source space, so the copy shows only the hard-cropped 640x480
-        screen (offscreen content never bleeds into a copy)."""
-        design_box = self._field_design_box(frame, ctx)
-        for transform, opacity in frame.fields:
+        """Blit the base backdrop then one blit per field instance, each
+        clipped to the chart region so no copy lands on the sidebar.
+
+        A 'full' copy blits the backdrop capture (background + below-draws)
+        then the field capture under its transform, so the whole screen is
+        replicated. A 'field' copy blits only the field capture, so the
+        real backdrop shows through. Each copy is additionally clipped to
+        the mapped design box in its own source space, so it shows only the
+        hard-cropped 640x480 screen (offscreen content never bleeds in).
+
+        The backdrop pixmap, when present, was captured in place of the
+        direct background/below-draws, so it is blitted here as the base
+        backdrop exactly once."""
+        from analysis.games.notitg.field_instances import design_box
+        box = (design_box(ctx.chart_rect)
+               if self._full_field_capture(frame, ctx) else None)
+        if self._backdrop_pixmap is not None:
+            painter.save()
+            painter.setClipRect(QRectF(*ctx.chart_rect))
+            painter.drawPixmap(0, 0, self._backdrop_pixmap)
+            painter.restore()
+        for entry in frame.fields:
+            transform, opacity, scope = _field_entry(entry)
             if opacity < 1.0 / 255.0:
                 continue
             painter.save()
             painter.setClipRect(QRectF(*ctx.chart_rect))
             if transform is not None:
                 painter.setTransform(transform, True)
-            if design_box is not None:
+            if box is not None:
                 # Set after the transform: clips the copy's SOURCE (the
                 # 640x480 design box in the pixmap) so only that region is
                 # copied, mapped to the copy's position by the transform.
-                painter.setClipRect(design_box, Qt.ClipOperation.IntersectClip)
+                painter.setClipRect(box, Qt.ClipOperation.IntersectClip)
             painter.setOpacity(min(1.0, opacity))
+            if scope == 'full' and self._backdrop_pixmap is not None:
+                painter.drawPixmap(0, 0, self._backdrop_pixmap)
             painter.drawPixmap(0, 0, self._field_pixmap)
             painter.restore()
-
-    def _field_design_box(self, frame, ctx):
-        """The mapped 640x480 design rect to crop AFT copies to, or None
-        when this frame's field capture is not the full-screen ('full')
-        kind (fluXis proxies keep the whole transparent notefield)."""
-        if not self._full_field_capture(frame, ctx):
-            return None
-        from analysis.games.notitg.field_instances import design_box
-        return design_box(ctx.chart_rect)
+        self._backdrop_pixmap = None
 
     @staticmethod
     def _begin_scene_transform(frame, painter, ctx) -> bool:

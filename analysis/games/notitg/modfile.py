@@ -812,6 +812,9 @@ def _compile_modfile(sm_path):
         'has_background': _has_background_actors(tree, sm_path),
         'field_copies': _field_copies(root, named_keyframes, named_meta,
                                       to_seconds, start_beat, actor_keyframes),
+        'aft_bg_visible': _aft_bg_visible_timeline(root, bg_stem,
+                                                   actor_keyframes),
+        'base_field_hidden': _base_field_hidden_timeline(env),
         'named_actors': len(named_keyframes),
         'recorded_keyframes': _count_recorded_keyframes(named_keyframes),
         'replay': {'fired': fired, 'failed': failed,
@@ -864,8 +867,11 @@ _PROXY_NAMES = frozenset({'P1p', 'P2p', 'P3p', 'P4p'})
 
 # Field-copy transform properties the producer samples. base_scale
 # folds into scale (SM's separate pre-multiplier); rotation is degrees.
+# `hidden` is SM's hard visibility bit (the proxy ActorFrames rest
+# `hidden,1` until their section shows them), so the producer drops a
+# copy whose hidden bit is set even when its diffusealpha is still 1.
 _FIELD_PROPS = ('x', 'y', 'rotation', 'scale_x', 'scale_y',
-                'base_scale_x', 'base_scale_y', 'alpha')
+                'base_scale_x', 'base_scale_y', 'alpha', 'hidden')
 
 
 def _field_copies(root, named_keyframes, named_meta, to_seconds,
@@ -910,6 +916,85 @@ def _field_copies(root, named_keyframes, named_meta, to_seconds,
     return copies
 
 
+# The engine player actors the chart hides while proxies stand in
+# (`P1:hidden(1)`). PlayerP1 is player 0's real NoteField; hiding it means
+# the copies replace the base field, so the renderer skips the base draw.
+_BASE_PLAYER_NAME = 'PlayerP1'
+
+
+def _base_field_hidden_timeline(env):
+    """An EventTimeline sampling 1.0 while the real player-0 NoteField is
+    hidden (the chart poked `P1:hidden(1)` to let proxies stand in), 0.0
+    otherwise. None when the chart never hides it (every non-notitg chart,
+    and unmodded notitg). Sourced from the recorder the screen stub hands
+    back for `GetChild('PlayerP1')`."""
+    hidden = env.player_keyframes(_BASE_PLAYER_NAME).get('hidden')
+    if not hidden:
+        return None
+    return EventTimeline(hidden, rest=(0.0,))
+
+
+def _aft_bg_visible_timeline(root, bg_stem, actor_keyframes):
+    """An EventTimeline sampling 1.0 while an ActorFrameTexture capture
+    includes the background, 0.0 otherwise.
+
+    gat toggles a fullscreen bg.png quad between its `ShowAFT` (no bg) and
+    `ShowAFTBG` (bg) states: the quad is `hidden,1` until `ShowAFTBG`
+    shows it and `HideAFT` hides it again. Its recorded `hidden` timeline
+    (inverted to bg-visible) IS the AFT bg-in-capture signal. Multiple
+    such quads OR together (bg visible if any is shown). None when the
+    chart has no AFT-bg quad."""
+    visibles = []
+    for actor in _iter_actors(root):
+        if not _is_aft_bg_quad(actor, bg_stem):
+            continue
+        hidden = _actor_hidden_keyframes(actor, actor_keyframes)
+        if hidden:
+            visibles.append(EventTimeline(
+                [_invert_hidden(kf) for kf in hidden], rest=(1.0,)))
+    if not visibles:
+        return None
+    return visibles[0] if len(visibles) == 1 else _AnyVisible(visibles)
+
+
+def _is_aft_bg_quad(actor, bg_stem) -> bool:
+    """True for a fullscreen background sprite/quad the AFT rig toggles:
+    it responds to `ShowAFTBG` and draws the chart's #BACKGROUND image."""
+    if 'ShowAFTBG' not in actor.message_commands():
+        return False
+    reference = (actor.attrs.get('File') or actor.attrs.get('Texture')
+                 or actor.attrs.get('Load') or '')
+    return bool(bg_stem) and Path(reference).stem.casefold() == bg_stem
+
+
+def _actor_hidden_keyframes(actor, actor_keyframes):
+    if not actor_keyframes:
+        return None
+    rec_id = getattr(actor, '_recorder_id', None)
+    if rec_id is None:
+        return None
+    return actor_keyframes.get(rec_id, {}).get('hidden')
+
+
+def _invert_hidden(keyframe):
+    """A `hidden` keyframe (1 hidden / 0 shown) as a bg-visible keyframe
+    (0 hidden -> 1 visible). Zero-duration step, so the boolean flips
+    exactly at the poke time."""
+    hidden = keyframe.values[0]
+    return replace(keyframe, values=(1.0 - hidden,), duration=0.0)
+
+
+class _AnyVisible:
+    """Samples 1.0 when ANY of several bg-visible timelines is set (the
+    AFT includes bg if any of its bg quads is shown)."""
+
+    def __init__(self, timelines):
+        self._timelines = tuple(timelines)
+
+    def sample(self, t) -> tuple:
+        return (max(tl.sample(t)[0] for tl in self._timelines),)
+
+
 def _quad_source_timelines(named_keyframes) -> dict:
     """Compiled {prop: EventTimeline} per named actor, so a copy's driver
     can sample the data-holder quads it reads (gat_aftx GetX, ...)."""
@@ -948,4 +1033,5 @@ _FIELD_RESTS = {
     'x': 0.0, 'y': 0.0, 'rotation': 0.0,
     'scale_x': 1.0, 'scale_y': 1.0,
     'base_scale_x': 1.0, 'base_scale_y': 1.0, 'alpha': 1.0,
+    'hidden': 0.0,
 }

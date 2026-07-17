@@ -16,13 +16,17 @@ Public API:
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF
+from PySide6.QtGui import QBrush, QPainterPath, QTransform
 
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, NamedTuple
 
+import numpy as np
+
 from analysis.player.notetypes import NT_TICK
 from analysis.player.render.layers import chart_extras as _extras
+from analysis.player.render.primitives import _NO_PEN
 
 if TYPE_CHECKING:
     from analysis.player.render.render_context import RenderContext
@@ -73,6 +77,10 @@ class _NoteView:
     # note, plus Quaver LNs whose SV doesn't reverse inside the body).
     body_min_y: float = float('nan')
     body_max_y: float = float('nan')
+    # NotITG per-note-mod hold-body warp: (xs, ys) polyline (our px)
+    # tracing this hold's body bent by drunk/wave/digital etc. None =
+    # draw the straight head/tail rect (every mod-free frame + game).
+    body_samples: object = None
 
 
 def _ln_body_y_extent(ctx, i, p):
@@ -235,6 +243,11 @@ def _build(ctx, i, pos) -> _NoteView | None:
     mod_alpha = getattr(ctx, 'candidate_alpha', None)
     mod_rot = getattr(ctx, 'candidate_rot_deg', None)
     mod_zoom = getattr(ctx, 'candidate_zoom', None)
+    body_samples = None
+    if is_ln:
+        samples = getattr(ctx, 'hold_body_samples', None)
+        if samples is not None:
+            body_samples = samples.get(pos)
     return _NoteView(
         i=i, col=col,
         y=float(ctx.candidate_head_y[pos]), y_end=y_end,
@@ -257,6 +270,7 @@ def _build(ctx, i, pos) -> _NoteView | None:
         flip_tail=flip_tail,
         body_min_y=body_min_y,
         body_max_y=body_max_y,
+        body_samples=body_samples,
     )
 
 
@@ -362,7 +376,10 @@ def _draw_ln(ctx, painter, n):
     if span is not None:
         top, bot, body_state = span
         if bot > top:
-            _draw_ln_body_tile(ctx, painter, n, top, bot, body_state)
+            if n.body_samples is not None:
+                _draw_ln_body_warped(ctx, painter, n, top, bot, body_state)
+            else:
+                _draw_ln_body_tile(ctx, painter, n, top, bot, body_state)
 
     # ── tail sprite ──
     on_screen = -ctx.screen_margin <= n.y_end <= p.H + ctx.screen_margin
@@ -413,6 +430,76 @@ def _draw_ln_body_tile(ctx, painter, n, top, bot, state):
     # so fractional pixel heights (high-DPI) render cleanly.
     painter.drawTiledPixmap(
         QRectF(n.lx, top, ctx.lane_width(n.col), bot - top), pm)
+
+
+def _clip_body_samples(xs, ys, top, bot):
+    """Restrict a hold's (xs, ys) body polyline to the visible [top, bot]
+    y-window, inserting interpolated endpoints where it crosses either
+    edge. The samples run monotonically in y from head to tail (either
+    direction); we walk consecutive segments and keep the in-window part.
+    Returns (xs, ys) arrays or None if nothing lies inside."""
+    out_x, out_y = [], []
+
+    def add(x, y):
+        out_x.append(float(x))
+        out_y.append(float(y))
+
+    def at_edge(x0, y0, x1, y1, edge):
+        f = (edge - y0) / (y1 - y0)
+        return x0 + f * (x1 - x0), edge
+
+    for k in range(len(ys)):
+        y = ys[k]
+        if top <= y <= bot:
+            add(xs[k], y)
+        if k + 1 < len(ys):
+            y0, y1 = ys[k], ys[k + 1]
+            x0, x1 = xs[k], xs[k + 1]
+            for edge in (top, bot):
+                if (y0 - edge) * (y1 - edge) < 0.0:
+                    add(*at_edge(x0, y0, x1, y1, edge))
+    if len(out_y) < 2:
+        return None
+    order = np.argsort(out_y)
+    return np.asarray(out_x)[order], np.asarray(out_y)[order]
+
+
+def _draw_ln_body_warped(ctx, painter, n, top, bot, state):
+    """Draw a hold body as a BENT vertical strip through the per-note-mod
+    sample polyline (`n.body_samples`), so drunk/wave/digital deform the
+    body the way ITGmania's per-strip rendering does, instead of the
+    straight head/tail rect. The strip is a filled ribbon of lane width
+    centered on the polyline, tiled with the same body sprite as a brush
+    (vertical tiling matches the rect path)."""
+    xs, ys = n.body_samples
+    clipped = _clip_body_samples(xs, ys, top, bot)
+    if clipped is None:
+        return
+    xs, ys = clipped
+
+    pm = ctx.sprite_cache.get('ln_body', ctx,
+                              col=n.col, state=state, is_roll=n.is_roll)
+    w = ctx.lane_width(n.col)
+    # `xs` is the body's LEFT edge per sample (lane_x + dx), matching the
+    # rect path's `QRectF(n.lx, ...)` origin; the ribbon spans one lane
+    # width to its right. Trace the left edge down then the right edge back.
+    right = xs + w
+
+    path = QPainterPath()
+    path.moveTo(float(xs[0]), float(ys[0]))
+    for i in range(1, len(ys)):
+        path.lineTo(float(xs[i]), float(ys[i]))
+    for i in range(len(ys) - 1, -1, -1):
+        path.lineTo(float(right[i]), float(ys[i]))
+    path.closeSubpath()
+
+    brush = QBrush(pm)
+    brush.setTransform(QTransform().translate(float(xs[0]), float(ys[0])))
+    painter.save()
+    painter.setPen(_NO_PEN)
+    painter.setBrush(brush)
+    painter.drawPath(path)
+    painter.restore()
 
 
 def _draw_ln_tail_sprite(ctx, painter, n):

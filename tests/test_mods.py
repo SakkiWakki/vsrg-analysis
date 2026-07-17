@@ -1012,3 +1012,114 @@ def test_new_mods_determinism():
     np.testing.assert_array_equal(a.dx, b.dx)
     np.testing.assert_array_equal(a.zoom, b.zoom)
     np.testing.assert_array_equal(a.alpha_mult, b.alpha_mult)
+
+
+# --- hold-body warp (item 39) ----------------------------------------
+
+class _LnNotes:
+    def __init__(self, n, ln_tail_times):
+        self.noterows_list = list(range(n))
+        self.ln_tail_times = np.asarray(ln_tail_times, dtype=np.float64)
+
+
+class _LnPlayer:
+    def __init__(self, cols, keycount, ln_tail_times):
+        self.columns = np.asarray(cols, dtype=np.int64)
+        self.keycount = keycount
+        self.notes = _LnNotes(len(cols), ln_tail_times)
+
+
+class _LnCtx:
+    """Fake ctx with LN tail y, lane_x, and a hold_body_samples slot."""
+    def __init__(self, player, heads, tails, judge_y, chart_h, lane_w=ae.ARROW_SIZE):
+        self.player = player
+        self.candidates = list(range(len(heads)))
+        self.t_now = 0.0
+        self.lane_w = lane_w
+        self.judge_y = judge_y
+        self.chart_rect = (0.0, 0.0, 400.0, float(chart_h))
+        self.candidate_head_y = np.asarray(heads, dtype=np.float64)
+        self.candidate_tail_y = np.asarray(tails, dtype=np.float64)
+        self.candidate_press_y = np.asarray(heads, dtype=np.float64)
+
+    def lane_x(self, col):
+        return 100.0 + col * self.lane_w
+
+
+def test_hold_body_samples_absent_without_mods():
+    # No dx-producing channel active => rect fallback: no samples stashed.
+    player = _LnPlayer([0], 1, [1.0])
+    ctx = _LnCtx(player, [40.0], [200.0], judge_y=300, chart_h=600)
+    _mods([ModEvent(0.0, 1.0, -1, 'reverse')]).apply(ctx)
+    assert getattr(ctx, 'hold_body_samples', None) is None
+
+
+def test_hold_body_samples_none_for_taps():
+    # A tap (NaN ln_tail_time) never gets a body polyline even with drunk on.
+    player = _LnPlayer([0], 1, [float('nan')])
+    ctx = _LnCtx(player, [40.0], [float('nan')], judge_y=300, chart_h=600)
+    _mods([ModEvent(0.0, 1.2, -1, 'drunk')]).apply(ctx)
+    assert getattr(ctx, 'hold_body_samples', None) is None
+
+
+def test_hold_body_passes_through_head_and_tail():
+    # Under drunk the body's first sample sits at the head, the last at the
+    # tail (both in x AND y), so the bent strip stays attached. reverse=1
+    # pins the native (downscroll) space so head/tail y are untouched.
+    player = _LnPlayer([1], 4, [5.0])
+    ctx = _LnCtx(player, [50.0], [400.0], judge_y=300, chart_h=600)
+    _mods([ModEvent(0.0, 1.0, -1, 'reverse'),
+           ModEvent(0.0, 1.2, -1, 'drunk')]).apply(ctx)
+    xs, ys = ctx.hold_body_samples[0]
+    assert ys[0] == pytest.approx(ctx.candidate_head_y[0])
+    assert ys[-1] == pytest.approx(ctx.candidate_tail_y[0])
+    # x at the endpoints matches the head's own displaced x (lane_x + dx).
+    head_x = ctx.lane_x(1) + ctx.candidate_dx[0]
+    assert xs[0] == pytest.approx(head_x)
+
+
+def test_hold_body_bends_under_drunk():
+    # A straight rect would keep xs constant; drunk warps the body so at
+    # least one interior sample's x differs from the endpoints' x.
+    player = _LnPlayer([2], 4, [6.0])
+    ctx = _LnCtx(player, [40.0], [500.0], judge_y=300, chart_h=600)
+    _mods([ModEvent(0.0, 1.0, -1, 'reverse'),
+           ModEvent(0.0, 1.5, -1, 'drunk')]).apply(ctx)
+    xs, _ys = ctx.hold_body_samples[0]
+    assert len(xs) >= 3
+    assert not np.allclose(xs, xs[0])
+
+
+def test_hold_body_sample_x_matches_direct_note_offsets():
+    # Each body sample's dx is exactly note_offsets(drunk) at that sample's
+    # engine y_offset. reverse=1 keeps native space so y_offset = judge_y -
+    # screen_y (scale = lane_w/64 = 1 here). Verify one interior sample.
+    player = _LnPlayer([0], 4, [4.0])
+    lane_w = ae.ARROW_SIZE
+    ctx = _LnCtx(player, [100.0], [300.0], judge_y=300, chart_h=600,
+                 lane_w=lane_w)
+    _mods([ModEvent(0.0, 1.0, -1, 'reverse'),
+           ModEvent(0.0, 1.3, -1, 'drunk')]).apply(ctx)
+    xs, ys = ctx.hold_body_samples[0]
+    k = len(ys) // 2
+    y_off = (ctx.judge_y - ys[k]) / (lane_w / ae.ARROW_SIZE)
+    off = note_offsets({'drunk': 1.3}, np.array([0]), np.array([y_off]),
+                       t_now=0.0, beat_now=0.0, keycount=4,
+                       note_beats=np.array([0.0]))
+    expect_x = ctx.lane_x(0) + off.dx[0] * (lane_w / ae.ARROW_SIZE)
+    assert xs[k] == pytest.approx(expect_x, abs=1e-6)
+
+
+def test_hold_body_batches_multiple_holds():
+    # Two holds in one apply => two polylines, each attached to its own
+    # head/tail (the batched note_offsets call splits back correctly).
+    player = _LnPlayer([0, 3], 4, [4.0, 4.0])
+    ctx = _LnCtx(player, [40.0, 80.0], [300.0, 450.0], judge_y=300,
+                 chart_h=600)
+    _mods([ModEvent(0.0, 1.0, -1, 'reverse'),
+           ModEvent(0.0, 1.2, -1, 'drunk')]).apply(ctx)
+    assert set(ctx.hold_body_samples.keys()) == {0, 1}
+    for pos in (0, 1):
+        xs, ys = ctx.hold_body_samples[pos]
+        assert ys[0] == pytest.approx(ctx.candidate_head_y[pos])
+        assert ys[-1] == pytest.approx(ctx.candidate_tail_y[pos])

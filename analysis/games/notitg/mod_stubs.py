@@ -140,6 +140,7 @@ class StubEnvironment:
         self._message_commands: dict = {}
         self._named_commands: dict = {}
         self._child_recorders: dict = {}
+        self._screen_children: dict = {}
         self._dispatch_depth = 0
         self._dispatch_total = 0
         self._host = LuaHost(dialect='luajit21')
@@ -403,6 +404,37 @@ class StubEnvironment:
                 return value
         return self._host.env['__permissive']()
 
+    def _screen_get_child(self, _self, name=None):
+        """`SCREENMAN:GetTopScreen():GetChild('PlayerP1')`. The real
+        players are engine actors, not chart-declared, but the chart pokes
+        them (`P1:hidden(1)` to hide the base NoteField while proxies stand
+        in). We hand back a persistent recorder per player name so those
+        pokes record onto a timeline the compiler can read as the
+        base-field visibility signal. Non-player children return a fresh
+        recorder too, so `P1:GetChild('NoteField')` is a usable target for
+        a proxy's SetTarget (its pokes are harmless)."""
+        if not isinstance(name, str):
+            return self._host.env['__permissive']()
+        table = self._screen_children.get(name)
+        if table is None:
+            # Anchor at the current fire clock, not load: the player is
+            # first fetched inside a mod_actions broadcast (Hide/Show),
+            # and _reset_recorder_clocks (which precedes each fire) has
+            # already run, so a recorder born here misses it.
+            _rec_id, table = self._new_recorder(
+                self._to_seconds(self._clock_beat))
+            self._screen_children[name] = table
+        return table
+
+    def player_keyframes(self, name: str) -> dict:
+        """Recorded pokes for an engine player actor
+        (`PlayerP1`/`PlayerP2`), or {} when the chart never poked it. Used
+        for the base-field visibility (`hidden`) timeline."""
+        table = self._screen_children.get(name)
+        recorder = self._recorder_for_table(table) if table is not None \
+            else None
+        return recorder.keyframes() if recorder is not None else {}
+
     def named_actor_keyframes(self) -> dict:
         """global name -> {property: [Keyframe]} for every actor a chunk
         self-assigned to a Lua global (the closures' poke targets). Only
@@ -563,10 +595,13 @@ class StubEnvironment:
         host.expose('MESSAGEMAN', singleton(host.to_lua({
             'Broadcast': self._broadcast,
         })))
+        top_screen = singleton(host.to_lua({
+            'GetChild': self._screen_get_child,
+        }))
         host.expose('SCREENMAN', singleton(host.to_lua({
             'SystemMessage': lambda _self, *_a: None,
             'PostScreenMessage': lambda _self, *_a: None,
-            'GetTopScreen': lambda _self, *_a: None,
+            'GetTopScreen': lambda _self, *_a: top_screen,
         })))
         host.expose('DISPLAY', singleton(host.to_lua({
             'GetDisplayWidth': lambda _self: 640.0,

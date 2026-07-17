@@ -106,12 +106,6 @@ class NotitgAdapter(EtternaAdapter):
     def transparent_field(self) -> bool:
         return True
 
-    def field_capture_scope(self) -> str:
-        # gat's AFT copies (gat_aft = ActorFrameTexture with ShowAFTBG)
-        # capture the WHOLE screen incl. background, so the field copies
-        # must replicate background + below-draws, not a bare notefield.
-        return 'full'
-
     def _compiled_modfile(self, replay):
         """compile_modfile for this replay's chart, memoized on the replay
         so note_mods / scroll_multipliers / effects share one harvest."""
@@ -166,7 +160,10 @@ class NotitgAdapter(EtternaAdapter):
         effects = list(notitg_shader_effects(compiled.get('shader_flags')))
         field_copies = compiled.get('field_copies')
         if field_copies:
-            effects.append(NotitgFieldInstances(field_copies))
+            effects.append(NotitgFieldInstances(
+                field_copies,
+                aft_bg_timeline=compiled.get('aft_bg_visible'),
+                base_hidden=compiled.get('base_field_hidden')))
         return effects
 
     def storyboard(self, replay):

@@ -7,6 +7,11 @@ the vectorized ArrowEffects pipeline over the visible candidates, and
 - stashes per-candidate dx / alpha / rotation / zoom for the note views
   (ctx.candidate_dx / _alpha / _rot_deg / _zoom; dx in our pixel space,
   rotation in degrees, zoom a multiplier),
+- stashes ctx.hold_body_samples: candidate-position -> (xs, ys) polyline
+  arrays (OUR pixel space) tracing each visible hold's body BENT by the
+  per-note x-mods (drunk/wave/digital ...) instead of a straight rect;
+  the notes layer draws the body through these points. Present only when
+  a dx-producing mod is active and a hold is visible,
 - stashes ctx.receptor_offsets: a dict of numpy arrays keyed
   'dx','dy','rotation_deg','zoom','alpha' (length keycount) in OUR pixel
   space, so the receptor layer displaces the hit marks the same way the
@@ -48,6 +53,7 @@ from analysis.player.render.mods.arrow_effects import (
 
 _ACTIVE_EPS = 1e-4
 _EXPAND_RATE = 3.0  # ArrowEffects.cpp:131 cos(g_fExpandSeconds*3)
+_MAX_BODY_SAMPLES = 64  # per-hold cap on the body polyline subdivision
 
 
 class NotitgNoteMods:
@@ -126,6 +132,99 @@ class NotitgNoteMods:
         ctx.candidate_alpha = offs.alpha_mult
         ctx.candidate_rot_deg = offs.rotation_deg
         ctx.candidate_zoom = offs.zoom
+
+        self._stash_hold_body_samples(ctx, percents, cols, idx, head_off,
+                                      tail_off, scale, t)
+
+    def _stash_hold_body_samples(self, ctx, percents, cols, idx, head_off,
+                                 tail_off, scale, t) -> None:
+        """Sample each visible hold's body so the notes layer can draw it
+        as a polyline that BENDS under the per-note x/y mods, instead of a
+        straight head-to-tail rect (drunk/wave/digital etc. displace every
+        strip of an engine-rendered hold body, not just the head).
+
+        A hold's body is subdivided in engine y_offset space between its
+        (accel-remapped) head and tail offsets. The x of each sample is
+        lane_x(col) + note_offsets(...).dx at that offset; the y is the
+        linear interpolation between the FINAL head_y and tail_y (post
+        accel + dy + reverse). Both endpoints coincide with the head and
+        tail by construction (sample 0 = head_off/head_y, sample -1 =
+        tail_off/tail_y), so the bent body stays attached.
+
+        All samples of all visible holds are batched into ONE note_offsets
+        call (each sample is just another row: same column, varying
+        y_offset, same note_beat), then split back per hold. The result is
+        stashed as ctx.hold_body_samples: candidate-position -> (xs, ys)
+        arrays in OUR pixel space, consumed by layers/notes.py."""
+        p = ctx.player
+        lane_x_fn = getattr(ctx, 'lane_x', None)
+        ln_tail_times = getattr(p.notes, 'ln_tail_times', None)
+        if lane_x_fn is None or ln_tail_times is None:
+            return
+        tail_off = np.asarray(tail_off, dtype=np.float64)
+        is_ln = np.isfinite(np.asarray(ln_tail_times)[idx]) & np.isfinite(tail_off)
+        if not is_ln.any():
+            return
+
+        head_y = np.asarray(ctx.candidate_head_y, dtype=np.float64)
+        tail_y = np.asarray(ctx.candidate_tail_y, dtype=np.float64)
+        note_beats = np.asarray(p.notes.noterows_list, dtype=np.float64)[idx] / 48.0
+        segments = self._build_body_segments(
+            np.nonzero(is_ln)[0], cols, head_off, tail_off, head_y, tail_y,
+            note_beats, scale)
+
+        sample = note_offsets(
+            percents, segments['cols'], segments['offs'], t_now=t,
+            beat_now=self._beat_at(t), keycount=p.keycount,
+            note_beats=segments['beats'])
+
+        # A body only needs the polyline when its dx actually VARIES along
+        # the body (drunk/wave/digital ...); a constant dx (flip/movex, or
+        # reverse-only frames) leaves it a straight strip the rect path
+        # already draws. Skip those holds so the rect fallback stays.
+        samples = {}
+        for pos, screen_ys, start, count in segments['holds']:
+            dx = sample.dx[start:start + count]
+            if np.ptp(dx) < _ACTIVE_EPS:
+                continue
+            samples[pos] = (lane_x_fn(int(cols[pos])) + dx * scale, screen_ys)
+        if samples:
+            ctx.hold_body_samples = samples
+
+    def _build_body_segments(self, ln_positions, cols, head_off, tail_off,
+                             head_y, tail_y, note_beats, scale) -> dict:
+        """Subdivide each hold's body into y samples and pack them into the
+        flat arrays one batched `note_offsets` call consumes. Returns the
+        concatenated per-sample `cols` / `offs` (engine y_offset) / `beats`
+        plus `holds`: (pos, screen_ys, start, count) so the caller can
+        split the batched result back per hold. Engine offsets interpolate
+        head_off..tail_off; screen ys interpolate the FINAL head_y..tail_y,
+        keeping both endpoints on the head and tail (see caller)."""
+        cols_parts, offs_parts, beats_parts, holds = [], [], [], []
+        cursor = 0
+        for pos in ln_positions:
+            count = self._body_sample_count(head_y[pos], tail_y[pos], scale)
+            frac = np.linspace(0.0, 1.0, count)
+            cols_parts.append(np.full(count, cols[pos], dtype=np.int64))
+            offs_parts.append(head_off[pos] + frac * (tail_off[pos] - head_off[pos]))
+            beats_parts.append(np.full(count, note_beats[pos]))
+            screen_ys = head_y[pos] + frac * (tail_y[pos] - head_y[pos])
+            holds.append((int(pos), screen_ys, cursor, count))
+            cursor += count
+        return {
+            'cols': np.concatenate(cols_parts),
+            'offs': np.concatenate(offs_parts),
+            'beats': np.concatenate(beats_parts),
+            'holds': holds,
+        }
+
+    def _body_sample_count(self, head_y, tail_y, scale) -> int:
+        """Number of body samples for a hold, ~ARROW_SIZE/2 spacing in our
+        pixels, clamped to a sane per-hold maximum. At least 2 (the head
+        and tail endpoints) so every LN yields a valid polyline."""
+        span = abs(float(tail_y) - float(head_y))
+        spacing = 0.5 * ARROW_SIZE * scale
+        return int(np.clip(round(span / spacing) + 1, 2, _MAX_BODY_SAMPLES))
 
     def _remap_accel(self, percents, ys, judge_y, scale):
         """Accel-remapped y_offset (engine px) for a candidate y array."""

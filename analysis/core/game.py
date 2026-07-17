@@ -157,20 +157,6 @@ class GameAdapter:
         The lanes layer skips its fills and dividers."""
         return False
 
-    def field_capture_scope(self) -> str:
-        """What the offscreen field capture (for `EffectFrame.fields`
-        playfield copies) holds:
-
-        - 'field' (default): only the transformable field layers - lanes,
-          notes, judgment. The background and below-draws stay on the
-          screen underneath, so a copy replicates a transparent notefield
-          over the same background (fluXis dual/extra playfields).
-        - 'full': the whole chart region - background clear + below-draws
-          (storyboards) + field layers. A copy then replicates that whole
-          screen, matching NotITG's ActorFrameTexture captures whose
-          ShowAFTBG grabs the background too (gat's AFT copies)."""
-        return 'field'
-
     def receptor_style(self) -> str:
         """How the judgment layer marks the hit line.
 
