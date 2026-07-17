@@ -128,6 +128,16 @@ def _compile_via_sim(sm_path, end_seconds):
 # '*100000 1000 drunk' one-frame slam would vanish).
 _FRAME_HOLD_S = 1.0 / 60.0
 
+# A per-frame driver re-applies the same mod with a CHANGING value every
+# body tick (`ApplyGameCommand('mod,*10000 '..driver:GetX()..' ...')`),
+# and between the engine's frames NOTHING reverts - each apply's target
+# simply holds until the next. Consecutive same-(player, mods) windows
+# within this gap chain end-to-start so the resolved target is the
+# driver's staircase, never a rest dip the resolver would otherwise
+# insert in every inter-frame gap (the chase then integrates those dips
+# into values that neither track the driver nor come to rest).
+_CHAIN_GAP_S = 0.05
+
 
 class _TableView:
     """Adapts a SimEnvironment to the `.mods`/`.mods2` attribute surface
@@ -149,19 +159,38 @@ def _compile_channels(mod_events):
 
 def _mod_events(result) -> list:
     """Coalesced ApplyModifiers windows in `compile_mod_channels`'
-    row shape. `apply_type` marks the provenance; the channel compiler
-    reads only t_start/t_end/modstring/player."""
-    return [{
-        'beat': window.beat_start,
-        'modstring': window.modstring,
-        'apply_type': 'sim',
-        # Window players are engine channel INDEXES (0/1); the row
-        # contract carries the chart's 1-based numbers.
-        'player': window.player + 1,
-        't_start': window.t_start,
-        't_end': window.t_end + _FRAME_HOLD_S,
-        'time_based': True,
-    } for window in coalesce_applied(result.applied_mods)]
+    row shape, with driver bursts chained (see _CHAIN_GAP_S). `apply_type`
+    marks the provenance; the channel compiler reads only
+    t_start/t_end/modstring/player."""
+    from analysis.games.notitg.mod_channels import parse_modstring
+
+    groups: dict = {}
+    for window in coalesce_applied(result.applied_mods):
+        names = tuple(sorted(
+            name for _p, _s, name in parse_modstring(window.modstring)))
+        groups.setdefault((window.player, names), []).append(window)
+
+    rows = []
+    for group in groups.values():
+        group.sort(key=lambda w: w.t_start)
+        for window, successor in zip(group, [*group[1:], None]):
+            end = window.t_end + _FRAME_HOLD_S
+            if (successor is not None
+                    and successor.t_start - window.t_end <= _CHAIN_GAP_S):
+                end = successor.t_start
+            rows.append({
+                'beat': window.beat_start,
+                'modstring': window.modstring,
+                'apply_type': 'sim',
+                # Window players are engine channel INDEXES (0/1); the
+                # row contract carries the chart's 1-based numbers.
+                'player': window.player + 1,
+                't_start': window.t_start,
+                't_end': end,
+                'time_based': True,
+            })
+    rows.sort(key=lambda r: r['t_start'])
+    return rows
 
 
 # -- generalized field instances ---------------------------------------------
@@ -233,6 +262,8 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
         notefield = synthetic.get((player_id, 'NoteField'))
         if notefield is not None:
             proxy_players[notefield] = number
+    notefields = {synthetic.get((pid, 'NoteField'))
+                  for pid in player_ids.values()} - {None}
     names = env.named_actor_ids()
     aft_nodes = {sim.aft_texture_name: rec_id
                  for rec_id, sim in env.actors.items() if sim.is_aft}
@@ -273,13 +304,21 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
                  for link_actor in reversed(chain)]
         if kind == 'proxy':
             # The engine draws a proxied target WITH the target's own
-            # transform (P1 at its seat + pokes), composed inside the
-            # proxy's frame - without it every copy sits one design
-            # centre off and pops at the chart's cull margins instead
-            # of the screen edge.
-            links.append(field_compose.player_link(
-                player, named_keyframes.get(f'P{player}'),
-                (field_oscillators or {}).get(player), ignore_hidden=True))
+            # transform composed inside the proxy's frame. WHICH
+            # transform depends on the bind: `SetTarget(P1)` re-renders
+            # the whole player (seat + pokes + oscillators), while
+            # `SetTarget(P1:GetChild('NoteField'))` targets the CHILD -
+            # the player frame's transform never applies, only the
+            # notefield's own recorded pokes do (composing the player's
+            # too would double every seat/motion offset).
+            if sim.proxy_target in notefields:
+                links.append(_notefield_link(sim.proxy_target,
+                                             actor_keyframes))
+            else:
+                links.append(field_compose.player_link(
+                    player, named_keyframes.get(f'P{player}'),
+                    (field_oscillators or {}).get(player),
+                    ignore_hidden=True))
         name = names.get(rec_id)
         if name is None:
             ancestor = next((names[env.actor_id(a)] for a in chain
@@ -290,6 +329,14 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
                                                 aft_live=aft_live,
                                                 color=color))
     return instances
+
+
+def _notefield_link(notefield_id, actor_keyframes) -> dict:
+    """The proxied NoteField child's own transform link, hidden pinned
+    visible (proxies draw their target regardless of its hidden bit)."""
+    link = field_compose.link_timelines(actor_keyframes.get(notefield_id))
+    link['hidden'] = EventTimeline([], rest=(0.0,))
+    return link
 
 
 def _aft_node_visible(env, node_id):

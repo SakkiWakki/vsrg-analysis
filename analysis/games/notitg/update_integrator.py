@@ -76,8 +76,13 @@ _UPDATE_COMMAND = 'Update'
 # Live `perframe(a, b)` and `perframe(a)` windows in the body bound the
 # tick range. Comment-stripped first so `--[[ perframe(..) ]]` blocks and
 # `-- if perframe(..)` lines do not widen the range with dead drivers.
+# Args are numeric ARITHMETIC, not just literals: charts write window
+# ends as expressions (`perframe(1240,1240+128)`), and a literal-only
+# match would silently degrade the window to its one-beat default (the
+# driver then ticks at the coarse rate - a visibly broken walker).
 _PERFRAME_RE = re.compile(
-    r'perframe\s*\(\s*([0-9]+(?:\.[0-9]+)?)\s*(?:,\s*([0-9]+(?:\.[0-9]+)?))?')
+    r'perframe\s*\(\s*([0-9][0-9.+\-*/ ()]*?)\s*'
+    r'(?:,\s*([0-9][0-9.+\-*/ ()]*?)\s*)?\)')
 
 # Tables the body reads that other passes own; emptied during integration
 # so the window reader and action loop inside Update no-op.
@@ -181,11 +186,33 @@ def _live_windows(body: str):
     across a run of drivers."""
     spans = []
     for match in _PERFRAME_RE.finditer(_strip_comments(body)):
-        start = float(match.group(1))
-        end = float(match.group(2)) if match.group(2) else start + 1.0
-        if end > start:
+        start = _beat_arg(match.group(1))
+        if start is None:
+            continue
+        end = _beat_arg(match.group(2)) if match.group(2) else start + 1.0
+        if end is not None and end > start:
             spans.append((start, end))
     return _merge_spans(sorted(spans))
+
+
+_BEAT_ARITH_RE = re.compile(r'(?!.*\*\*)[0-9.+\-*/ ()]+$')
+
+
+def _beat_arg(text) -> float | None:
+    """A perframe arg as a beat number: a literal, or purely numeric
+    arithmetic evaluated (`1240+128`). None when it is neither (an arg
+    over Lua variables cannot be resolved statically; the window is
+    skipped rather than guessed)."""
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        pass
+    if isinstance(text, str) and _BEAT_ARITH_RE.fullmatch(text.strip()):
+        try:
+            return float(eval(text, {'__builtins__': None}, {}))
+        except (SyntaxError, ZeroDivisionError, TypeError, ValueError):
+            return None
+    return None
 
 
 def _merge_spans(spans):

@@ -21,6 +21,8 @@ survives cutover), but routed onto SimActors and ONE timeline:
 """
 from __future__ import annotations
 
+import re
+
 from analysis.games.notitg.lua_api import (
     COMMAND_NAMES, GETTER_NAMES, SIM_GETTER_NAMES, _as_int)
 from analysis.games.notitg.mod_stubs import (
@@ -29,6 +31,11 @@ from analysis.games.notitg.sim.actor import SimActor
 from analysis.games.notitg.xml_actors import (
     _strip_lua_wrapper, parse_command_string)
 from analysis.player.render.lua import LuaHost
+from analysis.player.render.lua.host import LuaScriptError
+
+# A classic-command arg that may be a Lua expression over identifiers
+# (globals, screen constants) rather than a plain number.
+_IDENT_CHAR_RE = re.compile(r'[A-Za-z_]')
 
 # Broadcast/command recursion guard: a handler may broadcast a message
 # whose handlers broadcast again. Depth-only, deliberately: the engine
@@ -134,6 +141,10 @@ class SimEnvironment:
         # the drivers at frozen drain clocks).
         self.suppressed_queued_commands: frozenset = frozenset()
         self._classic_cache: dict = {}
+        # Compiled `return (<arg>)` chunks for identifier-bearing
+        # classic-command args, keyed by raw arg text (False = does not
+        # compile). Evaluated at fire time so globals are current.
+        self._arg_chunks: dict = {}
         self._queued: set = set()
         self._install()
 
@@ -579,7 +590,31 @@ class SimEnvironment:
             if verb in ('queuecommand', 'playcommand') and args:
                 self._actor_command(rec_id, verb, args[0])
             else:
-                actor.poke(verb, args)
+                actor.poke(verb, [self._classic_arg(a) for a in args])
+
+    def _classic_arg(self, arg):
+        """NotITG evaluates classic-command args as Lua EXPRESSIONS, so
+        charts write `linear,my_dur*2` and `x,SCREEN_CENTER_X-220` -
+        identifiers resolved against the live globals at fire time. Args
+        with no identifier characters keep the numeric fast path; an arg
+        whose evaluation is not a number keeps its raw string
+        (`blend,add`, `effectclock,music`)."""
+        if not isinstance(arg, str) or not _IDENT_CHAR_RE.search(arg):
+            return arg
+        chunk = self._arg_chunks.get(arg)
+        if chunk is None:
+            try:
+                chunk = self._host.compile(f'return ({arg})', name='arg')
+            except LuaScriptError:
+                chunk = False
+            self._arg_chunks[arg] = chunk
+        if chunk is False:
+            return arg
+        try:
+            value = chunk()
+        except Exception:
+            return arg
+        return float(value) if isinstance(value, (int, float)) else arg
 
     def _broadcast(self, _self, name=None, *_a) -> None:
         """MESSAGEMAN:Broadcast - run <name>MessageCommand on every

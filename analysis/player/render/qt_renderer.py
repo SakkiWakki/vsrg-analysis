@@ -155,6 +155,8 @@ class QtPlayerRenderer:
         # This frame's node-point capture, taken lazily during the
         # instance blits and promoted to `_prev_screen` at composite end.
         self._screen_capture = None
+        # Per-purpose pooled capture pixmaps (see _new_capture_pixmap).
+        self._capture_pool: dict = {}
         # Preserve-texture freezes: the last capture each AFT source
         # blitted while its node was visible, held across hidden frames.
         self._aft_frozen: dict = {}
@@ -495,7 +497,7 @@ class QtPlayerRenderer:
         if (not self._has_screen_copy(frame) or painter is None
                 or getattr(ctx, 'player', None) is None):
             return None
-        pm = self._new_capture_pixmap(ctx, painter)
+        pm = self._new_capture_pixmap(ctx, painter, slot='screen')
         sp = QPainter(pm)
         sp.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         self._screen_pixmap = pm
@@ -523,13 +525,23 @@ class QtPlayerRenderer:
             self._prev_screen_t = float(ctx.t_now)
             self._screen_capture = None
 
-    def _new_capture_pixmap(self, ctx, painter):
+    def _new_capture_pixmap(self, ctx, painter, slot=None):
         """A transparent window-sized pixmap matching the painter's device
-        pixel ratio, for an offscreen field/backdrop capture."""
+        pixel ratio, for an offscreen field/backdrop capture. `slot`
+        names a per-purpose pooled pixmap reused across frames while the
+        size holds - a fresh window-sized allocation per capture per
+        frame is a measurable slice of the frame budget. Pooled pixmaps
+        must never be RETAINED across frames by the caller (the screen
+        retention copies out of its slot)."""
         from PySide6.QtGui import QPixmap
         p = ctx.player
         dpr = float(painter.device().devicePixelRatioF())
-        pm = QPixmap(int(p.W * dpr), int(p.H * dpr))
+        size = (int(p.W * dpr), int(p.H * dpr))
+        pm = self._capture_pool.get(slot) if slot is not None else None
+        if pm is None or (pm.width(), pm.height()) != size:
+            pm = QPixmap(*size)
+            if slot is not None:
+                self._capture_pool[slot] = pm
         pm.setDevicePixelRatio(dpr)
         pm.fill(Qt.GlobalColor.transparent)
         return pm
@@ -545,7 +557,7 @@ class QtPlayerRenderer:
         if (not self._full_field_capture(frame, ctx) or painter is None
                 or getattr(ctx, 'player', None) is None):
             return
-        pm = self._new_capture_pixmap(ctx, painter)
+        pm = self._new_capture_pixmap(ctx, painter, slot='backdrop')
         self._backdrop_pixmap = pm
         bp = QPainter(pm)
         bp.setRenderHint(QPainter.RenderHint.Antialiasing, False)
@@ -564,7 +576,7 @@ class QtPlayerRenderer:
         if (frame is None or not frame.fields or painter is None
                 or getattr(ctx, 'player', None) is None):
             return None
-        pm = self._new_capture_pixmap(ctx, painter)
+        pm = self._new_capture_pixmap(ctx, painter, slot='field')
         self._field_pixmap = pm
         field_painter = QPainter(pm)
         field_painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
@@ -592,7 +604,7 @@ class QtPlayerRenderer:
             return
         player = ctx.player
         primary = getattr(player, '_note_mods', None)
-        pm = self._new_capture_pixmap(ctx, painter)
+        pm = self._new_capture_pixmap(ctx, painter, slot='field2')
         fp = QPainter(pm)
         fp.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         try:

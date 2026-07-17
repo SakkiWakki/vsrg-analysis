@@ -155,12 +155,18 @@ class TransformChannel:
         base_sy = v('base_scale_y')
         if flip:
             base_sy = -base_sy
-        m = transform3d.rotate_xyz(v('rotation_x'), v('rotation_y'),
-                                   v('rotation'))
-        m = m @ transform3d.scale(v('scale_x') * v('base_scale_x'),
-                                  v('scale_y') * base_sy)
-        m = m @ transform3d.translate(v('x'), v('y'))
+        rx, ry, rz = v('rotation_x'), v('rotation_y'), v('rotation')
+        sx = v('scale_x') * v('base_scale_x')
+        sy = v('scale_y') * base_sy
         skew = v('skew_x')
+        if not (rx or ry or rz or skew) and sx == 1.0 and sy == 1.0:
+            # The overwhelmingly common link state (a plain positioned
+            # frame): one translation matrix instead of three matmuls,
+            # sampled for every instance link every frame.
+            return transform3d.translate(v('x'), v('y'))
+        m = transform3d.rotate_xyz(rx, ry, rz)
+        m = m @ transform3d.scale(sx, sy)
+        m = m @ transform3d.translate(v('x'), v('y'))
         if skew:
             m = transform3d.skew_x(skew) @ m
         return m
