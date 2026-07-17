@@ -39,6 +39,24 @@ _ITG_WINDOWS_MS = (
     ('wayoff', 181.5),
 )
 
+_PLAYER_TRANSFORM_PROPS = {
+    'x': 0.0, 'y': 0.0, 'rotation': 0.0,
+    'scale_x': 1.0, 'scale_y': 1.0, 'hidden': 0.0,
+}
+
+
+def _player_transform_timelines(keyframes):
+    """The recorded transform of a player group (its `PlayerP1`/`PlayerP2`
+    poke stream) as {prop: EventTimeline}, or None when the chart never
+    poked that player. The renderer samples these to seat the player's
+    field where the chart positions its group."""
+    if not keyframes:
+        return None
+    from analysis.player.render.effects.timeline import EventTimeline
+    return {prop: EventTimeline(keyframes.get(prop, []), rest=(rest,))
+            for prop, rest in _PLAYER_TRANSFORM_PROPS.items()}
+
+
 def _autoplay_arrays(chart) -> dict:
     judged = judged_notes(chart)
     count = len(judged)
@@ -109,21 +127,21 @@ class NotitgAdapter(EtternaAdapter):
     def _compiled_modfile(self, replay):
         """The compiled modfile for this replay's chart, memoized on the
         replay so note_mods / scroll_multipliers / effects share one
-        compile. VSRG_NOTITG_SIM=1 routes through the engine-loop
-        compiler (DESIGN_engine_loop.md parity gate); default stays the
-        harvest path until cutover."""
+        compile. The engine-loop compiler (DESIGN_engine_loop.md) is the
+        default; VSRG_NOTITG_SIM=0 opts back to the harvest path (kept on
+        its own branch too) until cutover deletes it."""
         import os
 
         cached = replay.get('_notitg_modfile')
         if cached is not None:
             return cached or None
         sm_path, _index = split_chart_ref(replay.get('filepath', ''))
-        if os.environ.get('VSRG_NOTITG_SIM') == '1':
-            from analysis.games.notitg.sim.producers import compile_via_sim
-            compiled = compile_via_sim(sm_path)
-        else:
+        if os.environ.get('VSRG_NOTITG_SIM') == '0':
             from analysis.games.notitg.modfile import compile_modfile
             compiled = compile_modfile(sm_path)
+        else:
+            from analysis.games.notitg.sim.producers import compile_via_sim
+            compiled = compile_via_sim(sm_path)
         replay['_notitg_modfile'] = compiled or {}
         return compiled
 
@@ -173,26 +191,30 @@ class NotitgAdapter(EtternaAdapter):
                               player=player)
 
     def _second_field(self, replay):
-        """A SecondFieldSpec (player-1 mod consumer for the second field
-        capture) when the modfile drives player-2 mods, else None.
+        """A SecondFieldSpec (player-2 field group) when the modfile
+        touches player 2, else None.
 
-        UKSRT-style charts play the SAME chart on both sides with DIFFERENT
-        per-side effects (gat's `mod_insert(..., player)` rows, item 43).
-        The compiled channels already split by (mod, player); a player-1
-        channel present means the chart is dual-sided. Zero cost otherwise:
-        no player-1 channels -> None -> the renderer never renders a second
-        field, and single-player / non-NotITG charts are untouched."""
+        NotITG P1/P2 are two real tournament players, each a field group
+        the chart positions and mods independently (item 43). The chart
+        touches player 2 when either a player-1 mod channel exists OR it
+        poked the `PlayerP2` actor (position/hidden/etc.) - a chart that
+        stacks both fields at centre with equal mods still means two
+        players. The spec carries both players' recorded transform
+        streams so each field seats where the chart puts its group. Zero
+        cost otherwise: no player-2 touch -> None -> single field, and
+        single-player / non-NotITG charts are untouched."""
         from analysis.games.notitg.field_instances import SecondFieldSpec
         from analysis.games.notitg.mod_channels import compile_mod_channels
         compiled = self._compiled_modfile(replay)
-        # The sim compiler precompiles channels from the exact per-frame
-        # chase (the mirin-dict pattern); harvest dicts fall back to
-        # window compilation.
         channels = (compiled or {}).get('mod_channels') \
             or compile_mod_channels((compiled or {}).get('mod_events') or [])
-        if 1 not in channels.players:
+        player_keyframes = (compiled or {}).get('player_field_keyframes') or {}
+        p1_tl = _player_transform_timelines(player_keyframes.get('P1'))
+        p2_tl = _player_transform_timelines(player_keyframes.get('P2'))
+        if 1 not in channels.players and p2_tl is None:
             return None
-        return SecondFieldSpec(self._note_mods_for(replay, player=1))
+        return SecondFieldSpec(self._note_mods_for(replay, player=1),
+                               p1_timelines=p1_tl, p2_timelines=p2_tl)
 
     def scroll_multipliers(self, replay):
         from analysis.games.notitg.mod_channels import compile_scroll_multipliers

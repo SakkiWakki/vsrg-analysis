@@ -95,8 +95,66 @@ class SecondFieldSpec:
     the single-field capture); the per-side X placement lives in the blit
     transforms the field producer emits, not in the capture itself."""
 
-    def __init__(self, note_mods):
+    def __init__(self, note_mods, p1_timelines=None, p2_timelines=None):
         self.note_mods = note_mods
+        # Recorded transform streams (x/y/rotation/scale/hidden) for each
+        # player group, from the compiled dict, or None when the chart
+        # never moved that player (it keeps the versus-split rest).
+        self.p1_timelines = p1_timelines
+        self.p2_timelines = p2_timelines
+
+
+def player_placement(player_timelines, rest_dx_design, t, k, scope):
+    """A field-instance entry seating a player's capture where the chart
+    positions that player's group.
+
+    NotITG P1/P2 are two real players, each a group the chart moves via
+    recorded pokes on the `PlayerP1`/`PlayerP2` actors (position, scale,
+    rotation, hidden). `player_timelines` is that recorded transform
+    (x/y/rotation/scale_x/scale_y/hidden EventTimelines) from the
+    compiled dict; `rest_dx_design` is the versus-split X the field sits
+    at before the chart moves it (StepMania's PlayerP{n}X metric,
+    center-relative). Returns None when the player's recorded `hidden`
+    bit is set (the chart hid that side), so the capture is not blitted.
+
+    The capture pixmap is centered in the design box at scale `k`, so the
+    recorded transform (design-space, centered on 320,240) conjugates
+    into screen space the same way a field copy does."""
+    if player_timelines is not None and \
+            player_timelines['hidden'].sample(t)[0] >= 0.5:
+        return None
+    rx = rest_dx_design
+    ry = 0.0
+    rotation = 0.0
+    sx = sy = 1.0
+    if player_timelines is not None:
+        # Recorded x/y are absolute design-space; the field rests at
+        # (rest_dx_design + center, center), so the recorded absolute
+        # position replaces the rest when the chart poked it (a poke of
+        # SCREEN_CENTER_X-160 = the versus split; both at center = the
+        # overlap gimmick). x/y rest at 0 in the stream, meaning
+        # "unpoked" -> keep the metric rest.
+        px = player_timelines['x'].sample(t)[0]
+        py = player_timelines['y'].sample(t)[0]
+        if px != 0.0 or py != 0.0:
+            rx = px - _SCREEN_CX
+            ry = py - _SCREEN_CY
+        rotation = player_timelines['rotation'].sample(t)[0]
+        sx = player_timelines['scale_x'].sample(t)[0]
+        sy = player_timelines['scale_y'].sample(t)[0]
+    if sx == 0.0 or sy == 0.0:
+        return None
+    if rx == 0.0 and ry == 0.0 and rotation == 0.0 and sx == 1.0 and sy == 1.0:
+        return (None, 1.0, scope)
+    t_screen = QTransform()
+    t_screen.translate(rx * k, ry * k)
+    if rotation or sx != 1.0 or sy != 1.0:
+        t_screen.translate(_SCREEN_CX * k, _SCREEN_CY * k)
+        if rotation:
+            t_screen.rotate(rotation)
+        t_screen.scale(sx, sy)
+        t_screen.translate(-_SCREEN_CX * k, -_SCREEN_CY * k)
+    return (t_screen, 1.0, scope)
 
 
 def _design_map(chart_rect):
@@ -163,7 +221,7 @@ class NotitgFieldInstances:
         copies = [entry for copy in self._copies
                   if (entry := self._instance(copy, t, k, ox, oy)) is not None]
         if self._second_field is not None:
-            return self._dual_frame(base_hidden, copies, k)
+            return self._dual_frame(base_hidden, copies, k, t)
         return self._single_frame(base_hidden, copies)
 
     def _single_frame(self, base_hidden, copies):
@@ -182,23 +240,29 @@ class NotitgFieldInstances:
             instances = [(None, 1.0, _PROXY_SCOPE), *copies]
         return EffectFrame(fields=tuple(instances))
 
-    def _dual_frame(self, base_hidden, copies, k):
-        """Dual-player: always the capture path. Two identity originals at
-        the theme P1/P2 X offsets (P1 left from the primary capture, P2
-        right from the second capture) unless the base is hidden, plus the
-        routed copies, plus the second_field spec so the renderer renders
-        the second capture. A zero-opacity placeholder keeps `fields`
-        non-empty on a fully-hidden frame."""
+    def _dual_frame(self, base_hidden, copies, k, t):
+        """Dual-player: always the capture path. Each player's capture is
+        seated where the chart positions that player's group - the
+        recorded PlayerP1/P2 transform (rest = the versus-split X), so
+        the fields split on GotoSides and overlap on the intro gimmick as
+        the chart drives them. `base_hidden` (P1's hidden bit) drops both
+        originals when the proxy wall owns the field; each player's own
+        recorded hidden additionally drops that side. A zero-opacity
+        placeholder keeps `fields` non-empty on a fully-hidden frame."""
+        spec = self._second_field
         if base_hidden:
             originals = []
         else:
             originals = [
-                _field_placement(_P1_FIELD_X - _SCREEN_CX, k, _PROXY_SCOPE),
-                _field_placement(_P2_FIELD_X - _SCREEN_CX, k, _FIELD2_SCOPE),
+                player_placement(spec.p1_timelines, _P1_FIELD_X - _SCREEN_CX,
+                                 t, k, _PROXY_SCOPE),
+                player_placement(spec.p2_timelines, _P2_FIELD_X - _SCREEN_CX,
+                                 t, k, _FIELD2_SCOPE),
             ]
+            originals = [o for o in originals if o is not None]
         instances = [*originals, *copies] or [(None, 0.0, _PROXY_SCOPE)]
         return EffectFrame(fields=tuple(instances),
-                           second_field=self._second_field)
+                           second_field=spec)
 
     def _base_field_hidden(self, t) -> bool:
         return (self._base_hidden is not None
@@ -288,20 +352,6 @@ class NotitgScreenCamera:
         transform.scale(1.0 / k, 1.0 / k)
         transform.translate(-ox, -oy)
         return EffectFrame(scene_transform=transform)
-
-
-def _field_placement(dx_design, k, scope):
-    """A field-instance entry that blits `scope`'s capture translated by
-    `dx_design` design-px horizontally. The capture pixmap is already in
-    screen space at the design map's scale `k`, so a design-space X shift
-    is `dx_design * k` screen px; a zero shift is the untouched identity
-    (None transform, the renderer's direct blit). Used to seat the two
-    dual-player originals at the theme P1/P2 X offsets."""
-    if dx_design == 0.0:
-        return (None, 1.0, scope)
-    t = QTransform()
-    t.translate(dx_design * k, 0.0)
-    return (t, 1.0, scope)
 
 
 def _copy_transform(x, y, rotation, sx, sy, k, ox, oy) -> QTransform:

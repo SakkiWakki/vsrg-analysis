@@ -174,6 +174,37 @@ shape for compiled output:
 - Scheduling stays two-tier: the tween queue is STATE the sim executes
   once at compile; its output is pure curves over clocks.
 
+## Events, not keyframes (the perf + model correction)
+
+The whole-song 60Hz sim loop is the compile wall (~90s, ~11M keyframes)
+and it is unnecessary: the classic template's content is mostly
+DECLARATIVE DATA with explicit times. The LOAD pass alone (0.01s)
+populates `mods` (2066 rows), `mods2` (135), `mod_actions` (667) - each
+row is already an event `{beat, len, modstring, end|len, player}`. Read
+the tables straight into scheduler events; do not tick the song.
+
+Sorting rule (load-bearing): DETERMINISTIC f(song time) for a fixed
+(chart, replay) -> compile to events + curves. NON-deterministic (live
+input / user interaction / plugin params) -> extract as a HOOK run
+in-game that may only write channels. For a replay the hook set is
+nearly empty. The residual `UpdateCommand` drivers read other
+deterministic curves, so they compile too (derived curves evaluated
+lazily), not full-song ticked.
+
+The render scheduler (`analysis/player/render/scheduler.py`) is the
+one interoperating primitive set:
+- `Clock` = the SV integral + beat map + effect-timer LoopClock (the
+  user's TempoMap/LoopScheduler); a curve names its clock.
+- `Channel` = curve + clock, evaluated live at frame t. Curve sources:
+  declarative mod windows, oscillators (analytic sin/cos), derived
+  drivers, AND (when built) the item-51 custom-buffer streams +
+  gameplay-state tallies - `Channel(curve=buffer.stream(name).at)`.
+- `EventSchedule` = one time-sorted event line: mod windows, message
+  dispatch, tween starts, custom-buffer writes.
+These interface with the SV engine, the compiled-document clock table
+(axis 5), and the per-map custom buffer as ONE set, not parallel
+systems.
+
 ## Verification
 
 Full suite (~1362) green at every phase; oracle montages structurally

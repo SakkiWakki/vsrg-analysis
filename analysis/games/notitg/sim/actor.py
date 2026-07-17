@@ -124,6 +124,46 @@ def _rest(prop):
     return _REST.get(prop, 0.0)
 
 
+# Values within this of the linear interpolation of their neighbours are
+# reconstructed by EventTimeline, so the recorded point is redundant. In
+# design pixels / degrees this is sub-visible.
+_SIMPLIFY_EPS = 1e-3
+
+
+def _simplify_instants(frames):
+    """Drop instant (duration 0) keyframes a linear interpolation of the
+    surrounding points reconstructs to `_SIMPLIFY_EPS`.
+
+    Only single-value scalar runs of instant points are collapsed (the
+    per-frame-driver case); any keyframe carrying a tween (duration > 0),
+    a multi-component value, or an ease-from `start` override is a
+    structural point kept verbatim, and it also breaks the run so
+    interpolation never spans it. Endpoints of every run are kept, so a
+    constant hold becomes two points and a linear ramp two points."""
+    if len(frames) < 3:
+        return frames
+    out = [frames[0]]
+    for i in range(1, len(frames) - 1):
+        prev, cur, nxt = out[-1], frames[i], frames[i + 1]
+        if not _collapsible(prev, cur, nxt):
+            out.append(cur)
+    out.append(frames[-1])
+    return out
+
+
+def _collapsible(prev, cur, nxt) -> bool:
+    if any(k.duration > 0.0 or k.start is not None or len(k.values) != 1
+           or not isinstance(k.values[0], (int, float))
+           for k in (prev, cur, nxt)):
+        return False
+    span = nxt.t - prev.t
+    if span <= 0.0:
+        return False
+    f = (cur.t - prev.t) / span
+    lerp = prev.values[0] + (nxt.values[0] - prev.values[0]) * f
+    return abs(cur.values[0] - lerp) <= _SIMPLIFY_EPS
+
+
 class OscSpan:
     """One effect-oscillator interval: kind, period/offset/clock, and the
     magnitude as (t, x, y, z) samples (many when a per-frame driver ramps
@@ -354,9 +394,16 @@ class SimActor:
 
     def keyframes(self) -> dict:
         """property -> list[Keyframe], only for properties actually
-        poked. The recorded timeline replays exactly what the sim
-        displayed (begin-time emission + stop pins)."""
-        return {prop: kfs for prop, kfs in self._frames.items() if kfs}
+        poked, each run of collinear instant points collapsed to its
+        endpoints. A per-frame driver pokes an instant setter every tick
+        (60Hz), so a property that holds constant or ramps linearly for a
+        while records hundreds of redundant points; dropping the ones the
+        `EventTimeline`'s linear interpolation reconstructs (to tolerance)
+        is behavior-preserving and cuts the compiled size by orders of
+        magnitude (the events-not-keyframes model). Tweened points (their
+        own duration/easing) are structural and never dropped."""
+        return {prop: _simplify_instants(kfs)
+                for prop, kfs in self._frames.items() if kfs}
 
     def oscillator_spans(self) -> tuple:
         spans = list(self._osc_spans)
