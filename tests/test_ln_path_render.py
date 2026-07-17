@@ -322,3 +322,20 @@ def test_released_hold_with_release_data_keeps_guide_window():
     ctx = _ctx(judge_y=500)
     n = _ln_view(state='released', rel_off=-0.05, y_end=420.0)
     assert nl._ln_body_span(ctx, n, hide=False) == (420.0, 500, 'released')
+
+
+def test_ribbon_width_matches_body_sprite_strip():
+    # The stroked ribbon and the rect tile are the SAME noodle: a body
+    # flipping between producers (constant-dx frames skip the polyline)
+    # must not change thickness. Vertical path => bounding width is the
+    # stroke width, which is the sprite strip's, not the full lane's.
+    from analysis.player.render.layers.note_sprites import ln_body_width
+    ctx = _ctx(lane_w=80)
+    painter = _RecordPainter()
+    xs = np.full(3, 40.0)
+    ys = np.array([100.0, 200.0, 300.0])
+    n = _ln_view(body_path=(xs, ys), state='held')
+    nl._draw_ln(ctx, painter, n)
+    assert len(painter.paths) == 1
+    assert painter.paths[0].boundingRect().width() == pytest.approx(
+        ln_body_width('bar', 80))

@@ -27,6 +27,7 @@ import numpy as np
 
 from analysis.player.notetypes import NT_TICK
 from analysis.player.render.layers import chart_extras as _extras
+from analysis.player.render.layers.note_sprites import ln_body_width
 from analysis.player.render.primitives import _NO_PEN
 
 if TYPE_CHECKING:
@@ -527,10 +528,12 @@ def _draw_ln_body_stroke(ctx, painter, n, top, bot, state):
 
     # `xs` is the body's LEFT edge per sample (lane_x + dx), matching the
     # rect path's `QRectF(n.lx, ...)` origin. Stroke the CENTER polyline
-    # with the lane width so the ribbon stays perpendicular to the path
-    # everywhere: tracing axis-aligned left/right edges instead collapses
-    # into self-intersecting bowties once a strong bend turns the body
-    # near-horizontal.
+    # so the ribbon stays perpendicular to the path everywhere: tracing
+    # axis-aligned left/right edges instead collapses into
+    # self-intersecting bowties once a strong bend turns the body
+    # near-horizontal. The stroke width is the sprite strip's visible
+    # width, so a body flipping between this path and the rect tile
+    # (producers skip constant-dx frames) keeps one thickness.
     center = xs + w / 2.0
     spine = QPainterPath()
     spine.moveTo(float(center[0]), float(ys[0]))
@@ -538,7 +541,8 @@ def _draw_ln_body_stroke(ctx, painter, n, top, bot, state):
         spine.lineTo(float(center[i]), float(ys[i]))
 
     stroker = QPainterPathStroker()
-    stroker.setWidth(float(w))
+    stroker.setWidth(float(ln_body_width(
+        getattr(ctx.player, 'skin', 'bar'), w)))
     stroker.setCapStyle(Qt.FlatCap)
     stroker.setJoinStyle(Qt.RoundJoin)
     path = stroker.createStroke(spine)

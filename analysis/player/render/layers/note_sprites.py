@@ -190,22 +190,29 @@ def _rasterize_ln_tail(painter, key, ctx):
         _rect_outline(painter, (255, 255, 255), rect)
 
 
+def ln_body_width(skin, lane_w) -> float:
+    """Visible width of the LN body strip within a `lane_w` lane. Shared
+    by the tile rasterizer and the body-path stroker (layers/notes.py) so
+    straight and mod-bent bodies read as the same noodle."""
+    match skin:
+        case 'circle':
+            return max(6, int(lane_w * 0.32))
+        case _:
+            return max(2, lane_w - 12)
+
+
 def _rasterize_ln_body(painter, key, ctx):
     """1-row tile for `drawTiledPixmap`. Width matches the body strip;
     vertical repetition covers any LN height."""
-    skin = ctx.player.skin
     lane_w = ctx.lane_w
     col = key['col']
     state = key['state']
     is_roll = bool(key.get('is_roll', False))
     color = _body_state_color(state, ctx.player.palette[col], is_roll)
 
-    if skin == 'circle':
-        body_w = max(6, int(lane_w * 0.32))
-        bx = (lane_w - body_w) / 2
-        _rect(painter, color, (bx, 0, body_w, 1))
-    else:
-        _rect(painter, color, (6, 0, lane_w - 12, 1))
+    body_w = ln_body_width(ctx.player.skin, lane_w)
+    bx = (lane_w - body_w) / 2
+    _rect(painter, color, (bx, 0, body_w, 1))
 
 
 def _rasterize_mine(painter, key, ctx):
