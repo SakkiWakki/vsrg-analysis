@@ -12,9 +12,13 @@ keyframes on ONE timeline per actor:
 the SM tween model to place keyframes at the right times:
 
 - Property setters (x/y/z, zoom/zoomx/zoomy, rotationx/y/z, diffuse,
-  diffusealpha, hidden, visible, ...) emit a `Keyframe` at the actor's
-  CURRENT local clock, using whatever tween interval is open (instant
-  when none is).
+  diffusealpha, ...) emit a `Keyframe` at the actor's CURRENT local
+  clock, using whatever tween interval is open (instant when none is).
+- Visibility setters (`hidden`, `visible`) are SEPARATE from alpha: SM's
+  `hidden` flag is a hard visibility bit, independent of diffusealpha, so
+  it records onto its own `hidden` channel (1 hidden, 0 shown). An actor
+  can hold a diffusealpha crossfade while `hidden,1` gates it off; the
+  renderer draws only when NOT hidden AND alpha > 0.
 - Tween verbs (linear/accelerate/decelerate/smooth/tween/sleep) open a
   new interval: they first CLOSE the previous one (advancing the local
   clock by its duration, so chained tweens accumulate) then set the new
@@ -72,6 +76,7 @@ _REST = {
     'alpha': 1.0, 'skew_x': 0.0, 'skew_y': 0.0,
     'color': (1.0, 1.0, 1.0),
     'frame': 0.0,
+    'hidden': 0.0,
 }
 
 # Actor getter verb -> the property whose CURRENT value it returns.
@@ -314,7 +319,7 @@ class RecordingActor:
             self._emit('alpha', (alpha,))
 
     def _visibility(self, hidden: bool) -> None:
-        self._emit('alpha', (0.0 if hidden else 1.0,))
+        self._emit('hidden', (1.0 if hidden else 0.0,))
 
     def _set_state(self, index) -> None:
         """`setstate(i)` pins the sprite to grid frame `i` at the current

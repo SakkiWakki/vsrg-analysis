@@ -148,9 +148,22 @@ def test_dizzy_rotation_wraps_to_degrees():
 
 
 def test_confusion_rotation_radians_times_beat():
-    # percent (radians) * beat, in degrees.
+    # ReceptorGetRotationZ: (beat*percent mod 2pi) * -180/pi. beat 4, percent
+    # 0.5 => 2.0 rad (< 2pi, no wrap) => 2.0 * -180/pi.
     out = ae.confusion_rotation(0.5, 4.0)
-    assert out == pytest.approx(0.5 * 4.0 * 180.0 / math.pi)
+    assert out == pytest.approx(2.0 * -180.0 / math.pi)
+
+
+def test_confusion_wraps_at_two_pi():
+    # beat*percent = 8.0 rad wraps to 8 - 2pi ~ 1.717 before scaling.
+    out = ae.confusion_rotation(1.0, 8.0)
+    assert out == pytest.approx((8.0 % (2.0 * math.pi)) * -180.0 / math.pi)
+
+
+def test_confusion_offset_adds_constant():
+    # confusionoffset adds offset*180/pi regardless of beat.
+    out = ae.confusion_rotation(0.0, 4.0, offset=0.5)
+    assert out == pytest.approx(0.5 * 180.0 / math.pi)
 
 
 def test_zoom_from_mini():
@@ -421,42 +434,581 @@ def _mods(events):
     return NotitgNoteMods(mc, [(0.0, 120.0)])
 
 
-def test_reverse_100_flips_positions_about_midline():
-    # judge_y = 100, chart center = 200 => mirror_y = 300. A note at
-    # head_y = 40 (60 above judge line) fully reversed sits at
-    # mirror_y - (40 - 100) = 300 + 60 = 360 (60 below the mirrored line).
+def test_reverse_100_reads_as_native_downscroll():
+    # Native candidate space IS engine reverse=1, so a chart pinning
+    # reverse=1 (gat's baseline) leaves positions untouched.
     player = _FakePlayer([0, 1, 2, 3], 4)
     ctx = _FakeCtx(player, [40.0, 40.0, 40.0, 40.0], judge_y=100, chart_h=400)
     _mods([ModEvent(0.0, 1.0, -1, 'reverse')]).apply(ctx)
+    np.testing.assert_allclose(ctx.candidate_head_y, [40.0] * 4)
+    np.testing.assert_allclose(ctx.receptor_offsets['dy'], [0.0] * 4)
+
+
+def test_zero_channels_flip_to_engine_default_upscroll():
+    # No mods = engine reverse 0 = receptors on top. judge_y = 100,
+    # chart center = 200 => mirror_y = 300. A note at head_y = 40 (60
+    # above the judge line) mirrors to 300 + 60 = 360, and receptors
+    # shift to the mirrored line (dy = +200).
+    player = _FakePlayer([0, 1, 2, 3], 4)
+    ctx = _FakeCtx(player, [40.0, 40.0, 40.0, 40.0], judge_y=100, chart_h=400)
+    _mods([]).apply(ctx)
     np.testing.assert_allclose(ctx.candidate_head_y, [360.0] * 4)
+    np.testing.assert_allclose(ctx.receptor_offsets['dy'], [200.0] * 4)
 
 
 def test_centered_converges_receptor_to_midscreen():
     # centered 50% slides each receptor halfway to field center (200).
-    # receptors at judge_y = 100 -> 100 + 0.5*(200 - 100) = 150. A note at
+    # With no reverse channels the receptor starts at the engine-default
+    # mirrored line (300) -> 300 + 0.5*(200 - 300) = 250. A note at
     # head_y = judge_y (y_offset 0) lands exactly on the receptor.
     player = _FakePlayer([0, 1, 2, 3], 4)
     ctx = _FakeCtx(player, [100.0] * 4, judge_y=100, chart_h=400)
     _mods([ModEvent(0.0, 0.5, -1, 'centered')]).apply(ctx)
-    np.testing.assert_allclose(ctx.candidate_head_y, [150.0] * 4)
-    np.testing.assert_allclose(ctx.receptor_offsets['dy'], [50.0] * 4)
+    np.testing.assert_allclose(ctx.candidate_head_y, [250.0] * 4)
+    np.testing.assert_allclose(ctx.receptor_offsets['dy'], [150.0] * 4)
 
 
 def test_split_reverses_only_right_half():
-    # split 100%: cols 2,3 fully reverse, cols 0,1 stay put.
+    # split 100%: cols 2,3 engine-reverse (= our native downscroll, stay
+    # put); cols 0,1 remain engine-default and mirror to 360.
     player = _FakePlayer([0, 1, 2, 3], 4)
     ctx = _FakeCtx(player, [40.0] * 4, judge_y=100, chart_h=400)
     _mods([ModEvent(0.0, 1.0, -1, 'split')]).apply(ctx)
-    # left half unchanged (r = 0 => identity), right half flipped to 360.
-    np.testing.assert_allclose(ctx.candidate_head_y, [40.0, 40.0, 360.0, 360.0])
+    np.testing.assert_allclose(ctx.candidate_head_y, [360.0, 360.0, 40.0, 40.0])
 
 
 def test_boost_compresses_via_apply():
     # boost remaps y_offset before positions rebuild. head_y = 60 =>
     # y_offset = 100 - 60 = 40 (scale 1). boost 100%: fNewY = 40*1.5/
-    # ((40 + 400)/480) = 60/(440/480) = 65.4545; new head_y = 100 - 65.4545.
+    # ((40 + 400)/480) = 60/(440/480) = 65.4545. The zero-reverse baseline
+    # then mirrors about the judge line: mirror_y + off = 300 + 65.4545.
     player = _FakePlayer([0], 1)
     ctx = _FakeCtx(player, [60.0], judge_y=100, chart_h=400)
     _mods([ModEvent(0.0, 1.0, -1, 'boost')]).apply(ctx)
     expect_off = 40.0 * 1.5 / ((40.0 + 480.0 / 1.2) / 480.0)
-    assert ctx.candidate_head_y[0] == pytest.approx(100.0 - expect_off)
+    assert ctx.candidate_head_y[0] == pytest.approx(300.0 + expect_off)
+
+
+# --- digital / waveform warp family (ITGmania ArrowEffects.cpp) -------
+
+def _digital_angle(yoff, offset, period):
+    return math.pi * (yoff + offset) / (ae.ARROW_SIZE + period * ae.ARROW_SIZE)
+
+
+def test_rage_triangle_shape():
+    # RageTriangle (u = angle/PI): rises 0->1 over u in [0,0.5], falls
+    # 1->-1 over [0.5,1.5], rises -1->0 over [1.5,2]. So the peak +1 is at
+    # angle=PI/2 (u=0.5), zero at angle=PI (u=1), trough -1 at 3PI/2 (u=1.5).
+    ang = np.array([0.0, math.pi / 2, math.pi, 3 * math.pi / 2])
+    np.testing.assert_allclose(ae.rage_triangle(ang), [0.0, 1.0, 0.0, -1.0])
+
+
+def test_rage_square_shape():
+    # +1 for [0, PI), -1 for [PI, 2PI). Wraps and handles negatives.
+    ang = np.array([0.0, math.pi / 2, math.pi, 3 * math.pi / 2, -math.pi / 2])
+    np.testing.assert_allclose(ae.rage_square(ang), [1.0, 1.0, -1.0, -1.0, -1.0])
+
+
+def test_digital_x_steps_quantize_sine():
+    # percent*ARROW_SIZE*0.5 * round((steps+1)*sin(angle))/(steps+1).
+    # steps=0 => levels 1 => round(sin(angle)) in {-1,0,1}. Pick yoff so
+    # angle = PI/2 => sin=1 => round(1)/1 = 1 => 1*64*0.5*1 = 32.
+    yoff = np.array([ae.ARROW_SIZE / 2.0])  # angle = PI*(32)/64 = PI/2
+    out = ae.digital_x(1.0, yoff, 0.0, 0.0, 0.0)
+    assert out[0] == pytest.approx(32.0)
+
+
+def test_digital_x_more_steps_recovers_sine():
+    # steps large => levels large => round(levels*sin)/levels ~ sin.
+    yoff = np.array([20.0])
+    angle = _digital_angle(20.0, 0.0, 0.0)
+    out = ae.digital_x(1.0, yoff, 0.0, 0.0, 999.0)
+    levels = 1000.0
+    expect = 32.0 * round(levels * math.sin(angle)) / levels
+    assert out[0] == pytest.approx(expect)
+
+
+def test_digital_x_offset_and_period_modulate():
+    # offset shifts phase by 1 px/percent; period stretches the base period.
+    yoff = np.array([15.0])
+    out = ae.digital_x(0.5, yoff, 20.0, 0.5, 3.0)
+    angle = _digital_angle(15.0, 20.0, 0.5)
+    levels = 4.0
+    expect = 0.5 * 64.0 * 0.5 * round(levels * math.sin(angle)) / levels
+    assert out[0] == pytest.approx(expect)
+
+
+def test_zigzag_x_triangle_scaled():
+    # percent*(ARROW_SIZE/2)*RageTriangle(PI*(1/(period+1))*((yoff+100*off)/AS)).
+    yoff = np.array([32.0])
+    out = ae.zigzag_x(1.0, yoff, 0.0, 0.0, ae.ARROW_SIZE)
+    angle = math.pi * (32.0 / 64.0)  # PI/2
+    expect = 32.0 * ae.rage_triangle(np.array([angle]))[0]
+    assert out[0] == pytest.approx(expect)
+
+
+def test_zigzag_x_period_stretches():
+    yoff = np.array([48.0])
+    out = ae.zigzag_x(0.5, yoff, 10.0, 1.0, ae.ARROW_SIZE)
+    angle = math.pi * (1.0 / 2.0) * ((48.0 + 100.0 * 10.0) / 64.0)
+    expect = 0.5 * 32.0 * ae.rage_triangle(np.array([angle]))[0]
+    assert out[0] == pytest.approx(expect)
+
+
+def test_sawtooth_x_fractional_ramp():
+    # percent*ARROW_SIZE*frac(0.5/(period+1)*yoff/ARROW_SIZE). period 0:
+    # yoff=64 => 0.5*64/64 = 0.5, frac = 0.5 => 1*64*0.5 = 32.
+    out = ae.sawtooth_x(1.0, np.array([64.0]), 0.0)
+    assert out[0] == pytest.approx(32.0)
+    # wraps: yoff = 3*64 => 0.5*3 = 1.5, frac = 0.5 => still 32.
+    out2 = ae.sawtooth_x(1.0, np.array([192.0]), 0.0)
+    assert out2[0] == pytest.approx(32.0)
+
+
+def test_sawtooth_x_period_slows_ramp():
+    # period 1 halves the slope: 0.5/2*yoff/AS. yoff=128 => 0.25*128/64=0.5.
+    out = ae.sawtooth_x(1.0, np.array([128.0]), 1.0)
+    assert out[0] == pytest.approx(32.0)
+
+
+def test_square_x_wave_scaled():
+    # percent*ARROW_SIZE*0.5*RageSquare(digital_angle). Pick yoff so angle
+    # is in [0,PI) => +1 => +32; and one in [PI,2PI) => -1 => -32.
+    pos = ae.square_x(1.0, np.array([16.0]), 0.0, 0.0)  # angle=PI/4
+    assert pos[0] == pytest.approx(32.0)
+    neg = ae.square_x(1.0, np.array([96.0]), 0.0, 0.0)  # angle=3PI/2
+    assert neg[0] == pytest.approx(-32.0)
+
+
+def test_square_x_offset_period():
+    yoff = np.array([10.0])
+    out = ae.square_x(0.5, yoff, 5.0, 0.5)
+    angle = _digital_angle(10.0, 5.0, 0.5)
+    expect = 0.5 * 64.0 * 0.5 * ae.rage_square(np.array([angle]))[0]
+    assert out[0] == pytest.approx(expect)
+
+
+def test_bounce_x_rectified_sine():
+    # percent*ARROW_SIZE*0.5*abs(sin((yoff+off)/(60+period*60))). period 0:
+    # yoff = 60*PI/2 => sin(PI/2)=1 => 1*64*0.5*1 = 32.
+    yoff = np.array([60.0 * math.pi / 2.0])
+    out = ae.bounce_x(1.0, yoff, 0.0, 0.0)
+    assert out[0] == pytest.approx(32.0)
+    # rectified: a phase that gives sin<0 still yields +abs.
+    neg_phase = np.array([60.0 * 3.0 * math.pi / 2.0])
+    out2 = ae.bounce_x(1.0, neg_phase, 0.0, 0.0)
+    assert out2[0] == pytest.approx(32.0)
+
+
+def test_bounce_x_period_and_offset():
+    yoff = np.array([30.0])
+    out = ae.bounce_x(0.5, yoff, 12.0, 1.0)
+    amt = abs(math.sin((30.0 + 12.0) / (60.0 + 60.0)))
+    assert out[0] == pytest.approx(0.5 * 64.0 * 0.5 * amt)
+
+
+def test_waveform_z_zoom_reprojection():
+    # z push maps to 1 + z/SCREEN_HEIGHT, matching bumpy's reprojection.
+    out = ae.waveform_z_zoom(np.array([48.0]))
+    assert out[0] == pytest.approx(1.0 + 48.0 / 480.0)
+
+
+# --- digital family via note_offsets (channels-through smoke) --------
+
+def test_digital_note_offsets_displaces_dx():
+    # a 'digital' percent moves dx off-lane; zero percent leaves dx at 0.
+    cols = np.array([0, 1, 2, 3])
+    yoff = np.array([32.0, 32.0, 32.0, 32.0])
+    on = note_offsets({'digital': 1.0}, cols, yoff, t_now=0.0, beat_now=0.0,
+                      keycount=4)
+    assert np.any(on.dx != 0.0)
+    off = note_offsets({'digital': 0.0}, cols, yoff, t_now=0.0, beat_now=0.0,
+                       keycount=4)
+    np.testing.assert_array_equal(off.dx, np.zeros(4))
+
+
+def test_digital_companions_change_dx():
+    # digitalperiod / digitaloffset / digitalsteps modulate the result:
+    # changing a companion changes dx (they are read from the percents dict).
+    # Use a fine step base (100 levels) so the sine, not the quantizer,
+    # dominates - period/offset shifts then reliably change the sample.
+    cols = np.array([0])
+    yoff = np.array([37.0])
+    fine = {'digital': 1.0, 'digitalsteps': 99.0}
+    base = note_offsets(fine, cols, yoff, t_now=0.0, beat_now=0.0,
+                        keycount=4).dx[0]
+    period = note_offsets({**fine, 'digitalperiod': 0.7}, cols, yoff,
+                          t_now=0.0, beat_now=0.0, keycount=4).dx[0]
+    offset = note_offsets({**fine, 'digitaloffset': 25.0}, cols, yoff,
+                          t_now=0.0, beat_now=0.0, keycount=4).dx[0]
+    # steps changes the quantization: coarse (0) vs fine (99) differ.
+    coarse = note_offsets({'digital': 1.0, 'digitalsteps': 0.0}, cols, yoff,
+                          t_now=0.0, beat_now=0.0, keycount=4).dx[0]
+    assert period != base
+    assert offset != base
+    assert coarse != base
+
+
+def test_digitalz_note_offsets_changes_zoom():
+    # the Z sibling pushes zoom off 1.0 via the reprojection; X stays clean.
+    cols = np.array([0])
+    yoff = np.array([32.0])
+    r = note_offsets({'digitalz': 1.0}, cols, yoff, t_now=0.0, beat_now=0.0,
+                     keycount=4)
+    assert r.zoom[0] != pytest.approx(1.0)
+    np.testing.assert_array_equal(r.dx, np.zeros(1))
+
+
+def test_zigzag_per_column_variant():
+    # numbered zigzag2 fires on column 2 only (rides auto-detection).
+    p = {'zigzag2': 1.0}
+    cols = np.array([0, 1, 2, 3])
+    yoff = np.array([48.0, 48.0, 48.0, 48.0])
+    r = note_offsets(p, cols, yoff, t_now=0.0, beat_now=0.0, keycount=4)
+    assert r.dx[0] == 0.0 and r.dx[1] == 0.0 and r.dx[3] == 0.0
+    assert r.dx[2] != 0.0
+
+
+def test_waveform_batch_equals_scalar_loop():
+    p = {'digital': 0.6, 'digitalperiod': 0.3, 'digitaloffset': 10.0,
+         'digitalsteps': 2.0, 'zigzag': 0.5, 'zigzagperiod': 0.4,
+         'sawtooth': 0.3, 'square': 0.4, 'squareoffset': 5.0,
+         'bounce': 0.5, 'bounceperiod': 0.2, 'digitalz': 0.4,
+         'zigzagz': 0.3, 'bouncez': 0.2}
+    cols = np.array([0, 1, 2, 3, 0, 2])
+    y = np.array([120.0, 80.0, 41.0, 13.0, -30.0, 305.0])
+    batch = note_offsets(p, cols, y, t_now=1.7, beat_now=3.3, keycount=4)
+    for i in range(len(cols)):
+        one = note_offsets(p, cols[i:i + 1], y[i:i + 1], t_now=1.7,
+                           beat_now=3.3, keycount=4)
+        assert batch.dx[i] == pytest.approx(one.dx[0])
+        assert batch.zoom[i] == pytest.approx(one.zoom[0])
+
+
+# --- boomerang (position parabola + visibility approximation) --------
+
+def test_boomerang_y_offset_parabola():
+    # y' = -y*y/H + 1.5*y, H = 480. At y = 240: -240^2/480 + 360 = 240.
+    out = ae.boomerang_y_offset(np.array([240.0]))
+    assert out[0] == pytest.approx(240.0)
+    # at the fold peak y = 0.75*480 = 360: -360^2/480 + 540 = 270 (the max).
+    peak_raw, peak_y = ae.boomerang_peak()
+    assert peak_raw == pytest.approx(360.0)
+    assert peak_y == pytest.approx(270.0)
+    assert ae.boomerang_y_offset(np.array([360.0]))[0] == pytest.approx(270.0)
+
+
+def test_boomerang_applies_via_accel():
+    # boomerang runs inside accel_y_offset (after boost/brake/wave). Alone it
+    # is just the parabola of the raw offset.
+    y = np.array([120.0, 360.0, 480.0])
+    out = ae.accel_y_offset({'boomerang': 1.0}, y)
+    expect = -1.0 * y * y / 480.0 + 1.5 * y
+    np.testing.assert_allclose(out, expect)
+
+
+def test_boomerang_visibility_fades_past_fold():
+    # visibility mirrors bIsPastPeak: alpha 1 at the fold p = 360, ramping to
+    # 0 one ARROW_SIZE (64) later. percent gates the strength.
+    p = 360.0
+    assert ae.boomerang_visibility(1.0, np.array([p]))[0] == pytest.approx(1.0)
+    assert ae.boomerang_visibility(1.0, np.array([p + 32.0]))[0] == pytest.approx(0.5)
+    assert ae.boomerang_visibility(1.0, np.array([p + 64.0]))[0] == pytest.approx(0.0)
+    # notes before the fold are fully visible.
+    assert ae.boomerang_visibility(1.0, np.array([100.0]))[0] == pytest.approx(1.0)
+    # percent 0 => no fade at all.
+    assert ae.boomerang_visibility(0.0, np.array([p + 64.0])) == 1.0
+
+
+def test_boomerang_visibility_enters_alpha():
+    # a far note (past the fold) under boomerang fades in note_offsets.alpha.
+    r = note_offsets({'boomerang': 1.0}, np.array([0]), np.array([440.0]),
+                     t_now=0.0, beat_now=0.0, keycount=4)
+    assert r.alpha_mult[0] == pytest.approx(0.0)
+    near = note_offsets({'boomerang': 1.0}, np.array([0]), np.array([100.0]),
+                        t_now=0.0, beat_now=0.0, keycount=4)
+    assert near.alpha_mult[0] == pytest.approx(1.0)
+
+
+# --- pulse / shrink zoom --------------------------------------------
+
+def test_pulse_zoom_sine_swing():
+    # sine = sin((yoff+100*off)/(0.4*(AS+period*AS))). Pick yoff so sine = 1:
+    # yoff/(0.4*64) = pi/2 => yoff = 0.4*64*pi/2. inner 0, outer 1:
+    # zoom = 1*(1*0.5) + (0*0.5 + 1) = 1.5.
+    yoff = np.array([0.4 * 64.0 * math.pi / 2.0])
+    out = ae.pulse_zoom(0.0, 1.0, yoff)
+    assert out[0] == pytest.approx(1.5)
+
+
+def test_pulse_zoom_off_when_both_zero():
+    assert ae.pulse_zoom(0.0, 0.0, np.array([50.0])) == 1.0
+
+
+def test_pulse_inner_sets_rest_scale():
+    # sine term 0 (yoff = 0), inner 1 => rest = inner*0.5 + 1 = 1.5.
+    out = ae.pulse_zoom(1.0, 0.0, np.array([0.0]))
+    assert out[0] == pytest.approx(1.5)
+
+
+def test_pulse_via_note_offsets_zoom():
+    r = note_offsets({'pulseouter': 1.0}, np.array([0]),
+                     np.array([0.4 * 64.0 * math.pi / 2.0]),
+                     t_now=0.0, beat_now=0.0, keycount=4)
+    assert r.zoom[0] != pytest.approx(1.0)
+
+
+def test_shrink_mult_shrinks_far_notes():
+    # zoom *= 1/(1 + yoff*(mult/100)). yoff=100, mult=100 => 1/101.
+    m, a = ae.shrink_zoom(100.0, 0.0, np.array([100.0]))
+    assert m[0] == pytest.approx(1.0 / 101.0)
+    assert a[0] == 0.0
+
+
+def test_shrink_linear_adds_by_distance():
+    # zoom += yoff*(0.5*linear/AS). yoff=64, linear=1 => +0.5.
+    m, a = ae.shrink_zoom(0.0, 1.0, np.array([64.0]))
+    assert a[0] == pytest.approx(0.5)
+    assert m[0] == 1.0
+
+
+def test_shrink_only_affects_approaching_notes():
+    # y_offset < 0 (past receptor) is untouched by either shrink.
+    m, a = ae.shrink_zoom(100.0, 1.0, np.array([-50.0]))
+    assert m[0] == 1.0 and a[0] == 0.0
+
+
+# --- tan / cosec family ---------------------------------------------
+
+def test_select_tan_matches_math():
+    ang = np.array([0.3, 0.8])
+    np.testing.assert_allclose(ae._select_tan(ang), np.tan(ang))
+    np.testing.assert_allclose(ae._select_tan(ang, cosecant=True), 1.0 / np.sin(ang))
+
+
+def test_tan_drunk_uses_tan_kernel():
+    # tandrunk is drunk with the tan kernel: percent*tan(angle)*AS*0.5.
+    # angle at t=1, col0, yoff0 = 1. Expect 1*tan(1)*64*0.5.
+    cols = np.array([0])
+    r = note_offsets({'tandrunk': 1.0}, cols, np.array([0.0]),
+                     t_now=1.0, beat_now=0.0, keycount=4)
+    assert r.dx[0] == pytest.approx(math.tan(1.0) * 64.0 * 0.5)
+
+
+def test_tan_tornado_differs_from_tornado():
+    cols = np.array([0])
+    y = np.array([50.0])
+    plain = ae.tornado_x(1.0, cols, y, 4)
+    tanv = ae.tan_tornado_x(1.0, cols, y, 4)
+    assert plain[0] != pytest.approx(tanv[0])
+
+
+def test_tan_tipsy_uses_tan_kernel():
+    # tantipsy = percent*tan(angle)*AS*0.4; angle at t=0.5, col0 = 0.5*1.2 = 0.6.
+    r = note_offsets({'tantipsy': 1.0}, np.array([0]), np.array([0.0]),
+                     t_now=0.5, beat_now=0.0, keycount=4)
+    assert r.dy[0] == pytest.approx(math.tan(0.6) * 64.0 * 0.4)
+
+
+def test_tan_digital_uses_tan_kernel():
+    # tandigital shares digital's angle but tan-kernels the sine. steps large
+    # so quantization is fine.
+    yoff = np.array([15.0])
+    r = note_offsets({'tandigital': 1.0, 'tandigitalsteps': 999.0},
+                     np.array([0]), yoff, t_now=0.0, beat_now=0.0, keycount=4)
+    angle = math.pi * 15.0 / 64.0
+    levels = 1000.0
+    expect = 32.0 * round(levels * math.tan(angle)) / levels
+    assert r.dx[0] == pytest.approx(expect)
+
+
+def test_tan_bumpy_pushes_zoom():
+    # tanbumpy is a z-push (-> zoom) using the tan kernel.
+    r = note_offsets({'tanbumpy': 0.5}, np.array([0]), np.array([20.0]),
+                     t_now=0.0, beat_now=0.0, keycount=4)
+    assert r.zoom[0] != pytest.approx(1.0)
+
+
+def test_tan_bumpyx_pushes_dx():
+    r = note_offsets({'tanbumpyx': 0.5}, np.array([0]), np.array([20.0]),
+                     t_now=0.0, beat_now=0.0, keycount=4)
+    assert r.dx[0] != 0.0
+
+
+# --- companion sweep (drunk/tipsy/tornado/bumpy) --------------------
+
+def test_drunk_speed_offset_period_companions():
+    cols = np.array([0])
+    y = np.array([48.0])
+    base = ae.drunk_x(1.0, cols, y, 1.5, 4)
+    speed = ae.drunk_x(1.0, cols, y, 1.5, 4, speed=0.5)
+    offset = ae.drunk_x(1.0, cols, y, 1.5, 4, offset=0.3)
+    period = ae.drunk_x(1.0, cols, y, 1.5, 4, period=0.4)
+    assert speed[0] != base[0]
+    # offset scales the per-column term; at col 0 it multiplies 0 -> no change.
+    assert offset[0] == pytest.approx(base[0])
+    assert period[0] != base[0]
+
+
+def test_drunk_companions_via_note_offsets():
+    cols = np.array([0, 1])
+    y = np.array([40.0, 40.0])
+    base = note_offsets({'drunk': 1.0}, cols, y, t_now=1.0, beat_now=0.0,
+                        keycount=4).dx
+    withspeed = note_offsets({'drunk': 1.0, 'drunkspeed': 1.0}, cols, y,
+                             t_now=1.0, beat_now=0.0, keycount=4).dx
+    assert not np.allclose(base, withspeed)
+
+
+def test_tipsy_speed_offset_companions():
+    cols = np.array([1])
+    base = ae.tipsy_y(1.0, cols, 0.5)
+    speed = ae.tipsy_y(1.0, cols, 0.5, speed=1.0)
+    offset = ae.tipsy_y(1.0, cols, 0.5, offset=0.5)
+    assert speed[0] != base[0]
+    assert offset[0] != base[0]
+
+
+def test_tornado_offset_period_companions():
+    cols = np.array([0])
+    y = np.array([60.0])
+    base = ae.tornado_x(1.0, cols, y, 4)
+    period = ae.tornado_x(1.0, cols, y, 4, period=0.5)
+    offset = ae.tornado_x(1.0, cols, y, 4, offset=30.0)
+    assert period[0] != base[0]
+    assert offset[0] != base[0]
+
+
+def test_bumpy_offset_period_companions():
+    y = np.array([20.0])
+    base = ae.bumpy_z(1.0, y)
+    offset = ae.bumpy_z(1.0, y, offset=0.5)
+    period = ae.bumpy_z(1.0, y, period=0.5)
+    assert offset[0] != base[0]
+    assert period[0] != base[0]
+
+
+# --- beat siblings (beaty / beatz) + companions ---------------------
+
+def test_beat_x_shift_shape():
+    # factor at beat_now=0 is 20; shift = factor*sin(yoff/15 + pi/2).
+    # yoff=0 => sin(pi/2)=1 => 20.
+    out = ae.beat_x(1.0, np.array([0.0]), 0.0)
+    assert out[0] == pytest.approx(20.0)
+
+
+def test_beaty_matches_beat_shape_on_y():
+    r = note_offsets({'beaty': 1.0}, np.array([0]), np.array([0.0]),
+                     t_now=0.0, beat_now=0.0, keycount=4)
+    assert r.dy[0] == pytest.approx(20.0)
+
+
+def test_beatz_reprojects_to_zoom():
+    # beatz pushes z; zoom = 1 + z/480. yoff=0, factor 20 => z=20 => 1+20/480.
+    r = note_offsets({'beatz': 1.0}, np.array([0]), np.array([0.0]),
+                     t_now=0.0, beat_now=0.0, keycount=4)
+    assert r.zoom[0] == pytest.approx(1.0 + 20.0 / 480.0)
+
+
+def test_beat_mult_companion_speeds_pulse():
+    # beatmult doubles the beat phase, changing the factor.
+    plain = ae.beat_factor(0.0)
+    fast = ae.beat_factor(0.0, mult=1.0)
+    assert plain != pytest.approx(fast)
+
+
+def test_beat_offset_companion_shifts_phase():
+    # beat_now = 1.0 => phase frac 0.2 (in the active 0..0.5 window); a small
+    # offset shifts the phase to a different active amount.
+    plain = ae.beat_factor(1.0)
+    shifted = ae.beat_factor(1.0, offset=0.1)
+    assert plain != pytest.approx(shifted)
+    assert plain != 0.0 and shifted != 0.0
+
+
+# --- attenuate / parabola -------------------------------------------
+
+def test_parabola_quadratic():
+    # percent*(yoff/AS)^2. yoff=128 => (2)^2 = 4.
+    out = ae.parabola(1.0, np.array([128.0]))
+    assert out[0] == pytest.approx(4.0)
+
+
+def test_attenuate_scaled_by_column_xoffset():
+    # percent*(yoff/AS)^2*(xoff/AS). 4k col 0 xoff = -96, yoff = 64:
+    # 1 * (1)^2 * (-96/64) = -1.5.
+    out = ae.attenuate(1.0, np.array([0]), np.array([64.0]), 4)
+    assert out[0] == pytest.approx(-1.5)
+    # center-ish columns flip sign; col 3 xoff = +96 => +1.5.
+    out3 = ae.attenuate(1.0, np.array([3]), np.array([64.0]), 4)
+    assert out3[0] == pytest.approx(1.5)
+
+
+def test_attenuate_x_y_z_route_to_axes():
+    y = np.array([64.0])
+    r = note_offsets({'attenuatex': 1.0, 'attenuatey': 1.0, 'attenuatez': 1.0},
+                     np.array([0]), y, t_now=0.0, beat_now=0.0, keycount=4)
+    assert r.dx[0] == pytest.approx(-1.5)
+    assert r.dy[0] == pytest.approx(-1.5)
+    # z push -1.5 px -> zoom 1 + (-1.5)/480.
+    assert r.zoom[0] == pytest.approx(1.0 - 1.5 / 480.0)
+
+
+def test_parabola_x_y_z_route_to_axes():
+    y = np.array([128.0])
+    r = note_offsets({'parabolax': 1.0, 'parabolay': 1.0, 'parabolaz': 1.0},
+                     np.array([0]), y, t_now=0.0, beat_now=0.0, keycount=4)
+    assert r.dx[0] == pytest.approx(4.0)
+    assert r.dy[0] == pytest.approx(4.0)
+    assert r.zoom[0] == pytest.approx(1.0 + 4.0 / 480.0)
+
+
+# --- xmode / confusionoffset ----------------------------------------
+
+def test_xmode_shoves_by_y_offset():
+    # single-side field: dx = percent * y_offset.
+    r = note_offsets({'xmode': 0.5}, np.array([0]), np.array([200.0]),
+                     t_now=0.0, beat_now=0.0, keycount=4)
+    assert r.dx[0] == pytest.approx(100.0)
+
+
+def test_confusion_offset_via_note_offsets():
+    # confusionoffset alone spins the whole field a constant amount.
+    r = note_offsets({'confusionoffset': 0.5}, np.array([0]), np.array([50.0]),
+                     t_now=0.0, beat_now=3.0, keycount=4)
+    assert r.rotation_deg[0] == pytest.approx(0.5 * 180.0 / math.pi)
+
+
+# --- new-mod vectorization parity -----------------------------------
+
+def test_new_mods_batch_equals_scalar_loop():
+    p = {'tandrunk': 0.4, 'tandrunkspeed': 0.2, 'tantornado': 0.3,
+         'tantipsy': 0.5, 'beaty': 0.6, 'beatz': 0.4, 'beatmult': 1.0,
+         'attenuatex': 0.3, 'attenuatey': 0.2, 'attenuatez': 0.25,
+         'parabolax': 0.2, 'bumpyx': 0.3, 'bumpyxoffset': 0.4,
+         'tandigital': 0.3, 'tandigitalsteps': 3.0, 'pulseouter': 0.5,
+         'shrinkmult': 20.0, 'shrinklinear': 0.5, 'drunk': 0.4,
+         'drunkperiod': 0.3, 'tornado': 0.3, 'tornadooffset': 10.0}
+    cols = np.array([0, 1, 2, 3, 0, 2])
+    y = np.array([120.0, 83.0, 41.0, 13.0, -30.0, 305.0])
+    beats = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    batch = note_offsets(p, cols, y, t_now=1.7, beat_now=3.3, keycount=4,
+                         note_beats=beats)
+    for i in range(len(cols)):
+        one = note_offsets(p, cols[i:i + 1], y[i:i + 1], t_now=1.7,
+                           beat_now=3.3, keycount=4, note_beats=beats[i:i + 1])
+        assert batch.dx[i] == pytest.approx(one.dx[0])
+        assert batch.dy[i] == pytest.approx(one.dy[0])
+        assert batch.zoom[i] == pytest.approx(one.zoom[0])
+        assert batch.alpha_mult[i] == pytest.approx(one.alpha_mult[0])
+
+
+def test_new_mods_determinism():
+    p = {'tandrunk': 0.5, 'beaty': 0.3, 'pulseouter': 0.4, 'boomerang': 0.5}
+    cols = np.array([0, 1, 2, 3])
+    y = np.array([100.0, 200.0, 300.0, 400.0])
+    a = note_offsets(p, cols, y, t_now=2.5, beat_now=4.0, keycount=4)
+    b = note_offsets(p, cols, y, t_now=2.5, beat_now=4.0, keycount=4)
+    np.testing.assert_array_equal(a.dx, b.dx)
+    np.testing.assert_array_equal(a.zoom, b.zoom)
+    np.testing.assert_array_equal(a.alpha_mult, b.alpha_mult)

@@ -112,9 +112,6 @@ class NotitgAdapter(EtternaAdapter):
         # must replicate background + below-draws, not a bare notefield.
         return 'full'
 
-    def upscroll(self) -> bool:
-        return True
-
     def _compiled_modfile(self, replay):
         """compile_modfile for this replay's chart, memoized on the replay
         so note_mods / scroll_multipliers / effects share one harvest."""
@@ -140,12 +137,14 @@ class NotitgAdapter(EtternaAdapter):
         return super().background_path(replay)
 
     def note_mods(self, replay):
+        """Always present for NotITG, even with no modfile: the consumer
+        owns scroll orientation (engine-default upscroll comes from the
+        zero-channel reverse baseline), so a chart without mods still
+        needs it."""
         from analysis.games.notitg.mod_channels import compile_mod_channels
         from analysis.games.notitg.note_mods import NotitgNoteMods
         compiled = self._compiled_modfile(replay)
-        if not compiled or not compiled.get('mod_events'):
-            return None
-        channels = compile_mod_channels(compiled['mod_events'])
+        channels = compile_mod_channels((compiled or {}).get('mod_events') or [])
         sm_path, _index = split_chart_ref(replay.get('filepath', ''))
         bpms = parse_sm(sm_path)['bpms']
         return NotitgNoteMods(channels, bpms)
@@ -159,18 +158,12 @@ class NotitgAdapter(EtternaAdapter):
         return events or None
 
     def effects(self, replay):
-        from analysis.games.notitg.background_tint import NotitgBackgroundTint
         from analysis.games.notitg.field_instances import NotitgFieldInstances
-        from analysis.games.notitg.mod_channels import compile_mod_channels
         from analysis.games.notitg.shader_bridge import notitg_shader_effects
         compiled = self._compiled_modfile(replay)
         if not compiled:
             return []
         effects = list(notitg_shader_effects(compiled.get('shader_flags')))
-        mod_events = compiled.get('mod_events')
-        if mod_events:
-            effects.append(
-                NotitgBackgroundTint(compile_mod_channels(mod_events)))
         field_copies = compiled.get('field_copies')
         if field_copies:
             effects.append(NotitgFieldInstances(field_copies))

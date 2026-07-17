@@ -377,6 +377,30 @@ def test_group_alpha_multiplies_onto_children():
     assert 40 < alpha < 65
 
 
+# ── hidden vs alpha split -------------------------------------------------
+
+def test_hidden_bit_gates_draw_independently_of_alpha():
+    """SM's `hidden` bit hard-gates the draw even at full alpha: a
+    diffusealpha crossfade can ride an actor a `hidden,1` currently
+    hides."""
+    shown = _leaf('rect', timelines=build_timelines(
+        {'w': 20.0, 'h': 20.0, 'alpha': 1.0, 'hidden': 0.0}))
+    hidden = _leaf('rect', timelines=build_timelines(
+        {'w': 20.0, 'h': 20.0, 'alpha': 1.0, 'hidden': 1.0}))
+    shown_sb = Storyboard(200, 200, 'height', (shown,))
+    hidden_sb = Storyboard(200, 200, 'height', (hidden,))
+    assert _rendered_bbox(shown_sb, t=0.5) is not None
+    assert _rendered_bbox(hidden_sb, t=0.5) is None   # gated off at alpha 1
+
+
+def test_hidden_group_hides_whole_subtree():
+    child = _leaf('rect', timelines=build_timelines({'w': 20.0, 'h': 20.0}))
+    sb = Storyboard(200, 200, 'height',
+                    (_group([child],
+                            timelines=build_timelines({'hidden': 1.0})),))
+    assert _rendered_bbox(sb, t=0.5) is None
+
+
 # ── SM built-in 'white' texture -------------------------------------------
 
 def test_white_texture_recognized_and_synthesized():

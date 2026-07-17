@@ -405,7 +405,7 @@ def test_note_mods_stashes_rotation_zoom_and_receptor_offsets():
         columns=np.array([0, 1, 2, 3]), keycount=keycount, notes=notes)
     ctx = types.SimpleNamespace(
         candidates=[0, 1, 2, 3], t_now=5.0, player=player,
-        lane_w=64.0, judge_y=400.0,
+        lane_w=64.0, judge_y=400.0, chart_rect=(0.0, 0.0, 400.0, 800.0),
         candidate_head_y=np.full(4, 200.0),
         candidate_tail_y=np.full(4, 180.0),
         candidate_press_y=np.full(4, 200.0))
@@ -478,6 +478,10 @@ def test_recording_actor_add_reads_current_value():
 
 
 def test_recording_actor_diffuse_and_visibility():
+    """`diffuse`/`diffusealpha` feed the `alpha` channel; `hidden`/`visible`
+    feed a SEPARATE `hidden` channel (SM's hard visibility bit is
+    independent of diffusealpha), so a crossfade can ride an actor a
+    `hidden,1` currently gates off."""
     from analysis.games.notitg.recording_actor import RecordingActor
 
     actor = RecordingActor(clock=0.0)
@@ -486,9 +490,12 @@ def test_recording_actor_diffuse_and_visibility():
     actor.poke('visible', ['1'])
     frames = actor.keyframes()
     assert frames['color'][0].values == (1.0, 0.0, 0.0)
+    # diffusealpha never gets clobbered by the visibility pokes.
     assert frames['alpha'][0].values == (0.5,)
-    assert frames['alpha'][1].values == (0.0,)   # hidden(1)
-    assert frames['alpha'][2].values == (1.0,)   # visible
+    assert len(frames['alpha']) == 1
+    # hidden(1) then visible(1): the hidden bit goes on, then off.
+    assert frames['hidden'][0].values == (1.0,)   # hidden(1)
+    assert frames['hidden'][1].values == (0.0,)   # visible(1) -> shown
 
 
 # -- named-actor binding: XML self-assign + closure pokes -----------------
@@ -511,8 +518,9 @@ def test_named_actor_binding_from_synthetic_xml_and_closure():
     named = env.named_actor_keyframes()
     assert set(named) == {'my_frame'}            # 'self' does not linger
     frames = named['my_frame']
-    # InitCommand hidden(1) recorded at load (t=0), fire-time y pokes at 4/5.
-    assert frames['alpha'][0].values == (0.0,)
+    # InitCommand hidden(1) recorded at load (t=0) on the hidden channel
+    # (its own bit, not alpha), fire-time y pokes at 4/5.
+    assert frames['hidden'][0].values == (1.0,)
     y = frames['y']
     assert (y[0].t, y[0].values) == (4.0, (30.0,))
     assert (y[1].t, y[1].values) == (5.0, (60.0,))
@@ -742,6 +750,89 @@ def test_playcommand_starts_at_current_clock():
     move_kf = recorder.keyframes()['y'][-1]
     # playcommand does NOT wait for the tween: clock unchanged from load.
     assert move_kf.t == pytest.approx(0.0)
+
+
+def test_queuecommand_propagates_to_frame_children():
+    """A play/queuecommand on an ActorFrame runs the named command on
+    every descendant that defines it (SM RunCommandsOnChildren), so gat's
+    `gat_bg:queuecommand('BG2')` fires the bg Layers' BG2 crossfades even
+    though the frame itself has no BG2Command."""
+    env, _w = _load(
+        '<ActorFrame InitCommand="%function(self) frame = self end"><children>'
+        '<LAER Type="Sprite" BG2Command="diffusealpha,0.5"/>'
+        '<LAER Type="Sprite" BG2Command="diffusealpha,0.25"/>'
+        '</children></ActorFrame>')
+    env.run("frame:playcommand('BG2')", name='play')
+    frame_rec = env._recorder_for_table(env._host.env['frame'])
+    child_ids = env._child_recorders[frame_rec_id(env, 'frame')]
+    alphas = [env._recorders[cid].keyframes()['alpha'][-1].values[0]
+              for cid in child_ids]
+    assert alphas == [0.5, 0.25]           # each child took its own crossfade
+    assert 'alpha' not in frame_rec.keyframes()   # the frame itself is inert
+
+
+def frame_rec_id(env, name):
+    return env._host.env[name]['__recorder_id']
+
+
+def test_bg_crossfade_compiles_from_queued_message():
+    """The gat bg pattern: a frame's queuecommand crossfades four stacked
+    bg sprites. bg.png starts shown (alpha 0.5), a BG2 message fades it out
+    while bg2.png fades in - the compiled sprites carry the evolving
+    alpha, so the background progresses instead of sitting static."""
+    xml = (
+        '<ActorFrame><children>'
+        '<ActorFrame OnCommand="%function(self) bg = self end"><children>'
+        '<LAER Type="Sprite" Texture="white"'
+        ' OnCommand="diffusealpha,0.5" BG2Command="linear,1;diffusealpha,0;"/>'
+        '<LAER Type="Sprite" Texture="white"'
+        ' OnCommand="diffusealpha,0" BG2Command="linear,1;diffusealpha,0.5;"/>'
+        '</children></ActorFrame>'
+        '</children></ActorFrame>')
+    parsed = xml_actors.parse_actor_xml(xml)
+    env = StubEnvironment(start_beat=0.0)
+    env.load_actors(parsed.root)
+    # A scheduled closure queues BG2 at beat 10 (= 10s identity clock).
+    env.run("mod_actions = { {10, function() bg:queuecommand('BG2') end} }",
+            name='ma')
+    env.replay_mod_actions()
+
+    from analysis.games.notitg import modfile
+    tree = modfile.compile_element_tree(
+        parsed.root, to_seconds=lambda b: float(b), start_beat=0.0,
+        actor_keyframes=env.actor_keyframes())
+    frame = tree[0]
+    first, second = frame.children
+    # Before the message: first shown at 0.5, second off.
+    assert first.sample('alpha', 0.0)[0] == pytest.approx(0.5)
+    assert second.sample('alpha', 0.0)[0] == pytest.approx(0.0)
+    # After the crossfade (>1s past beat 10): they have swapped.
+    assert first.sample('alpha', 12.0)[0] == pytest.approx(0.0)
+    assert second.sample('alpha', 12.0)[0] == pytest.approx(0.5)
+
+
+def test_hidden_init_gates_sprite_but_keeps_alpha_crossfade():
+    """The ShowAFTBG residual: a bg sprite with `InitCommand=hidden,1` and
+    `OnCommand=diffusealpha,0.5` must compile HIDDEN (gated off in front of
+    the notes) while retaining its 0.5 alpha, so a later `hidden,0` message
+    can reveal it without clobbering the diffusealpha."""
+    xml = (
+        '<ActorFrame><children>'
+        '<LAER Type="Sprite" Texture="white"'
+        ' InitCommand="hidden,1" OnCommand="diffusealpha,0.5"'
+        ' ShowMessageCommand="hidden,0"/>'
+        '</children></ActorFrame>')
+    parsed = xml_actors.parse_actor_xml(xml)
+    env = StubEnvironment(start_beat=0.0)
+    env.load_actors(parsed.root)
+
+    from analysis.games.notitg import modfile
+    tree = modfile.compile_element_tree(
+        parsed.root, to_seconds=lambda b: float(b), start_beat=0.0,
+        actor_keyframes=env.actor_keyframes())
+    el = tree[0]
+    assert el.sample('hidden', 0.0)[0] == pytest.approx(1.0)   # gated off
+    assert el.sample('alpha', 0.0)[0] == pytest.approx(0.5)    # alpha kept
 
 
 def test_recursive_dispatch_is_capped():

@@ -13,6 +13,9 @@ Properties and arities:
     scale_x/y     multiplies the element's natural size
     rotation      degrees, clockwise, about the origin point
     alpha         0..1 (element base alpha folded into the rest value)
+    hidden        SM's hard visibility bit (0 shown, 1 hidden); gates the
+                  draw independently of alpha so a diffusealpha crossfade
+                  can ride an actor that a `hidden,1` currently hides
     w, h          design-space size for sized kinds (rect/ellipse/...)
     border        outline stroke width, design px
     color         (r, g, b) 0..1
@@ -51,6 +54,9 @@ from analysis.player.render.effects.timeline import EventTimeline
 _SCALAR_RESTS = {
     'x': 0.0, 'y': 0.0, 'scale_x': 1.0, 'scale_y': 1.0,
     'rotation': 0.0, 'alpha': 1.0, 'w': 0.0, 'h': 0.0, 'border': 2.0,
+    # SM's hard visibility bit, held apart from alpha (0 shown, 1 hidden);
+    # an element is drawn only when NOT hidden AND alpha is visible.
+    'hidden': 0.0,
 }
 
 

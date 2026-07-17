@@ -420,7 +420,7 @@ def _compile_elements(classic_commands, to_seconds, start_beat,
 
 
 def compile_element_tree(root, to_seconds, start_beat, named_keyframes=None,
-                         fonts=None):
+                         fonts=None, actor_keyframes=None):
     """HIERARCHICAL compile: the actor tree becomes a tree of storyboard
     Elements. An ActorFrame with drawable descendants becomes a 'group'
     whose transform composes onto its children; a Sprite/Quad/BitmapText
@@ -444,18 +444,19 @@ def compile_element_tree(root, to_seconds, start_beat, named_keyframes=None,
     below = []
     for child in root.children:
         element = _compile_actor(child, start_time, named_keyframes, fonts,
-                                 below)
+                                 below, actor_keyframes)
         if element is not None:
             children.append(element)
     return below + children
 
 
-def _compile_actor(actor, start_time, named_keyframes, fonts, below=None):
+def _compile_actor(actor, start_time, named_keyframes, fonts, below=None,
+                   actor_keyframes=None):
     if below is None:
         below = []
     if getattr(actor, '_background_layer', False):
         element = _compile_background_actor(actor, start_time, named_keyframes,
-                                           fonts)
+                                           fonts, actor_keyframes)
         if element is not None:
             below.append(element)
         return None
@@ -463,11 +464,12 @@ def _compile_actor(actor, start_time, named_keyframes, fonts, below=None):
     child_elements = []
     for child in actor.children:
         element = _compile_actor(child, start_time, named_keyframes, fonts,
-                                 below)
+                                 below, actor_keyframes)
         if element is not None:
             child_elements.append(element)
 
-    keyframes = _merged_keyframes(actor, start_time, named_keyframes)
+    keyframes = _merged_keyframes(actor, start_time, named_keyframes,
+                                  actor_keyframes)
     if child_elements:
         return _group_element(actor, start_time, keyframes,
                               tuple(child_elements))
@@ -480,7 +482,8 @@ def _compile_actor(actor, start_time, named_keyframes, fonts, below=None):
 _BACKGROUND_Z = -100
 
 
-def _compile_background_actor(actor, start_time, named_keyframes, fonts):
+def _compile_background_actor(actor, start_time, named_keyframes, fonts,
+                              actor_keyframes=None):
     """Compile a background-layer subtree as one top-level element at the
     background z. The subtree is self-contained (its own gat_all_bg /
     gat_bg transforms), so hoisting it past the identity top frames keeps
@@ -488,11 +491,13 @@ def _compile_background_actor(actor, start_time, named_keyframes, fonts):
     child_elements = []
     for child in actor.children:
         element = _compile_background_actor(child, start_time,
-                                           named_keyframes, fonts)
+                                           named_keyframes, fonts,
+                                           actor_keyframes)
         if element is not None:
             child_elements.append(element)
 
-    keyframes = _merged_keyframes(actor, start_time, named_keyframes)
+    keyframes = _merged_keyframes(actor, start_time, named_keyframes,
+                                  actor_keyframes)
     if child_elements:
         element = _group_element(actor, start_time, keyframes,
                                 tuple(child_elements))
@@ -506,10 +511,25 @@ def _with_z(element, z):
     return replace(element, z=z)
 
 
-def _merged_keyframes(actor, start_time, named_keyframes):
-    """XML command keyframes + recorded pokes for one actor, on ONE
-    RecordingActor so both obey the same tween model, then merged with
-    whatever the actor's bound global recorded from the closures."""
+def _merged_keyframes(actor, start_time, named_keyframes, actor_keyframes=None):
+    """All keyframes for one actor.
+
+    When the actor carries a load-pass `_recorder_id` (the modfile compile
+    path), its recorder already holds the COMPLETE poke stream - its
+    InitCommand/OnCommand AND every message / play / queuecommand body
+    dispatched onto it during load and the mod_actions replay. That stream
+    is authoritative (the anonymous bg Layer children get their BG2/BG3/BG4
+    crossfades only here - they self-assign no global), so we use it
+    directly.
+
+    The FLAT path (tests / charts compiled without a StubEnvironment) has
+    no recorder ids: it re-poks the classic InitCommand/OnCommand strings
+    on a fresh recorder and merges whatever the actor's bound global
+    recorded from the closures."""
+    recorded = _recorded_keyframes(actor, actor_keyframes)
+    if recorded is not None:
+        return recorded
+
     recorder = RecordingActor(clock=start_time)
     for attr in ('InitCommand', 'OnCommand'):
         value = actor.attrs.get(attr, '')
@@ -523,6 +543,18 @@ def _merged_keyframes(actor, start_time, named_keyframes):
         for prop, frames in named_keyframes[name].items():
             keyframes.setdefault(prop, []).extend(frames)
     return keyframes
+
+
+def _recorded_keyframes(actor, actor_keyframes):
+    """The actor's load-pass recorder keyframes (a fresh dict of lists so
+    the caller may mutate it), or None when no recorder id is available."""
+    if not actor_keyframes:
+        return None
+    rec_id = getattr(actor, '_recorder_id', None)
+    if rec_id is None or rec_id not in actor_keyframes:
+        return None
+    return {prop: list(frames)
+            for prop, frames in actor_keyframes[rec_id].items()}
 
 
 def _group_element(actor, start_time, keyframes, children):
@@ -692,11 +724,13 @@ def _resolve_font(actor, fonts):
     return fonts(reference) if reference else None
 
 
-# Storyboard properties the renderer samples. The recorder also captures
-# 3D-only channels (z, rotation_x/y, skew, scale_z) with no 2D analogue;
-# they are kept out of the built element timelines.
+# Storyboard properties the renderer samples. `hidden` is SM's hard
+# visibility bit (1 hidden, 0 shown), kept separate from `alpha` so a
+# `hidden,1` gate and a diffusealpha crossfade coexist. The recorder also
+# captures 3D-only channels (z, rotation_x/y, skew, scale_z) with no 2D
+# analogue; they are kept out of the built element timelines.
 _DRAWABLE_PROPS = frozenset({
-    'x', 'y', 'scale_x', 'scale_y', 'rotation', 'alpha', 'color',
+    'x', 'y', 'scale_x', 'scale_y', 'rotation', 'alpha', 'color', 'hidden',
 })
 
 
@@ -761,12 +795,13 @@ def _compile_modfile(sm_path):
     fired, failed = env.replay_mod_actions()
     named_keyframes = env.named_actor_keyframes()
     named_meta = env.named_actor_meta()
+    actor_keyframes = env.actor_keyframes()
 
     mod_events = _normalize_mod_events(env, to_seconds)
     mod_events.extend(_normalize_applied_mods(env, to_seconds))
     fonts = _font_resolver(lua_dir)
     tree = compile_element_tree(root, to_seconds, start_beat, named_keyframes,
-                                fonts=fonts)
+                                fonts=fonts, actor_keyframes=actor_keyframes)
     return {
         'mod_events': mod_events,
         'shader_flags': _normalize_shader_flags(env, to_seconds),
@@ -776,7 +811,7 @@ def _compile_modfile(sm_path):
         'tree': tree,
         'has_background': _has_background_actors(tree, sm_path),
         'field_copies': _field_copies(root, named_keyframes, named_meta,
-                                      to_seconds, start_beat),
+                                      to_seconds, start_beat, actor_keyframes),
         'named_actors': len(named_keyframes),
         'recorded_keyframes': _count_recorded_keyframes(named_keyframes),
         'replay': {'fired': fired, 'failed': failed,
@@ -834,7 +869,7 @@ _FIELD_PROPS = ('x', 'y', 'rotation', 'scale_x', 'scale_y',
 
 
 def _field_copies(root, named_keyframes, named_meta, to_seconds,
-                  start_beat) -> list:
+                  start_beat, actor_keyframes=None) -> list:
     """Actors that draw a copy of the playfield - AFT-screen copy
     sprites (`aft_source` set) and Proxy notefield actors - as
     ready-to-sample transform timelines for the field producer.
@@ -859,7 +894,8 @@ def _field_copies(root, named_keyframes, named_meta, to_seconds,
         source = _field_source(name, named_meta)
         if source is None:
             continue
-        keyframes = _merged_keyframes(actor, start_time, named_keyframes)
+        keyframes = _merged_keyframes(actor, start_time, named_keyframes,
+                                      actor_keyframes)
         field_keyframes = {prop: keyframes[prop] for prop in _FIELD_PROPS
                            if keyframes.get(prop)}
         _merge_driven_keyframes(field_keyframes, name, quad_timelines,

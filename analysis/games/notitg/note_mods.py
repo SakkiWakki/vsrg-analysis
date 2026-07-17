@@ -24,17 +24,18 @@ Scroll direction and accel:
 - REVERSE FAMILY (reverse/split/alternate/cross/centered) slides each
   column's receptor toward the mirrored/centered judge line and flips
   the note distance about it, over the (accel-remapped) candidate y
-  arrays. All in pre-flip downscroll space; the global upscroll flip
-  wraps the result.
+  arrays. Scroll orientation is owned HERE, with no global flip: the
+  native candidate space (receptors at judge_y, notes falling down) is
+  engine reverse=1, so the effective per-column fraction is
+  1 - r_engine and the remap runs every frame -- zero channels yield
+  the engine default (receptors on top, notes scrolling up), and a
+  chart pinning reverse=1 (gat) reads back as our native downscroll.
 
 Simplifications (documented, revisit with the oracle):
 - beat(t) inverts the BPM segments only (stops/warps shift beat_now
   slightly during those regions; note beats come exactly from rows).
 - player 0 channels only until per-field routing lands.
-- rotation/zoom offsets are computed but not yet consumed by draw
-  sites.
-- boomerang deferred (needs the culling peak contract); expand keyed to
-  song time not wall clock (scrub-exactness).
+- expand keyed to song time not wall clock (scrub-exactness).
 """
 from __future__ import annotations
 
@@ -69,46 +70,54 @@ class NotitgNoteMods:
         return beat0 + max(0.0, t - t0) * bps
 
     def apply(self, ctx) -> None:
-        if not ctx.candidates:
-            return
         t = float(ctx.t_now)
-        percents = self._channels.values_at(t)
-        if all(abs(v) < _ACTIVE_EPS for v in percents.values()):
-            return
+        percents = self._with_expand_phase(self._channels.values_at(t), t)
+        scale = ctx.lane_w / ARROW_SIZE
+        judge_y = float(ctx.judge_y)
 
+        if ctx.candidates:
+            self._apply_to_notes(ctx, percents, scale, judge_y, t)
+        # Receptors carry the scroll orientation even on empty frames.
+        ctx.receptor_offsets = self._receptor_offsets(
+            ctx, percents, ctx.player.keycount, scale, t, judge_y)
+
+    def _apply_to_notes(self, ctx, percents, scale, judge_y, t) -> None:
         p = ctx.player
         idx = np.asarray(ctx.candidates, dtype=np.int64)
         cols = np.asarray(p.columns[idx], dtype=np.int64)
-        scale = ctx.lane_w / ARROW_SIZE
-        judge_y = float(ctx.judge_y)
+        active = any(abs(v) >= _ACTIVE_EPS for v in percents.values())
 
         # ACCEL FAMILY (boost/brake/wave/expand): reshape the raw scroll
         # y_offset -> position mapping BEFORE any dy contribution. Each of
         # head/tail/press is a position on the same scroll axis, so all
         # three are remapped by the same function; positions rebuild as
-        # y = judge_y - y_offset' * scale (downscroll, pre-flip space).
-        percents = self._with_expand_phase(percents, t)
-        head_off = self._remap_accel(percents, ctx.candidate_head_y, judge_y, scale)
-        tail_off = self._remap_accel(percents, ctx.candidate_tail_y, judge_y, scale)
-        press_off = self._remap_accel(percents, ctx.candidate_press_y, judge_y, scale)
-        ctx.candidate_head_y = judge_y - head_off * scale
-        ctx.candidate_tail_y = judge_y - tail_off * scale
-        ctx.candidate_press_y = judge_y - press_off * scale
+        # y = judge_y - y_offset' * scale (native downscroll space).
+        offs = None
+        if active:
+            head_off = self._remap_accel(percents, ctx.candidate_head_y, judge_y, scale)
+            tail_off = self._remap_accel(percents, ctx.candidate_tail_y, judge_y, scale)
+            press_off = self._remap_accel(percents, ctx.candidate_press_y, judge_y, scale)
+            ctx.candidate_head_y = judge_y - head_off * scale
+            ctx.candidate_tail_y = judge_y - tail_off * scale
+            ctx.candidate_press_y = judge_y - press_off * scale
 
-        note_beats = (np.asarray(p.notes.noterows_list,
-                                 dtype=np.float64)[idx] / 48.0)
-        offs = note_offsets(
-            percents, cols, head_off,
-            t_now=t, beat_now=self._beat_at(t), keycount=p.keycount,
-            note_beats=note_beats)
+            note_beats = (np.asarray(p.notes.noterows_list,
+                                     dtype=np.float64)[idx] / 48.0)
+            offs = note_offsets(
+                percents, cols, head_off,
+                t_now=t, beat_now=self._beat_at(t), keycount=p.keycount,
+                note_beats=note_beats)
 
         # REVERSE FAMILY (reverse/split/alternate/cross/centered): per
         # column, the receptor slides toward the mirrored judge line by
-        # r_col and the note's distance from it flips sign. Applied over
-        # the (already accel-remapped) candidate y arrays, in pre-flip
-        # downscroll space; the global upscroll flip wraps the result.
+        # r_col and the note's distance from it flips sign, over the
+        # (already accel-remapped) candidate y arrays. Runs every frame:
+        # the zero-channel baseline is a full mirror to engine-default
+        # upscroll (see module doc).
         self._apply_reverse(ctx, percents, cols, judge_y)
 
+        if offs is None:
+            return
         dy = offs.dy * scale
         ctx.candidate_head_y += dy
         ctx.candidate_tail_y += dy
@@ -117,8 +126,6 @@ class NotitgNoteMods:
         ctx.candidate_alpha = offs.alpha_mult
         ctx.candidate_rot_deg = offs.rotation_deg
         ctx.candidate_zoom = offs.zoom
-        ctx.receptor_offsets = self._receptor_offsets(
-            ctx, percents, p.keycount, scale, t, judge_y)
 
     def _remap_accel(self, percents, ys, judge_y, scale):
         """Accel-remapped y_offset (engine px) for a candidate y array."""
@@ -137,19 +144,18 @@ class NotitgNoteMods:
     def _reverse_geom(self, ctx, judge_y):
         """Mirror of the judge line about the chart region's vertical
         center: the position a fully-reversed receptor slides to, in
-        pre-flip downscroll pixels."""
+        native downscroll pixels."""
         _rx, ry, _w, h = ctx.chart_rect
         return 2.0 * (ry + h / 2.0) - judge_y
 
+    def _effective_reverse(self, percents, cols, keycount):
+        """1 - r_engine: the native candidate space already IS engine
+        reverse=1, so engine-default columns (r_engine 0) mirror fully."""
+        return 1.0 - reverse_fractions(percents, cols, keycount)
+
     def _apply_reverse(self, ctx, percents, cols, judge_y):
         centered = float(percents.get('centered', 0.0))
-        active = centered or any(
-            percents.get(m, 0.0)
-            for m in ('reverse', 'split', 'alternate', 'cross'))
-        if not active:
-            return
-
-        r = reverse_fractions(percents, cols, ctx.player.keycount)
+        r = self._effective_reverse(percents, cols, ctx.player.keycount)
         self._reverse_arrays(ctx, r, centered, judge_y)
 
     def _reverse_arrays(self, ctx, r, centered, judge_y):
@@ -191,15 +197,10 @@ class NotitgNoteMods:
         """Per-column receptor vertical shift from the reverse family: the
         receptor slides from judge_y to lerp(judge_y, mirror_y, r_col),
         then toward field center by `centered`. Receptors are at y_offset 0
-        so their shift is exactly (receptor_y - judge_y)."""
+        so their shift is exactly (receptor_y - judge_y). Runs every frame
+        (the zero-channel baseline puts receptors at the mirrored line)."""
         centered = float(percents.get('centered', 0.0))
-        active = centered or any(
-            percents.get(m, 0.0)
-            for m in ('reverse', 'split', 'alternate', 'cross'))
-        if not active:
-            return np.zeros(cols.shape[0], dtype=np.float64)
-
-        r = reverse_fractions(percents, cols, ctx.player.keycount)
+        r = self._effective_reverse(percents, cols, ctx.player.keycount)
         mirror_y = self._reverse_geom(ctx, judge_y)
         _rx, ry, _w, h = ctx.chart_rect
         center_y = ry + h / 2.0

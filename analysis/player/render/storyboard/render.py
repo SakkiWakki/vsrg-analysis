@@ -155,6 +155,12 @@ class StoryboardEffect:
 
     def _paint_element(self, painter, el, t, k, ox, oy,
                        ref_w, ref_h, inherited_alpha=1.0) -> None:
+        # SM's `hidden` bit hard-gates the draw independently of alpha, so
+        # an actor carrying a diffusealpha crossfade stays dark while
+        # hidden (the ShowAFTBG capture sprite sits `hidden,1` until its
+        # message shows it).
+        if el.sample('hidden', t)[0] >= 0.5:
+            return
         alpha = el.sample('alpha', t)[0] * inherited_alpha
         if alpha < _MIN_VISIBLE_ALPHA:
             return

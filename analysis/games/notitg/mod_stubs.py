@@ -139,6 +139,7 @@ class StubEnvironment:
         self._next_recorder_id = 0
         self._message_commands: dict = {}
         self._named_commands: dict = {}
+        self._child_recorders: dict = {}
         self._dispatch_depth = 0
         self._dispatch_total = 0
         self._host = LuaHost(dialect='luajit21')
@@ -184,7 +185,10 @@ class StubEnvironment:
 
     def _register_all_commands(self, actor) -> None:
         """Give every actor a recorder and index its message / named
-        command bodies, before any load command runs."""
+        command bodies, before any load command runs. The actor tree's
+        parent->child recorder links are recorded too, so a play/queue
+        command on an ActorFrame propagates to its subtree (SM's
+        RunCommandsOnChildren)."""
         rec_id = self._recorder_id_for(actor)
         for message, body in actor.message_commands().items():
             self._message_commands.setdefault(message, []).append(
@@ -192,6 +196,8 @@ class StubEnvironment:
         named = actor.named_commands()
         if named:
             self._named_commands[rec_id] = named
+        self._child_recorders[rec_id] = [
+            self._recorder_id_for(child) for child in actor.children]
         for child in actor.children:
             self._register_all_commands(child)
 
@@ -203,8 +209,21 @@ class StubEnvironment:
                 body = _strip_lua_wrapper(value)
                 self._run_body_on(rec_id, body, f'{actor.kind}.{attr}',
                                   warnings)
+            elif value:
+                self._poke_classic_body(rec_id, value)
         for child in actor.children:
             self._run_load_commands(child, warnings)
+
+    def _poke_classic_body(self, rec_id, value) -> None:
+        """Poke a classic-string InitCommand/OnCommand (`diffusealpha,0`)
+        onto the actor's load-pass recorder, so its base state is part of
+        the same complete poke stream the tree compiler reads (the bg
+        Layers' `OnCommand=diffusealpha,0` rest alpha lives here)."""
+        recorder = self._recorders.get(rec_id)
+        if recorder is None:
+            return
+        for verb, args in parse_command_string(value):
+            self._dispatch_command_verb(recorder, rec_id, verb, args)
 
     def _recorder_id_for(self, actor):
         """The recorder id bound to `actor`, created on first ask so the
@@ -287,20 +306,30 @@ class StubEnvironment:
 
     def _actor_command(self, rec_id, verb, name=None) -> None:
         """`actor:playcommand('Name')` / `actor:queuecommand('Name')`:
-        run that actor's `<Name>Command`. playcommand runs at the actor's
-        current clock; queuecommand queues at clock + pending tween time
-        (SM runs a queued command on the next frame, after the in-flight
-        tween; advancing the recorder's clock by the pending tween is a
-        close approximation and keeps chained commands ordered)."""
-        rec_id = _to_int(rec_id)
-        commands = self._named_commands.get(rec_id)
-        if not isinstance(name, str) or commands is None \
-                or name not in commands:
+        run that actor's `<Name>Command`, then propagate to its whole
+        subtree - SM's ActorFrame runs a play/queuecommand on itself AND
+        recursively on every child, so `gat_bg:queuecommand('BG2')` fires
+        each bg Layer's `BG2Command` crossfade even though gat_bg defines
+        no `BG2Command` itself.
+
+        playcommand runs at the actor's current clock; queuecommand queues
+        at clock + pending tween time (SM runs a queued command on the next
+        frame, after the in-flight tween; advancing the recorder's clock by
+        the pending tween is a close approximation and keeps chained
+        commands ordered)."""
+        if not isinstance(name, str):
             return
-        recorder = self._recorders.get(rec_id)
-        if recorder is not None and verb == 'queuecommand':
-            recorder.advance_clock_by_pending()
-        self._run_command_body(rec_id, commands[name], f'cmd:{name}')
+        self._run_actor_command_subtree(_to_int(rec_id), verb, name)
+
+    def _run_actor_command_subtree(self, rec_id, verb, name) -> None:
+        commands = self._named_commands.get(rec_id)
+        if commands is not None and name in commands:
+            recorder = self._recorders.get(rec_id)
+            if recorder is not None and verb == 'queuecommand':
+                recorder.advance_clock_by_pending()
+            self._run_command_body(rec_id, commands[name], f'cmd:{name}')
+        for child_id in self._child_recorders.get(rec_id, ()):
+            self._run_actor_command_subtree(child_id, verb, name)
 
     def _sync_recorder_clock(self, rec_id) -> None:
         """Point a recorder at the current fire clock before a dispatched
@@ -388,6 +417,21 @@ class StubEnvironment:
             keyframes = recorder.keyframes()
             if keyframes:
                 out[name] = keyframes
+        return out
+
+    def actor_keyframes(self) -> dict:
+        """recorder-id -> {property: [Keyframe]} for every actor that
+        recorded pokes during load + replay. This is the COMPLETE poke
+        stream per actor: its InitCommand/OnCommand, plus every message /
+        play / queuecommand body dispatched onto it (bg crossfades reach
+        the anonymous bg Layer children this way - they self-assign no
+        global, so `named_actor_keyframes` misses them). The tree compiler
+        keys by the actor's `_recorder_id` to pick up its full stream."""
+        out = {}
+        for rec_id, recorder in self._recorders.items():
+            keyframes = recorder.keyframes()
+            if keyframes:
+                out[rec_id] = keyframes
         return out
 
     def named_actor_meta(self) -> dict:
