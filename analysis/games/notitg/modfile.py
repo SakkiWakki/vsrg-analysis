@@ -51,7 +51,8 @@ from dataclasses import replace
 from pathlib import Path
 
 from analysis.games.etterna import sm_chart
-from analysis.games.notitg import aft_drivers, sprite_sheet, xml_actors
+from analysis.games.notitg import (
+    aft_drivers, sprite_sheet, update_integrator, xml_actors)
 from analysis.games.notitg.mod_stubs import StubEnvironment
 from analysis.games.notitg.paths import find_notitg_dirs
 from analysis.games.notitg.recording_actor import RecordingActor
@@ -793,12 +794,15 @@ def _compile_modfile(sm_path):
 
     env, chunk_warnings = _run_chunks(root, start_beat, to_seconds)
     fired, failed = env.replay_mod_actions()
+    integration = update_integrator.integrate_update(env, root, to_seconds)
     named_keyframes = env.named_actor_keyframes()
     named_meta = env.named_actor_meta()
     actor_keyframes = env.actor_keyframes()
 
     mod_events = _normalize_mod_events(env, to_seconds)
     mod_events.extend(_normalize_applied_mods(env, to_seconds))
+    mod_events.extend(integration.get('applied_events') or [])
+    proxy_grid = env.proxy_grid()
     fonts = _font_resolver(lua_dir)
     tree = compile_element_tree(root, to_seconds, start_beat, named_keyframes,
                                 fonts=fonts, actor_keyframes=actor_keyframes)
@@ -810,8 +814,10 @@ def _compile_modfile(sm_path):
                                       start_beat, named_keyframes),
         'tree': tree,
         'has_background': _has_background_actors(tree, sm_path),
-        'field_copies': _field_copies(root, named_keyframes, named_meta,
-                                      to_seconds, start_beat, actor_keyframes),
+        'field_copies': _all_field_copies(
+            root, named_keyframes, named_meta, to_seconds, start_beat,
+            actor_keyframes, proxy_grid),
+        'screen_transform': _screen_transform_timelines(env),
         'aft_bg_visible': _aft_bg_visible_timeline(root, bg_stem,
                                                    actor_keyframes),
         'base_field_hidden': _base_field_hidden_timeline(env),
@@ -820,6 +826,11 @@ def _compile_modfile(sm_path):
         'replay': {'fired': fired, 'failed': failed,
                    'applied_mods': len(env.applied_mods),
                    'swallowed': env.swallowed},
+        'integration': {'ran': integration.get('ran', False),
+                        'ticks': integration.get('ticks', 0),
+                        'windows': integration.get('windows', 0),
+                        'applied': integration.get('applied', 0),
+                        'faults': integration.get('faults', 0)},
         'warnings': chunk_warnings,
     }
 
@@ -914,6 +925,114 @@ def _field_copies(root, named_keyframes, named_meta, to_seconds,
                                          keyframes=field_keyframes),
         })
     return copies
+
+
+# Proxy-grid copies source to their player's notefield: player 1 -> P1p,
+# player 2 -> P2p (the same NoteField the split-screen proxies re-render),
+# so field_instances gives them the field-only ('field') capture scope.
+_GRID_SOURCE = {1: 'P1p', 2: 'P2p'}
+
+
+def _all_field_copies(root, named_keyframes, named_meta, to_seconds,
+                      start_beat, actor_keyframes, proxy_grid) -> list:
+    """AFT/Proxy field copies plus the gat_updateproxies 3x3 grid copies.
+    The grid frames self-assign no global (they live in the `gat_proxies`
+    table), so they come through `env.proxy_grid()` rather than the
+    named-actor path, and their world transform is composed here."""
+    copies = _field_copies(root, named_keyframes, named_meta, to_seconds,
+                           start_beat, actor_keyframes)
+    copies.extend(_proxy_grid_copies(proxy_grid))
+    return copies
+
+
+def _proxy_grid_copies(proxy_grid) -> list:
+    """The gat_updateproxies proxy grid as field copies.
+
+    Each `gat_proxies[pn][i]` frame is a notefield proxy whose SCREEN
+    position is the SM ActorFrame composition
+        world = gat_allproxies + gat_allproxiesc + frame_local
+    (translations sum in the frame hierarchy). `gat_allproxies` is the
+    per-frame accumulator the update integrator drives (the scatter/scroll
+    with wrap-around); `gat_allproxiesc` is a static centering offset;
+    the frame carries its StartShit2 grid slot and its per-frame rotation /
+    visibility cull. Scale comes from the `gat_proxiesc` content proxy's
+    zoom. Emitting each as a field copy replicates the notefield across the
+    3x3 grid exactly where the live per-frame code places it."""
+    if not proxy_grid:
+        return []
+    parent = _timelines_for(proxy_grid.get('parent'), _FIELD_RESTS)
+    offset = _timelines_for(proxy_grid.get('parent_offset'), _FIELD_RESTS)
+    copies = []
+    for index, frame in enumerate(proxy_grid.get('frames') or []):
+        copy = _proxy_grid_copy(frame, parent, offset, index)
+        if copy is not None:
+            copies.append(copy)
+    return copies
+
+
+def _proxy_grid_copy(frame, parent, offset, index):
+    player = frame.get('player', 1)
+    frame_tl = _timelines_for(frame.get('frame'), _FIELD_RESTS)
+    content_tl = _timelines_for(frame.get('content'), _FIELD_RESTS)
+    timelines = dict(frame_tl)
+    timelines['x'] = _SumTimeline((parent['x'], offset['x'], frame_tl['x']))
+    timelines['y'] = _SumTimeline((parent['y'], offset['y'], frame_tl['y']))
+    # The content proxy's zoom is the copy's scale (0.8 in StartShit2); the
+    # frame itself does not zoom. Fall back to the frame's own scale when a
+    # content proxy never recorded one.
+    for scale in ('scale_x', 'scale_y'):
+        if frame.get('content', {}).get(scale):
+            timelines[scale] = content_tl[scale]
+    return {
+        'name': f'gat_proxy_{player}_{index}', 'source': _GRID_SOURCE[player],
+        'timelines': timelines,
+    }
+
+
+def _timelines_for(keyframes, rests):
+    return build_timelines(rests=rests, keyframes=keyframes or {})
+
+
+class _SumTimeline:
+    """A timeline sampling the SUM of several child timelines - the field
+    producer samples `timeline.sample(t)`, and an ActorFrame's world
+    translation is the sum of its own and its ancestors' offsets, so a
+    grid copy's world x/y composes as this sum without materializing a
+    merged keyframe stream."""
+
+    def __init__(self, timelines):
+        self._timelines = tuple(timelines)
+
+    def sample(self, t) -> tuple:
+        return (sum(tl.sample(t)[0] for tl in self._timelines),)
+
+
+def _screen_transform_timelines(env) -> dict | None:
+    """The whole-scene camera the per-frame update drives via the top
+    screen: gat_updateproxies zooms and offsets `SCREENMAN:GetTopScreen()`
+    for a screen-zoom camera, and `screen:effectmagnitude` a scene vibrate.
+    Returns {prop: EventTimeline} (x/y/scale) or None when nothing poked
+    the screen (every non-gat chart). effectmagnitude (a jitter with no
+    still-frame analogue) is not modeled."""
+    keyframes = env.screen_keyframes()
+    moved = {prop: keyframes[prop] for prop in ('x', 'y', 'scale_x',
+             'scale_y')
+             if _deviates(keyframes.get(prop), _SCREEN_RESTS[prop])}
+    if not moved:
+        return None
+    return build_timelines(rests=_SCREEN_RESTS, keyframes=moved)
+
+
+def _deviates(frames, rest) -> bool:
+    """True when any keyframe value differs from the channel rest - a
+    channel poked only with its rest value (gat_updateproxies writing
+    `screen:zoom(1); x(0); y(0)` every frame) carries no motion and is
+    dropped, so the screen camera stays inactive."""
+    return bool(frames) and any(abs(kf.values[0] - rest) > 1e-6
+                                for kf in frames)
+
+
+_SCREEN_RESTS = {'x': 0.0, 'y': 0.0, 'scale_x': 1.0, 'scale_y': 1.0}
 
 
 # The engine player actors the chart hides while proxies stand in

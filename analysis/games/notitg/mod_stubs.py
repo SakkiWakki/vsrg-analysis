@@ -96,6 +96,28 @@ function __make_recorder(id)
     return t
 end
 
+-- The top screen is a recorder (the chart pokes it directly - the
+-- `screen:effectmagnitude(..)` camera vibe and `GetTopScreen():zoom(..)`
+-- per-frame zoom in gat_updateproxies), so it records like any actor,
+-- but it ALSO answers GetChild/GetTopScreen. Those return real recorder
+-- tables (a player, or the screen itself) instead of a poke, so player
+-- fetches and chained `GetTopScreen():GetChild(..)` keep working.
+function __make_screen_recorder(id)
+    local t = __make_recorder(id)
+    local mt = getmetatable(t)
+    local poke_index = mt.__index
+    mt.__index = function(tbl, key)
+        if key == 'GetChild' then
+            return function(_self, name) return __screen_get_child(name) end
+        end
+        if key == 'GetTopScreen' then
+            return function(_self) return t end
+        end
+        return poke_index(tbl, key)
+    end
+    return t
+end
+
 -- NotITG embeds Lua 5.0; these live under the LuaJIT (5.1) runtime as
 -- their renamed forms. The template calls the 5.0 names.
 if math.mod == nil then math.mod = math.fmod end
@@ -141,8 +163,18 @@ class StubEnvironment:
         self._named_commands: dict = {}
         self._child_recorders: dict = {}
         self._screen_children: dict = {}
+        self._screen_recorder_id: int | None = None
         self._dispatch_depth = 0
         self._dispatch_total = 0
+        # Per-frame update integration state (None outside a pass).
+        self._integration_clock: list | None = None
+        self._integration_applied: dict | None = None
+        self._integration_beat: float = 0.0
+        self._integration_faults = 0
+        # When set, actor pokes are dropped (the mod_actions closures a
+        # tick re-fires only to evolve time-varying globals - their actor
+        # pokes were already captured by the one-shot replay).
+        self._recording_frozen = False
         self._host = LuaHost(dialect='luajit21')
         self._host.run(_PERMISSIVE_BOOTSTRAP, name='permissive-bootstrap')
         self._install()
@@ -290,7 +322,7 @@ class StubEnvironment:
         way, e.g. shame's Hurt -> StopVib)."""
         if verb in ('queuecommand', 'playcommand') and args:
             self._actor_command(rec_id, verb, args[0])
-        else:
+        elif not self._recording_frozen:
             recorder.poke(verb, args)
 
     def _dispatch_message(self, name) -> None:
@@ -386,6 +418,8 @@ class StubEnvironment:
         return rec_id, table
 
     def _actor_poke(self, rec_id, verb=None, *args) -> None:
+        if self._recording_frozen:
+            return
         recorder = self._recorders.get(_to_int(rec_id))
         if recorder is not None and isinstance(verb, str):
             recorder.poke(verb, list(args))
@@ -403,6 +437,31 @@ class StubEnvironment:
             if value is not None:
                 return value
         return self._host.env['__permissive']()
+
+    def _make_top_screen(self):
+        """A recording mirror standing in for `SCREENMAN:GetTopScreen()`.
+
+        The chart pokes the top screen directly (gat_updateproxies zooms
+        and offsets it as a whole-scene camera, and `screen:effectmagnitude`
+        is a scene vibrate), so it must record like an actor while still
+        answering GetChild/GetTopScreen. One persistent recorder id backs
+        it, exposed as the screen-transform stream to the field producer."""
+        rec_id, _table = self._new_recorder(self._load_seconds)
+        self._screen_recorder_id = rec_id
+        return self._host.env['__make_screen_recorder'](rec_id)
+
+    def screen_keyframes(self) -> dict:
+        """Recorded pokes on the top screen (the whole-scene camera zoom /
+        offset / vibrate the per-frame update drives), or {} when nothing
+        poked it."""
+        recorder = (self._recorders.get(self._screen_recorder_id)
+                    if self._screen_recorder_id is not None else None)
+        return recorder.keyframes() if recorder is not None else {}
+
+    def _screen_get_child_by_name(self, name=None):
+        """`__screen_get_child(name)` from the Lua screen recorder (no
+        colon self); delegates to the player-child recorder path."""
+        return self._screen_get_child(None, name)
 
     def _screen_get_child(self, _self, name=None):
         """`SCREENMAN:GetTopScreen():GetChild('PlayerP1')`. The real
@@ -434,6 +493,64 @@ class StubEnvironment:
         recorder = self._recorder_for_table(table) if table is not None \
             else None
         return recorder.keyframes() if recorder is not None else {}
+
+    def proxy_grid(self) -> dict:
+        """The `gat_proxies` / `gat_proxiesc` proxy-grid frames as
+        composition inputs for the field producer, or {} when the chart
+        has no such table.
+
+        gat's t=42 scatter is a 3x3 grid of notefield proxies per player:
+        `gat_proxies[pn][i]` frames (their per-frame `hidden`/`rotation`
+        and StartShit2 grid `x`/`y`) nested under `gat_allproxies` (the
+        stateful accumulator the update integrator drives) and a static
+        `gat_allproxiesc` centering offset. The frames self-assign no
+        global, so they are invisible to `named_actor_keyframes`; this
+        hands the field producer each frame's recorder keyframes plus the
+        parent offsets so it can compose the world transform SM applies.
+
+        Returns {'parent': {prop: [kf]}, 'parent_offset': {prop: [kf]},
+        'frames': [{'player', 'frame': {prop: [kf]},
+        'content': {prop: [kf]}}, ...]}. `content` is the matching
+        `gat_proxiesc` proxy child (its zoom), `player` sources the copy to
+        that side's notefield."""
+        table = self._host.env['gat_proxies']
+        content = self._host.env['gat_proxiesc']
+        if not self._is_lua_table(table):
+            return {}
+        parent = self._recorder_for_table(self._host.env['gat_allproxies'])
+        offset = self._recorder_for_table(self._host.env['gat_allproxiesc'])
+        frames = []
+        for player in (1, 2):
+            frames.extend(self._proxy_grid_frames(table, content, player))
+        if not frames:
+            return {}
+        return {
+            'parent': parent.keyframes() if parent is not None else {},
+            'parent_offset': offset.keyframes() if offset is not None else {},
+            'frames': frames,
+        }
+
+    def _proxy_grid_frames(self, table, content, player) -> list:
+        """The `gat_proxies[player]` frames paired with their
+        `gat_proxiesc[player]` content proxies, as recorder keyframe
+        dicts."""
+        row = table[player]
+        content_row = content[player] if self._is_lua_table(content) else None
+        out = []
+        index = 1
+        while self._is_lua_table(row) and row[index] is not None:
+            frame = self._recorder_for_table(row[index])
+            if frame is not None and frame.keyframes():
+                proxy = (self._recorder_for_table(content_row[index])
+                         if content_row is not None
+                         and content_row[index] is not None else None)
+                out.append({
+                    'player': player,
+                    'frame': frame.keyframes(),
+                    'content': proxy.keyframes() if proxy is not None else {},
+                })
+            index += 1
+        return out
 
     def named_actor_keyframes(self) -> dict:
         """global name -> {property: [Keyframe]} for every actor a chunk
@@ -546,6 +663,135 @@ class StubEnvironment:
         for recorder in self._recorders.values():
             recorder.reset_clock(seconds)
 
+    # -- per-frame update integration -------------------------------------
+
+    def run_update_integration(self, body, windows, to_seconds, to_beats,
+                               tick_step, max_ticks) -> dict:
+        """Run the recorded `UpdateCommand` `body` on a fixed tick grid
+        over the beat `windows` (each a (start_beat, end_beat) pair),
+        harvesting each tick's actor pokes onto the existing recorders.
+
+        Recorders enter sampling mode so an update driver reading a source
+        quad gets its value at the tick's time; the `mods`/`mods2`/
+        `mod_actions` tables are emptied so the window reader and action
+        loop inside the body no-op (other passes own them). Direct
+        `ApplyGameCommand` mods from the per-frame drivers (the walking
+        `movey` family) accumulate into per-tick windowed events, returned
+        so the caller folds them into the mod timeline."""
+        stripped = _strip_lua_wrapper(body)
+        clock = [self._load_seconds]
+        self._integration_clock = clock
+        self._integration_applied = {}
+        self._integration_faults = 0
+        actions = self._sorted_mod_actions()
+        saved_tables = self._detach_isolated_tables()
+        for recorder in self._recorders.values():
+            recorder.begin_sampling(clock)
+        try:
+            ticks = self._run_update_ticks(stripped, windows, actions,
+                                           to_seconds, to_beats, clock,
+                                           tick_step, max_ticks)
+        finally:
+            for recorder in self._recorders.values():
+                recorder.end_sampling()
+            self._restore_isolated_tables(saved_tables)
+            applied = self._integration_applied
+            faults = self._integration_faults
+            self._integration_clock = None
+            self._integration_applied = None
+            self._clock_beat = self._start_beat
+        events = _tick_applied_events(applied, to_seconds, tick_step)
+        return {'ran': True, 'ticks': ticks, 'windows': len(windows),
+                'applied': len(events), 'applied_events': events,
+                'faults': faults}
+
+    def _sorted_mod_actions(self):
+        """Every mod_actions closure/broadcast as (beat, payload), beat-
+        sorted. Re-fired during integration (recording frozen) so a tick
+        sees the time-varying globals the closures maintain
+        (`gat_walkerdir`, `gat_scrollspd`, `gat_screen_zoom`) at the value
+        the engine's per-frame action loop would have set by that beat -
+        the walking `movey` amplitude and the screen-zoom camera read
+        them."""
+        rows = []
+        for row in self.mod_actions:
+            payload = row.get(2) if isinstance(row, dict) else None
+            if callable(payload) or isinstance(payload, str):
+                rows.append((_beat_of(row), payload))
+        rows.sort(key=lambda pair: pair[0])
+        return rows
+
+    def _run_update_ticks(self, chunk, windows, actions, to_seconds,
+                          to_beats, clock, tick_step, max_ticks) -> int:
+        cursor = 0
+        ticks = 0
+        for start_beat, end_beat in windows:
+            t = to_seconds(start_beat)
+            t_end = to_seconds(end_beat)
+            while t <= t_end and ticks < max_ticks:
+                beat = to_beats(t)
+                cursor = self._fire_pending_actions(actions, cursor, beat)
+                self._tick_update(chunk, t, beat, clock)
+                ticks += 1
+                t += tick_step
+        return ticks
+
+    def _fire_pending_actions(self, actions, cursor, beat) -> int:
+        """Fire every action whose beat has passed by `beat`, advancing the
+        monotonic cursor exactly as the engine's curaction loop does.
+        Recording is frozen so only global state evolves - the closures'
+        actor pokes were already captured by the one-shot replay. A window
+        gap can skip a run of actions at once (the cursor jumps to `beat`),
+        matching an editor that seeks past them; their globals still take
+        their final pre-`beat` value because they fire in order."""
+        self._recording_frozen = True
+        try:
+            while cursor < len(actions) and actions[cursor][0] <= beat:
+                self._clock_beat = actions[cursor][0]
+                self._fire_action_payload(actions[cursor][1])
+                cursor += 1
+        finally:
+            self._recording_frozen = False
+        return cursor
+
+    def _fire_action_payload(self, payload) -> None:
+        try:
+            if callable(payload):
+                payload()
+            else:
+                self._dispatch_message(payload)
+        except Exception:
+            self._integration_faults += 1
+
+    def _tick_update(self, chunk, seconds, beat, clock) -> None:
+        """One integration tick at song time `seconds` (chart beat `beat`):
+        aim the shared sample clock and every recorder's local clock at
+        this tick, point the engine beat/time clocks at it, then run the
+        Update body. A faulting tick is swallowed (the body may reach an
+        actor we do not model); its partial pokes stand."""
+        clock[0] = seconds
+        self._integration_beat = beat
+        self._clock_beat = beat
+        self._host.env['mod_time'] = seconds
+        self._reset_recorder_clocks(seconds)
+        try:
+            self._host.run(chunk, name='update-integration')
+        except Exception:
+            self._integration_faults += 1
+
+    def _detach_isolated_tables(self) -> dict:
+        """Empty the mods/mods2/mod_actions globals (other passes own
+        them) for the integration, keeping the originals to restore."""
+        saved = {}
+        for name in _ISOLATED_TABLES:
+            saved[name] = self._host.env[name]
+            self._host.env[name] = self._host.to_lua({})
+        return saved
+
+    def _restore_isolated_tables(self, saved) -> None:
+        for name, value in saved.items():
+            self._host.env[name] = value
+
     def _read_table(self, name: str) -> list:
         table = self._host.env[name]
         if table is None:
@@ -595,9 +841,7 @@ class StubEnvironment:
         host.expose('MESSAGEMAN', singleton(host.to_lua({
             'Broadcast': self._broadcast,
         })))
-        top_screen = singleton(host.to_lua({
-            'GetChild': self._screen_get_child,
-        }))
+        top_screen = self._make_top_screen()
         host.expose('SCREENMAN', singleton(host.to_lua({
             'SystemMessage': lambda _self, *_a: None,
             'PostScreenMessage': lambda _self, *_a: None,
@@ -631,6 +875,7 @@ class StubEnvironment:
         host.expose('__actor_poke', self._actor_poke)
         host.expose('__actor_get', self._actor_get)
         host.expose('__actor_command', self._actor_command)
+        host.expose('__screen_get_child', self._screen_get_child_by_name)
         host.expose('Trace', lambda *_a: None)
         host.expose('print', lambda *_a: None)
 
@@ -656,17 +901,80 @@ class StubEnvironment:
         if head.strip().lower() != 'mod':
             self._swallowed += 1
             return
-        self._applied_mods.append((self._clock_beat, rest.strip(),
-                                   _to_int(pn)))
+        self._record_applied_mod(rest.strip(), _to_int(pn))
 
     def _apply_modifiers(self, _self, modstring=None, *_a) -> None:
         """`GAMESTATE:ApplyModifiers('<modstring>')` (the raw form). Same
         one-shot recording as the 'mod,' game command."""
         if isinstance(modstring, str):
-            self._applied_mods.append((self._clock_beat, modstring.strip(),
-                                       None))
+            self._record_applied_mod(modstring.strip(), None)
         else:
             self._swallowed += 1
+
+    def _record_applied_mod(self, modstring, player) -> None:
+        """Route an `ApplyGameCommand('mod,X')` to the right harvest.
+
+        Outside a per-frame update pass it is a one-shot spike (the
+        mod_actions replay path). During integration it is a per-frame
+        driver's mod (the walking `movey`/`confusionoffset` families): the
+        tick beat feeds a running window per (mod-name, player, base
+        modstring) so a value that steps every tick becomes one continuous
+        keyed channel, not thousands of one-frame spikes."""
+        if self._integration_applied is None:
+            self._applied_mods.append((self._clock_beat, modstring, player))
+            return
+        key = (_mod_name(modstring), player)
+        self._integration_applied.setdefault(key, []).append(
+            (self._integration_beat, modstring, player))
+
+
+# Tables the per-frame Update body reads that other compile passes own
+# (window reader / action loop). Emptied for the integration so those
+# inner loops no-op; restored after.
+_ISOLATED_TABLES = ('mods', 'mods2', 'mod_actions')
+
+
+def _mod_name(modstring: str) -> str:
+    """The bare mod name of the LAST token in a modstring
+    (`*10000 40 movey0` -> `movey0`), the key a per-frame driver steps.
+    Used to group a driver's per-tick values into one keyed channel."""
+    token = str(modstring).split(',')[-1].strip().lower()
+    return token.split()[-1] if token.split() else token
+
+
+def _tick_applied_events(applied, to_seconds, tick_step):
+    """Per-tick ApplyGameCommand recordings -> contiguous mod windows.
+
+    `applied` maps (mod-name, player) to the list of (beat, modstring,
+    player) a per-frame driver produced across its ticks. Consecutive
+    ticks holding the SAME modstring coalesce into one window (the engine
+    re-applies the identical value each frame, so only value CHANGES need
+    a keyframe); the window runs from a value's first tick to the tick
+    after it last held, and the driver's final value reverts a tick later.
+    Emitted in the normalized `_mod_event` shape (seconds already
+    resolved) so the caller folds them straight into the mod timeline."""
+    events = []
+    for records in applied.values():
+        events.extend(_coalesce_ticks(records, to_seconds, tick_step))
+    return events
+
+
+def _coalesce_ticks(records, to_seconds, tick_step):
+    """One (beat, modstring, player) run -> minimal windows: a new window
+    only where the modstring changes, each ending a tick step past the
+    last tick that held it."""
+    windows = []
+    for beat, modstring, player in records:
+        t = to_seconds(beat)
+        if windows and windows[-1]['modstring'] == modstring:
+            windows[-1]['t_end'] = t + tick_step
+        else:
+            windows.append({
+                'beat': beat, 'len_beats': 0.0, 'modstring': modstring,
+                'apply_type': 'perframe', 'player': player,
+                't_start': t, 't_end': t + tick_step, 'time_based': True,
+            })
+    return windows
 
 
 def _beat_of(row) -> float:

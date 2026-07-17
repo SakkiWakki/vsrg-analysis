@@ -37,7 +37,9 @@ do not model, e.g. effect params), never faulting the recording.
 """
 from __future__ import annotations
 
-from analysis.player.render.effects.timeline import Keyframe
+import re
+
+from analysis.player.render.effects.timeline import EventTimeline, Keyframe
 
 # Tween verb -> easing id (osu.Framework Easing enum shared by the
 # storyboard timelines). SM's accelerate = ease-in quad, decelerate =
@@ -112,10 +114,44 @@ def _as_float(value, default=None):
     except (TypeError, ValueError):
         pass
     if isinstance(value, str):
-        constant = _SCREEN_CONSTANTS.get(value.strip())
-        if constant is not None:
-            return constant
+        resolved = _resolve_screen_expr(value.strip())
+        if resolved is not None:
+            return resolved
     return default
+
+
+# A classic-command arg that is a screen constant, optionally negated and
+# scaled/offset by a literal (`-SCREEN_WIDTH/2`, `SCREEN_HEIGHT*0.55`,
+# `112*(SCREEN_HEIGHT/480)`). The proxy-grid frames center themselves with
+# these, so resolving them places the grid where the engine does.
+_SCREEN_EXPR_RE = re.compile(
+    r'^(?P<lead>-?)\s*(?:(?P<pre>[0-9.]+)\s*\*\s*)?'
+    r'\(?\s*(?P<name>[A-Za-z_]+)\s*(?:(?P<op>[*/])\s*(?P<num>[0-9.]+))?\s*\)?$')
+
+
+def _resolve_screen_expr(text: str):
+    """A screen constant with an optional literal multiply/divide and a
+    leading minus (`SCREEN_CENTER_X`, `-SCREEN_WIDTH/2`,
+    `112*(SCREEN_HEIGHT/480)`), or None when `text` is not that shape."""
+    constant = _SCREEN_CONSTANTS.get(text)
+    if constant is not None:
+        return constant
+    match = _SCREEN_EXPR_RE.match(text)
+    if match is None:
+        return None
+    base = _SCREEN_CONSTANTS.get(match['name'])
+    if base is None:
+        return None
+    value = base
+    if match['op'] == '/':
+        value /= float(match['num'])
+    elif match['op'] == '*':
+        value *= float(match['num'])
+    if match['pre']:
+        value *= float(match['pre'])
+    if match['lead'] == '-':
+        value = -value
+    return value
 
 
 def _as_int(value, default=None):
@@ -136,6 +172,11 @@ class RecordingActor:
         self._current: dict = {}
         self._aft_source: str | None = None
         self._aft_texture_name: str | None = None
+        # Sampling-mirror state, set only while a per-frame update
+        # integrator drives this actor (begin_sampling..end_sampling).
+        self._baseline: dict | None = None
+        self._sample_clock: list | None = None
+        self._live_props: set = set()
 
     def reset_clock(self, clock: float) -> None:
         """Point the local clock at a new poke stream's start time (the
@@ -161,6 +202,33 @@ class RecordingActor:
         poked. Empty when the actor was never touched."""
         return {prop: kfs for prop, kfs in self._frames.items() if kfs}
 
+    # -- sampling mirror (per-frame update integrator) --------------------
+
+    def begin_sampling(self, sample_clock: list) -> None:
+        """Enter sampling-mirror mode for a per-frame update pass.
+
+        The update integrator runs the chart's real `UpdateCommand` on a
+        tick grid; a driver in it reads other actors (`gat_scroller:GetX()`)
+        expecting their value AT THE TICK'S TIME, not a frozen load-time
+        snapshot. `sample_clock` is a one-element list the integrator
+        rewrites each tick (a shared cell, so every mirror tracks the same
+        time); `get()` samples this actor's PRE-PASS timeline at that time
+        for any property the pass has not yet poked. Once the pass pokes a
+        property (`gat_allproxies:addx(..)`), it becomes a live accumulator
+        and `get()` returns the accumulated value instead - so stateful
+        per-frame accumulation reads its own running total, while inert
+        data-holder quads read their compiled curve."""
+        self._baseline = {prop: EventTimeline(frames, rest=(_REST.get(prop,
+                          0.0),)) for prop, frames in self._frames.items()
+                          if frames}
+        self._sample_clock = sample_clock
+        self._live_props = set()
+
+    def end_sampling(self) -> None:
+        self._baseline = None
+        self._sample_clock = None
+        self._live_props = set()
+
     @property
     def aft_source(self) -> str | None:
         """The ActorFrameTexture name this actor draws, when it is an
@@ -180,7 +248,17 @@ class RecordingActor:
         """Current value of a scalar property (rest when never set).
         Reads the last SET target, ignoring any in-flight tween - a
         load-time snapshot, matching what a driver closure sees when it
-        reads a sibling actor mid-command."""
+        reads a sibling actor mid-command.
+
+        Under a sampling-mirror pass (begin_sampling), a property the pass
+        has not yet poked is read from the actor's PRE-PASS timeline at the
+        tick clock instead, so an update driver reads a source quad's value
+        at the current tick time. A property the pass HAS poked is a live
+        accumulator and keeps reading its running value."""
+        if self._baseline is not None and prop not in self._live_props:
+            timeline = self._baseline.get(prop)
+            if timeline is not None:
+                return timeline.sample(self._sample_clock[0])[0]
         return self._current.get(prop, (_REST.get(prop, 0.0),))[0]
 
     # -- poke dispatch ----------------------------------------------------
@@ -296,6 +374,8 @@ class RecordingActor:
             Keyframe(self._clock, values, self._pending_dur,
                      self._pending_ease))
         self._current[prop] = values
+        if self._baseline is not None:
+            self._live_props.add(prop)
 
     def _set_scalar(self, prop, value) -> None:
         if value is None:
@@ -307,8 +387,7 @@ class RecordingActor:
     def _add_scalar(self, prop, delta) -> None:
         if delta is None:
             return
-        base = self._current.get(prop, (_REST[prop],))[0]
-        self._emit(prop, (base + delta,))
+        self._emit(prop, (self.get(prop) + delta,))
 
     def _diffuse(self, args) -> None:
         channels = [_as_float(a) for a in args[:3]]

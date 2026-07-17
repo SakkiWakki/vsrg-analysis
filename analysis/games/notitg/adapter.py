@@ -152,12 +152,16 @@ class NotitgAdapter(EtternaAdapter):
         return events or None
 
     def effects(self, replay):
-        from analysis.games.notitg.field_instances import NotitgFieldInstances
+        from analysis.games.notitg.field_instances import (
+            NotitgFieldInstances, NotitgScreenCamera)
         from analysis.games.notitg.shader_bridge import notitg_shader_effects
         compiled = self._compiled_modfile(replay)
         if not compiled:
             return []
         effects = list(notitg_shader_effects(compiled.get('shader_flags')))
+        screen_transform = compiled.get('screen_transform')
+        if screen_transform:
+            effects.append(NotitgScreenCamera(screen_transform))
         field_copies = compiled.get('field_copies')
         if field_copies:
             effects.append(NotitgFieldInstances(

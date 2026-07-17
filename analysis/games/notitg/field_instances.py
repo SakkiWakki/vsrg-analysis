@@ -154,6 +154,49 @@ class NotitgFieldInstances:
         return 'field'
 
 
+class NotitgScreenCamera:
+    """Whole-scene camera from the per-frame update's top-screen pokes.
+
+    gat_updateproxies drives `SCREENMAN:GetTopScreen()` as a screen-zoom
+    camera: it scales the top screen and offsets it by `(1-zoom)*center`
+    so the zoom pivots on the design centre (the t=42 pull-back and the
+    t=42/t=383 push-in). Those pokes are compiled to a screen-transform
+    timeline (x/y/scale in 640x480 design space); this effect maps them
+    onto the chart region and emits them on the scene_transform channel,
+    the same whole-scene slot as the fluXis camera.
+
+    The design-space transform SM applies is scale-about-origin then
+    translate (`zoom(z); x((1-z)*cx); y((1-z)*cy)`), i.e. scale `z` about
+    the design centre; we conjugate it by the design map so it pivots on
+    the mapped centre in screen space."""
+
+    def __init__(self, timelines):
+        self._tl = timelines
+
+    def __bool__(self):
+        return self._tl is not None
+
+    def at(self, ctx) -> EffectFrame | None:
+        if self._tl is None:
+            return None
+        t = float(ctx.t_now)
+        sx = self._tl['scale_x'].sample(t)[0]
+        sy = self._tl['scale_y'].sample(t)[0]
+        tx = self._tl['x'].sample(t)[0]
+        ty = self._tl['y'].sample(t)[0]
+        if sx == 1.0 and sy == 1.0 and tx == 0.0 and ty == 0.0:
+            return None
+        k, ox, oy = _design_map(ctx.chart_rect)
+        transform = QTransform()
+        transform.translate(ox, oy)
+        transform.scale(k, k)
+        transform.translate(tx, ty)
+        transform.scale(sx, sy)
+        transform.scale(1.0 / k, 1.0 / k)
+        transform.translate(-ox, -oy)
+        return EffectFrame(scene_transform=transform)
+
+
 def _copy_transform(x, y, rotation, sx, sy, k, ox, oy) -> QTransform:
     """Screen-space transform placing the captured field where a copy
     actor sits: M . T_copy . M^-1. Qt post-multiplies, so the calls read
