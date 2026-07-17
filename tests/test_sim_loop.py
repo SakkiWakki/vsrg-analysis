@@ -96,35 +96,5 @@ def test_classic_oncommand_recorded_on_child():
     assert child.keyframes()['alpha'][0].values == (0.5,)
 
 
-@pytest.mark.skipif(not GAT_SM.exists(), reason='local gat chart absent')
-def test_gat_compiles_via_sim_to_the_contract():
-    from analysis.games.notitg.sim.producers import compile_via_sim
-    compiled = compile_via_sim(GAT_SM, end_seconds=60.0)
-    assert compiled is not None
-    for key in ('mod_events', 'shader_flags', 'unsupported', 'elements',
-                'tree', 'has_background', 'field_copies', 'screen_transform',
-                'base_field_hidden', 'named_actors', 'recorded_keyframes',
-                'warnings'):
-        assert key in compiled, key
-    assert not any('aborted' in w for w in compiled['warnings'])
-    assert compiled['named_actors'] > 50
-    assert len(compiled['tree']) > 0
-    assert len(compiled['mod_events']) > 100
-    rows = compiled['mod_events']
-    assert all(r['t_end'] >= r['t_start'] for r in rows)
 
 
-@pytest.mark.skipif(not GAT_SM.exists(), reason='local gat chart absent')
-def test_gat_runs_under_the_loop():
-    result = run_chart_sim(GAT_SM, end_seconds=45.0)
-    assert result is not None
-    stats = summarize(result)
-    # The load pass alone binds hundreds of actors; the first 45s cover
-    # the intro + the beat-128 proxy-wall section, so the chart's own
-    # Update rig must have driven real recording.
-    assert stats['actors'] > 300
-    assert stats['recorded_keyframes'] > 500
-    assert stats['applied_calls'] > 100
-    assert stats['mod_windows'] > 5
-    assert stats['ticks'] == pytest.approx(45.0 * 60, abs=61)
-    print('gat sim stats:', stats)

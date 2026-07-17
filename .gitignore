@@ -173,3 +173,4 @@ plugins/overlays/
 analysis/games/fluxis/realmdump/bin/
 analysis/games/fluxis/realmdump/obj/
 refs/
+tests/local/

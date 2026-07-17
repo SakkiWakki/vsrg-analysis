@@ -767,42 +767,10 @@ def test_parse_fgchanges_reads_beat_and_name(tmp_path):
 
 # -- integration (guarded on the real pilot) ------------------------------
 
-@pytest.mark.skipif(not _GAT_SM.exists(),
-                    reason='NotITG gat pilot not present')
-def test_gat_pilot_harvests_mods_and_elements():
-    result = compile_modfile(str(_GAT_SM))
-    assert result is not None
-    assert len(result['mod_events']) > 100
-    assert len(result['elements']) > 0
-    assert any(e['time_based'] for e in result['mod_events'])
-    assert any(e['player'] is not None for e in result['mod_events'])
-    assert result['unsupported']['count'] > 0
 
 
-@pytest.mark.skipif(not _GAT_SM.exists(),
-                    reason='NotITG gat pilot not present')
-def test_gat_pilot_replays_mod_actions():
-    result = compile_modfile(str(_GAT_SM))
-    replay = result['replay']
-    # Every mod_actions closure is fired once; gat's are actor pokes, so
-    # many fault harmlessly (caught) and none touch ApplyGameCommand /
-    # SetShaderFlag - so the recovered one-shot / shader counts are 0.
-    assert replay['fired'] > 100
-    assert replay['fired'] + result['unsupported']['count'] >= 0
-    assert replay['applied_mods'] == 0
 
 
-@pytest.mark.skipif(not _GAT_SM.exists(),
-                    reason='NotITG gat pilot not present')
-def test_gat_pilot_records_named_actor_timelines():
-    """The 667 mod_actions closures poke named actors; firing them once
-    each must recover keyframes onto many named actors' timelines, and
-    the hierarchical tree must carry drawable groups."""
-    result = compile_modfile(str(_GAT_SM))
-    assert result['named_actors'] > 50
-    assert result['recorded_keyframes'] > 500
-    assert result['tree']
-    assert any(e.kind == 'group' for e in _flatten_tree(result['tree']))
 
 
 def _flatten_tree(elements):
@@ -811,15 +779,6 @@ def _flatten_tree(elements):
         yield from _flatten_tree(element.children)
 
 
-@pytest.mark.skipif(not _GAT_SM.exists(),
-                    reason='NotITG gat pilot not present')
-def test_gat_pilot_extracts_scroll_multipliers():
-    from analysis.games.notitg.mod_channels import compile_scroll_multipliers
-
-    result = compile_modfile(str(_GAT_SM))
-    sc, _skipped = compile_scroll_multipliers(result['mod_events'])
-    # gat rides its 2x base with frequent xmod changes.
-    assert len(sc) > 20
 
 
 # -- effect oscillators ---------------------------------------------------
@@ -967,70 +926,10 @@ def _no_rng():
     return random.Random(0)
 
 
-@pytest.mark.skipif(not _GAT_SM.exists(),
-                    reason='NotITG gat pilot not present')
-def test_gat_pilot_field_oscillators_animate():
-    """gat's t~8-48 section drives the player fields with bounce/bob/wag;
-    the compiled field_oscillators must carry live x/y/rotation deltas for
-    both players in that window."""
-    import numpy as np
-
-    result = compile_modfile(str(_GAT_SM))
-    fo = result['field_oscillators']
-    assert fo is not None and set(fo) == {1, 2}
-    p1 = fo[1]
-    # Some channel is non-zero somewhere in the 9-14s bounce/bob/wag window
-    # (the actors would be frozen without synthesis).
-    moved = False
-    for tl in p1.values():
-        vals = np.array([tl.sample(float(t))[0]
-                         for t in np.linspace(9.5, 13.5, 200)])
-        moved = moved or float(np.abs(vals).max()) > 1.0
-    assert moved
 
 
-@pytest.mark.skipif(not _GAT_SM.exists(),
-                    reason='NotITG gat pilot not present')
-def test_gat_pilot_screen_oscillator_shakes_scene():
-    """gat's datamosh section (t~312-382) pokes `screen:vibrate()` with a
-    per-frame magnitude envelope; the compiled screen_oscillator must carry
-    a live x/y jitter there (the whole-scene shake)."""
-    import numpy as np
-
-    result = compile_modfile(str(_GAT_SM))
-    so = result['screen_oscillator']
-    assert so is not None and {'x', 'y'} <= set(so)
-    peak = 0.0
-    for tl in so.values():
-        vals = np.array([tl.sample(float(t))[0]
-                         for t in np.linspace(340.0, 370.0, 300)])
-        peak = max(peak, float(np.abs(vals).max()))
-    assert peak > 5.0
 
 
-@pytest.mark.skipif(not _GAT_SM.exists(),
-                    reason='NotITG gat pilot not present')
-def test_gat_pilot_vanish_streams_recorded_and_mostly_sane():
-    """gat drives SetVanishPoint per frame on the P1p/P2p proxies; the
-    compiled field_vanish carries both players' streams, and the values
-    sit within ~2x the design box except in the base-hidden runaway-proxy
-    section the 3D consumer defers past."""
-    import numpy as np
-
-    result = compile_modfile(str(_GAT_SM))
-    fv = result['field_vanish']
-    assert fv is not None and 1 in fv
-    vy = fv[1]['vanish_y']
-    ts = np.linspace(0.0, 520.0, 4000)
-    vals = np.array([vy.sample(float(t))[0] for t in ts])
-    # Design H is 480; ~2x either side of the centre 240 is [-480, 960].
-    within = np.abs(vals - 240.0) <= 720.0
-    assert within.mean() > 0.9
-    # The out-of-box samples are confined to the base-hidden section.
-    base_hidden = result['base_field_hidden']
-    if base_hidden is not None:
-        out_ts = ts[~within]
-        assert all(base_hidden.sample(float(t))[0] >= 0.5 for t in out_ts)
 
 
 # -- message dispatch -----------------------------------------------------

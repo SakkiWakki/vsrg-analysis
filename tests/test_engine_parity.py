@@ -756,66 +756,12 @@ def _classified_x_mask(p, cols, yoff, keycount):
     return m
 
 
-@pytest.mark.parametrize('t', [round(0.5 + i * 517.0 / 29, 2) for i in range(30)])
-def test_gat_real_state_parity(t):
-    """At 30 timestamps across gat, production note_offsets == reference on
-    every axis, EXCEPT samples fenced by the classified-bug masks. If an
-    unclassified divergence exists, this fails with the timestamp + percents
-    + axis so it can be added to the classification."""
-    channels = _gat_channels()
-    keycount = 4
-    beat = _gat_beat_at(t)
-    percents = channels.values_at(t)
-
-    # A realistic note layout: every column, a spread of scroll offsets
-    # (approaching + a couple past the receptor), plus per-note beats.
-    cols = np.array([c for c in range(keycount) for _ in range(6)])
-    yoff = np.tile(np.array([-80.0, 40.0, 160.0, 320.0, 500.0, 760.0]), keycount)
-    note_beats = beat + (yoff / 64.0)  # rough beats-until-step for dizzy
-
-    prod = ae.note_offsets(percents, cols, yoff, t_now=t, beat_now=beat,
-                           keycount=keycount, note_beats=note_beats)
-
-    ref_x = _ref_x(percents, cols, yoff, keycount, t, beat) - _col_x(cols, keycount)
-    ref_dy = _ref_y_contrib(percents, cols, yoff, keycount, t, beat)
-    ref_rot = _ref_rot_z(percents, cols, note_beats, beat)
-    ref_alpha = _ref_visible(percents, cols, yoff, keycount, t, beat)
-
-    x_keep = ~_classified_x_mask(percents, cols, yoff, keycount)
-    np.testing.assert_allclose(
-        prod.dx[x_keep], ref_x[x_keep], rtol=1e-6, atol=1e-4,
-        err_msg=f'gat dx divergence at t={t} percents={_active(percents)}')
-    np.testing.assert_allclose(
-        prod.dy, ref_dy, rtol=1e-6, atol=1e-4,
-        err_msg=f'gat dy divergence at t={t} percents={_active(percents)}')
-    rot_diff = np.mod(prod.rotation_deg - ref_rot + 180.0, 360.0) - 180.0
-    np.testing.assert_allclose(
-        rot_diff, 0.0, rtol=0, atol=1e-5,
-        err_msg=f'gat rot divergence at t={t} percents={_active(percents)}')
-    np.testing.assert_allclose(
-        prod.alpha_mult, ref_alpha, rtol=1e-6, atol=1e-5,
-        err_msg=f'gat alpha divergence at t={t} percents={_active(percents)}')
 
 
 def _active(percents):
     return {k: round(v, 4) for k, v in percents.items() if abs(v) > 1e-4}
 
 
-def test_gat_exercises_the_classified_bugs():
-    """Sanity: gat's real channels DO activate tiny / square / waveperiod
-    (the three bug channels present in the chart), so the classified
-    approximations above are load-bearing for the pilot, not hypothetical.
-    Guards against the real-state test silently passing because gat never
-    reaches a bug region."""
-    channels = _gat_channels()
-    hit = set()
-    for i in range(201):
-        t = i * 517.0 / 200
-        for k, v in channels.values_at(t).items():
-            if abs(v) > 1e-4 and k in ('tiny', 'square', 'waveperiod'):
-                hit.add(k)
-    assert {'tiny', 'square', 'waveperiod'} <= hit, (
-        f'expected gat to activate tiny/square/waveperiod, got {hit}')
 
 
 def test_scale_is_linear_passthrough():

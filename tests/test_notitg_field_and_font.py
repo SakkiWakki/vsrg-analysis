@@ -282,33 +282,10 @@ def test_unresolvable_font_returns_none():
 
 # -- integration on the gat pilot -----------------------------------------
 
-@pytest.mark.skipif(not _GAT_SM.exists(), reason='NotITG gat pilot not present')
-def test_gat_field_copies_include_proxies_and_aft():
-    result = compile_modfile(str(_GAT_SM))
-    names = {c['name'] for c in result['field_copies']}
-    assert {'P1p', 'P2p'} <= names
-    assert any(c['source'].startswith('gat_aft') for c in result['field_copies'])
 
 
-@pytest.mark.skipif(not _GAT_SM.exists(), reason='NotITG gat pilot not present')
-def test_gat_proxies_split_screen_when_active():
-    """The P1p/P2p proxies fan out to opposite half-screens once the
-    tiling section starts, producing an off-centre field copy."""
-    result = compile_modfile(str(_GAT_SM))
-    copies = {c['name']: c for c in result['field_copies']}
-    p1x = copies['P1p']['timelines']['x'].sample(370.0)[0]
-    p2x = copies['P2p']['timelines']['x'].sample(370.0)[0]
-    assert p1x != p2x
-    assert min(p1x, p2x) < 320 < max(p1x, p2x)
 
 
-@pytest.mark.skipif(not _GAT_SM.exists(), reason='NotITG gat pilot not present')
-def test_gat_bitmaptext_actors_resolve_font():
-    result = compile_modfile(str(_GAT_SM))
-    bitmaptexts = [e for e in _flatten(result['tree'])
-                   if e.kind == 'bitmaptext']
-    assert bitmaptexts
-    assert all(e.font is not None for e in bitmaptexts)
 
 
 def _flatten(elements):
@@ -352,67 +329,9 @@ def test_screen_constants_resolve_in_classic_commands():
 
 # -- gat: AFT driver, load ordering, background layering ------------------
 
-@pytest.mark.skipif(not _GAT_SM.exists(), reason='NotITG gat pilot not present')
-def test_gat_aft_target_driven_by_data_holder_quads():
-    """gat_aft_target sits at the identity base (320,240) before its
-    driver window and translates/zooms/rotates inside it (beat 1140-1146
-    ~ t=369), sampled from the gat_aftx/afty/aftzoom/aftrz quad curves."""
-    result = compile_modfile(str(_GAT_SM))
-    copies = {c['name']: c for c in result['field_copies']}
-    tl = copies['gat_aft_target']['timelines']
-    # Base: screen center, unit zoom, no rotation (identity placement).
-    assert tl['x'].sample(42.0)[0] == pytest.approx(320.0)
-    assert tl['y'].sample(42.0)[0] == pytest.approx(240.0)
-    # Driven inside the window: shifted off center and rotated/zoomed.
-    assert tl['x'].sample(369.0)[0] != pytest.approx(320.0, abs=1.0)
-    assert tl['rotation'].sample(369.0)[0] != pytest.approx(0.0, abs=1.0)
 
 
-@pytest.mark.skipif(not _GAT_SM.exists(), reason='NotITG gat pilot not present')
-def test_gat_intro_chara_spawns_at_load():
-    """char_shame's beat-0 Spawn mod_action must win over its later-timed
-    InitCommand zoom(0): the intro chara is at unit scale, centered, at
-    t=5 (before the load-order fix it sampled scale 0 = invisible)."""
-    from analysis.games.notitg.mod_stubs import StubEnvironment
-    from analysis.games.notitg.modfile import (_beat_to_seconds,
-                                               _load_document, _resolve_lua_dir,
-                                               _timing, parse_fgchanges)
-    from analysis.games.etterna import sm_chart
-    from analysis.player.render.storyboard.model import build_timelines
-
-    entries = parse_fgchanges(str(_GAT_SM))
-    lua_dir = _resolve_lua_dir(str(_GAT_SM), entries)
-    data = sm_chart.parse_sm(str(_GAT_SM))
-    _b, _o, chart = _timing(data)
-    to_s = _beat_to_seconds(data, chart)
-    root, _lc, _cc = _load_document(lua_dir)
-    start_beat = min((b for b, _n, k in entries if k == 'FGCHANGES'),
-                     default=0.0)
-    env = StubEnvironment(start_beat, to_seconds=to_s)
-    env.load_actors(root)
-    env.replay_mod_actions()
-    tl = build_timelines(keyframes=env.named_actor_keyframes()['char_shame'])
-    assert tl['scale_x'].sample(5.0)[0] == pytest.approx(1.0)
-    assert tl['scale_y'].sample(5.0)[0] == pytest.approx(1.0)
-    assert tl['x'].sample(5.0)[0] == pytest.approx(320.0)
 
 
-@pytest.mark.skipif(not _GAT_SM.exists(), reason='NotITG gat pilot not present')
-def test_gat_background_hoisted_below_notes():
-    """The BGCHANGES bg tree is a top-level element at a below-the-notes
-    z (behind the field); the foreground tree stays at z=0."""
-    result = compile_modfile(str(_GAT_SM))
-    tree = result['tree']
-    zs = sorted(e.z for e in tree)
-    assert zs[0] < 0 < len(tree)  # at least one below-band element
-    assert 0 in zs                # foreground stays at z=0
-    assert result['has_background'] is True
 
 
-@pytest.mark.skipif(not _GAT_SM.exists(), reason='NotITG gat pilot not present')
-def test_gat_adapter_drops_builtin_background():
-    """With its own background actors compiled, the notitg adapter returns
-    no #BACKGROUND path (the built-in MapBackground would duplicate it)."""
-    from analysis.games.notitg.adapter import NotitgAdapter
-    replay = {'filepath': f'{_GAT_SM}::0'}
-    assert NotitgAdapter().background_path(replay) is None
