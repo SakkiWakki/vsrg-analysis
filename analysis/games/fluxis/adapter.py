@@ -158,6 +158,16 @@ class FluxisAdapter(GameAdapter):
             int(replay.get('keycount') or 0),
             streams.get('colorfade'))
 
+    def design_space(self):
+        """fluXis authors effect coordinates (playfield moves, shakes,
+        camera) at the gameplay reference resolution (`ref_space`
+        REF_W/H). A .fsb storyboard carries its OWN per-file `resolution`
+        (often 1920x1080), which the .fsb compiler keeps reading; this is
+        the effect authoring space, not that per-file header."""
+        from analysis.player.render.document import DesignSpace, FIT_MIN
+        from analysis.player.render.effects.ref_space import REF_H, REF_W
+        return DesignSpace(width=REF_W, height=REF_H, fit=FIT_MIN)
+
     def storyboard(self, replay):
         from analysis.games.fluxis.fsb_storyboard import parse_fsb
         path = self._sibling(replay, replay.get('_fluxis_storyboard_file'))

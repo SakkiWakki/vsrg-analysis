@@ -170,6 +170,15 @@ class NotitgAdapter(EtternaAdapter):
                 base_hidden=compiled.get('base_field_hidden')))
         return effects
 
+    def design_space(self):
+        """NotITG presents a hard-cropped 640x480 screen: letterbox that
+        exact box ('min') centered in the chart region and clip to it, so
+        actors that run offscreen crop at the design edges and the
+        centered box lines up with the notefield center (see
+        field_instances._design_map, kept in lockstep)."""
+        from analysis.player.render.document import DesignSpace, FIT_MIN
+        return DesignSpace(width=640.0, height=480.0, fit=FIT_MIN, clip=True)
+
     def storyboard(self, replay):
         """Modfile actors (prank overlays, quads, text, ActorFrame
         groups) render through the storyboard pipeline in SM's 640x480
@@ -181,13 +190,9 @@ class NotitgAdapter(EtternaAdapter):
         elements = compiled.get('tree') or compiled.get('elements')
         if not elements:
             return None
-        # NotITG presents a hard-cropped 640x480 box, so letterbox that
-        # exact box ('min') centered in the chart region and clip to it -
-        # actors that run offscreen crop at the design edges, and the
-        # centered box lines up with the notefield center (see
-        # field_instances._design_map, kept in lockstep).
-        return Storyboard(design_w=640.0, design_h=480.0, fit='min',
-                          elements=tuple(elements), clip_design_box=True)
+        ds = self.design_space()
+        return Storyboard(design_w=ds.width, design_h=ds.height, fit=ds.fit,
+                          elements=tuple(elements), clip_design_box=ds.clip)
 
     def judgment_colors(self) -> dict:
         return {

@@ -52,6 +52,14 @@ class OsuAdapter(GameAdapter):
         cand = Path(replay['chart_path']).parent / bg
         return str(cand) if cand.exists() else None
 
+    def design_space(self):
+        """osu storyboards live in a 640x480 space with the widescreen
+        convention: a viewport wider than 4:3 extends the x range (to
+        854) instead of letterboxing, so 'height' fit. The +854 wide
+        extension itself is applied inside the .osb compiler."""
+        from analysis.player.render.document import DesignSpace, FIT_HEIGHT
+        return DesignSpace(width=640.0, height=480.0, fit=FIT_HEIGHT)
+
     def storyboard(self, replay):
         from analysis.games.osu.storyboard_osb import parse_osu_storyboard
         if not replay.get('chart_path'):
