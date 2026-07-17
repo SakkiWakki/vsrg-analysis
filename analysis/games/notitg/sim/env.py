@@ -37,6 +37,19 @@ from analysis.player.render.lua.host import LuaScriptError
 # (globals, screen constants) rather than a plain number.
 _IDENT_CHAR_RE = re.compile(r'[A-Za-z_]')
 
+# The renderer identity the stubs report. Charts probe the video vendor
+# to compensate AFT preserve-texture blending: on opaque-texture GPUs
+# ('nvidia') they multiply their feedback alpha down themselves, while
+# elsewhere they rely on GL alpha-buffer decay. Our composited captures
+# are OPAQUE, so the compensating branch is the one that matches our
+# semantics - reporting an nvidia-class renderer keeps chart feedback
+# trails at their authored decay instead of saturating.
+_VIDEO_VENDOR = 'NVIDIA Corporation'
+_PREFERENCES = {
+    'VideoRenderers': 'opengl',
+    'LastSeenVideoDriver': _VIDEO_VENDOR,
+}
+
 # Broadcast/command recursion guard: a handler may broadcast a message
 # whose handlers broadcast again. Depth-only, deliberately: the engine
 # has no TOTAL dispatch budget, and a whole-chart sim legitimately runs
@@ -738,7 +751,8 @@ class SimEnvironment:
             'ApplyModifiers': self._apply_modifiers,
         })))
         host.expose('PREFSMAN', singleton(host.to_lua({
-            'GetPreference': lambda _self, _key=None: '',
+            'GetPreference': lambda _self, key=None: _PREFERENCES.get(
+                str(key), ''),
         })))
         host.expose('MESSAGEMAN', singleton(host.to_lua({
             'Broadcast': self._broadcast,
@@ -754,7 +768,7 @@ class SimEnvironment:
         host.expose('DISPLAY', singleton(host.to_lua({
             'GetDisplayWidth': lambda _self: 640.0,
             'GetDisplayHeight': lambda _self: 480.0,
-            'GetVendor': lambda _self: '',
+            'GetVendor': lambda _self: _VIDEO_VENDOR,
         })))
         # STATSMAN's score chain returns numbers (end-of-song bonus
         # closures do arithmetic on GetPossibleDancePoints); a permissive

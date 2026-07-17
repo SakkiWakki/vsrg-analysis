@@ -242,11 +242,20 @@ def run_declarative(root, to_seconds, start_beat, end_seconds,
     t = load_s
     next_body_t = load_s
     while t < end_seconds:
-        t = min(t + step, end_seconds)
+        # The body fires at its EXACT re-arm times, merged into the
+        # drain grid, never rounded up to the next tick: sleep(0.02) on
+        # a 60Hz grid would quantize to 33ms (30Hz), and every
+        # instant-approach driver mod would visibly step below the
+        # rig's real 50Hz.
+        target = min(t + step, end_seconds)
+        run_body = body is not None and next_body_t <= target
+        if run_body:
+            target = max(next_body_t, t)
+        t = target
         env.fire_mod_actions_until(t)
         env.set_time(t, to_beats(t))
         env.drain(t)
-        if body and t >= next_body_t:
+        if run_body:
             env.run_update_body(body)
             in_window = any(a <= t < b for a, b in window_spans)
             next_body_t = t + (body_step if in_window

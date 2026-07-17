@@ -250,6 +250,7 @@ class NotitgNoteMods:
         p = ctx.player
         idx = np.asarray(ctx.candidates, dtype=np.int64)
         cols = np.asarray(p.columns[idx], dtype=np.int64)
+        self._pin_held_holds(ctx, idx, judge_y, t)
         active = any(abs(v) >= _ACTIVE_EPS for v in percents.values())
 
         # ACCEL FAMILY (boost/brake/wave/expand): reshape the raw scroll
@@ -296,6 +297,35 @@ class NotitgNoteMods:
 
         self._stash_hold_body_samples(ctx, percents, cols, idx, head_off,
                                       tail_off, scale, ppe, t)
+
+    def _pin_held_holds(self, ctx, idx, judge_y, t) -> None:
+        """While a hold is held the engine draws its head AT the receptor
+        and the body only from there to the tail; the stretch already
+        scrolled past is consumed. Clamp the head y (and its press-mark
+        twin, which rides the head at autoplay's zero offsets) to the
+        judge line in native downscroll space, BEFORE the accel remap:
+        the pinned head then sits at y_offset 0 for the whole pipeline,
+        which is every accel kernel's fixpoint, lands on the (possibly
+        split / centered / animated) receptor after the reverse remap,
+        and starts the body sampler's polyline at the receptor instead
+        of past it. Missed holds keep falling (NaN offsets and non-LN
+        tails drop out of the mask via NaN comparisons)."""
+        p = ctx.player
+        ln_tail_times = getattr(p.notes, 'ln_tail_times', None)
+        if ln_tail_times is None:
+            return
+        tail_t = np.asarray(ln_tail_times)[idx]
+        press_t = p.times[idx] + p.offsets[idx]
+        held = ((press_t <= t) & (t <= tail_t)
+                & ~np.asarray(p.misses)[idx])
+        if not held.any():
+            return
+        ctx.candidate_head_y = np.where(
+            held, np.minimum(ctx.candidate_head_y, judge_y),
+            ctx.candidate_head_y)
+        ctx.candidate_press_y = np.where(
+            held, np.minimum(ctx.candidate_press_y, judge_y),
+            ctx.candidate_press_y)
 
     def _tiny_compressed_dx(self, percents, cols, dx_engine, keycount, scale):
         """Screen-space per-note dx with tiny's X-spacing compression folded

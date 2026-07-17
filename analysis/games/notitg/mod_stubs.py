@@ -908,8 +908,15 @@ class StubEnvironment:
             'ApplyModifiers': self._apply_modifiers,
         }))
         host.expose('GAMESTATE', gamestate)
+        # Renderer identity: report an nvidia-class GL renderer so
+        # vendor-probing charts take their opaque-texture AFT branch
+        # (see sim.env._VIDEO_VENDOR - our captures are opaque, and the
+        # other branch relies on GL alpha-buffer decay we don't model).
         host.expose('PREFSMAN', singleton(host.to_lua({
-            'GetPreference': lambda _self, _key=None: '',
+            'GetPreference': lambda _self, key=None: {
+                'VideoRenderers': 'opengl',
+                'LastSeenVideoDriver': 'NVIDIA Corporation',
+            }.get(str(key), ''),
         })))
         host.expose('MESSAGEMAN', singleton(host.to_lua({
             'Broadcast': self._broadcast,
@@ -923,7 +930,7 @@ class StubEnvironment:
         host.expose('DISPLAY', singleton(host.to_lua({
             'GetDisplayWidth': lambda _self: 640.0,
             'GetDisplayHeight': lambda _self: 480.0,
-            'GetVendor': lambda _self: '',
+            'GetVendor': lambda _self: 'NVIDIA Corporation',
         })))
         for name in ('STATSMAN', 'SONGMAN', 'THEME',
                      'GAMEMAN', 'NOTESKIN', 'INPUTFILTER', 'PROFILEMAN'):

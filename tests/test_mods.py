@@ -1244,6 +1244,9 @@ class _LnPlayer:
         self.columns = np.asarray(cols, dtype=np.int64)
         self.keycount = keycount
         self.notes = _LnNotes(len(cols), ln_tail_times)
+        self.times = np.zeros(len(cols), dtype=np.float64)
+        self.offsets = np.zeros(len(cols), dtype=np.float64)
+        self.misses = np.zeros(len(cols), dtype=bool)
 
 
 class _LnCtx:
@@ -1363,3 +1366,47 @@ def test_hold_body_batches_multiple_holds():
         xs, ys = ctx.hold_body_samples[pos]
         assert ys[0] == pytest.approx(ctx.candidate_head_y[pos])
         assert ys[-1] == pytest.approx(ctx.candidate_tail_y[pos])
+
+
+# --- held-hold pinning (engine: hold heads sit AT the receptor) ------
+
+def test_held_hold_head_pins_at_judge_line():
+    # A held hold whose head scrolled past the judge line clamps to it,
+    # press-mark twin included; the tail keeps scrolling. reverse=1 pins
+    # the native (downscroll) space so the clamp is directly visible.
+    player = _LnPlayer([0], 1, [5.0])
+    ctx = _LnCtx(player, [400.0], [100.0], judge_y=300, chart_h=600)
+    _mods([ModEvent(0.0, 1.0, -1, 'reverse')]).apply(ctx)
+    assert ctx.candidate_head_y[0] == pytest.approx(300.0)
+    assert ctx.candidate_press_y[0] == pytest.approx(300.0)
+    assert ctx.candidate_tail_y[0] == pytest.approx(100.0)
+
+
+def test_missed_hold_head_keeps_falling():
+    player = _LnPlayer([0], 1, [5.0])
+    player.misses[:] = True
+    ctx = _LnCtx(player, [400.0], [100.0], judge_y=300, chart_h=600)
+    _mods([ModEvent(0.0, 1.0, -1, 'reverse')]).apply(ctx)
+    assert ctx.candidate_head_y[0] == pytest.approx(400.0)
+
+
+def test_unpressed_hold_head_not_pinned():
+    # press_t still in the future (late hit yet to come): no clamp.
+    player = _LnPlayer([0], 1, [5.0])
+    player.times[:] = 1.0
+    ctx = _LnCtx(player, [400.0], [100.0], judge_y=300, chart_h=600)
+    _mods([ModEvent(0.0, 1.0, -1, 'reverse')]).apply(ctx)
+    assert ctx.candidate_head_y[0] == pytest.approx(400.0)
+
+
+def test_held_hold_body_samples_start_at_receptor():
+    # The bent-body polyline of a held hold begins at the pinned head
+    # (the receptor), never past it: the consumed stretch is not drawn.
+    player = _LnPlayer([0], 4, [6.0])
+    ctx = _LnCtx(player, [450.0], [100.0], judge_y=300, chart_h=600)
+    _mods([ModEvent(0.0, 1.0, -1, 'reverse'),
+           ModEvent(0.0, 1.5, -1, 'drunk')]).apply(ctx)
+    xs, ys = ctx.hold_body_samples[0]
+    assert ys[0] == pytest.approx(300.0)
+    assert ys[-1] == pytest.approx(100.0)
+    assert float(ys.max()) <= 300.0 + 1e-9

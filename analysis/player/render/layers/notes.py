@@ -371,8 +371,10 @@ def _draw_ln(ctx, painter, n):
             _draw_ln_body_tile(ctx, painter, n, top, bot, body_state)
 
     # ── tail sprite ──
+    # A released hold with no release data (autoplay streams) is fully
+    # consumed at the tail: no cap drifts on past the receptor.
     on_screen = -ctx.screen_margin <= n.y_end <= p.H + ctx.screen_margin
-    hidden = hide and n.state == 'released'
+    hidden = n.state == 'released' and (hide or n.rel_off is None)
     if on_screen and not hidden:
         _draw_ln_tail_sprite(ctx, painter, n)
 
@@ -388,6 +390,17 @@ def _draw_ln(ctx, painter, n):
                                 n.lx, n.y_end, rel_y, n.col)
 
 
+def _display_judge_y(ctx, col) -> float:
+    """The judge line where `col`'s notes visually land. `ctx.judge_y` is
+    the native downscroll anchor; a mod consumer that reorients columns
+    (NotITG's reverse family mirrors the field to upscroll) stashes each
+    receptor's shift from that anchor in `ctx.receptor_offsets['dy']`."""
+    offs = getattr(ctx, 'receptor_offsets', None)
+    if offs is None:
+        return float(ctx.judge_y)
+    return float(ctx.judge_y) + float(offs['dy'][col])
+
+
 def _ln_body_span(ctx, n, hide) -> tuple | None:
     """Return `(top_y, bot_y, sprite_state)` for an LN body -- the visible
     y-window the body clips to plus its sprite state. None means no body
@@ -395,20 +408,35 @@ def _ln_body_span(ctx, n, hide) -> tuple | None:
 
     When the hold carries a `body_path` (SV fold or mod bend) the window
     is the path's own y-extent, so a folded noodle that reaches past the
-    straight head/tail span still clips correctly. Otherwise the window
-    is the straight head->tail span (or the judge-line clamp for released
-    holds)."""
-    if n.state == 'missed':
-        return n.y_end, n.y, 'miss_ln'
+    straight head/tail span still clips correctly. Straight windows are
+    ordered min/max so both scroll orientations work (NotITG's engine
+    field scrolls up); the press-hide clamp cuts the body at the display
+    judge line without extending past the tail, so a hold whose tail has
+    already crossed it draws nothing.
+
+    Released holds keep the downscroll-literal window: it exists to show
+    the body remainder between an early release and the judge line, so
+    it only draws while the tail is still above it (the caller's
+    `bot > top` guard) and only when release data exists at all --
+    autoplay streams carry none, and their holds vanish at the tail."""
     match n.state:
+        case 'missed':
+            lo, hi = sorted((n.y, n.y_end))
+            return lo, hi, 'miss_ln'
         case 'upcoming' | 'held' if n.body_path is not None:
             ys = n.body_path[1]
             return float(ys.min()), float(ys.max()), 'normal'
         case 'upcoming':
-            return n.y_end, n.y, 'normal'
+            lo, hi = sorted((n.y, n.y_end))
+            return lo, hi, 'normal'
         case 'held':
-            return n.y_end, (ctx.judge_y if hide else n.y), 'normal'
-        case 'released' if not hide:
+            cap = n.y
+            if hide:
+                lo, hi = sorted((n.y, n.y_end))
+                cap = min(max(_display_judge_y(ctx, n.col), lo), hi)
+            lo, hi = sorted((cap, n.y_end))
+            return lo, hi, 'normal'
+        case 'released' if not hide and n.rel_off is not None:
             return n.y_end, ctx.judge_y, 'released'
         case _:
             return None
@@ -605,7 +633,7 @@ def _head_vis(ctx, n) -> tuple:
 
     if n.is_ln:
         vis = n.state in ('upcoming', 'held')
-        y = ctx.judge_y if n.state == 'held' else n.y
+        y = _display_judge_y(ctx, n.col) if n.state == 'held' else n.y
         return vis, 'normal', y
     return ctx.t_now < n.press_t, 'normal', n.y
 
