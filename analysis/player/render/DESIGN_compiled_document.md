@@ -92,6 +92,13 @@ scene-projection work on the phase-3 tree.
 
 ## Invariants
 
+- **Compiled visibility**: every node has an explicit is-rendered
+  answer for all t. Recorded state bounds it, driving-window spans
+  bound it, and outside both a node rests to NOT rendered - a driven
+  visual's last recorded state never holds past its driver's lifetime
+  (the ghost-receptor class of bug, fixed for grid copies in
+  `_SpanGatedTimeline`; the model makes it structural).
+
 - Per-game code compiles INTO the document; no game name appears in
   the player/render path.
 - Every phase: full suite green, oracle structurally identical at
