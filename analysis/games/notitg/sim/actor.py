@@ -57,6 +57,7 @@ from analysis.games.notitg.lua_api import (
     _ADD_SETTERS, _FALLBACK_TWEEN_EASING, _REST, _SCALAR_GETTERS,
     _SCALAR_SETTERS, _SIZE_AXIS_SETTERS, _SIZE_PAIR_SETTERS, _TWEEN_EASING,
     _as_float, _as_int)
+from analysis.games.notitg.sim import verb_surface
 from analysis.player.render.effects.easing import (
     EASE_SM_BOUNCE_BEGIN, EASE_SM_BOUNCE_END, EASE_SM_SPRING, ease)
 from analysis.player.render.effects.timeline import Keyframe
@@ -106,6 +107,17 @@ _DEFAULT_EFFECT_OFFSET = 0.0
 # Gap under which two driven-poke times merge into one span (seconds);
 # per-frame ticks are 1/60 apart, real gaps between sections are long.
 _DRIVEN_SPAN_GAP = 0.5
+
+# The sim dispatches off verb_surface's generated tables (the full actor
+# verb surface), which are supersets of lua_api's harvest-path tables: the
+# scalar table adds zbias / basezoomz / skewy / the per-axis rotation
+# setters, and the bulk / bulk-add / per-axis rotation-add families are
+# new. lua_api's tables stay untouched so the harvest path is unchanged
+# (parallel-build rule).
+_SIM_SCALAR_SETTERS = verb_surface.SCALAR_SETTERS
+_SIM_ADD_SETTERS = verb_surface.ADD_SETTERS
+_SIM_BULK_SETTERS = verb_surface.BULK_SETTERS
+_SIM_BULK_ADD_SETTERS = verb_surface.BULK_ADD_SETTERS
 
 
 def _rest(prop):
@@ -383,7 +395,9 @@ class SimActor:
 
     def poke(self, verb: str, args: list) -> None:
         arg0 = args[0] if args else None
-        if self._poke_multi_arg(verb, args) or self._poke_effect(verb, args):
+        if self._poke_multi_arg(verb, args) or self._poke_bulk(verb, args):
+            return
+        if self._poke_effect(verb, args):
             return
         if self._poke_channel(verb, arg0) or self._poke_tween(verb, arg0):
             return
@@ -445,16 +459,35 @@ class SimActor:
         if verb in _SIM_TWEEN_EASING:
             self._begin_tweening(_as_float(arg0, 0.0),
                                  _SIM_TWEEN_EASING[verb])
-        elif verb in _SCALAR_SETTERS:
-            self._set_scalar(_SCALAR_SETTERS[verb], _as_float(arg0))
-        elif verb in _ADD_SETTERS:
-            prop = _ADD_SETTERS[verb]
-            delta = _as_float(arg0)
-            if delta is not None:
-                self._write_dest(prop, self.get_dest(prop) + delta)
+        elif verb in _SIM_SCALAR_SETTERS:
+            self._set_scalar(_SIM_SCALAR_SETTERS[verb], _as_float(arg0))
+        elif verb in _SIM_ADD_SETTERS:
+            self._add_dest(_SIM_ADD_SETTERS[verb], _as_float(arg0))
         else:
             return False
         return True
+
+    def _poke_bulk(self, verb, args) -> bool:
+        """Bulk setter (xy/xyz/xyza/xywh/rotationxyz): one positional write
+        per property (ACTOR_LUA_API.md 03/04). The bulk-add form
+        (addrotationxyz) stacks each component onto its destination."""
+        props = _SIM_BULK_SETTERS.get(verb)
+        if props is not None:
+            for prop, arg in zip(props, args):
+                self._set_scalar(prop, _as_float(arg))
+            return True
+        props = _SIM_BULK_ADD_SETTERS.get(verb)
+        if props is not None:
+            for prop, arg in zip(props, args):
+                self._add_dest(prop, _as_float(arg))
+            return True
+        return False
+
+    def _add_dest(self, prop, delta) -> None:
+        """AddX(v) = SetX(GetDestX()+v) - stack onto the destination
+        (Actor.h:117)."""
+        if delta is not None:
+            self._write_dest(prop, self.get_dest(prop) + delta)
 
     def _poke_tween(self, verb, arg0) -> bool:
         match verb:
