@@ -514,6 +514,8 @@ def _draw_ln_body_warped(ctx, painter, n, top, bot, state):
 def _draw_ln_tail_sprite(ctx, painter, n):
     state = _tail_state(n)
     pm = ctx.sprite_cache.get('ln_tail', ctx, col=n.col, state=state)
+    if n.body_samples is not None and _draw_tail_on_curve(ctx, painter, n, pm):
+        return
     if n.flip_tail:
         # Quaver tails flip vertically when the SV at end_time is
         # negative (the LN is being drawn pointing the other way).
@@ -529,6 +531,36 @@ def _draw_ln_tail_sprite(ctx, painter, n):
     else:
         _blit_lane_pixmap(ctx, painter, pm, n.lx,
                           n.y_end - pm.height() / 2, n.col)
+
+
+def _draw_tail_on_curve(ctx, painter, n, pm) -> bool:
+    """Seat the tail cap on the END of the bent body path, rotated to the
+    local tangent, so it traces the arrow-effect curve instead of sitting
+    detached at the straight-lane position. Returns False when the path is
+    degenerate (caller falls back to the straight blit)."""
+    xs, ys = n.body_samples
+    if len(ys) < 2:
+        return False
+
+    w = ctx.lane_width(n.col)
+    end_x = float(xs[-1]) + w / 2.0
+    end_y = float(ys[-1])
+    # Tangent from the last segment; the sprite's natural orientation is
+    # "pointing down the scroll axis" (angle 90 deg in atan2 terms).
+    dx = (float(xs[-1]) - float(xs[-2]))
+    dy = (float(ys[-1]) - float(ys[-2]))
+    if dx == 0.0 and dy == 0.0:
+        return False
+
+    angle_deg = math.degrees(math.atan2(dy, dx)) - 90.0
+    painter.save()
+    painter.translate(end_x, end_y)
+    painter.rotate(angle_deg)
+    if n.flip_tail:
+        painter.scale(1.0, -1.0)
+    painter.drawPixmap(QPointF(-w / 2.0, -pm.height() / 2.0), pm)
+    painter.restore()
+    return True
 
 
 def _tail_state(n) -> str:
