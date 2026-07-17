@@ -166,7 +166,8 @@ class NotitgAdapter(EtternaAdapter):
         sm_path, _index = split_chart_ref(replay.get('filepath', ''))
         bpms = parse_sm(sm_path)['bpms']
         field_3d = notitg_field_3d(
-            sm_path, base_hidden=(compiled or {}).get('base_field_hidden'))
+            sm_path, base_hidden=(compiled or {}).get('base_field_hidden'),
+            player_keyframes=(compiled or {}).get('player_field_keyframes'))
         tilt_active = field_3d.tilt_active if field_3d is not None else None
         return NotitgNoteMods(channels, bpms, field_tilt_active=tilt_active,
                               player=player)
@@ -212,7 +213,9 @@ class NotitgAdapter(EtternaAdapter):
         effects = list(notitg_shader_effects(compiled.get('shader_flags')))
         base_hidden = compiled.get('base_field_hidden')
         sm_path, _index = split_chart_ref(replay.get('filepath', ''))
-        field_3d = notitg_field_3d(sm_path, base_hidden=base_hidden)
+        field_3d = notitg_field_3d(
+            sm_path, base_hidden=base_hidden,
+            player_keyframes=compiled.get('player_field_keyframes'))
         if field_3d is not None:
             # Before the copies/camera: the field-3D transform warps the
             # base playfield in column space; the copies replicate that

@@ -155,6 +155,25 @@ into `sim/env.py` + `sim/record.py`.
 6. Mirin wiring: `is_mirin_chart` routing in the orchestrator
    (declarative fast-path), reconciling the two output-dict shapes.
 
+## Clock-table integration (post-cutover; user's time-integral designs)
+
+The user's scheduling formalism (SV integral; glitch project
+`Scheduler`/`TempoMap`, loops as mu = dtau + warp atoms) is the target
+shape for compiled output:
+
+- SM effect clocks ARE Scheduler instances: `music` = identity, `beat`
+  = the BPM integral, `timer` = the sliding-loop degenerate case
+  (wrap at period+delay = a warp atom back to 0).
+- After cutover, producers emit `(clock_key, curve)` timelines:
+  beat-keyed where the chart scheduled in beats (mods table,
+  mod_actions), seconds where time-based (mods2). The CompiledDocument
+  ClockTable receives them; nothing new is baked to seconds.
+- Oscillator spans compile to analytic entries
+  `magnitude(t) * shape(clock/period + offset)` instead of dense
+  keyframes.
+- Scheduling stays two-tier: the tween queue is STATE the sim executes
+  once at compile; its output is pure curves over clocks.
+
 ## Verification
 
 Full suite (~1362) green at every phase; oracle montages structurally

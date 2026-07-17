@@ -83,6 +83,7 @@ _EPS = 1e-4
 _PLAYER_ACTORS = ('P1', 'P2')
 
 
+@lru_cache(maxsize=8)
 def _player_field_keyframes(sm_path):
     """Harvest the P1/P2 named-actor poke streams for a chart.
 
@@ -126,24 +127,29 @@ def _actor_3d_timelines(frames):
     return build_timelines(rests=_CHANNEL_RESTS, keyframes=keyframes)
 
 
-@lru_cache(maxsize=8)
-def _player_field_timelines(sm_path):
+def _player_field_timelines(sm_path, named=None):
     """Per-player EventTimelines for the 3D channels, or () when no player
-    actor carries any 3D poke (the common no-3D-chart case)."""
-    named = _player_field_keyframes(sm_path)
+    actor carries any 3D poke (the common no-3D-chart case). When the
+    compiler supplies the P1/P2 streams they are used directly; otherwise
+    a private harvest compile is run (and cached per chart)."""
+    if named is None:
+        named = _player_field_keyframes(sm_path)
     out = tuple(_actor_3d_timelines(named.get(actor))
                 for actor in _PLAYER_ACTORS)
     return out if any(tl is not None for tl in out) else ()
 
 
-def notitg_field_3d(sm_path, base_hidden=None):
+def notitg_field_3d(sm_path, base_hidden=None, player_keyframes=None):
     """The field-3D effect for a chart, or None when it has no 3D pokes.
 
-    `base_hidden` is the compiled `base_field_hidden` timeline (the same
-    one the field-instances effect reads): while it is set the copies own
-    the field and this effect defers, so the field capture stays flat and
+    `player_keyframes` is the compiled dict's P1/P2 poke streams when the
+    compiler provides them (the engine-loop path does); without it this
+    falls back to a private harvest compile of the chart. `base_hidden`
+    is the compiled `base_field_hidden` timeline (the same one the
+    field-instances effect reads): while it is set the copies own the
+    field and this effect defers, so the field capture stays flat and
     copies never inherit the base tilt."""
-    timelines = _player_field_timelines(sm_path)
+    timelines = _player_field_timelines(sm_path, player_keyframes)
     if not timelines:
         return None
     return NotitgField3D(timelines[0], base_hidden=base_hidden)

@@ -90,6 +90,12 @@ def _compile_via_sim(sm_path, end_seconds):
         'aft_bg_visible': modfile._aft_bg_visible_timeline(
             doc.root, _bg_stem(sm_path), actor_keyframes),
         'base_field_hidden': modfile._base_field_hidden_timeline(env),
+        # The P1/P2 poke streams for consumers that read the player
+        # actors directly (field_3d; the player-placement work) - saves
+        # them a private recompile.
+        'player_field_keyframes': {
+            name: named_keyframes[name] for name in ('P1', 'P2')
+            if named_keyframes.get(name)},
         'named_actors': len(named_keyframes),
         'recorded_keyframes': sum(
             len(kfs) for frames in actor_keyframes.values()
