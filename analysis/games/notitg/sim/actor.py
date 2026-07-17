@@ -263,6 +263,10 @@ class SimActor:
         # (named/actor/player keyframes, copies) each re-read every
         # actor, and re-simplifying per read is quadratic in practice.
         self._kf_cache: dict | None = None
+        # Set by the environment: called when the queue goes non-empty,
+        # so the drain loop can track ONLY actors with live queues
+        # instead of scanning everyone per tick.
+        self.queue_notify = None
 
     @property
     def now(self) -> float:
@@ -568,6 +572,8 @@ class SimActor:
             self._finish_tweening()
         base = (dict(self._tweens[-1].state) if self._tweens
                 else dict(self._current))
+        if not self._tweens and self.queue_notify is not None:
+            self.queue_notify()
         self._tweens.append(_Tween(duration, ease_id, base))
 
     def _sleep(self, duration) -> None:

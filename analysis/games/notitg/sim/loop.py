@@ -212,20 +212,28 @@ def run_declarative(root, to_seconds, start_beat, end_seconds,
     # ticks suffice there: the unconditional pokes are smooth
     # positioning/housekeeping, and the collinear keyframe
     # simplification absorbs the sampling density either way.
-    if body:
-        window_spans = [(to_seconds(a), to_seconds(b)) for a, b in windows]
-        step = 1.0 / float(tick_hz)
-        coarse = 1.0 / _COARSE_HZ
-        ticks = 0
-        t = load_s
-        while t < end_seconds:
-            in_window = any(a <= t < b for a, b in window_spans)
-            t = min(t + (step if in_window else coarse), end_seconds)
-            env.set_time(t, to_beats(t))
+    # Queue drains run at FULL rate over the whole song - the engine
+    # drains every frame, and the intro's chained zero-tweens
+    # (sleep(0) links) smear if drains lag. Cheap: the queued set holds
+    # only actors with live queues. The BODY runs hybrid: full rate
+    # inside perframe driver windows, coarse outside (its unconditional
+    # positioning/housekeeping is smooth; the simplification absorbs
+    # the density).
+    window_spans = [(to_seconds(a), to_seconds(b)) for a, b in windows]
+    step = 1.0 / float(tick_hz)
+    coarse = 1.0 / _COARSE_HZ
+    ticks = 0
+    t = load_s
+    next_body_t = load_s
+    while t < end_seconds:
+        t = min(t + step, end_seconds)
+        env.set_time(t, to_beats(t))
+        env.drain(t)
+        if body and t >= next_body_t:
             env.run_update_body(body)
-            ticks += 1
-    else:
-        ticks = 0
+            in_window = any(a <= t < b for a, b in window_spans)
+            next_body_t = t + (step if in_window else coarse)
+        ticks += 1
 
     # Self-scheduling chains (a chara Idle loop re-queueing itself) are
     # event lines already: the tween queue is deterministic, so ONE final

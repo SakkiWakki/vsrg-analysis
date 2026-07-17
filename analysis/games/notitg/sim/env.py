@@ -122,6 +122,7 @@ class SimEnvironment:
         self._update_chunk = None
         self._body_chunks: dict = {}
         self._classic_cache: dict = {}
+        self._queued: set = set()
         self._install()
 
     # -- declarative tables (the classic template's event data) ----------
@@ -409,6 +410,7 @@ class SimEnvironment:
         self._next_id += 1
         actor = SimActor(self._now)
         actor.beat_fn = lambda: self._beat
+        actor.queue_notify = lambda: self._queued.add(rec_id)
         self._actors[rec_id] = actor
         self._tables[rec_id] = self._host.env['__make_recorder'](rec_id)
         self._active.append(rec_id)
@@ -421,13 +423,18 @@ class SimEnvironment:
         self._beat = float(beat)
 
     def drain(self, t: float) -> None:
-        """Advance every actor's tween queue to `t`, firing queue-borne
-        commands as the drains reach them. Idle actors (empty queue) are
-        skipped; a dispatch onto one syncs it first (`_sync`)."""
-        for rec_id in self._active:
+        """Advance every LIVE tween queue to `t`, firing queue-borne
+        commands as the drains reach them. Only actors in the queued set
+        (notified when their queue went non-empty) iterate; an actor
+        whose queue drained empty leaves the set until re-armed - so a
+        whole-song 60Hz drain sweep costs proportional to actual queue
+        activity, not the actor count."""
+        for rec_id in list(self._queued):
             actor = self._actors[rec_id]
             if actor._tweens:
                 self._drain_actor(rec_id, actor, t)
+            if not actor._tweens:
+                self._queued.discard(rec_id)
 
     def _drain_actor(self, rec_id, actor, t) -> None:
         actor.update_to(t, lambda name: self._fire_queued(rec_id, name))
