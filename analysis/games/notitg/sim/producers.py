@@ -24,7 +24,8 @@ from pathlib import Path
 
 from analysis.games.notitg import modfile
 from analysis.games.notitg.sim.loop import load_chart, run_sim
-from analysis.games.notitg.sim.record import coalesce_applied
+from analysis.games.notitg.sim.record import chase_events, coalesce_applied
+from analysis.player.render.mods.channels import ModChannels
 
 
 def compile_via_sim(sm_path, end_seconds: float) -> dict | None:
@@ -64,6 +65,11 @@ def _compile_via_sim(sm_path, end_seconds):
 
     return {
         'mod_events': _mod_events(result),
+        # Precompiled channels from frame-resolved retarget events - the
+        # exact engine chase, no window reconstruction. Consumers prefer
+        # this over recompiling mod_events (the mirin-dict pattern).
+        'mod_channels': ModChannels.compile(
+            chase_events(result.applied_mods)),
         'shader_flags': [{'beat': beat, 't': t, 'key': key, 'which': which}
                          for t, beat, key, which in result.shader_flags],
         'unsupported': {'count': 0, 'described': []},
@@ -111,7 +117,9 @@ def _mod_events(result) -> list:
         'beat': window.beat_start,
         'modstring': window.modstring,
         'apply_type': 'sim',
-        'player': window.player,
+        # Window players are engine channel INDEXES (0/1); the row
+        # contract carries the chart's 1-based numbers.
+        'player': window.player + 1,
         't_start': window.t_start,
         't_end': window.t_end + _FRAME_HOLD_S,
         'time_based': True,

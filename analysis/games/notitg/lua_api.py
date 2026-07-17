@@ -345,8 +345,22 @@ VERB_REGISTRY.update(_entries(
     source=_DECOMP))
 VERB_REGISTRY.update(_entries(
     ('effectmagnitude', 'effectperiod', 'effectclock', 'effectm',
-     'effecttiming', 'effectcolor1', 'effectcolor2'),
+     'effectdelay', 'effecttiming', 'effectcolor1', 'effectcolor2'),
     EFFECT_OSCILLATOR, IMPLEMENTED, note='oscillator parameters', source=_A))
+# Modchart primitives (ACTOR_LUA_API.md category 00). aux scratch state
+# is recorded as a live per-actor channel the getters read back;
+# luaeffect (registered above) and tween's custom-Lua-easing argument
+# remain the deferred live tier.
+VERB_REGISTRY.update(_entries(
+    ('aux', 'addaux'), SCALAR_SETTER, IMPLEMENTED, native='aux',
+    note='per-actor scratch state (modchart primitive)', source=_DECOMP))
+VERB_REGISTRY['getaux'] = Verb(
+    'getaux', GETTER, IMPLEMENTED, 'aux',
+    'scratch-state readback (luaeffect carries data through this)',
+    _DECOMP)
+VERB_REGISTRY['GetTweenTimeLeft'] = Verb(
+    'GetTweenTimeLeft', GETTER, IMPLEMENTED, None,
+    'seconds remaining in the tween queue', _DECOMP)
 VERB_REGISTRY['GetSecsIntoEffect'] = Verb(
     'GetSecsIntoEffect', GETTER, IMPLEMENTED, 'effect_secs',
     'seconds into the effect period (drives perframe copy math)', _A)
@@ -515,7 +529,8 @@ GETTER_NAMES = tuple(sorted((*_SCALAR_GETTERS, 'GetTexture', 'getrotation')))
 # Kept OFF GETTER_NAMES so the harvest path's routing is untouched; the
 # sim substitutes its own set. Folds into GETTER_NAMES at cutover.
 SIM_GETTER_NAMES = tuple(sorted(
-    (*GETTER_NAMES, 'GetSecsIntoEffect', 'GetText')))
+    (*GETTER_NAMES, 'GetSecsIntoEffect', 'GetText', 'getaux',
+     'GetTweenTimeLeft')))
 # `__COMMAND` = the actor commands whose dispatch runs the actor's
 # `<Name>Command` on its own recorder (`__actor_command`): playcommand runs
 # it now, queuecommand after the pending tween. `queuemessage` is a message

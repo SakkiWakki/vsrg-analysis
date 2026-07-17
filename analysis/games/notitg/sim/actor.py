@@ -93,7 +93,7 @@ _EFFECT_KINDS = frozenset({
     'diffuseramp', 'glowshift', 'glowblink', 'glowramp'})
 _EFFECT_PARAM_VERBS = frozenset({
     'effectmagnitude', 'effectperiod', 'effectoffset', 'effectclock',
-    'effecttiming', 'effectcolor1', 'effectcolor2'})
+    'effectdelay', 'effecttiming', 'effectcolor1', 'effectcolor2'})
 # Kinds that animate even with no effectmagnitude poke (spin integrates
 # a default; the color/zoom families draw from effectcolor/period).
 _SELF_EVIDENT_KINDS = frozenset({
@@ -313,6 +313,10 @@ class SimActor:
                 return self._osc_open.magnitude_at(self._now)
             case 'GetText':
                 return str(self._current.get('text', ''))
+            case 'getaux':
+                return self._current.get('aux', 0.0)
+            case 'GetTweenTimeLeft':
+                return sum(t.left for t in self._tweens)
             case _:
                 return None
 
@@ -391,6 +395,13 @@ class SimActor:
                 self._set_state(_as_int(arg0))
             case 'settext':
                 self._set_immediate('text', '' if arg0 is None else str(arg0))
+            case 'aux':
+                self._set_immediate('aux', _as_float(arg0))
+            case 'addaux':
+                delta = _as_float(arg0)
+                if delta is not None:
+                    self._set_immediate(
+                        'aux', self._current.get('aux', 0.0) + delta)
             case 'animate':
                 self._animate(_as_float(arg0, 1.0) != 0.0)
             # Any other verb pokes actor state we do not model; ignore it.
@@ -626,7 +637,8 @@ class SimActor:
                 span.set_magnitude(self._now, tuple(
                     _as_float(args[i] if i < len(args) else None, 0.0)
                     for i in range(3)))
-            case 'effecttiming' | 'effectcolor1' | 'effectcolor2':
+            case 'effectdelay' | 'effecttiming' | 'effectcolor1' \
+                    | 'effectcolor2':
                 span.extra[verb] = tuple(
                     _as_float(a, 0.0) for a in args)
 

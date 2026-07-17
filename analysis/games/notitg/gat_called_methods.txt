@@ -190,3 +190,8 @@ glowramp
 effecttiming
 effectcolor1
 effectcolor2
+effectdelay
+aux
+addaux
+getaux
+GetTweenTimeLeft

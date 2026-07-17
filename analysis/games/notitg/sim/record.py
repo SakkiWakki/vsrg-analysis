@@ -55,17 +55,64 @@ def _parsed(modstring: str) -> tuple:
     return tuple(parse_modstring(modstring))
 
 
-def coalesce_applied(applied) -> list:
-    """(t, beat, modstring, player) rows -> per-mod ModWindows.
-    Rows arrive in call order (sim time is monotonic), so within one
-    frame a later application simply overwrites the pending frame entry
-    before it is folded into a window."""
-    open_windows: dict = {}
+# The template's per-frame `clearall` retargets every mod to 0 at this
+# approach speed before the live windows reapply (same constant the
+# harvest decode used); within one frame the reapply wins per-channel.
+_CLEARALL_SPEED = 1.0
+
+
+def _player_indexes(raw) -> tuple:
+    """A row's raw player (1/2 from the chart, None = both) as engine
+    channel indexes. Expansion happens at INGESTION so a per-player
+    clearall and a both-players window meet on the same key inside one
+    frame (last call wins there, as in the engine)."""
+    return (0, 1) if raw is None else (max(0, int(raw) - 1),)
+
+
+def _frame_resolved(applied) -> list:
+    """(t, beat, modstring, player) rows -> per-frame effective targets
+    [(name, player_index, t, beat, value, speed)], last call per
+    (mod, player) within a frame winning, with `clearall` expanded to a
+    0-target for every channel that player has ever applied."""
     pending: dict = {}
+    seen: dict = {}
     out: list = []
 
-    def fold(key, entry) -> None:
-        t, beat, value, speed = entry
+    def flush(key, next_t) -> None:
+        held = pending.get(key)
+        if held is not None and next_t - held[0] >= _SAME_FRAME_S:
+            name, index = key
+            out.append((name, index, *held))
+            del pending[key]
+
+    for t, beat, modstring, player in applied:
+        indexes = _player_indexes(player)
+        if 'clearall' in modstring.lower():
+            for index in indexes:
+                for name in seen.get(index, ()):
+                    key = (name, index)
+                    flush(key, t)
+                    pending[key] = (t, beat, 0.0, _CLEARALL_SPEED)
+            continue
+        for value, speed, name in _parsed(modstring):
+            for index in indexes:
+                seen.setdefault(index, set()).add(name)
+                key = (name, index)
+                flush(key, t)
+                pending[key] = (t, beat, value, speed)
+    for (name, index), held in pending.items():
+        out.append((name, index, *held))
+    out.sort(key=lambda row: row[2])
+    return out
+
+
+def coalesce_applied(applied) -> list:
+    """Frame-resolved targets -> per-mod ModWindows (contiguous runs of
+    one value, split on value/speed change or call gap)."""
+    open_windows: dict = {}
+    out: list = []
+    for name, player, t, beat, value, speed in _frame_resolved(applied):
+        key = (name, player)
         window = open_windows.get(key)
         if window is not None and window.value == value \
                 and window.speed == speed \
@@ -73,26 +120,35 @@ def coalesce_applied(applied) -> list:
             window.t_end = t
             window.beat_end = beat
             window.calls += 1
-            return
+            continue
         if window is not None:
             out.append(window)
-        name, player = key
         open_windows[key] = ModWindow(name, value, speed, player,
                                       t, t, beat, beat)
-
-    for t, beat, modstring, player in applied:
-        for value, speed, name in _parsed(modstring):
-            key = (name, player)
-            held = pending.get(key)
-            if held is not None and t - held[0] >= _SAME_FRAME_S:
-                fold(key, held)
-                held = None
-            pending[key] = (t, beat, value, speed)
-    for key, held in pending.items():
-        fold(key, held)
     out.extend(open_windows.values())
     out.sort(key=lambda w: (w.t_start, w.name))
     return out
+
+
+def chase_events(applied) -> list:
+    """Frame-resolved targets -> ModEvent retargets for
+    `ModChannels.compile`, which runs the exact fapproach chase
+    (RageUtil.cpp:51: value moves linearly toward the target at
+    speed/sec, snapping on arrival - PlayerOptions::Approach applies it
+    per mod with dt * approach speed). One event per (mod, player)
+    target-or-speed CHANGE; a raw player of 1/2 maps to channel index
+    0/1, None applies to both."""
+    from analysis.player.render.mods.channels import ModEvent
+
+    last: dict = {}
+    events: list = []
+    for name, index, t, _beat, value, speed in _frame_resolved(applied):
+        key = (name, index)
+        if last.get(key) == (value, speed):
+            continue
+        last[key] = (value, speed)
+        events.append(ModEvent(t, value, speed, name, index))
+    return events
 
 
 def summarize(result) -> dict:

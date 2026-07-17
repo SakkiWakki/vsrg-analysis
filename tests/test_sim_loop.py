@@ -69,16 +69,20 @@ def test_update_cadence_is_the_charts_not_the_ticks():
         assert gap == pytest.approx(0.02, abs=1e-6)
 
 
-def test_per_frame_mods_coalesce_to_one_window():
+def test_per_frame_mods_coalesce_to_one_window_per_player():
     result = _run_synthetic()
     windows = coalesce_applied(result.applied_mods)
-    assert len(windows) == 1
-    (w,) = windows
-    assert w.modstring == '*10 50 drunk'
-    # Live while song beat in [2, 4) = seconds [1, 2).
-    assert w.t_start == pytest.approx(1.0, abs=0.05)
-    assert w.t_end == pytest.approx(2.0, abs=0.05)
-    assert w.calls > 40
+    # A playerless ApplyModifiers targets BOTH engine players; player
+    # expansion happens at ingestion so per-player clearalls can meet
+    # these windows on the same key.
+    assert len(windows) == 2
+    assert sorted(w.player for w in windows) == [0, 1]
+    for w in windows:
+        assert w.modstring == '*10 50 drunk'
+        # Live while song beat in [2, 4) = seconds [1, 2).
+        assert w.t_start == pytest.approx(1.0, abs=0.05)
+        assert w.t_end == pytest.approx(2.0, abs=0.05)
+        assert w.calls > 40
 
 
 def test_broadcast_reaches_child_at_fire_time():
