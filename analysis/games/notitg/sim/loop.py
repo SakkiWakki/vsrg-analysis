@@ -252,6 +252,6 @@ def run_declarative(root, to_seconds, start_beat, end_seconds,
     # monotonic (sync only advances forward).
     env.fire_mod_actions_until(end_seconds)
     env.set_time(end_seconds, to_beats(end_seconds))
-    env.drain(end_seconds)
+    env.drain(end_seconds, defer_queued=False)
     return SimResult(env=env, ticks=ticks, end_seconds=end_seconds,
                      load_seconds=load_s, warnings=warnings)

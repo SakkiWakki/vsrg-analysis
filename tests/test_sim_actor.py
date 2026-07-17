@@ -176,9 +176,10 @@ def test_zero_dt_update_fires_nothing():
     assert fired == ['N']
 
 
-def test_command_pokes_extend_live_queue():
-    # A fired command's pokes append to the live queue and the drain
-    # continues into them within the same update.
+def test_command_pokes_defer_to_next_update():
+    # A fired command's pokes append to the live queue but run on the
+    # NEXT update (one queue pass per frame, engine-true): the appended
+    # tween starts where this update left off.
     a = SimActor()
 
     def body(name):
@@ -188,6 +189,25 @@ def test_command_pokes_extend_live_queue():
     a.poke('sleep', [1.0])
     a.queue_command('N')
     a.update_to(1.5, body)
+    assert a.get('x') == pytest.approx(0.0)
+    a.update_to(2.0, body)
+    assert a.get('x') == pytest.approx(50.0)
+    a.update_to(2.5, body)
+    assert a.get('x') == pytest.approx(100.0)
+
+
+def test_command_pokes_expand_in_place_when_not_deferred():
+    # defer_queued=False (the loop's final drain) expands the appended
+    # tweens within the same update.
+    a = SimActor()
+
+    def body(name):
+        a.poke('linear', [1.0])
+        a.poke('x', [100])
+
+    a.poke('sleep', [1.0])
+    a.queue_command('N')
+    a.update_to(1.5, body, defer_queued=False)
     assert a.get('x') == pytest.approx(50.0)
 
 

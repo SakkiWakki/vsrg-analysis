@@ -51,6 +51,7 @@ applies them to the draw-time temp state, NOT to m_current
 """
 from __future__ import annotations
 
+import re
 from bisect import bisect_right
 
 from analysis.games.notitg.lua_api import (
@@ -123,6 +124,26 @@ _SIM_BULK_ADD_SETTERS = verb_surface.BULK_ADD_SETTERS
 
 def _rest(prop):
     return _REST.get(prop, 0.0)
+
+
+# NotITG evaluates arithmetic in classic command args: charts write beat
+# durations as expressions (`accelerate,60/205` = one beat at 205bpm,
+# gat default.xml:5113). Purely numeric arithmetic only; `**` is
+# excluded (not a Lua operator, and unbounded under eval).
+_ARITH_EXPR_RE = re.compile(r'^(?!.*\*\*)[\d.+\-*/() ]+$')
+
+
+def _arg_float(value, default=None):
+    """`_as_float` plus classic-arg arithmetic (`60/205`,
+    `128*(60/205)`). The harvest path's coercion stays untouched."""
+    result = _as_float(value)
+    if result is None and isinstance(value, str) \
+            and _ARITH_EXPR_RE.match(value.strip()):
+        try:
+            result = float(eval(value, {'__builtins__': None}, {}))
+        except (SyntaxError, ZeroDivisionError, TypeError, ValueError):
+            result = None
+    return result if result is not None else default
 
 
 # Values within this of the linear interpolation of their neighbours are
@@ -281,20 +302,28 @@ class SimActor:
 
     # -- time ------------------------------------------------------------
 
-    def update_to(self, t: float, run_command=None) -> None:
+    def update_to(self, t: float, run_command=None,
+                  defer_queued: bool = True) -> None:
         """Advance the tween queue to sim time `t` (Actor::UpdateTweening,
         Actor.cpp:469). `run_command(name)` plays a queue-carried command
         (or broadcasts, for '!name') at the exact moment its zero-tween
         begins; commands may poke this actor, appending to the live
-        queue, and the drain continues. A zero-dt call returns without
-        beginning anything, matching the engine's early-out."""
+        queue. With `defer_queued` (the engine's one-queue-pass-per-frame
+        shape) a tween appended DURING this update waits for the next
+        one, bounding every self-requeue chain to the tick rate; pass
+        False to expand chains to quiescence in one call (the loop's
+        final drain). A zero-dt call returns without beginning anything,
+        matching the engine's early-out."""
         remaining = float(t) - self._now
         if remaining <= 0.0 or self._in_update:
             return
         self._in_update = True
+        entry_tweens = len(self._tweens)
         try:
-            for _ in range(_MAX_DRAIN_STEPS):
+            for step_count in range(_MAX_DRAIN_STEPS):
                 if not self._tweens or remaining <= 0.0:
+                    break
+                if defer_queued and step_count >= entry_tweens:
                     break
                 head = self._tweens[0]
                 if not head.started:
@@ -469,9 +498,9 @@ class SimActor:
             case 'diffuse':
                 self._diffuse(args)
             case 'hidden':
-                self._visibility(_as_float(arg0, 1.0) != 0.0)
+                self._visibility(_arg_float(arg0, 1.0) != 0.0)
             case 'visible':
-                self._visibility(_as_float(arg0, 1.0) == 0.0)
+                self._visibility(_arg_float(arg0, 1.0) == 0.0)
             case 'SetTextureName' | 'SetTexture':
                 self._texture(verb, arg0)
             case 'setstate':
@@ -479,14 +508,14 @@ class SimActor:
             case 'settext':
                 self._set_immediate('text', '' if arg0 is None else str(arg0))
             case 'aux':
-                self._set_immediate('aux', _as_float(arg0))
+                self._set_immediate('aux', _arg_float(arg0))
             case 'addaux':
-                delta = _as_float(arg0)
+                delta = _arg_float(arg0)
                 if delta is not None:
                     self._set_immediate(
                         'aux', self._current.get('aux', 0.0) + delta)
             case 'animate':
-                self._animate(_as_float(arg0, 1.0) != 0.0)
+                self._animate(_arg_float(arg0, 1.0) != 0.0)
             # Any other verb pokes actor state we do not model; ignore it.
 
     def queue_command(self, name: str) -> None:
@@ -503,30 +532,30 @@ class SimActor:
 
     def _poke_multi_arg(self, verb, args) -> bool:
         if verb in _SIZE_PAIR_SETTERS:
-            self._set_scalar('size_x', _as_float(args[0] if args else None))
+            self._set_scalar('size_x', _arg_float(args[0] if args else None))
             self._set_scalar('size_y',
-                             _as_float(args[1] if len(args) > 1 else None))
+                             _arg_float(args[1] if len(args) > 1 else None))
             return True
         if verb in _SIZE_AXIS_SETTERS:
             self._set_scalar(_SIZE_AXIS_SETTERS[verb],
-                             _as_float(args[0] if args else None))
+                             _arg_float(args[0] if args else None))
             return True
         if verb == 'SetVanishPoint':
             self._set_immediate('vanish_x',
-                                _as_float(args[0] if args else None))
+                                _arg_float(args[0] if args else None))
             self._set_immediate(
-                'vanish_y', _as_float(args[1] if len(args) > 1 else None))
+                'vanish_y', _arg_float(args[1] if len(args) > 1 else None))
             return True
         return False
 
     def _poke_channel(self, verb, arg0) -> bool:
         if verb in _SIM_TWEEN_EASING:
-            self._begin_tweening(_as_float(arg0, 0.0),
+            self._begin_tweening(_arg_float(arg0, 0.0),
                                  _SIM_TWEEN_EASING[verb])
         elif verb in _SIM_SCALAR_SETTERS:
-            self._set_scalar(_SIM_SCALAR_SETTERS[verb], _as_float(arg0))
+            self._set_scalar(_SIM_SCALAR_SETTERS[verb], _arg_float(arg0))
         elif verb in _SIM_ADD_SETTERS:
-            self._add_dest(_SIM_ADD_SETTERS[verb], _as_float(arg0))
+            self._add_dest(_SIM_ADD_SETTERS[verb], _arg_float(arg0))
         else:
             return False
         return True
@@ -538,12 +567,12 @@ class SimActor:
         props = _SIM_BULK_SETTERS.get(verb)
         if props is not None:
             for prop, arg in zip(props, args):
-                self._set_scalar(prop, _as_float(arg))
+                self._set_scalar(prop, _arg_float(arg))
             return True
         props = _SIM_BULK_ADD_SETTERS.get(verb)
         if props is not None:
             for prop, arg in zip(props, args):
-                self._add_dest(prop, _as_float(arg))
+                self._add_dest(prop, _arg_float(arg))
             return True
         return False
 
@@ -556,7 +585,7 @@ class SimActor:
     def _poke_tween(self, verb, arg0) -> bool:
         match verb:
             case 'sleep':
-                self._sleep(_as_float(arg0, 0.0))
+                self._sleep(_arg_float(arg0, 0.0))
             case 'queuecommand':
                 self.queue_command(arg0)
             case 'queuemessage':
@@ -655,10 +684,10 @@ class SimActor:
     # -- non-queue channels ---------------------------------------------
 
     def _diffuse(self, args) -> None:
-        channels = [_as_float(a) for a in args[:3]]
+        channels = [_arg_float(a) for a in args[:3]]
         if len(channels) == 3 and all(c is not None for c in channels):
             self._write_dest('color', tuple(channels))
-        alpha = _as_float(args[3]) if len(args) > 3 else None
+        alpha = _arg_float(args[3]) if len(args) > 3 else None
         if alpha is not None:
             self._write_dest('alpha', alpha)
 
@@ -739,10 +768,10 @@ class SimActor:
         span.touch(self._now)
         match verb:
             case 'effectperiod':
-                span.period = _as_float(args[0] if args else None,
+                span.period = _arg_float(args[0] if args else None,
                                         span.period)
             case 'effectoffset':
-                span.offset = _as_float(args[0] if args else None,
+                span.offset = _arg_float(args[0] if args else None,
                                         span.offset)
             case 'effectclock':
                 clock = args[0] if args else None
@@ -751,12 +780,12 @@ class SimActor:
                     self._effect_clock = span.clock
             case 'effectmagnitude':
                 span.set_magnitude(self._now, tuple(
-                    _as_float(args[i] if i < len(args) else None, 0.0)
+                    _arg_float(args[i] if i < len(args) else None, 0.0)
                     for i in range(3)))
             case 'effectdelay' | 'effecttiming' | 'effectcolor1' \
                     | 'effectcolor2':
                 span.extra[verb] = tuple(
-                    _as_float(a, 0.0) for a in args)
+                    _arg_float(a, 0.0) for a in args)
 
     # -- emission --------------------------------------------------------
 

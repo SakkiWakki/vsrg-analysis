@@ -473,22 +473,24 @@ class SimEnvironment:
         self._now = float(t)
         self._beat = float(beat)
 
-    def drain(self, t: float) -> None:
+    def drain(self, t: float, defer_queued: bool = True) -> None:
         """Advance every LIVE tween queue to `t`, firing queue-borne
         commands as the drains reach them. Only actors in the queued set
         (notified when their queue went non-empty) iterate; an actor
         whose queue drained empty leaves the set until re-armed - so a
         whole-song 60Hz drain sweep costs proportional to actual queue
-        activity, not the actor count."""
+        activity, not the actor count. `defer_queued=False` expands
+        self-requeue chains to quiescence (the loop's final drain)."""
         for rec_id in list(self._queued):
             actor = self._actors[rec_id]
             if actor._tweens:
-                self._drain_actor(rec_id, actor, t)
+                self._drain_actor(rec_id, actor, t, defer_queued)
             if not actor._tweens:
                 self._queued.discard(rec_id)
 
-    def _drain_actor(self, rec_id, actor, t) -> None:
-        actor.update_to(t, lambda name: self._fire_queued(rec_id, name))
+    def _drain_actor(self, rec_id, actor, t, defer_queued=True) -> None:
+        actor.update_to(t, lambda name: self._fire_queued(rec_id, name),
+                        defer_queued=defer_queued)
 
     def _sync(self, rec_id) -> None:
         """Bring an actor to the current time before a dispatched body

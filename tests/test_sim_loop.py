@@ -53,9 +53,10 @@ def test_update_chain_self_schedules():
     root_actor = next(a for a in result.actors.values()
                       if 'x' in a.keyframes())
     fires = len(root_actor.keyframes()['x'])
-    # ~4s at the chart's own 0.02s cadence = ~200 fires, quantized by
-    # the first-tick arm. The loop imposed no rig knowledge.
-    assert 180 <= fires <= 205
+    # ~4s of a sleep(0.02) rig at 60Hz: one queue pass per tick means
+    # each cycle takes 2 frames (0.02 > one 1/60 frame), the engine's
+    # own quantization = ~120 fires. The loop imposed no rig knowledge.
+    assert 110 <= fires <= 125
     assert result.faults == 0
 
 
@@ -64,9 +65,11 @@ def test_update_cadence_is_the_charts_not_the_ticks():
     root_actor = next(a for a in result.actors.values()
                       if 'x' in a.keyframes())
     kfs = root_actor.keyframes()['x']
+    # The chart's 0.02s sleep frame-quantizes to 2 ticks at 60Hz (a
+    # re-queued command runs on the NEXT queue pass, engine-true).
     gaps = [b.t - a.t for a, b in zip(kfs[10:20], kfs[11:21])]
     for gap in gaps:
-        assert gap == pytest.approx(0.02, abs=1e-6)
+        assert gap == pytest.approx(2 / 60, abs=1e-6)
 
 
 def test_per_frame_mods_coalesce_to_one_window_per_player():
@@ -82,7 +85,7 @@ def test_per_frame_mods_coalesce_to_one_window_per_player():
         # Live while song beat in [2, 4) = seconds [1, 2).
         assert w.t_start == pytest.approx(1.0, abs=0.05)
         assert w.t_end == pytest.approx(2.0, abs=0.05)
-        assert w.calls > 40
+        assert w.calls > 25
 
 
 def test_broadcast_reaches_child_at_fire_time():
@@ -90,8 +93,8 @@ def test_broadcast_reaches_child_at_fire_time():
     child = next(a for a in result.actors.values() if 'y' in a.keyframes())
     (kf,) = child.keyframes()['y']
     assert kf.values == (77.0,)
-    # Fire #10 of a 0.02s chain that armed on the first tick.
-    assert kf.t == pytest.approx(10 * 0.02, abs=0.05)
+    # Fire #10 of the chain at its frame-quantized 2-tick cadence.
+    assert kf.t == pytest.approx(10 * 2 / 60, abs=0.05)
 
 
 def test_classic_oncommand_recorded_on_child():
