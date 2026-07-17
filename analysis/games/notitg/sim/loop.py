@@ -23,6 +23,11 @@ from analysis.games.notitg.sim.env import SimEnvironment
 
 _TICK_HZ = 60.0
 
+# Sweep rate OUTSIDE the perframe driver windows: the body's
+# unconditional sections still run (positioning, housekeeping), just
+# coarsely - the simplification pass absorbs the density difference.
+_COARSE_HZ = 10.0
+
 # Anchor load a hair before beat 0 when the FGCHANGES start beat maps
 # later, so load-time keyframes strictly precede beat-0 actions (same
 # rule and rationale as the harvest path's _LOAD_LEAD_S).
@@ -199,21 +204,33 @@ def run_declarative(root, to_seconds, start_beat, end_seconds,
         # so the rig's own re-arm tail no-ops - the window sweep drives
         # time instead).
         body = _strip_lua_wrapper(body)
-    step = 1.0 / float(tick_hz)
-    ticks = 0
-    for start_beat_w, end_beat_w in windows:
-        t = to_seconds(start_beat_w)
-        w_end = to_seconds(end_beat_w)
-        while t < w_end:
-            t = min(t + step, w_end)
+    # Hybrid-rate sweep: the body runs full-rate inside the declared
+    # `perframe(a, b)` driver windows, and at a coarse rate everywhere
+    # else - the body's UNCONDITIONAL sections (player positioning, the
+    # intro block, always-on pokes) run every engine frame in-game, and
+    # skipping them outside windows loses their state entirely. Coarse
+    # ticks suffice there: the unconditional pokes are smooth
+    # positioning/housekeeping, and the collinear keyframe
+    # simplification absorbs the sampling density either way.
+    if body:
+        window_spans = [(to_seconds(a), to_seconds(b)) for a, b in windows]
+        step = 1.0 / float(tick_hz)
+        coarse = 1.0 / _COARSE_HZ
+        ticks = 0
+        t = load_s
+        while t < end_seconds:
+            in_window = any(a <= t < b for a, b in window_spans)
+            t = min(t + (step if in_window else coarse), end_seconds)
             env.set_time(t, to_beats(t))
             env.run_update_body(body)
             ticks += 1
+    else:
+        ticks = 0
 
     # Self-scheduling chains (a chara Idle loop re-queueing itself) are
     # event lines already: the tween queue is deterministic, so ONE final
     # drain to the end expands every remaining chain at queue-exact times
-    # - no tick grid. Runs after the window sweep so all timestamps stay
+    # - no tick grid. Runs after the sweep so all timestamps stay
     # monotonic (sync only advances forward).
     env.set_time(end_seconds, to_beats(end_seconds))
     env.drain(end_seconds)

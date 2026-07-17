@@ -197,6 +197,11 @@ class SimEnvironment:
                 continue
             beat = _beat_of(row)
             self.set_time(self._to_seconds(beat), beat)
+            # Advance every live queue to this fire time BEFORE the
+            # action runs: queued tweens begin at their true times, so a
+            # later finishtweening collapses only what is genuinely
+            # still in flight - not the whole song's accumulated queue.
+            self.drain(self._now)
             fired += 1
             try:
                 if callable(payload):
