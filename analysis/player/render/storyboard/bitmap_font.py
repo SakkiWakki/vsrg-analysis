@@ -25,10 +25,13 @@ to a system font.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from analysis.player.render.storyboard.asset_size import AssetSizeSpec, resolve
+
 _GRID_RE = re.compile(r'(?P<cols>\d+)x(?P<rows>\d+)(?=\D*$)')
+_DOUBLERES_RE = re.compile(r'\(\s*doubleres\s*\)', re.IGNORECASE)
 _SECTION_RE = re.compile(r'^\s*\[(?P<name>[^\]]+)\]\s*$')
 _KV_RE = re.compile(r'^\s*(?P<key>[^=;#]+?)\s*=\s*(?P<value>[^;/]*)')
 
@@ -36,14 +39,18 @@ _KV_RE = re.compile(r'^\s*(?P<key>[^=;#]+?)\s*=\s*(?P<value>[^;/]*)')
 @dataclass(frozen=True)
 class BitmapFont:
     """A parsed SM font: one texture grid plus per-codepoint advances.
-    Cell pixel size is derived from the atlas dimensions at draw time
-    (the renderer owns the pixmap), so this record stays pixmap-free."""
+    Cell LOGICAL size is derived from the atlas pixels at draw time (the
+    renderer owns the pixmap) through the asset-size funnel, so a
+    `(doubleres)` font page halves like any other doubleres texture; this
+    record stays pixmap-free."""
     texture_path: str
     cols: int
     rows: int
     line_spacing: float
     default_advance: float
     advances: dict          # codepoint -> advance width, design px
+    size_spec: AssetSizeSpec = field(
+        default_factory=lambda: AssetSizeSpec())
 
     def advance(self, codepoint: int) -> float:
         return self.advances.get(codepoint, self.default_advance)
@@ -51,7 +58,10 @@ class BitmapFont:
     def cell(self, codepoint: int, atlas_w: float, atlas_h: float):
         """(x, y, w, h) source rect of this codepoint's cell in an atlas
         of the given pixel size, or None when the codepoint is outside
-        the grid."""
+        the grid. The source rect is in atlas PIXELS (cropping the real
+        texture); glyph LOGICAL size for layout comes from `cell_logical`.
+        Positioning stays in pixels because the draw scales the whole
+        cell into its logical destination."""
         count = self.cols * self.rows
         if not 0 <= codepoint < count:
             return None
@@ -60,6 +70,14 @@ class BitmapFont:
         col = codepoint % self.cols
         row = codepoint // self.cols
         return (col * cell_w, row * cell_h, cell_w, cell_h)
+
+    def cell_logical(self, atlas_w: float, atlas_h: float) -> tuple:
+        """One glyph cell's LOGICAL (w, h) in design units - the atlas
+        pixels resolved through the asset-size funnel (grid divide plus
+        any doubleres halving). This is the size the renderer composites
+        each glyph at."""
+        size = resolve(atlas_w, atlas_h, self.size_spec)
+        return size.natural
 
 
 def _resolve_ini(reference: str, search_dirs) -> Path | None:
@@ -139,10 +157,12 @@ def load_font(reference: str, search_dirs) -> BitmapFont | None:
     add_all = _as_int(scalars.get('addtoallwidths'), 0)
     advances = {cp: w + extra + add_all for cp, w in parsed['widths'].items()}
     default_advance = float(max(advances.values(), default=16))
+    doubleres = bool(_DOUBLERES_RE.search(Path(texture_path).stem))
     return BitmapFont(
         texture_path=str(texture_path), cols=cols, rows=rows,
         line_spacing=float(_as_int(scalars.get('linespacing'), 0) or 0),
-        default_advance=default_advance, advances=advances)
+        default_advance=default_advance, advances=advances,
+        size_spec=AssetSizeSpec(cols=cols, rows=rows, doubleres=doubleres))
 
 
 def _as_int(value, default=None):

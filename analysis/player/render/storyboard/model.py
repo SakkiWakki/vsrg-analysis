@@ -31,7 +31,12 @@ A 'sprite' whose asset is a StepMania NxM grid sheet carries the grid
 (`sheet_cols`/`sheet_rows`) and a `sheet_states` list of
 `(frame_index, delay_seconds)`: the renderer crops the CURRENT frame's
 cell instead of the whole sheet, and the element's natural size is ONE
-frame. With no `state_pin`, the sheet auto-animates through
+frame. The frame's LOGICAL size (what `scale_x/y` multiply and a plain
+draw occupies) is never the raw pixel size: `size_spec` carries the
+grid plus any `(doubleres)`/`res`/manifest conventions, and the renderer
+resolves it through `render.storyboard.asset_size` so a sheet, a
+doubleres texture, or a res-hinted image all size correctly. With no
+`state_pin`, the sheet auto-animates through
 `sheet_states` (SM's sprite animation, tied to the effect clock);
 `state_pin` is an optional EventTimeline of a frame index over time
 (recorded `setstate`/`animate` pokes) that overrides the animation when
@@ -51,12 +56,18 @@ from dataclasses import dataclass, field
 
 from analysis.player.render.effects.timeline import EventTimeline
 
+# Absolute on-screen size (SM zoomto/setsize) is UNSET at rest: a
+# negative sentinel the renderer reads as "no absolute size, use
+# natural*scale". A real zoomto keyframe (>=0) overrides that axis.
+_SIZE_UNSET = -1.0
+
 _SCALAR_RESTS = {
     'x': 0.0, 'y': 0.0, 'scale_x': 1.0, 'scale_y': 1.0,
     'rotation': 0.0, 'alpha': 1.0, 'w': 0.0, 'h': 0.0, 'border': 2.0,
     # SM's hard visibility bit, held apart from alpha (0 shown, 1 hidden);
     # an element is drawn only when NOT hidden AND alpha is visible.
     'hidden': 0.0,
+    'size_x': _SIZE_UNSET, 'size_y': _SIZE_UNSET,
 }
 
 
@@ -99,6 +110,11 @@ class Element:
     sheet_rows: int = 1       # rows of frames in the sheet
     sheet_states: tuple = ()  # ((frame_index, delay_seconds), ...) auto-anim
     state_pin: object = None  # EventTimeline of a frame index, or None
+    # Size conventions (doubleres/res hint/manifest logical override) the
+    # renderer feeds to render.storyboard.asset_size.resolve to turn raw
+    # pixels into the frame's LOGICAL size. None = a plain asset whose
+    # logical size is its pixel size divided by the grid (the default).
+    size_spec: object = None  # AssetSizeSpec | None
 
     def sample(self, prop: str, t: float):
         return self.timelines[prop].sample(t)

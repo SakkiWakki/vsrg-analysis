@@ -29,13 +29,23 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from analysis.player.render.storyboard.asset_size import (AssetSizeSpec,
+                                                          LogicalSize, resolve)
 from analysis.player.render.storyboard.sprite_sheet import (frame_at_time,
                                                             frame_source_rect)
 
 __all__ = ['grid_from_filename', 'default_states', 'parse_sprite_states',
-           'frame_at_time', 'frame_source_rect']
+           'size_spec_from_filename', 'AssetSizeSpec', 'LogicalSize',
+           'resolve', 'frame_at_time', 'frame_source_rect']
 
 _GRID_TOKEN = re.compile(r'(?:^|\s)(\d+)x(\d+)(?=\.|$|\s)', re.IGNORECASE)
+
+# RageBitmapTexture reads authoring hints from parenthesised filename
+# tokens: `(doubleres)` = the image is 2x its logical resolution;
+# `(res WxH)`/`res WxH` = the logical size stated outright (halved again
+# under doubleres). gat uses neither; Government Knows-era packs do.
+_DOUBLERES_RE = re.compile(r'\(\s*doubleres\s*\)', re.IGNORECASE)
+_RES_RE = re.compile(r'\(?\s*res\s+(\d+)\s*x\s*(\d+)\s*\)?', re.IGNORECASE)
 
 # LoadFromTexture's per-frame default when no .sprite overrides it.
 _DEFAULT_DELAY = 0.1
@@ -52,6 +62,24 @@ def grid_from_filename(name: str) -> tuple:
         return (1, 1)
     cols, rows = matches[-1]
     return (max(1, int(cols)), max(1, int(rows)))
+
+
+def size_spec_from_filename(name: str, logical=None) -> AssetSizeSpec:
+    """The StepMania size conventions a sprite filename encodes, as an
+    `AssetSizeSpec` for `render.storyboard.asset_size.resolve`: the NxM
+    frame grid, a `(doubleres)` halving marker, and a `(res WxH)` logical
+    hint. `logical` supplies an explicit manifest-stated frame size that
+    outranks all filename rules (a `.sprite` redirect that records its
+    target size). The `res` token is scanned before the grid so a
+    `res WxH` does not read as a stray `WxH` grid."""
+    stem = Path(name).stem
+    res_match = _RES_RE.search(stem)
+    res = (int(res_match[1]), int(res_match[2])) if res_match else None
+    grid_source = _RES_RE.sub(' ', stem) if res_match else stem
+    cols, rows = grid_from_filename(grid_source)
+    return AssetSizeSpec(cols=cols, rows=rows,
+                         doubleres=bool(_DOUBLERES_RE.search(stem)),
+                         logical=logical, res=res)
 
 
 def default_states(frame_count: int) -> tuple:

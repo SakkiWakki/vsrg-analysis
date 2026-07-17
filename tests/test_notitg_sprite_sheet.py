@@ -196,6 +196,88 @@ def test_plain_sprite_draws_whole_pixmap(tmp_path):
     assert (src.width(), src.height()) == (16, 16)  # whole 1x1 pixmap
 
 
+# ── resolution API in the draw path: logical size, not raw pixels --------
+
+def test_doubleres_natural_size_is_halved(tmp_path):
+    # a (doubleres) 64x64 texture logically occupies 32x32, not 64x64.
+    from analysis.player.render.storyboard.asset_size import AssetSizeSpec
+    asset, _cell = _sheet_png(tmp_path, 1, 1, cell=64)
+    el = _sheet_element(asset, 1, 1, 64,
+                        size_spec=AssetSizeSpec(doubleres=True))
+    eff = StoryboardEffect(Storyboard(200, 200, 'height', (el,)))
+    assert eff._element_size(el, 0.0) == (32.0, 32.0)
+
+
+def test_zoomto_overrides_natural_with_absolute_size():
+    # SM zoomto sets the on-screen size DIRECTLY: a 4px-wide frame with a
+    # zoomto(20, 480) draws 20x480 regardless of its tiny logical size -
+    # the gat FUCK-bar fullscreen mechanism.
+    from analysis.player.render.effects.timeline import EventTimeline, Keyframe
+    from analysis.player.render.storyboard.render import _draw_size
+    tl = {'size_x': EventTimeline([Keyframe(0.0, (20.0,), 0.0, 0)],
+                                  rest=(-1.0,)),
+          'size_y': EventTimeline([Keyframe(0.0, (480.0,), 0.0, 0)],
+                                  rest=(-1.0,))}
+    el = SimpleNamespace(timelines=tl, sample=lambda p, t: tl[p].sample(t))
+    assert _draw_size(el, 0.0, (4.0, 96.0)) == (20.0, 480.0)
+
+
+def test_unset_size_falls_back_to_natural():
+    from analysis.player.render.effects.timeline import EventTimeline
+    from analysis.player.render.storyboard.render import _draw_size
+    tl = {'size_x': EventTimeline([], rest=(-1.0,)),
+          'size_y': EventTimeline([], rest=(-1.0,))}
+    el = SimpleNamespace(timelines=tl, sample=lambda p, t: tl[p].sample(t))
+    assert _draw_size(el, 0.0, (128.0, 256.0)) == (128.0, 256.0)
+
+
+def test_single_axis_zoomto_keeps_other_natural():
+    from analysis.player.render.effects.timeline import EventTimeline, Keyframe
+    from analysis.player.render.storyboard.render import _draw_size
+    tl = {'size_x': EventTimeline([], rest=(-1.0,)),
+          'size_y': EventTimeline([Keyframe(0.0, (480.0,), 0.0, 0)],
+                                  rest=(-1.0,))}
+    el = SimpleNamespace(timelines=tl, sample=lambda p, t: tl[p].sample(t))
+    assert _draw_size(el, 0.0, (100.0, 96.0)) == (100.0, 480.0)
+
+
+# ── recorder: zoomto/setsize/zoomtowidth record absolute size ------------
+
+def test_recorder_zoomto_records_both_axes():
+    from analysis.games.notitg.recording_actor import RecordingActor
+    actor = RecordingActor(clock=3.0)
+    actor.poke('zoomto', [20, 480.0])
+    kf = actor.keyframes()
+    assert kf['size_x'][0].values == (20.0,)
+    assert kf['size_y'][0].values == (480.0,)
+    assert kf['size_x'][0].t == 3.0
+
+
+def test_recorder_setsize_records_absolute_size():
+    from analysis.games.notitg.recording_actor import RecordingActor
+    actor = RecordingActor(clock=0.0)
+    actor.poke('setsize', [640, 480])
+    kf = actor.keyframes()
+    assert (kf['size_x'][0].values, kf['size_y'][0].values) == ((640.0,),
+                                                                (480.0,))
+
+
+def test_recorder_zoomtowidth_sets_one_axis():
+    from analysis.games.notitg.recording_actor import RecordingActor
+    actor = RecordingActor(clock=0.0)
+    actor.poke('zoomtowidth', [100])
+    kf = actor.keyframes()
+    assert kf['size_x'][0].values == (100.0,)
+    assert 'size_y' not in kf
+
+
+def test_recorder_zoomto_resolves_screen_constants():
+    from analysis.games.notitg.recording_actor import RecordingActor
+    actor = RecordingActor(clock=0.0)
+    actor.poke('zoomto', [20, 'SCREEN_HEIGHT'])
+    assert actor.keyframes()['size_y'][0].values == (480.0,)
+
+
 # ── modfile compile: grid + .sprite states onto the element --------------
 
 pytest.importorskip('lupa')

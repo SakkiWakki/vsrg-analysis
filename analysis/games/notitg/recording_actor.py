@@ -68,12 +68,28 @@ _SCALAR_SETTERS = {
 }
 _ADD_SETTERS = {'addx': 'x', 'addy': 'y', 'addz': 'z'}
 
+# Absolute-size setters. SM's `zoomto(w, h)`/`setsize(w, h)` set the
+# on-screen size in design pixels DIRECTLY (unlike `zoom`, a multiplier
+# of the logical size). The renderer overrides natural*scale with these
+# when they are set - the mechanism behind gat's fullscreen FUCK bars,
+# `zoomto(20, SCREEN_HEIGHT)` on a 4px-wide sheet frame. Recorded onto
+# their own size_x/size_y properties; the width-/height-only forms set
+# one axis. Rest is the UNSET sentinel (negative), so an untouched size
+# leaves the natural*scale path alone.
+_SIZE_PAIR_SETTERS = frozenset({'zoomto', 'setsize'})
+_SIZE_AXIS_SETTERS = {
+    'zoomtowidth': 'size_x', 'setwidth': 'size_x',
+    'zoomtoheight': 'size_y', 'setheight': 'size_y',
+}
+_SIZE_UNSET = -1.0
+
 _REST = {
     'x': 0.0, 'y': 0.0, 'z': 0.0,
     'scale_x': 1.0, 'scale_y': 1.0, 'scale_z': 1.0,
     'base_scale_x': 1.0, 'base_scale_y': 1.0,
     'rotation': 0.0, 'rotation_x': 0.0, 'rotation_y': 0.0,
     'alpha': 1.0, 'skew_x': 0.0, 'skew_y': 0.0,
+    'size_x': _SIZE_UNSET, 'size_y': _SIZE_UNSET,
     'color': (1.0, 1.0, 1.0),
     'frame': 0.0,
     'hidden': 0.0,
@@ -187,6 +203,8 @@ class RecordingActor:
 
     def poke(self, verb: str, args: list) -> None:
         arg0 = args[0] if args else None
+        if self._poke_size(verb, args):
+            return
         if self._poke_channel(verb, arg0) or self._poke_tween(verb, arg0):
             return
         match verb:
@@ -203,6 +221,21 @@ class RecordingActor:
             case 'animate':
                 self._animate(_as_float(arg0, 1.0) != 0.0)
             # Any other verb pokes actor state we do not model; ignore it.
+
+    def _poke_size(self, verb, args) -> bool:
+        """Absolute-size setters (`zoomto`/`setsize` take w AND h;
+        `zoomtowidth`/`zoomtoheight` one axis), returning whether `verb`
+        was one. Kept off `_poke_channel` because they read two args."""
+        if verb in _SIZE_PAIR_SETTERS:
+            self._set_scalar('size_x', _as_float(args[0] if args else None))
+            self._set_scalar('size_y',
+                             _as_float(args[1] if len(args) > 1 else None))
+            return True
+        if verb in _SIZE_AXIS_SETTERS:
+            self._set_scalar(_SIZE_AXIS_SETTERS[verb],
+                             _as_float(args[0] if args else None))
+            return True
+        return False
 
     def _poke_channel(self, verb, arg0) -> bool:
         """Handle the value-carrying verbs - tween opens and scalar/add

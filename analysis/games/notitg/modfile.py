@@ -572,9 +572,9 @@ def _leaf_element(actor, start_time, named_keyframes, precomputed=None,
     text = actor.attrs.get('Text', '')
     font = _resolve_font(actor, fonts)
     if font is not None:
-        asset, cols, rows, states = (None, 1, 1, ())
+        asset, spec, states = (None, sprite_sheet.AssetSizeSpec(), ())
     else:
-        asset, cols, rows, states = _resolve_sprite(actor)
+        asset, spec, states = _resolve_sprite(actor)
     kind = _element_kind(actor.kind, has_text=bool(text), font=font,
                          has_image=_is_image_asset(asset))
     if kind is None:
@@ -596,8 +596,8 @@ def _leaf_element(actor, start_time, named_keyframes, precomputed=None,
         timelines=build_timelines(keyframes=drawable),
         asset=asset,
         text=str(text), font=font,
-        sheet_cols=cols, sheet_rows=rows, sheet_states=states,
-        state_pin=state_pin,
+        sheet_cols=spec.cols, sheet_rows=spec.rows, sheet_states=states,
+        size_spec=spec, state_pin=state_pin,
     )
 
 
@@ -677,23 +677,25 @@ def _sprite_manifest_texture(sprite_path: Path, base_dir: Path) -> str | None:
 
 
 def _resolve_sprite(actor) -> tuple:
-    """A sprite's `(asset_path, sheet_cols, sheet_rows, sheet_states)`.
+    """A sprite's `(asset_path, size_spec, sheet_states)`.
 
-    The grid comes from the resolved image's NxM filename token (SM
-    `GetFrameDimensionsFromFileName`); the state list is the `.sprite`
-    manifest's `Frame%04d=`/`Delay%04d=` pairs when the reference is a
-    manifest, else SM's default sequential animation (one state per
-    frame). A plain single-frame sprite yields (path, 1, 1, ())."""
+    `size_spec` is the SM size conventions its filename encodes (NxM grid
+    from `GetFrameDimensionsFromFileName`, plus `(doubleres)`/`res`
+    hints) - the record the renderer resolves against raw pixels to get
+    the frame's logical size. The state list is the `.sprite` manifest's
+    `Frame%04d=`/`Delay%04d=` pairs when the reference is a manifest, else
+    SM's default sequential animation (one state per frame). A plain
+    single-frame sprite yields (path, 1x1 spec, ())."""
     asset = _resolve_asset(actor)
     if asset is None or asset in _BUILTIN_TEXTURES:
-        return (asset, 1, 1, ())
+        return (asset, sprite_sheet.AssetSizeSpec(), ())
 
-    cols, rows = sprite_sheet.grid_from_filename(asset)
-    frame_count = cols * rows
+    spec = sprite_sheet.size_spec_from_filename(asset)
+    frame_count = spec.cols * spec.rows
     states = _manifest_states(actor, frame_count)
     if not states and frame_count > 1:
         states = sprite_sheet.default_states(frame_count)
-    return (asset, cols, rows, states)
+    return (asset, spec, states)
 
 
 def _manifest_states(actor, frame_count: int) -> tuple:
@@ -731,6 +733,9 @@ def _resolve_font(actor, fonts):
 # analogue; they are kept out of the built element timelines.
 _DRAWABLE_PROPS = frozenset({
     'x', 'y', 'scale_x', 'scale_y', 'rotation', 'alpha', 'color', 'hidden',
+    # Absolute on-screen size (SM zoomto/setsize). Rest is the unset
+    # sentinel in model._SCALAR_RESTS; when set it overrides natural*scale.
+    'size_x', 'size_y',
 })
 
 

@@ -27,11 +27,42 @@ from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QPainter, QPen,
                            QPixmap)
 
 from analysis.player.render.effects.base import EffectFrame
+from analysis.player.render.storyboard.asset_size import AssetSizeSpec, resolve
 from analysis.player.render.storyboard.sprite_sheet import (frame_at_time,
                                                             frame_source_rect)
 
 _MIN_VISIBLE_ALPHA = 1.0 / 255.0
 _TINT_QUANT_LEVELS = 32
+
+
+def _logical_size(el, pm):
+    """The frame's LOGICAL size + grid for `el` drawn from pixmap `pm`,
+    resolved through the one asset-size funnel. An element without a
+    `size_spec` (fluXis/osu plain sprites, hand-built test elements) uses
+    a bare grid spec, so the funnel still owns the pixels->logical map."""
+    spec = el.size_spec or AssetSizeSpec(cols=el.sheet_cols,
+                                         rows=el.sheet_rows)
+    return resolve(pm.width(), pm.height(), spec)
+
+
+_SIZE_UNSET = -1.0
+
+
+def _draw_size(el, t, natural) -> tuple:
+    """The element's size basis in design units before `scale_x/y` -
+    SM's UNZOOMED size. It is the natural (logical) frame size unless a
+    `zoomto`/`setsize` set an absolute size on that axis (`size_x`/
+    `size_y` >= 0), which replaces the natural basis (so the FUCK bars'
+    `zoomto(20, SCREEN_HEIGHT)` fill full height regardless of the tiny
+    4px frame). `scale` still multiplies on top, exactly as SM applies
+    zoom after zoomto. A group carries no size timelines, so it passes
+    through untouched."""
+    nat_w, nat_h = natural
+    (size_x,) = el.sample('size_x', t)
+    (size_y,) = el.sample('size_y', t)
+    w = size_x if size_x >= 0.0 else nat_w
+    h = size_y if size_y >= 0.0 else nat_h
+    return (w, h)
 
 
 def _is_sheet(el) -> bool:
@@ -169,7 +200,7 @@ class StoryboardEffect:
         size = (0.0, 0.0) if el.kind == 'group' else self._element_size(el, t)
         if size is None:
             return
-        w, h = size
+        w, h = _draw_size(el, t, size)
 
         (x,) = el.sample('x', t)
         (y,) = el.sample('y', t)
@@ -257,7 +288,7 @@ class StoryboardEffect:
             return
         glyphs = self._tinted_pixmap(el.font.texture_path, color)
         pen = -_bitmaptext_width(el.font, el.text) / 2.0
-        cell_h = atlas.height() / el.font.rows
+        cell_w, cell_h = el.font.cell_logical(atlas.width(), atlas.height())
         top = -cell_h / 2.0
         for char in el.text:
             codepoint = ord(char)
@@ -265,7 +296,8 @@ class StoryboardEffect:
             cell = el.font.cell(codepoint, atlas.width(), atlas.height())
             if cell is not None:
                 cx, cy, cw, ch = cell
-                dest = QRectF(pen + (advance - cw) / 2.0, top, cw, ch)
+                dest = QRectF(pen + (advance - cell_w) / 2.0, top,
+                              cell_w, cell_h)
                 painter.drawPixmap(dest, glyphs, QRectF(cx, cy, cw, ch))
             pen += advance
 
@@ -275,8 +307,9 @@ class StoryboardEffect:
         if not _is_sheet(el):
             return QRectF(pm.rect())
         frame = _sheet_frame(el, t)
+        grid = _logical_size(el, pm)
         x, y, w, h = frame_source_rect(frame, pm.width(), pm.height(),
-                                       el.sheet_cols, el.sheet_rows)
+                                       grid.cols, grid.rows)
         return QRectF(x, y, w, h)
 
     def _element_size(self, el, t):
@@ -287,10 +320,7 @@ class StoryboardEffect:
                 pm = self._pixmap(self._asset_at(el, t))
                 if pm is None:
                     return None
-                if _is_sheet(el):
-                    return (pm.width() / el.sheet_cols,
-                            pm.height() / el.sheet_rows)
-                return (pm.width(), pm.height())
+                return _logical_size(el, pm).natural
             case 'text':
                 _font, metrics = self._font_for(el)
                 bounds = metrics.boundingRect(el.text)
@@ -299,8 +329,9 @@ class StoryboardEffect:
                 atlas = self._pixmap(el.font.texture_path)
                 if atlas is None:
                     return None
-                return (_bitmaptext_width(el.font, el.text),
-                        atlas.height() / el.font.rows)
+                _cell_w, cell_h = el.font.cell_logical(atlas.width(),
+                                                       atlas.height())
+                return (_bitmaptext_width(el.font, el.text), cell_h)
             case _:
                 (w,) = el.sample('w', t)
                 (h,) = el.sample('h', t)
