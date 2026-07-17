@@ -149,6 +149,70 @@ def test_diffuse_sets_color_and_alpha():
     assert element.sample('alpha', 0.0) == (0.5,)
 
 
+def test_quad_zoomto_size_feeds_renderer_wh():
+    # A fullscreen flash quad sizes via zoomto -> size_x/size_y; the
+    # renderer sizes fill kinds from w/h, so a Quad must expose both or it
+    # renders at zero size (the gat ZZZZZFLASHES / TargOn quads did).
+    from analysis.games.notitg import modfile
+
+    parsed = xml_actors.parse_actor_xml(
+        '<Quad Type="Quad" OnCommand="zoomto,640,480;diffuse,1,0,0,1"/>')
+    element = modfile._compile_elements(
+        parsed.classic_commands, _seconds, start_beat=0.0)[0]
+    assert element.kind == 'rect'
+    assert element.sample('w', 0.0) == (640.0,)
+    assert element.sample('h', 0.0) == (480.0,)
+    # The absolute-size override is preserved too (draw path reads it).
+    assert element.sample('size_x', 0.0) == (640.0,)
+
+
+def test_sprite_zoomto_does_not_hijack_wh():
+    # Sprites size from their pixmap; only fill kinds borrow size_x/y.
+    from analysis.games.notitg import modfile
+
+    parsed = xml_actors.parse_actor_xml(
+        '<Sprite Type="Sprite" Texture="white" OnCommand="zoomto,32,32"/>')
+    element = modfile._compile_elements(
+        parsed.classic_commands, _seconds, start_beat=0.0)[0]
+    assert element.kind == 'sprite'
+    assert element.sample('w', 0.0) == (0.0,)
+    assert element.sample('size_x', 0.0) == (32.0,)
+
+
+def test_blend_add_marks_element_additive():
+    # gat's split judgment lines blend add so the red bars glow.
+    from analysis.games.notitg import modfile
+
+    parsed = xml_actors.parse_actor_xml(
+        '<Quad Type="Quad" OnCommand="zoomto,640,4;blend,add"/>')
+    element = modfile._compile_elements(
+        parsed.classic_commands, _seconds, start_beat=0.0)[0]
+    assert element.additive is True
+
+    plain = xml_actors.parse_actor_xml(
+        '<Quad Type="Quad" OnCommand="zoomto,640,4"/>')
+    plain_el = modfile._compile_elements(
+        plain.classic_commands, _seconds, start_beat=0.0)[0]
+    assert plain_el.additive is False
+
+
+def test_rng_seed_makes_math_random_reproducible():
+    # The datamosh spawner scatters bars at math.random positions recorded
+    # once at compile; seeding keeps the scatter identical run to run.
+    seq_a = _random_sequence(1234)
+    seq_b = _random_sequence(1234)
+    seq_c = _random_sequence(9999)
+    assert seq_a == seq_b
+    assert seq_a != seq_c
+
+
+def _random_sequence(seed):
+    env = StubEnvironment(start_beat=0.0, rng_seed=seed)
+    env.run("vals = {} for i=1,8 do vals[i] = math.random() end", name='r')
+    table = env._host.env['vals']
+    return tuple(round(table[i], 9) for i in range(1, 9))
+
+
 # -- CODE chunk mod harvest -----------------------------------------------
 
 def test_stub_harvests_mods_table():

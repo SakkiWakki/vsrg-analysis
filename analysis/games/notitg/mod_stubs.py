@@ -130,15 +130,30 @@ if table.getn == nil then table.getn = function(t) return #t end end
 # beat-0 mod_action. Small: load values just hold from a hair earlier.
 _LOAD_LEAD_S = 0.01
 
+# Determinism contract for chart RNG. Charts spawn actors at positions
+# picked by `math.random` (gat's FUCK datamosh scatters 512 pooled bars
+# with random x/y tween targets); those targets are recorded ONCE at
+# compile, so an unseeded PRNG would place the bars differently every
+# compile and break the compiled-document cache and golden tests. We
+# seed the sandbox PRNG deterministically from the chart's own content
+# (the same faithful-once-recorded contract as fluXis RandomRange, which
+# seeds `random.Random(f'fluxis-script:{seed}')` per script path): the
+# same chart always compiles the same scatter, different charts differ.
+# One seed per compile (not per invocation) is faithful to the engine,
+# which shares one PRNG stream across every spawner call in a run.
+_DEFAULT_RNG_SEED = 0
+
 
 class StubEnvironment:
     """One LuaJIT host with the classic-template engine stubs installed,
     plus the harvested tables after chunks run."""
 
-    def __init__(self, start_beat: float = 0.0, to_seconds=None):
+    def __init__(self, start_beat: float = 0.0, to_seconds=None,
+                 rng_seed: int = _DEFAULT_RNG_SEED):
         self._start_beat = float(start_beat)
         self._clock_beat = float(start_beat)
         self._to_seconds = to_seconds or (lambda beat: float(beat))
+        self._rng_seed = int(rng_seed)
         # Actors load BEFORE the song's first beat, so their InitCommand /
         # OnCommand keyframes must sort before any `mod_actions` closure
         # (which can fire at beat 0 - e.g. gat's `char_shame:Spawn`). The
@@ -888,6 +903,12 @@ class StubEnvironment:
         host.expose('__screen_get_child', self._screen_get_child_by_name)
         host.expose('Trace', lambda *_a: None)
         host.expose('print', lambda *_a: None)
+
+        # Seed the sandbox PRNG so `math.random` scatter (the FUCK pool's
+        # tween targets, chara pool placement) records the same positions
+        # every compile - the determinism contract above.
+        host.expose('__rng_seed', float(self._rng_seed))
+        host.run('math.randomseed(__rng_seed)', name='rng-seed')
 
     def _broadcast(self, _self, name=None, *_a) -> None:
         """`MESSAGEMAN:Broadcast('Name')`. Runs the matching message
