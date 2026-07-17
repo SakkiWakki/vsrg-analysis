@@ -271,6 +271,15 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
         links = [_instance_link(link_actor, env, actor_keyframes,
                                 osc_context)
                  for link_actor in reversed(chain)]
+        if kind == 'proxy':
+            # The engine draws a proxied target WITH the target's own
+            # transform (P1 at its seat + pokes), composed inside the
+            # proxy's frame - without it every copy sits one design
+            # centre off and pops at the chart's cull margins instead
+            # of the screen edge.
+            links.append(field_compose.player_link(
+                player, named_keyframes.get(f'P{player}'),
+                (field_oscillators or {}).get(player), ignore_hidden=True))
         name = names.get(rec_id)
         if name is None:
             ancestor = next((names[env.actor_id(a)] for a in chain

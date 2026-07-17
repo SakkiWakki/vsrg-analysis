@@ -509,9 +509,15 @@ class NotitgNoteMods:
         return out
 
     def _reverse_geom(self, ctx, judge_y):
-        """Mirror of the judge line about the chart region's vertical
-        center: the position a fully-reversed receptor slides to, in
-        native downscroll pixels."""
+        """The position a fully-reversed receptor slides to, in native
+        downscroll pixels: the adapter's engine mirror line when its
+        field geometry is active (the engine's standard/reverse receptor
+        rows are NOT symmetric about the screen center), else the judge
+        line reflected about the chart region's vertical center."""
+        field_geometry = getattr(ctx.player, '_field_geometry', None)
+        geom = field_geometry() if field_geometry is not None else None
+        if geom is not None:
+            return geom[3]
         _rx, ry, _w, h = ctx.chart_rect
         return 2.0 * (ry + h / 2.0) - judge_y
 

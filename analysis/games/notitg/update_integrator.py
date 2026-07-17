@@ -152,6 +152,27 @@ def _update_body(root):
     return None
 
 
+_REARM_RE = re.compile(
+    r"sleep\s*\(\s*([0-9.]+)\s*\)\s*;?\s*self\s*:\s*queuecommand\s*\(\s*"
+    r"['\"]" + _UPDATE_COMMAND + r"['\"]", re.IGNORECASE)
+
+
+def _body_rearm_period(body: str) -> float | None:
+    """Seconds between update-body invocations, from the rig's own
+    re-arm tail (`self:sleep(X); self:queuecommand('Update')`), or None
+    when the body never self-schedules. The engine runs the body at
+    THIS cadence, and per-call integrators in it (a toss rig's
+    `addx(xspd); yspd = yspd + fall` Euler steps, a walker's per-call
+    scroll add) carry no dt - running them at the sweep's tick rate
+    instead integrates visibly fast (60/50 = 20% at the template's
+    0.02s re-arm)."""
+    match = _REARM_RE.search(_strip_comments(body))
+    if not match:
+        return None
+    period = float(match.group(1))
+    return period if period > 0.0 else None
+
+
 def _live_windows(body: str):
     """Sorted, merged (start_beat, end_beat) windows for every live
     `perframe(a, b)` in the body. `perframe(a)` (no end) is a one-beat

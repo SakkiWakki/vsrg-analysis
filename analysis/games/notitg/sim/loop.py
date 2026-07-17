@@ -231,6 +231,13 @@ def run_declarative(root, to_seconds, start_beat, end_seconds,
     window_spans = [(to_seconds(a), to_seconds(b)) for a, b in windows]
     step = 1.0 / float(tick_hz)
     coarse = 1.0 / _COARSE_HZ
+    # The body runs at the RIG'S OWN cadence, not the sweep's: its
+    # re-arm tail (`sleep(0.02); queuecommand('Update')`) is how often
+    # the engine invokes it, and its per-call integrators (dt-less
+    # Euler physics, per-call scroll adds) count invocations.
+    body_step = (update_integrator._body_rearm_period(body) or step) \
+        if body else step
+    body_step = max(body_step, step)
     ticks = 0
     t = load_s
     next_body_t = load_s
@@ -242,7 +249,8 @@ def run_declarative(root, to_seconds, start_beat, end_seconds,
         if body and t >= next_body_t:
             env.run_update_body(body)
             in_window = any(a <= t < b for a, b in window_spans)
-            next_body_t = t + (step if in_window else coarse)
+            next_body_t = t + (body_step if in_window
+                               else max(coarse, body_step))
         ticks += 1
 
     # Self-scheduling chains (a chara Idle loop re-queueing itself) are

@@ -326,6 +326,20 @@ def test_design_map_matches_design_box():
     assert ky == pytest.approx(box.height() / 480.0)
 
 
+def test_field_geometry_is_engine_grid():
+    """Adjacent 64-design-px columns centered on the design centre; the
+    judge/mirror pair maps the engine's reverse/standard receptor rows
+    (asymmetric about the screen centre)."""
+    from analysis.core import game as game_mod
+    adapter = game_mod.get('notitg')
+    x0, lane_w, judge_y, mirror_y = adapter.field_geometry(
+        (0, 0, 1280, 960), 4)
+    assert lane_w == pytest.approx(128.0)          # 64 * kx at kx=2
+    assert x0 == pytest.approx((320 - 128) * 2.0)  # centered on design 320
+    assert judge_y == pytest.approx(385 * 2.0)     # reverse-side row
+    assert mirror_y == pytest.approx(115 * 2.0)    # standard-side row
+
+
 def test_screen_constants_resolve_in_classic_commands():
     """`x,SCREEN_CENTER_X` records the numeric center, not a dropped
     None - so an AFT copy's InitCommand base sits at screen center."""

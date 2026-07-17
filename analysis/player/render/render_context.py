@@ -55,7 +55,7 @@ class RenderContext:
         return self._scroll_speed
 
     def time_to_y(self, t):
-        judge_y = self.player.H * self.player.hit_line_y_frac
+        judge_y = self.player.judge_y_px()
         frame = self.frame if self.frame is not None else self.player.render_frame_state(self.t_now)
         return judge_y - self.player._visual_sv_distance_from_frame(
             frame,

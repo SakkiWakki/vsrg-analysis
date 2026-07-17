@@ -145,6 +145,19 @@ class GameAdapter:
         + re-rasterizes note sprites as the quantized palette changes."""
         return None
 
+    def field_geometry(self, chart_rect, keycount):
+        """Engine-true field geometry override as `(x0, lane_w, judge_y,
+        mirror_y)` in window px, or None for the analysis layout. When
+        present, the player draws `keycount` adjacent `lane_w` columns
+        from `x0` with the judgement line at `judge_y` (the native
+        downscroll anchor), and the reverse-family mirror line sits at
+        `mirror_y` instead of the chart-region reflection - the pair maps
+        the game's own standard/reverse receptor rows, which need not be
+        symmetric about the region center. Modchart games override this
+        so field proportions and receptor rows match their engine's
+        design space; analysis-first games keep the adaptive layout."""
+        return None
+
     def upscroll(self) -> bool:
         """True when the game's native orientation is receptors-on-top
         (NotITG/ITG). The player mirrors the field vertically via a

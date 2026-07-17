@@ -39,6 +39,15 @@ _ITG_WINDOWS_MS = (
     ('wayoff', 181.5),
 )
 
+# Engine field geometry in 640x480 design px: one arrow column is 64,
+# and the receptor rows sit at the player seat (SCREEN_CENTER_Y 240)
+# offset by the ReceptorArrowsYStandard/-Reverse metrics (-125/+145,
+# openitg Player.cpp:127-128).
+_ARROW_PX = 64.0
+_DESIGN_CENTER_X = 320.0
+_RECEPTOR_Y_STANDARD = 240.0 - 125.0
+_RECEPTOR_Y_REVERSE = 240.0 + 145.0
+
 def _autoplay_arrays(chart) -> dict:
     judged = judged_notes(chart)
     count = len(judged)
@@ -258,6 +267,23 @@ class NotitgAdapter(EtternaAdapter):
         from analysis.player.render.document import DesignSpace, FIT_STRETCH
         return DesignSpace(width=640.0, height=480.0, fit=FIT_STRETCH,
                            clip=True)
+
+    def field_geometry(self, chart_rect, keycount):
+        """Engine field geometry mapped through the stretch design map:
+        adjacent 64-design-px columns centered on the design centre, the
+        judgement line at the engine's reverse-side receptor row and the
+        mirror line at its standard-side row (the player seat
+        SCREEN_CENTER_Y offset by the ReceptorArrowsYReverse/-Standard
+        metrics, openitg Player.cpp:127-128 - the pair is deliberately
+        asymmetric about the screen centre). Charts author every mod
+        amplitude against this 64px grid, so field proportions, mod
+        geometry, and the receptor rows all land reference-exact."""
+        from analysis.games.notitg.field_instances import _design_map
+        kx, ky, ox, oy = _design_map(chart_rect)
+        x0 = ox + (_DESIGN_CENTER_X - _ARROW_PX * keycount / 2.0) * kx
+        return (x0, _ARROW_PX * kx,
+                oy + _RECEPTOR_Y_REVERSE * ky,
+                oy + _RECEPTOR_Y_STANDARD * ky)
 
     def storyboard(self, replay):
         """Modfile actors (prank overlays, quads, text, ActorFrame

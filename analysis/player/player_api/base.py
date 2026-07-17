@@ -387,7 +387,34 @@ class Player:
         from analysis.player.render import theme
         return (0, 0, max(0, self.W - theme.SIDEBAR_WIDTH), self.H)
 
+    def _field_geometry(self):
+        """The adapter's engine-geometry override `(x0, lane_w, judge_y,
+        mirror_y)` in window px, or None for the analysis layout (see
+        GameAdapter.field_geometry). Memoized per viewport/keycount."""
+        adapter = getattr(self, '_adapter', None)
+        if adapter is None:
+            return None
+        key = (self.chart_rect, self.keycount)
+        if getattr(self, '_field_geom_key', None) != key:
+            self._field_geom_key = key
+            self._field_geom = adapter.field_geometry(self.chart_rect,
+                                                      self.keycount)
+        return self._field_geom
+
+    def judge_y_px(self) -> float:
+        """The judgement-line y (the native downscroll anchor every
+        time->y mapping hangs notes from): the adapter's engine geometry
+        when present, else the display fraction."""
+        geom = self._field_geometry()
+        if geom is not None:
+            return geom[2]
+        return self.H * self.hit_line_y_frac
+
     def _lane_geom(self):
+        geom = self._field_geometry()
+        if geom is not None:
+            return geom[0], geom[1]
+
         margin = 60
         _cx, _cy, chart_w, _chart_h = self.chart_rect
         avail = chart_w - 2 * margin

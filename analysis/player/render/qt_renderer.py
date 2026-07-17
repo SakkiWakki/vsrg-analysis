@@ -173,7 +173,7 @@ class QtPlayerRenderer:
             t_now=float(t_now),
             x0=x0,
             lane_w=lane_w,
-            judge_y=int(player.H * player.hit_line_y_frac),
+            judge_y=int(player.judge_y_px()),
             painter=painter,
             _scroll_speed=player.sv_render.effective_scroll_speed(t_now),
         )

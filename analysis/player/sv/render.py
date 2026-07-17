@@ -387,7 +387,7 @@ class SvRenderController:
         off / no engine is loaded."""
         p = self.p
         sps = max(0.001, self.effective_scroll_speed(t_now))
-        flat_dt = (p.H * p.hit_line_y_frac) / sps
+        flat_dt = p.judge_y_px() / sps
         engine = p._sv_engine
         if not p.sv_enabled or engine is None or not engine.enabled:
             return flat_dt
@@ -428,7 +428,7 @@ class SvRenderController:
 
     def time_to_y(self, t, t_now, frame=None):
         p = self.p
-        judge_y = p.H * p.hit_line_y_frac
+        judge_y = p.judge_y_px()
 
         if frame is None:
             frame = self.render_frame_state(t_now)
@@ -454,7 +454,7 @@ class SvRenderController:
         if arr.size == 0:
             return np.empty(0, dtype=np.float64)
 
-        judge_y = p.H * p.hit_line_y_frac
+        judge_y = p.judge_y_px()
         scroll_speed = self.effective_scroll_speed(float(frame.raw_t))
 
         if not getattr(frame, 'use_sv', False):

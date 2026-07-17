@@ -186,12 +186,24 @@ def instance(name, kind, player, links, t0=None, aft_order=None,
                                           flip_base_y=kind == 'aft')}
 
 
-def player_instance(number, keyframes, osc_deltas=None, t0=None) -> dict:
-    """A player-field instance from the recorded PlayerP{n} poke stream
-    (may be empty: an untouched player rests at its versus seat) plus
-    its field-oscillator deltas."""
+def player_link(number, keyframes, osc_deltas=None,
+                ignore_hidden=False) -> dict:
+    """A player field's own transform link: the recorded PlayerP{n} poke
+    stream (may be empty: an untouched player rests at its versus seat)
+    with its field-oscillator deltas overlaid. `ignore_hidden` pins the
+    hidden channel to visible - a proxy draws its target WITH the
+    target's transform but REGARDLESS of the target's hidden bit (the
+    standard trick: hide the real field, let the proxies show it)."""
     link = overlay_deltas(link_timelines(keyframes, rests=PLAYER_REST[number]),
                           osc_deltas)
+    if ignore_hidden:
+        link['hidden'] = EventTimeline([], rest=(0.0,))
+    return link
+
+
+def player_instance(number, keyframes, osc_deltas=None, t0=None) -> dict:
+    """A player-field instance drawn in place from its own link."""
+    link = player_link(number, keyframes, osc_deltas)
     return instance(f'P{number}', 'player', number, [link], t0=t0)
 
 

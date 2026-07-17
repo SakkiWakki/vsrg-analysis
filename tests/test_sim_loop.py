@@ -147,12 +147,14 @@ def test_notefield_proxy_becomes_composed_field_instance():
     assert inst['kind'] == 'proxy' and inst['player'] == 1
     assert inst['name'].startswith('holder_')
     # Parent-chain composition in the transform channel: root x(100) +
-    # inner frame x(20) + the proxy's own x(3) place the capture centre
-    # at design (123, 0).
+    # inner frame x(20) + the proxy's own x(3), then the TARGET's own
+    # transform (engine ActorProxy semantics - an untouched player 1
+    # rests at its versus seat, 160/240) places the capture centre at
+    # design (283, 240).
     H, alpha = inst['transform'].at(0.5)
     assert alpha == 1.0
-    assert H[2, 0] == pytest.approx(123.0 - 320.0)
-    assert H[2, 1] == pytest.approx(0.0 - 240.0)
+    assert H[2, 0] == pytest.approx(283.0 - 320.0)
+    assert H[2, 1] == pytest.approx(240.0 - 240.0)
 
 
 
