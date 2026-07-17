@@ -593,8 +593,9 @@ class EtternaAdapter(GameAdapter):
         elements = compiled.get('tree') or compiled.get('elements')
         if not elements:
             return None
-        return Storyboard(design_w=640.0, design_h=480.0, fit='height',
-                          elements=tuple(elements))
+        ds = self.design_space()
+        return Storyboard(design_w=ds.width, design_h=ds.height, fit=ds.fit,
+                          elements=tuple(elements), clip_design_box=ds.clip)
 
     # --- library scan -----------------------------------------------------
     _STEPSTYPE_KEYCOUNT = {

@@ -171,6 +171,20 @@ class GameAdapter:
         as the notes for every game."""
         return 'bars'
 
+    def design_space(self):
+        """This game's design-space header: the resolution its visual
+        content is authored at plus how that rectangle fits the on-screen
+        chart region (`analysis.player.render.document.DesignSpace`).
+
+        Replaces the scattered fit constants and per-call storyboard
+        kwargs; the compiled document carries it and the player maps
+        design->screen in one place. This is the game's PRIMARY (effect)
+        authoring space -- fluXis's per-file .fsb `resolution` and osu's
+        widescreen extension stay inside their own sub-format compilers.
+        Default: SM's 640x480 height-fit screen (the sm-family base)."""
+        from analysis.player.render.document import DesignSpace, FIT_HEIGHT
+        return DesignSpace(width=640.0, height=480.0, fit=FIT_HEIGHT)
+
     def storyboard(self, replay):
         """This replay's storyboard compiled to the game-agnostic IR
         (`analysis.player.render.storyboard.Storyboard`), or None.
