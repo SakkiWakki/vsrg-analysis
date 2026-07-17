@@ -333,12 +333,26 @@ def test_oscillator_span_records_and_reads():
     assert span.end == pytest.approx(2.0)
 
 
-def test_secs_into_effect_reads_from_open_span():
+def test_secs_into_effect_timer_clock_wraps_at_period():
+    # CLOCK_TIMER accumulates and wraps at period + delay
+    # (Actor.cpp:571-575); default period 1.0.
     a = SimActor()
     a.poke('bob', [])
     a.poke('effectmagnitude', [0, 10, 0])
     a.update_to(1.5)
-    assert a.read('GetSecsIntoEffect') == pytest.approx(1.5)
+    assert a.read('GetSecsIntoEffect') == pytest.approx(0.5)
+
+
+def test_secs_into_effect_music_clock_is_song_time():
+    # CLOCK_BGM_TIME tracks the song clock outright (Actor.cpp:581-583);
+    # charts set `effectclock,music` with NO effect running to use this
+    # as their mod-clock rig.
+    a = SimActor()
+    a.poke('effectclock', ['music'])
+    a.update_to(12.25)
+    assert a.read('GetSecsIntoEffect') == pytest.approx(12.25)
+    a.poke('settext', [a.read('GetSecsIntoEffect')])
+    assert float(a.read('GetText')) == pytest.approx(12.25)
 
 
 def test_driven_spans_merge_ticks_and_split_sections():

@@ -494,6 +494,14 @@ def names_by_category(category: str) -> tuple:
 # the generic path (they degrade to the permissive sentinel / a real
 # recorder target), so adding them would hand a poke stream a wrong value.
 GETTER_NAMES = tuple(sorted((*_SCALAR_GETTERS, 'GetTexture', 'getrotation')))
+
+# The sim path answers two more getters the poke-recorder cannot:
+# GetSecsIntoEffect (a live clock read under the actor's effect clock)
+# and GetText (the settext round-trip charts abuse as a number store).
+# Kept OFF GETTER_NAMES so the harvest path's routing is untouched; the
+# sim substitutes its own set. Folds into GETTER_NAMES at cutover.
+SIM_GETTER_NAMES = tuple(sorted(
+    (*GETTER_NAMES, 'GetSecsIntoEffect', 'GetText')))
 # `__COMMAND` = the actor commands whose dispatch runs the actor's
 # `<Name>Command` on its own recorder (`__actor_command`): playcommand runs
 # it now, queuecommand after the pending tween. `queuemessage` is a message

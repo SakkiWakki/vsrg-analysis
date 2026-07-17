@@ -170,6 +170,14 @@ class SimActor:
 
     def __init__(self, now: float = 0.0):
         self._now = float(now)
+        self._created = float(now)
+        # Actor-level effect clock (SetEffectClockString semantics,
+        # Actor.cpp:720): 'music' = song seconds, 'beat'/'bgm' = song
+        # beat, 'timer' = per-actor wrapped seconds. Charts set it with
+        # no effect running to abuse GetSecsIntoEffect as a clock (gat's
+        # mod_time rig). `beat_fn` is wired by the environment.
+        self._effect_clock = 'timer'
+        self.beat_fn = None
         self._current: dict = {}
         self._tweens: list = []
         self._ease_start: dict = {}
@@ -181,6 +189,7 @@ class SimActor:
         self._osc_open: OscSpan | None = None
         self._driven = False
         self._driven_spans: list = []
+        self._in_update = False
 
     @property
     def now(self) -> float:
@@ -196,21 +205,25 @@ class SimActor:
         queue, and the drain continues. A zero-dt call returns without
         beginning anything, matching the engine's early-out."""
         remaining = float(t) - self._now
-        if remaining <= 0.0:
+        if remaining <= 0.0 or self._in_update:
             return
-        for _ in range(_MAX_DRAIN_STEPS):
-            if not self._tweens or remaining <= 0.0:
-                break
-            head = self._tweens[0]
-            if not head.started:
-                self._begin_head(head, run_command)
-            step = min(head.left, remaining)
-            head.left -= step
-            remaining -= step
-            self._now += step
-            if head.left <= 0.0:
-                self._complete_head(head)
-        self._now += max(0.0, remaining)
+        self._in_update = True
+        try:
+            for _ in range(_MAX_DRAIN_STEPS):
+                if not self._tweens or remaining <= 0.0:
+                    break
+                head = self._tweens[0]
+                if not head.started:
+                    self._begin_head(head, run_command)
+                step = min(head.left, remaining)
+                head.left -= step
+                remaining -= step
+                self._now += step
+                if head.left <= 0.0:
+                    self._complete_head(head)
+            self._now += max(0.0, remaining)
+        finally:
+            self._in_update = False
 
     def _begin_head(self, head, run_command) -> None:
         """Head tween begins: snapshot the ease start (m_start =
@@ -275,12 +288,30 @@ class SimActor:
                 return self.get(_SCALAR_GETTERS[v])
             case 'GetTexture' if self._aft_texture_name is not None:
                 return f'aft:{self._aft_texture_name}'
-            case 'GetSecsIntoEffect' if self._osc_open is not None:
-                return self._now - self._osc_open.start
+            case 'GetSecsIntoEffect':
+                return self._secs_into_effect()
             case 'GetEffectMagnitude' if self._osc_open is not None:
                 return self._osc_open.magnitude_at(self._now)
+            case 'GetText':
+                return str(self._current.get('text', ''))
             case _:
                 return None
+
+    def _secs_into_effect(self) -> float:
+        """m_fSecsIntoEffect by effect clock (Actor.cpp:559-590): the
+        BGM clocks TRACK song time/beat outright, so charts read this
+        with no effect running as a clock; the timer clock accumulates
+        per-actor and wraps at period + delay."""
+        match self._effect_clock:
+            case 'music':
+                return self._now
+            case 'beat' | 'bgm':
+                return self.beat_fn() if self.beat_fn is not None else self._now
+            case _:
+                period = (self._osc_open.period if self._osc_open is not None
+                          else _DEFAULT_EFFECT_PERIOD)
+                elapsed = self._now - self._created
+                return elapsed % period if period > 0 else elapsed
 
     def getrotation(self):
         return (self.get('rotation_x'), self.get('rotation_y'),
@@ -339,6 +370,8 @@ class SimActor:
                 self._texture(verb, arg0)
             case 'setstate':
                 self._set_state(_as_int(arg0))
+            case 'settext':
+                self._set_immediate('text', '' if arg0 is None else str(arg0))
             case 'animate':
                 self._animate(_as_float(arg0, 1.0) != 0.0)
             # Any other verb pokes actor state we do not model; ignore it.
@@ -551,6 +584,11 @@ class SimActor:
     def _effect_param(self, verb, args) -> None:
         span = self._osc_open
         if span is None:
+            # The clock is ACTOR state, not span state: charts set
+            # `effectclock,music` with no effect running purely to turn
+            # GetSecsIntoEffect into a song clock (gat's mod_time rig).
+            if verb == 'effectclock' and args and isinstance(args[0], str):
+                self._effect_clock = str(args[0]).strip().lower()
             return
         span.touch(self._now)
         match verb:
@@ -562,8 +600,9 @@ class SimActor:
                                         span.offset)
             case 'effectclock':
                 clock = args[0] if args else None
-                span.clock = str(clock).strip().lower() if isinstance(
-                    clock, str) else span.clock
+                if isinstance(clock, str):
+                    span.clock = str(clock).strip().lower()
+                    self._effect_clock = span.clock
             case 'effectmagnitude':
                 span.set_magnitude(self._now, tuple(
                     _as_float(args[i] if i < len(args) else None, 0.0)
