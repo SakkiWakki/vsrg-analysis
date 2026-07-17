@@ -15,8 +15,9 @@ Public API:
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRectF
-from PySide6.QtGui import QBrush, QPainterPath, QTransform
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import (QBrush, QPainterPath, QPainterPathStroker,
+                           QTransform)
 
 import math
 from dataclasses import dataclass
@@ -480,18 +481,26 @@ def _draw_ln_body_warped(ctx, painter, n, top, bot, state):
     pm = ctx.sprite_cache.get('ln_body', ctx,
                               col=n.col, state=state, is_roll=n.is_roll)
     w = ctx.lane_width(n.col)
-    # `xs` is the body's LEFT edge per sample (lane_x + dx), matching the
-    # rect path's `QRectF(n.lx, ...)` origin; the ribbon spans one lane
-    # width to its right. Trace the left edge down then the right edge back.
-    right = xs + w
+    if len(ys) < 2:
+        return
 
-    path = QPainterPath()
-    path.moveTo(float(xs[0]), float(ys[0]))
+    # `xs` is the body's LEFT edge per sample (lane_x + dx), matching the
+    # rect path's `QRectF(n.lx, ...)` origin. Stroke the CENTER polyline
+    # with the lane width so the ribbon stays perpendicular to the path
+    # everywhere: tracing axis-aligned left/right edges instead collapses
+    # into self-intersecting bowties once a strong bend turns the body
+    # near-horizontal.
+    center = xs + w / 2.0
+    spine = QPainterPath()
+    spine.moveTo(float(center[0]), float(ys[0]))
     for i in range(1, len(ys)):
-        path.lineTo(float(xs[i]), float(ys[i]))
-    for i in range(len(ys) - 1, -1, -1):
-        path.lineTo(float(right[i]), float(ys[i]))
-    path.closeSubpath()
+        spine.lineTo(float(center[i]), float(ys[i]))
+
+    stroker = QPainterPathStroker()
+    stroker.setWidth(float(w))
+    stroker.setCapStyle(Qt.FlatCap)
+    stroker.setJoinStyle(Qt.RoundJoin)
+    path = stroker.createStroke(spine)
 
     brush = QBrush(pm)
     brush.setTransform(QTransform().translate(float(xs[0]), float(ys[0])))
