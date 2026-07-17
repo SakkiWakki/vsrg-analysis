@@ -1034,7 +1034,23 @@ def _resolve_texture_path(reference: str, base_dir: Path) -> str | None:
         with_ext = candidate.with_name(candidate.name + suffix)
         if with_ext.exists():
             return str(with_ext)
-    return str(candidate)
+    return _prefix_globbed(candidate) or str(candidate)
+
+
+def _prefix_globbed(candidate: Path) -> str | None:
+    """SM's directory-listing match (`ActorUtil` globs `<reference>*`):
+    a bare name resolves to a file whose name merely STARTS with it, so
+    `File="laugh"` finds `laugh 2x1.png` (the frame-dimensions token
+    lives only in the on-disk name). First image match in name order; a
+    `.sprite` manifest match resolves through its Texture= line."""
+    if not candidate.parent.is_dir():
+        return None
+    for path in sorted(candidate.parent.glob(candidate.name + '*')):
+        if path.suffix.lower() == '.sprite':
+            return _sprite_manifest_texture(path, path.parent)
+        if path.suffix.lower() in _IMAGE_SUFFIXES and path.is_file():
+            return str(path)
+    return None
 
 
 def _sprite_manifest_texture(sprite_path: Path, base_dir: Path) -> str | None:
@@ -1158,7 +1174,9 @@ def _is_image_asset(asset) -> bool:
         return False
     if asset in _BUILTIN_TEXTURES:
         return True
-    return Path(asset).exists()
+    # A directory reference (`File="../bg"`, a BGAnimation dir) is
+    # include-spliced by _splice_includes, not drawn as a texture.
+    return Path(asset).is_file()
 
 
 def _element_kind(actor_kind: str, has_text=False, font=None,

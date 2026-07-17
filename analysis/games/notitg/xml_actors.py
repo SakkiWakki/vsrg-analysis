@@ -109,6 +109,13 @@ class ParsedXml:
 _NAME = r'[A-Za-z_][A-Za-z0-9_]*'
 _ATTR_RE = re.compile(r'(' + _NAME + r')\s*=\s*"', re.DOTALL)
 
+# Tag names are looser than attribute names: SM's XmlFile accepts any
+# run of name-ish characters, and charts use digit-leading tags
+# (gat's `<0Layer>`). A rejected start tag would leave its `</0Layer>`
+# close unmatched, popping the parse stack early and truncating the
+# document.
+_TAG_RE = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.:-]*')
+
 
 def _find_attr_value_end(text: str, start: int) -> int:
     """Index of the closing `"` for an attribute value opened at
@@ -138,7 +145,7 @@ def _scan_start_tag(text: str, lt: int):
     """Parse the start tag beginning at `<` (index `lt`). Returns
     (tag_name, attrs, self_closing, end_index) or None if `lt` does not
     begin a usable start/close tag."""
-    name_match = re.match(_NAME, text[lt + 1:])
+    name_match = _TAG_RE.match(text, lt + 1)
     if not name_match:
         return None
     tag_name = name_match.group(0)
