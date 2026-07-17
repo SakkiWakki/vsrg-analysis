@@ -18,14 +18,18 @@ identity original is present unless the chart hides the base field.
 
 Per-copy capture scope: gat has two copy SOURCES with different content.
 ActorProxy copies (P1p..) re-render only a player's NoteField, so their
-content is notes + receptors, never the background. ActorFrameTexture
-copies (gat_aft) grab the whole SM screen, but only some sections include
-the background (the chart toggles a fullscreen bg.png between its
-`ShowAFT` and `ShowAFTBG` states). Each instance therefore carries a
-`scope`: 'field' blits the transparent notefield capture (one shared
-background shows through every copy); 'full' blits the whole-screen
-capture (background baked in). Proxy copies are always 'field'; AFT
-copies sample a compiled bg-in-capture timeline per frame.
+content is notes + receptors, never the background - always the 'field'
+(transparent notefield) capture, one shared background showing through.
+ActorFrameTexture copies (gat_aft) capture the WHOLE COMPOSED SCREEN as
+of the PREVIOUS frame - so they carry 'screen' scope: the renderer blits
+last frame's chart-area composite (backdrop + field + the copy blits
+themselves) under the copy transform. This is engine-exact: during gat's
+grid section the base NoteField is hidden and the AFT content is the
+scattered proxy grid (flipped by the copy's basezoomy=-1), never a clean
+centered receptor row; and the one-frame-delayed self-reference is SM's
+AFT feedback (the ending echo/DelayFrame trails). It also makes the old
+`ShowAFT`/`ShowAFTBG` bg-in-capture distinction moot: the previous-frame
+composite already contains the background exactly when the chart drew it.
 
 Design-space mapping: a copy's placement is authored in SM's 640x480
 screen space. A copy centred at (320, 240) with unit scale IS the
@@ -52,8 +56,10 @@ _MIN_VISIBLE_ALPHA = 1.0 / 255.0
 
 # Proxy copies re-render only the NoteField (notes + receptors), so they
 # never carry the background - always the field-only capture. AFT copies
-# capture the whole screen and follow the chart's bg-in-capture timeline.
+# capture the whole composed screen as of the previous frame - the
+# 'screen' scope (previous-frame chart-area composite, feedback semantics).
 _PROXY_SCOPE = 'field'
+_AFT_SCOPE = 'screen'
 _PROXY_SOURCES = frozenset({'P1p', 'P2p', 'P3p', 'P4p'})
 
 
@@ -85,15 +91,17 @@ class NotitgFieldInstances:
     is hidden at t (the chart moves the real NoteField away and lets the
     copies stand in) - then the copies replace it and no identity draws.
 
-    `aft_bg_timeline` samples 1.0 while an AFT capture includes the
-    background (gat's `ShowAFTBG`), 0.0 otherwise; AFT copies pick their
-    scope from it per frame. `base_hidden` samples 1.0 while the real
-    NoteField is hidden."""
+    `base_hidden` samples 1.0 while the real NoteField is hidden.
+
+    `aft_bg_timeline` is accepted for compatibility with the compiled-data
+    producer (games/notitg/modfile.py still emits `aft_bg_visible`) but is
+    UNUSED: AFT copies now carry 'screen' scope, so background presence in
+    a copy is automatic - the previous-frame composite contains the
+    background exactly when the chart drew it, with no separate toggle."""
 
     def __init__(self, field_copies, aft_bg_timeline=None,
                  base_hidden=None):
         self._copies = tuple(field_copies)
-        self._aft_bg = aft_bg_timeline
         self._base_hidden = base_hidden
 
     def __bool__(self):
@@ -142,16 +150,13 @@ class NotitgFieldInstances:
         if sx == 0.0 or sy == 0.0:
             return None
         return (_copy_transform(x, y, rotation, sx, sy, k, ox, oy),
-                min(1.0, alpha), self._scope(copy, t))
+                min(1.0, alpha), self._scope(copy))
 
-    def _scope(self, copy, t) -> str:
-        """A proxy copy is always field-only; an AFT copy carries the
-        background only while the bg-in-capture timeline is set."""
-        if copy['source'] in _PROXY_SOURCES:
-            return _PROXY_SCOPE
-        if self._aft_bg is not None and self._aft_bg.sample(t)[0] >= 0.5:
-            return 'full'
-        return 'field'
+    def _scope(self, copy) -> str:
+        """A proxy copy is always field-only; an AFT copy blits the
+        previous-frame screen composite ('screen' scope)."""
+        return (_PROXY_SCOPE if copy['source'] in _PROXY_SOURCES
+                else _AFT_SCOPE)
 
 
 class NotitgScreenCamera:
