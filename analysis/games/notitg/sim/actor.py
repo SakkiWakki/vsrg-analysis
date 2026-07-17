@@ -81,12 +81,10 @@ _TWEEN_OVERFLOW = 50
 _MAX_DRAIN_STEPS = 10000
 
 _DEFAULT_EFFECT_CLOCK = 'bgm'
-# The COMPLETE effect-kind verb surface, from the NotITG decompile
-# (Actor::PushSelf registrations, refs/notitg/decompile/c/actors/
-# Actor.clean.c:3445-3480; SetEffect* bodies @0x4ab230-0x4ab630).
-# Position/rotation kinds synthesize downstream today; the color/zoom
-# families (rainbow/diffuse*/glow*/pulse*) record spans for a future
-# color-oscillator synthesis.
+# The COMPLETE effect-kind verb surface the NotITG fork registers on
+# every actor. Position/rotation kinds synthesize downstream today; the
+# color/zoom families (rainbow/diffuse*/glow*/pulse*) record spans for
+# a future color-oscillator synthesis.
 _EFFECT_KINDS = frozenset({
     'vibrate', 'wag', 'floorwag', 'bob', 'bounce', 'spin',
     'pulse', 'pulseramp', 'rainbow', 'diffuseshift', 'diffuseblink',
@@ -373,6 +371,13 @@ class SimActor:
     @property
     def is_aft(self) -> bool:
         return self._aft_texture_name is not None
+
+    # ActorProxy target bind (SetTarget): the recorder id of the actor
+    # this proxy re-renders (ActorProxy.cpp:18 - a proxy is the target
+    # re-drawn under the proxy's transform). The environment resolves
+    # the Lua table argument and stores the id here; the copy producer
+    # keys field copies off it instead of a name list.
+    proxy_target: int | None = None
 
     # -- poke dispatch ---------------------------------------------------
 

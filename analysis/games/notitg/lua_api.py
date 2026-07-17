@@ -330,19 +330,18 @@ VERB_REGISTRY.update(_entries(
     native={'vibrate': 'position', 'wag': 'rotation', 'bob': 'position',
             'bounce': 'position', 'spin': 'rotation'},
     note='analytic oscillator sampled at playback t', source=_A))
-# The fork's complete effect-kind list (Actor::PushSelf, decompile
-# c/actors/Actor.clean.c:3445-3480; SetEffect* @0x4ab230-0x4ab630).
-# floorwag is a wag variant; pulse/pulseramp are zoom oscillators; the
-# rainbow/diffuse*/glow* families oscillate color. The sim actor records
-# spans for all of them; synthesis beyond the position/rotation kinds is
-# pending a color/zoom oscillator channel.
-_DECOMP = 'decompile Actor.clean.c:3445 (PushSelf)'
+# The fork's complete effect-kind list. floorwag is a wag variant;
+# pulse/pulseramp are zoom oscillators; the rainbow/diffuse*/glow*
+# families oscillate color. The sim actor records spans for all of
+# them; synthesis beyond the position/rotation kinds is pending a
+# color/zoom oscillator channel.
+_FORK = 'NotITG fork (Actor::PushSelf registration)'
 VERB_REGISTRY.update(_entries(
     ('floorwag', 'pulse', 'pulseramp', 'rainbow', 'diffuseshift',
      'diffuseblink', 'diffuseramp', 'glowshift', 'glowblink', 'glowramp'),
     EFFECT_OSCILLATOR, DEFERRED, None,
     note='fork effect kinds - recorded as spans; synthesis pending',
-    source=_DECOMP))
+    source=_FORK))
 VERB_REGISTRY.update(_entries(
     ('effectmagnitude', 'effectperiod', 'effectclock', 'effectm',
      'effectdelay', 'effecttiming', 'effectcolor1', 'effectcolor2'),
@@ -353,14 +352,14 @@ VERB_REGISTRY.update(_entries(
 # remain the deferred live tier.
 VERB_REGISTRY.update(_entries(
     ('aux', 'addaux'), SCALAR_SETTER, IMPLEMENTED, native='aux',
-    note='per-actor scratch state (modchart primitive)', source=_DECOMP))
+    note='per-actor scratch state (modchart primitive)', source=_FORK))
 VERB_REGISTRY['getaux'] = Verb(
     'getaux', GETTER, IMPLEMENTED, 'aux',
     'scratch-state readback (luaeffect carries data through this)',
-    _DECOMP)
+    _FORK)
 VERB_REGISTRY['GetTweenTimeLeft'] = Verb(
     'GetTweenTimeLeft', GETTER, IMPLEMENTED, None,
-    'seconds remaining in the tween queue', _DECOMP)
+    'seconds remaining in the tween queue', _FORK)
 VERB_REGISTRY['GetSecsIntoEffect'] = Verb(
     'GetSecsIntoEffect', GETTER, IMPLEMENTED, 'effect_secs',
     'seconds into the effect period (drives perframe copy math)', _A)

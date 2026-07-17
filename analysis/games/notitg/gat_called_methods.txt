@@ -176,7 +176,7 @@ SetHeight
 # -- explicitly ignored (cosmetic / no visual) --
 SetTextureFiltering
 customtexturerect
-# fork effect surface (decompile Actor.clean.c PushSelf, 2026-07-17)
+# fork effect surface additions (NotITG-registered actor methods)
 floorwag
 pulse
 pulseramp

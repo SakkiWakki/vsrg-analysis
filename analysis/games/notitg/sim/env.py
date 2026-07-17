@@ -22,7 +22,7 @@ survives cutover), but routed onto SimActors and ONE timeline:
 from __future__ import annotations
 
 from analysis.games.notitg.lua_api import (
-    GETTER_NAMES, SIM_GETTER_NAMES, _as_int)
+    COMMAND_NAMES, GETTER_NAMES, SIM_GETTER_NAMES, _as_int)
 from analysis.games.notitg.mod_stubs import (
     _PERMISSIVE_BOOTSTRAP, _lua_name_set)
 from analysis.games.notitg.sim.actor import SimActor
@@ -49,6 +49,43 @@ _SIM_BOOTSTRAP = _PERMISSIVE_BOOTSTRAP.replace(
     _lua_name_set(GETTER_NAMES), _lua_name_set(SIM_GETTER_NAMES))
 if _SIM_BOOTSTRAP == _PERMISSIVE_BOOTSTRAP:
     raise RuntimeError('sim getter-set substitution found no match')
+
+# Redefine __make_recorder with real GetChild semantics (a later Lua
+# definition wins; the screen recorder wraps whichever definition is
+# live when it is built). The harvest bridge let GetChild fall through
+# to the poke path, RETURNING THE PARENT table - so a proxy targeting
+# P1:GetChild('Combo') looked identical to one targeting P1, and pokes
+# meant for a child landed on the parent. Here GetChild resolves
+# through Python to the XML child by Name, or to a persistent synthetic
+# child recorder (engine children like NoteField/Judgment that exist
+# without XML nodes).
+_SIM_BOOTSTRAP += """
+function __make_recorder(id)
+    local t = {__recorder_id = id}
+    local __GETTER = __SIM_GETTER_SET
+    local __COMMAND = __SIM_COMMAND_SET
+    setmetatable(t, {__index = function(_, key)
+        if key == 'GetChild' then
+            return function(_self, name) return __actor_get_child(id, name) end
+        end
+        if __GETTER[key] then
+            return function(_self, ...) return __actor_get(id, key) end
+        end
+        if __COMMAND[key] then
+            return function(_self, name, ...)
+                __actor_command(id, key, name)
+                return t
+            end
+        end
+        return function(_self, ...)
+            __actor_poke(id, key, ...)
+            return t
+        end
+    end})
+    return t
+end
+""".replace('__SIM_GETTER_SET', _lua_name_set(SIM_GETTER_NAMES)) \
+   .replace('__SIM_COMMAND_SET', _lua_name_set(COMMAND_NAMES))
 
 
 class SimEnvironment:
@@ -78,6 +115,8 @@ class SimEnvironment:
         self._rng_seed = int(rng_seed)
         self._screen_id: int | None = None
         self._screen_children: dict = {}
+        self._xml_child_names: dict = {}
+        self._synthetic_children: dict = {}
         self._install()
 
     # -- results the loop harvests ----------------------------------------
@@ -188,15 +227,35 @@ class SimEnvironment:
                 out[key] = actor
         return out
 
+    def named_actor_ids(self) -> dict:
+        """recorder id -> bound global name (first one seen), for
+        labeling producer output."""
+        out = {}
+        for key, value in self._host.env.items():
+            if not isinstance(key, str):
+                continue
+            rec_id = self._table_rec_id(value)
+            if rec_id is not None and rec_id not in out:
+                out[rec_id] = key
+        return out
+
+    def screen_child_ids(self) -> dict:
+        """screen child name ('PlayerP1', ...) -> recorder id."""
+        return dict(self._screen_children)
+
     def _actor_for_table(self, table) -> SimActor | None:
+        rec_id = self._table_rec_id(table)
+        return self._actors.get(rec_id) if rec_id is not None else None
+
+    @staticmethod
+    def _table_rec_id(table) -> int | None:
         if not hasattr(table, '__getitem__'):
             return None
         try:
             rec_id = table['__recorder_id']
         except (KeyError, TypeError):
             return None
-        return self._actors.get(_as_int(rec_id)) if rec_id is not None \
-            else None
+        return _as_int(rec_id) if rec_id is not None else None
 
     # -- load pass ---------------------------------------------------------
 
@@ -223,6 +282,10 @@ class SimEnvironment:
             self._named_commands[rec_id] = named
         self._children[rec_id] = [self._id_for(c) for c in actor.children]
         for child in actor.children:
+            child_name = child.attrs.get('Name', '')
+            if child_name:
+                self._xml_child_names[(rec_id, child_name)] = \
+                    self._id_for(child)
             self._register(child)
 
     def _run_load(self, actor, attr) -> None:
@@ -369,6 +432,11 @@ class SimEnvironment:
         actor = self._actors.get(rec_id)
         if actor is None:
             return
+        if verb == 'SetTarget':
+            target_id = self._table_rec_id(args[0]) if args else None
+            if target_id is not None and target_id in self._actors:
+                actor.proxy_target = target_id
+            return
         self._sync(rec_id)
         actor.poke(verb, list(args))
 
@@ -380,6 +448,27 @@ class SimEnvironment:
         if value is None:
             return self._host.env['__permissive']()
         return value
+
+    def _actor_get_child(self, rec_id, name=None):
+        """`actor:GetChild(name)` - the XML child bound to that Name, or
+        a persistent synthetic child recorder (engine children like
+        NoteField/Judgment/Combo exist without XML nodes; proxies target
+        them and their pokes must not land on the parent)."""
+        if not isinstance(name, str):
+            return self._host.env['__permissive']()
+        parent_id = _as_int(rec_id)
+        child_id = self._xml_child_names.get((parent_id, name))
+        if child_id is None:
+            child_id = self._synthetic_children.get((parent_id, name))
+        if child_id is None:
+            child_id = self._new_actor()
+            self._synthetic_children[(parent_id, name)] = child_id
+        return self._tables[child_id]
+
+    def synthetic_child_ids(self) -> dict:
+        """(parent recorder id, child name) -> recorder id, for the
+        producers' proxy-source resolution."""
+        return dict(self._synthetic_children)
 
     def _screen_get_child(self, name):
         """SCREENMAN:GetTopScreen():GetChild(name) - a persistent
@@ -403,6 +492,7 @@ class SimEnvironment:
         host.expose('__actor_poke', self._actor_poke)
         host.expose('__actor_get', self._actor_get)
         host.expose('__actor_command', self._actor_command)
+        host.expose('__actor_get_child', self._actor_get_child)
         host.expose('__screen_get_child', self._screen_get_child)
 
         host.expose('GAMESTATE', singleton(host.to_lua({
