@@ -61,7 +61,16 @@ from analysis.player.render.mods.arrow_effects import (
 
 _ACTIVE_EPS = 1e-4
 _EXPAND_RATE = 3.0  # ArrowEffects.cpp:131 cos(g_fExpandSeconds*3)
-_MAX_BODY_SAMPLES = 64  # per-hold cap on the body polyline subdivision
+_MAX_BODY_SAMPLES = 96  # per-hold cap on the body polyline subdivision
+# Body sample spacing, engine px. Must sit well under the shortest
+# spatial period of the waveform family (drunk's is ~2*pi*48 px) or a
+# long hold's helix aliases into zigzag; 8 px = ~37 samples per period.
+_BODY_SAMPLE_SPACING = 8.0
+# The sampled span is clamped to the visible window plus this margin
+# (fraction of the window height per side): sampling budget goes to the
+# on-screen body, and clamped path ends stay far enough off screen that
+# a seated tail cap never becomes visible at the clamp edge.
+_BODY_WINDOW_PAD = 0.6
 
 
 class NotitgNoteMods:
@@ -177,9 +186,13 @@ class NotitgNoteMods:
         head_y = np.asarray(ctx.candidate_head_y, dtype=np.float64)
         tail_y = np.asarray(ctx.candidate_tail_y, dtype=np.float64)
         note_beats = np.asarray(p.notes.noterows_list, dtype=np.float64)[idx] / 48.0
+        _rx, ry, _w, h = ctx.chart_rect
+        window = (ry - h * _BODY_WINDOW_PAD, ry + h * (1.0 + _BODY_WINDOW_PAD))
         segments = self._build_body_segments(
             np.nonzero(is_ln)[0], cols, head_off, tail_off, head_y, tail_y,
-            note_beats, scale)
+            note_beats, scale, window)
+        if not segments['holds']:
+            return
 
         sample = note_offsets(
             percents, segments['cols'], segments['offs'], t_now=t,
@@ -200,25 +213,42 @@ class NotitgNoteMods:
             ctx.hold_body_samples = samples
 
     def _build_body_segments(self, ln_positions, cols, head_off, tail_off,
-                             head_y, tail_y, note_beats, scale) -> dict:
+                             head_y, tail_y, note_beats, scale,
+                             window) -> dict:
         """Subdivide each hold's body into y samples and pack them into the
         flat arrays one batched `note_offsets` call consumes. Returns the
         concatenated per-sample `cols` / `offs` (engine y_offset) / `beats`
         plus `holds`: (pos, screen_ys, start, count) so the caller can
-        split the batched result back per hold. Engine offsets interpolate
-        head_off..tail_off; screen ys interpolate the FINAL head_y..tail_y,
-        keeping both endpoints on the head and tail (see caller)."""
+        split the batched result back per hold.
+
+        The sampled span is the hold's intersection with the padded
+        visible `window`: a long hold's body can run many screens, and
+        spreading a capped sample count over all of it leaves segments
+        longer than the waveform period (a smooth helix aliases into
+        zigzag). Fractions interpolate the FULL head..tail range for both
+        the engine offset and the FINAL screen y, so clamped samples stay
+        exactly on the body's line; a hold entirely outside the window is
+        skipped (its rect fallback is clipped away regardless)."""
+        win_lo, win_hi = window
         cols_parts, offs_parts, beats_parts, holds = [], [], [], []
         cursor = 0
         for pos in ln_positions:
-            count = self._body_sample_count(head_y[pos], tail_y[pos], scale)
-            frac = np.linspace(0.0, 1.0, count)
+            span = self._visible_frac_span(head_y[pos], tail_y[pos],
+                                           win_lo, win_hi)
+            if span is None:
+                continue
+            f0, f1 = span
+            count = self._body_sample_count(
+                abs(tail_y[pos] - head_y[pos]) * (f1 - f0), scale)
+            frac = np.linspace(f0, f1, count)
             cols_parts.append(np.full(count, cols[pos], dtype=np.int64))
             offs_parts.append(head_off[pos] + frac * (tail_off[pos] - head_off[pos]))
             beats_parts.append(np.full(count, note_beats[pos]))
             screen_ys = head_y[pos] + frac * (tail_y[pos] - head_y[pos])
             holds.append((int(pos), screen_ys, cursor, count))
             cursor += count
+        if not holds:
+            return {'cols': None, 'offs': None, 'beats': None, 'holds': []}
         return {
             'cols': np.concatenate(cols_parts),
             'offs': np.concatenate(offs_parts),
@@ -226,13 +256,29 @@ class NotitgNoteMods:
             'holds': holds,
         }
 
-    def _body_sample_count(self, head_y, tail_y, scale) -> int:
-        """Number of body samples for a hold, ~ARROW_SIZE/2 spacing in our
-        pixels, clamped to a sane per-hold maximum. At least 2 (the head
-        and tail endpoints) so every LN yields a valid polyline."""
-        span = abs(float(tail_y) - float(head_y))
-        spacing = 0.5 * ARROW_SIZE * scale
-        return int(np.clip(round(span / spacing) + 1, 2, _MAX_BODY_SAMPLES))
+    @staticmethod
+    def _visible_frac_span(head_y, tail_y, win_lo, win_hi):
+        """The [0,1] fraction interval of the head->tail line inside the
+        window, or None when the body misses it entirely. Screen y is
+        linear in the fraction, so the intersection is a direct clamp."""
+        y0, y1 = float(head_y), float(tail_y)
+        if y0 == y1:
+            return (0.0, 1.0) if win_lo <= y0 <= win_hi else None
+        f_a = (win_lo - y0) / (y1 - y0)
+        f_b = (win_hi - y0) / (y1 - y0)
+        f0 = max(0.0, min(f_a, f_b))
+        f1 = min(1.0, max(f_a, f_b))
+        if f0 >= f1:
+            return None
+        return f0, f1
+
+    def _body_sample_count(self, visible_span_px, scale) -> int:
+        """Samples for the VISIBLE part of a hold's body, at
+        `_BODY_SAMPLE_SPACING` engine px, clamped per hold. At least 2
+        (the span endpoints) so every polyline is valid."""
+        spacing = _BODY_SAMPLE_SPACING * scale
+        return int(np.clip(round(float(visible_span_px) / spacing) + 1,
+                           2, _MAX_BODY_SAMPLES))
 
     def _remap_accel(self, percents, ys, judge_y, scale):
         """Accel-remapped y_offset (engine px) for a candidate y array."""
