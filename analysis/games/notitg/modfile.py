@@ -456,7 +456,7 @@ def _group_element(actor, start_time, keyframes, children):
     return Element(
         kind='group', z=0, z_index=0,
         t_start=start_time, t_end=float('inf'),
-        anchor=(0.5, 0.5), origin=(0.5, 0.5),
+        anchor=(0.0, 0.0), origin=(0.5, 0.5),
         timelines=build_timelines(keyframes=_drawable_props(keyframes)),
         children=children,
     )
@@ -480,7 +480,7 @@ def _leaf_element(actor, start_time, named_keyframes, precomputed=None,
     return Element(
         kind=kind, z=0, z_index=0,
         t_start=start_time, t_end=float('inf'),
-        anchor=(0.5, 0.5), origin=(0.5, 0.5),
+        anchor=(0.0, 0.0), origin=(0.5, 0.5),
         timelines=build_timelines(keyframes=drawable),
         asset=asset,
         text=str(text), font=font,
