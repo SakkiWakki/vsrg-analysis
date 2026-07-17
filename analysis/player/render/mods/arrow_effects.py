@@ -59,8 +59,15 @@ still displace them and confusion still rotates them).
 - confusion / confusionoffset: a whole-field Z spin keyed to the song beat
   ((beat*percent mod 2*PI)*-180/PI) plus a constant offset*180/PI; dizzy is
   the note-relative spin. Both implemented (`confusion_rotation` /
-  `dizzy_rotation`). RotationX/Y confusion (confusionx/confusiony) is an
-  out-of-plane tilt and stays deferred with roll/twirl.
+  `dizzy_rotation`). RotationX/Y confusion (confusionx / confusiony, with
+  their *offset companions and numbered per-column variants) share that exact
+  angle (`_confusion_axis_degrees`) but tilt about the horizontal / vertical
+  axis. Unlike roll/twirl these are CONSTANT tilts (no per-note y_offset
+  factor), so they reproject faithfully into 2D as foreshortening: confusionx
+  -> uniform zoom by cos(angle) (`confusionx_zoom`), confusiony -> a
+  per-column dx pulling x toward center by (cos(angle)-1) (`confusiony_dx`).
+  The pipeline has uniform zoom (no zoom_x/zoom_y) and per-note dx, so each
+  axis maps to the one it can express; documented on those functions.
 
 - xmode: on a single-side field, dx = percent * y_offset - the vertical
   scroll shears into a diagonal (`xmode_x`); the doubles sign-split is not
@@ -735,15 +742,94 @@ def dizzy_rotation(percent, note_beat, beat_now):
     return rot * 180.0 / PI
 
 
-def confusion_rotation(percent, beat_now, offset=0.0):
-    """confusion / confusionoffset (ReceptorGetRotationZ,
-    ArrowEffects.cpp:1091-1110): a whole-field Z spin. The engine computes
-    (songBeat * percent) wrapped to 2*PI, times -180/PI, plus a constant
-    offset*180/PI. `offset` is the confusionoffset companion (a fixed rotation
-    the numbered confusion0.. variants also feed). Returned in degrees, one
-    scalar broadcast to every note."""
+def _confusion_axis_degrees(percent, beat_now, offset):
+    """The shared confusion angle in degrees, identical on all three axes:
+    ReceptorGetRotationZ/X/Y (ArrowEffects.cpp:1091-1113 / 1115-1138 /
+    1140-1163) each compute the SAME (songBeat*percent wrapped to 2*PI)*-180/PI
+    spin plus a constant offset*180/PI. Only the axis the result rotates about
+    differs. `percent` is the confusion/confusionx/confusiony magnitude,
+    `offset` its matching confusion*offset companion."""
     spin = np.mod(beat_now * percent, 2.0 * PI) * -180.0 / PI
     return spin + offset * 180.0 / PI
+
+
+def confusion_rotation(percent, beat_now, offset=0.0):
+    """confusion / confusionoffset (ReceptorGetRotationZ,
+    ArrowEffects.cpp:1091-1110): a whole-field Z spin (in-plane). Returned in
+    degrees, one scalar broadcast to every note. See `_confusion_axis_degrees`
+    for the formula shared with the X/Y siblings."""
+    return _confusion_axis_degrees(percent, beat_now, offset)
+
+
+def confusionx_zoom(percent, beat_now, offset=0.0):
+    """confusionx / confusionxoffset reprojected to 2D zoom.
+
+    ReceptorGetRotationX (ArrowEffects.cpp:1115-1138) rotates the whole field
+    about the HORIZONTAL axis by the confusion angle (the X-axis sibling of the
+    Z-axis confusion spin; same magnitude, different axis). A rotation about X
+    tilts the field toward/away from the camera, which in true 3D foreshortens
+    the VERTICAL extent by cos(angle).
+
+    Our pipeline exposes only a UNIFORM per-note zoom (renderer scales x and y
+    by the same factor; there is no independent zoom_y), so we express the X
+    tilt as that uniform zoom multiplied by cos(angle): a note tilted flat
+    about X reads smaller. This is the closest faithful uniform-zoom projection
+    of an out-of-plane X tilt, in the same spirit as `bumpy_zoom`'s z->zoom
+    proxy. abs() keeps the multiplier non-negative past a quarter turn (a
+    tilt past 90 deg reads as shrinking back to edge-on, never mirrored).
+    Returns a scalar zoom multiplier broadcast to every note."""
+    angle = _confusion_axis_degrees(percent, beat_now, offset) * PI / 180.0
+    return np.abs(np.cos(angle))
+
+
+def confusiony_dx(percent, cols, beat_now, keycount, offset=0.0,
+                  arrow_size=ARROW_SIZE):
+    """confusiony / confusionyoffset reprojected to a 2D per-column dx.
+
+    ReceptorGetRotationY (ArrowEffects.cpp:1140-1163) rotates the whole field
+    about the VERTICAL axis by the confusion angle (the Y-axis sibling; same
+    magnitude as confusion/confusionx). A rotation about Y foreshortens the
+    HORIZONTAL extent by cos(angle): every column's x-offset from field center
+    contracts toward the center (the vanishing line) as the field tilts.
+
+    We render 2D, so we express that horizontal foreshortening as a per-column
+    dx that pulls each column's x-offset toward center by (cos(angle) - 1):
+        dx = xoff * (cos(angle) - 1)
+    At angle 0 the field is head-on (cos 1, dx 0); at a quarter turn the field
+    is seen edge-on (cos 0, columns collapse onto center). This is the
+    horizontal-foreshortening analogue of `confusionx_zoom`'s vertical one,
+    chosen because the pipeline has per-note dx but no independent zoom_x.
+    Returns a per-note dx aligned with `cols`."""
+    angle = _confusion_axis_degrees(percent, beat_now, offset) * PI / 180.0
+    xoff = column_offsets(keycount, arrow_size)[cols.astype(np.int64)]
+    return xoff * (np.cos(angle) - 1.0)
+
+
+def hallway_x(percent, cols, y_offset, keycount, arrow_size=ARROW_SIZE,
+              field_height=SCREEN_HEIGHT):
+    """hallway: a per-note X scale toward the vanishing point with distance.
+
+    NotITG's `hallway` is a perspective/appearance mod (a notefield tilt, like
+    distant/space/incoming/overhead) rather than a GetXPos term, so it has no
+    formula in OpenITG/ITGmania's ArrowEffects.cpp - the perspective is applied
+    at the notefield-actor level (m_fPerspectiveTilt, OpenITG ArrowEffects.cpp
+    :17). Its VISUAL effect is exactly 2D-expressible as a per-note dx: notes
+    far from the receptor recede toward the field-center vanishing line, notes
+    at the receptor stay put.
+
+    We port that effect directly. An approaching note (y_offset > 0) at column
+    x-offset `xoff` and depth `y_offset` has its x contracted toward center by
+    a pinhole perspective factor f = H / (H + y_offset) in (0, 1]:
+        dx = xoff * (f - 1) * percent
+    At the receptor (y_offset 0) f = 1 => dx 0; far away f -> 0 => the column
+    collapses onto center (the vanishing point). Notes past the receptor
+    (y_offset < 0) are left unscaled (they are at/through the judgment line,
+    not receding down the hallway). Returns a per-note dx aligned with `cols`."""
+    xoff = column_offsets(keycount, arrow_size)[cols.astype(np.int64)]
+    y = np.asarray(y_offset, dtype=np.float64)
+    depth = np.maximum(y, 0.0)
+    factor = field_height / (field_height + depth)
+    return xoff * (factor - 1.0) * percent
 
 
 def _center_line(mini_percent):
@@ -934,6 +1020,41 @@ def _tornado_pair(percents, cols, y_offset, keycount, arrow_size, suffix):
     return out
 
 
+def _confusion_offset(percents, name, cols, keycount):
+    """The per-note constant confusion offset for one axis: the global
+    `<name>offset` companion plus any numbered per-column variants (`<name>0`
+    ..), which the engine stores as m_fConfusion*[iCol] and adds as a per-column
+    constant rotation (ReceptorGetRotationX/Y ArrowEffects.cpp:1120/1145). The
+    global spin (`<name>`) rides separately as the beat term. Returns a per-note
+    offset array aligned with `cols` (scalar-broadcast when no numbered variant
+    is set)."""
+    global_off = _get(percents, name + 'offset')
+    per_col = {}
+    for c in range(keycount):
+        key = f'{name}{c}'
+        if key in percents:
+            per_col[c] = global_off + percents[key]
+    if not per_col:
+        return global_off
+    return column_percents(global_off, cols, keycount, per_col)
+
+
+def _perspective_dx(percents, cols, y_offset, beat_now, keycount, arrow_size):
+    """The X contributions of the reprojected 3D/perspective mods: hallway
+    (recede toward the vanishing point with depth) and confusiony (horizontal
+    foreshortening from the Y-axis confusion tilt, incl. its offset companion
+    and numbered per-column variants). Each is off when its channels are 0."""
+    out = np.zeros(cols.shape[0], dtype=np.float64)
+    if _get(percents, 'hallway'):
+        out += hallway_x(_get(percents, 'hallway'), cols, y_offset, keycount, arrow_size)
+    if (_get(percents, 'confusiony') or _get(percents, 'confusionyoffset')
+            or _active(percents, 'confusiony', keycount)):
+        offset = _confusion_offset(percents, 'confusiony', cols, keycount)
+        out += confusiony_dx(_get(percents, 'confusiony'), cols, beat_now, keycount,
+                             offset, arrow_size)
+    return out
+
+
 def _dx(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size):
     dx = _drunk_pair(percents, cols, y_offset, t_now, keycount, arrow_size, suffix='')
     dx += _tornado_pair(percents, cols, y_offset, keycount, arrow_size, suffix='')
@@ -960,6 +1081,7 @@ def _dx(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size):
         dx += xmode_x(_get(percents, 'xmode'), y_offset)
     if _active(percents, 'movex', keycount):
         dx += movex_x(_per_note(percents, 'movex', cols, keycount), arrow_size)
+    dx += _perspective_dx(percents, cols, y_offset, beat_now, keycount, arrow_size)
     dx += _warp_family_sum(percents, cols, y_offset, keycount, arrow_size,
                            suffix='', tan_digital=True)
     return dx
@@ -1082,6 +1204,11 @@ def _zoom(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size, n):
     z_push = _z_push(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size)
     if np.any(z_push):
         zoom = zoom * waveform_z_zoom(z_push)
+
+    if (_get(percents, 'confusionx') or _get(percents, 'confusionxoffset')
+            or _active(percents, 'confusionx', keycount)):
+        offset = _confusion_offset(percents, 'confusionx', cols, keycount)
+        zoom = zoom * confusionx_zoom(_get(percents, 'confusionx'), beat_now, offset)
     return zoom
 
 
@@ -1117,12 +1244,23 @@ def note_offsets(percents: dict, cols: np.ndarray, y_offset: np.ndarray,
     and boomerang's visibility fold (its position parabola lives in
     `accel_y_offset`). Every companion rides the same `percents` dict.
 
+    The out-of-plane confusion tilts confusionx / confusiony (ReceptorGet-
+    RotationX/Y, with their *offset companions and numbered per-column
+    variants) are reprojected into the 2D pipeline: confusionx as a uniform
+    zoom (vertical foreshortening, `confusionx_zoom`), confusiony as a
+    per-column dx (horizontal foreshortening, `confusiony_dx`). `hallway`
+    (a notefield perspective mod, no ArrowEffects formula) is ported as a
+    per-note dx that recedes columns toward the vanishing point with depth
+    (`hallway_x`).
+
     DEFERRED (2D limitation, documented in the module header): roll
     (RotationX) and twirl (RotationY) are out-of-plane tilts a 2D sprite
-    can't express, so they contribute nothing here. `grain` / `granulate`
-    (hold step-size) and dizzyholds (hold-render-specific) stay deferred;
-    sawtooth's offset companion is unread in the ported engine formula
-    (see `sawtooth_x`)."""
+    can't express, so they contribute nothing here (confusionx/y differ:
+    they are constant tilts, faithfully reprojectable as foreshortening,
+    while roll/twirl scale their tilt with y_offset per note). `grain` /
+    `granulate` (hold step-size) and dizzyholds (hold-render-specific) stay
+    deferred; sawtooth's offset companion is unread in the ported engine
+    formula (see `sawtooth_x`)."""
     cols = np.asarray(cols)
     y_offset = np.asarray(y_offset, dtype=np.float64)
     n = cols.shape[0]

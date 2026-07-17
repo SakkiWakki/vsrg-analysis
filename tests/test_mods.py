@@ -178,6 +178,125 @@ def test_confusion_offset_adds_constant():
     assert out == pytest.approx(0.5 * 180.0 / math.pi)
 
 
+# --- confusionx / confusiony (out-of-plane tilts reprojected to 2D) --
+
+def test_confusionx_zoom_is_cos_of_angle():
+    # ReceptorGetRotationX (ArrowEffects.cpp:1115-1138) shares the confusion
+    # angle; confusionx is reprojected to a uniform zoom of |cos(angle)|.
+    # confusionxoffset 0.5 -> angle 0.5*180/pi deg = 0.5 rad; zoom = cos(0.5).
+    out = ae.confusionx_zoom(0.0, 4.0, offset=0.5)
+    assert out == pytest.approx(abs(math.cos(0.5)))
+
+
+def test_confusionx_zoom_uses_beat_spin():
+    # confusionx 0.5, beat 4 -> spin = fmod(4*0.5, 2pi)*-180/pi deg = -2 rad;
+    # zoom = |cos(-2)| = |cos(2)|.
+    out = ae.confusionx_zoom(0.5, 4.0)
+    assert out == pytest.approx(abs(math.cos(2.0)))
+
+
+def test_confusiony_dx_foreshortens_columns():
+    # ReceptorGetRotationY: confusionyoffset 0.5 -> angle 0.5 rad; each
+    # column's x-offset pulls toward center by (cos(0.5) - 1). Col 0 of a
+    # 4-key field sits at xoff (0 - 1.5)*64 = -96.
+    cols = np.array([0, 1, 2, 3])
+    out = ae.confusiony_dx(0.0, cols, 4.0, keycount=4, offset=0.5)
+    xoff = (np.arange(4) - 1.5) * 64.0
+    np.testing.assert_allclose(out, xoff * (math.cos(0.5) - 1.0))
+
+
+def test_confusiony_dx_zero_at_head_on():
+    # angle 0 (no confusiony, no offset) -> cos 1 -> dx 0 everywhere.
+    cols = np.array([0, 1, 2, 3])
+    out = ae.confusiony_dx(0.0, cols, 4.0, keycount=4, offset=0.0)
+    np.testing.assert_allclose(out, np.zeros(4))
+
+
+def test_confusionx_zoom_through_note_offsets():
+    # confusionxoffset multiplies the base (mini/tiny) zoom by |cos(angle)|.
+    p = {'confusionxoffset': 0.5}
+    r = note_offsets(p, np.array([0]), np.array([100.0]),
+                     t_now=0.0, beat_now=4.0, keycount=4)
+    assert r.zoom[0] == pytest.approx(abs(math.cos(0.5)))
+
+
+def test_confusiony_dx_through_note_offsets():
+    # confusionyoffset shows up as a per-column dx in the summed output.
+    p = {'confusionyoffset': 0.5}
+    cols = np.array([0, 1, 2, 3])
+    r = note_offsets(p, cols, np.zeros(4), t_now=0.0, beat_now=4.0, keycount=4)
+    xoff = (np.arange(4) - 1.5) * 64.0
+    np.testing.assert_allclose(r.dx, xoff * (math.cos(0.5) - 1.0))
+
+
+def test_confusionx_numbered_per_column_offset():
+    # confusionx2 = m_fConfusionX[2]: a per-column constant offset added to the
+    # angle. With no global spin/offset only column 2's zoom differs.
+    p = {'confusionx2': 0.5}
+    cols = np.array([0, 1, 2, 3])
+    r = note_offsets(p, cols, np.zeros(4), t_now=0.0, beat_now=4.0, keycount=4)
+    assert r.zoom[0] == pytest.approx(1.0)
+    assert r.zoom[1] == pytest.approx(1.0)
+    assert r.zoom[2] == pytest.approx(abs(math.cos(0.5)))
+    assert r.zoom[3] == pytest.approx(1.0)
+
+
+def test_confusiony_numbered_per_column_offset():
+    # confusiony1 offsets only column 1's tilt; other columns stay head-on
+    # (dx 0). Col 1 xoff = (1 - 1.5)*64 = -32.
+    p = {'confusiony1': 0.5}
+    cols = np.array([0, 1, 2, 3])
+    r = note_offsets(p, cols, np.zeros(4), t_now=0.0, beat_now=4.0, keycount=4)
+    assert r.dx[0] == pytest.approx(0.0)
+    assert r.dx[2] == pytest.approx(0.0)
+    assert r.dx[3] == pytest.approx(0.0)
+    assert r.dx[1] == pytest.approx(-32.0 * (math.cos(0.5) - 1.0))
+
+
+# --- hallway (perspective recede toward the vanishing point) --------
+
+def test_hallway_recedes_far_notes_toward_center():
+    # dx = xoff*(H/(H+depth) - 1)*percent. Col 0 xoff = -96, H = 480, depth
+    # (y_offset) = 480 -> factor 0.5 -> dx = -96*(0.5-1)*1 = +48 (toward center).
+    cols = np.array([0])
+    out = ae.hallway_x(1.0, cols, np.array([480.0]), keycount=4)
+    assert out[0] == pytest.approx(-96.0 * (480.0 / 960.0 - 1.0))
+    assert out[0] == pytest.approx(48.0)
+
+
+def test_hallway_zero_at_receptor():
+    # y_offset 0 -> factor 1 -> dx 0 for every column.
+    cols = np.array([0, 1, 2, 3])
+    out = ae.hallway_x(1.0, cols, np.zeros(4), keycount=4)
+    np.testing.assert_allclose(out, np.zeros(4))
+
+
+def test_hallway_past_receptor_unscaled():
+    # y_offset < 0 (past the judgment line) is clamped to depth 0 -> dx 0.
+    cols = np.array([0])
+    out = ae.hallway_x(1.0, cols, np.array([-200.0]), keycount=4)
+    assert out[0] == pytest.approx(0.0)
+
+
+def test_hallway_scales_with_percent():
+    # Half strength halves the recede.
+    cols = np.array([0])
+    full = ae.hallway_x(1.0, cols, np.array([480.0]), keycount=4)
+    half = ae.hallway_x(0.5, cols, np.array([480.0]), keycount=4)
+    assert half[0] == pytest.approx(full[0] / 2.0)
+
+
+def test_hallway_through_note_offsets():
+    # hallway lands as a per-note dx in the summed output; center column of a
+    # 4-key field is off-center so it recedes too.
+    p = {'hallway': 1.0}
+    cols = np.array([0, 1, 2, 3])
+    y = np.full(4, 480.0)
+    r = note_offsets(p, cols, y, t_now=0.0, beat_now=0.0, keycount=4)
+    xoff = (np.arange(4) - 1.5) * 64.0
+    np.testing.assert_allclose(r.dx, xoff * (480.0 / 960.0 - 1.0))
+
+
 def test_zoom_from_mini():
     assert ae.zoom_from_mini(0.0) == 1.0
     assert ae.zoom_from_mini(1.0) == 0.5
@@ -234,7 +353,9 @@ def test_movex_per_column():
 
 def test_note_offsets_batch_equals_scalar_loop():
     p = {'drunk': 0.5, 'tornado': 0.3, 'tipsy': 0.4, 'movex': 0.2,
-         'stealth': 0.25, 'mini': 0.5, 'bumpy': 0.3}
+         'stealth': 0.25, 'mini': 0.5, 'bumpy': 0.3,
+         'hallway': 0.4, 'confusionx': 0.3, 'confusionxoffset': 0.2,
+         'confusiony': 0.25, 'confusionyoffset': 0.15, 'confusiony1': 0.1}
     cols = np.array([0, 1, 2, 3, 0, 2])
     y = np.array([120.0, 80.0, 40.0, 10.0, -30.0, 300.0])
     beats = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
@@ -257,6 +378,23 @@ def test_tornado_batch_equals_scalar():
     batch = ae.tornado_x(0.7, cols, y, 4)
     for i in range(4):
         one = ae.tornado_x(0.7, cols[i:i + 1], y[i:i + 1], 4)
+        assert batch[i] == pytest.approx(one[0])
+
+
+def test_hallway_batch_equals_scalar():
+    cols = np.array([0, 1, 2, 3])
+    y = np.array([50.0, 120.0, -30.0, 400.0])
+    batch = ae.hallway_x(0.6, cols, y, keycount=4)
+    for i in range(4):
+        one = ae.hallway_x(0.6, cols[i:i + 1], y[i:i + 1], keycount=4)
+        assert batch[i] == pytest.approx(one[0])
+
+
+def test_confusiony_dx_batch_equals_scalar():
+    cols = np.array([0, 1, 2, 3])
+    batch = ae.confusiony_dx(0.4, cols, 3.3, keycount=4, offset=0.2)
+    for i in range(4):
+        one = ae.confusiony_dx(0.4, cols[i:i + 1], 3.3, keycount=4, offset=0.2)
         assert batch[i] == pytest.approx(one[0])
 
 
