@@ -60,7 +60,43 @@ _MIN_VISIBLE_ALPHA = 1.0 / 255.0
 # 'screen' scope (previous-frame chart-area composite, feedback semantics).
 _PROXY_SCOPE = 'field'
 _AFT_SCOPE = 'screen'
+# The second-player field capture scope (see NotitgDualField): copies
+# whose source is a player-2 proxy blit from the independently-modded
+# player-1-channel capture instead of the primary one.
+_FIELD2_SCOPE = 'field2'
 _PROXY_SOURCES = frozenset({'P1p', 'P2p', 'P3p', 'P4p'})
+# Proxy sources that re-render player 2's NoteField (the second capture).
+# ScreenGameplay names players PlayerP1.. (1-based); P2p/P4p target the
+# second player. P1p/P3p target player 1 -> the primary capture.
+_P2_PROXY_SOURCES = frozenset({'P2p', 'P4p'})
+
+# Theme P1/P2 field X in SM 640x480 design space. OpenITG/ITG fallback
+# metrics.ini: PlayerP1TwoPlayersTwoSidesX = SCREEN_CENTER_X-160,
+# PlayerP2..X = SCREEN_CENTER_X+160 (research item 73). A dual-player
+# chart's two fields rest here; the base identity capture for each side
+# is translated by (theme_x - design_center) so P1 sits left, P2 right.
+# gat repositions its fields via pokes/proxies, but this is the baseline.
+_P1_FIELD_X = _SCREEN_CX - 160.0
+_P2_FIELD_X = _SCREEN_CX + 160.0
+
+
+class SecondFieldSpec:
+    """Instruction to the renderer to render the field layers a SECOND
+    time for a dual-player NotITG chart.
+
+    `note_mods` is the player-1 mod consumer: while the second capture is
+    rendered, the renderer swaps it in for the player's primary one so the
+    field's notes, receptor offsets, and reverse baseline all evaluate
+    against player 2's channels (gat applies different mods per side).
+    Everything else about the two captures is identical (same chart, same
+    candidate set) - only the sampled (mod, player) channels diverge.
+
+    The two captures are each rendered centered in the design box (like
+    the single-field capture); the per-side X placement lives in the blit
+    transforms the field producer emits, not in the capture itself."""
+
+    def __init__(self, note_mods):
+        self.note_mods = note_mods
 
 
 def _design_map(chart_rect):
@@ -97,38 +133,72 @@ class NotitgFieldInstances:
     producer (games/notitg/modfile.py still emits `aft_bg_visible`) but is
     UNUSED: AFT copies now carry 'screen' scope, so background presence in
     a copy is automatic - the previous-frame composite contains the
-    background exactly when the chart drew it, with no separate toggle."""
+    background exactly when the chart drew it, with no separate toggle.
+
+    `second_field` (SecondFieldSpec | None): when a dual-player chart
+    supplies it, the effect additionally
+      - routes every player-2 proxy copy (P2p/P4p) to the 'field2' scope
+        so it blits the second, independently-modded capture,
+      - places the two identity originals at the theme P1/P2 X offsets
+        (P1 left, P2 right) instead of one centered original, and
+      - forwards the spec on the EffectFrame so the renderer renders the
+        second capture.
+    Single-player charts leave it None and behave exactly as before."""
 
     def __init__(self, field_copies, aft_bg_timeline=None,
-                 base_hidden=None):
+                 base_hidden=None, second_field=None):
         self._copies = tuple(field_copies)
         self._base_hidden = base_hidden
+        self._second_field = second_field
 
     def __bool__(self):
-        return bool(self._copies)
+        return bool(self._copies) or self._second_field is not None
 
     def at(self, ctx) -> EffectFrame | None:
-        if not self._copies:
+        if not self._copies and self._second_field is None:
             return None
         t = float(ctx.t_now)
         base_hidden = self._base_field_hidden(t)
         k, ox, oy = _design_map(ctx.chart_rect)
         copies = [entry for copy in self._copies
                   if (entry := self._instance(copy, t, k, ox, oy)) is not None]
+        if self._second_field is not None:
+            return self._dual_frame(base_hidden, copies, k)
+        return self._single_frame(base_hidden, copies)
+
+    def _single_frame(self, base_hidden, copies):
+        """Single-player: one centered identity original, present only
+        alongside copies (or a placeholder when the base is hidden).
+        Base visible with no copies -> None (the renderer's fast path
+        draws the base directly)."""
         if not base_hidden and not copies:
-            # Base visible, no copies: nothing to replicate - let the
-            # renderer's fast path draw the base field directly.
             return None
         if base_hidden:
-            # The base field is suppressed (the copies replace it). A
-            # zero-opacity placeholder keeps `fields` non-empty even with
-            # no visible copies this frame, so the renderer takes the
-            # capture path (which never draws the base directly) instead of
-            # the fast path.
-            instances = copies or [(None, 0.0, 'field')]
+            # Base suppressed (copies replace it). A zero-opacity
+            # placeholder keeps `fields` non-empty even with no visible
+            # copies, so the renderer takes the capture path.
+            instances = copies or [(None, 0.0, _PROXY_SCOPE)]
         else:
-            instances = [(None, 1.0, 'field'), *copies]
+            instances = [(None, 1.0, _PROXY_SCOPE), *copies]
         return EffectFrame(fields=tuple(instances))
+
+    def _dual_frame(self, base_hidden, copies, k):
+        """Dual-player: always the capture path. Two identity originals at
+        the theme P1/P2 X offsets (P1 left from the primary capture, P2
+        right from the second capture) unless the base is hidden, plus the
+        routed copies, plus the second_field spec so the renderer renders
+        the second capture. A zero-opacity placeholder keeps `fields`
+        non-empty on a fully-hidden frame."""
+        if base_hidden:
+            originals = []
+        else:
+            originals = [
+                _field_placement(_P1_FIELD_X - _SCREEN_CX, k, _PROXY_SCOPE),
+                _field_placement(_P2_FIELD_X - _SCREEN_CX, k, _FIELD2_SCOPE),
+            ]
+        instances = [*originals, *copies] or [(None, 0.0, _PROXY_SCOPE)]
+        return EffectFrame(fields=tuple(instances),
+                           second_field=self._second_field)
 
     def _base_field_hidden(self, t) -> bool:
         return (self._base_hidden is not None
@@ -153,10 +223,17 @@ class NotitgFieldInstances:
                 min(1.0, alpha), self._scope(copy))
 
     def _scope(self, copy) -> str:
-        """A proxy copy is always field-only; an AFT copy blits the
-        previous-frame screen composite ('screen' scope)."""
-        return (_PROXY_SCOPE if copy['source'] in _PROXY_SOURCES
-                else _AFT_SCOPE)
+        """The capture a copy blits from. An AFT copy blits the previous-
+        frame screen composite ('screen'). A proxy copy blits a NoteField
+        capture: player 2's proxies (P2p/P4p) blit the second capture
+        ('field2') when this is a dual-player chart, all others the
+        primary ('field')."""
+        source = copy['source']
+        if source not in _PROXY_SOURCES:
+            return _AFT_SCOPE
+        if self._second_field is not None and source in _P2_PROXY_SOURCES:
+            return _FIELD2_SCOPE
+        return _PROXY_SCOPE
 
 
 class NotitgScreenCamera:
@@ -200,6 +277,20 @@ class NotitgScreenCamera:
         transform.scale(1.0 / k, 1.0 / k)
         transform.translate(-ox, -oy)
         return EffectFrame(scene_transform=transform)
+
+
+def _field_placement(dx_design, k, scope):
+    """A field-instance entry that blits `scope`'s capture translated by
+    `dx_design` design-px horizontally. The capture pixmap is already in
+    screen space at the design map's scale `k`, so a design-space X shift
+    is `dx_design * k` screen px; a zero shift is the untouched identity
+    (None transform, the renderer's direct blit). Used to seat the two
+    dual-player originals at the theme P1/P2 X offsets."""
+    if dx_design == 0.0:
+        return (None, 1.0, scope)
+    t = QTransform()
+    t.translate(dx_design * k, 0.0)
+    return (t, 1.0, scope)
 
 
 def _copy_transform(x, y, rotation, sx, sy, k, ox, oy) -> QTransform:

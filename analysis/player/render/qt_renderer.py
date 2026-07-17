@@ -23,6 +23,10 @@ _HUD_LAYERS = frozenset(('free_sections', 'hud'))
 # feedback semantics).
 _DEFAULT_FIELD_SCOPE = 'field'
 _SCREEN_SCOPE = 'screen'
+# The second, independently-modded playfield capture (dual-player NotITG).
+# A 'field2' copy blits `_field2_pixmap` instead of the primary field
+# pixmap; produced only when the frame carries a second_field spec.
+_FIELD2_SCOPE = 'field2'
 
 # A chart-time advance larger than this (or any backward step) between
 # rendered frames reads as a seek, not smooth playback: the retained
@@ -120,6 +124,10 @@ class QtPlayerRenderer:
         self._hud_rendered_at = 0.0
         self._hud_snapshot = None
         self._field_pixmap = None
+        # Second, independently-modded field capture for dual-player NotITG
+        # charts (EffectFrame.second_field). None on every frame that has no
+        # second_field spec - the zero-cost path for every other game.
+        self._field2_pixmap = None
         self._backdrop_pixmap = None
         self._backdrop_painter = None
         # Previous frame's chart-area composite, retained for this frame's
@@ -279,6 +287,8 @@ class QtPlayerRenderer:
                     chart_wrapped = False
                 if field_painter is not None:
                     field_painter.end()
+                    self._capture_second_field(effect_frame, ctx,
+                                               chart_painter, visibility)
                     self._blit_field_instances(effect_frame, ctx,
                                                chart_painter)
                     field_painter = None
@@ -342,6 +352,8 @@ class QtPlayerRenderer:
             self._end_effect_transform(field_painter or chart_painter)
         if field_painter is not None:
             field_painter.end()
+            self._capture_second_field(effect_frame, ctx, chart_painter,
+                                       visibility)
             self._blit_field_instances(effect_frame, ctx, chart_painter)
         self._draw_effect_above(effect_frame, ctx, chart_painter)
         if scene_wrapped:
@@ -529,6 +541,67 @@ class QtPlayerRenderer:
         field_painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         return field_painter
 
+    def _capture_second_field(self, frame, ctx, painter, visibility) -> None:
+        """Render the field layers a second time with a dual-player chart's
+        alternate (player-1) note-mod consumer, into `_field2_pixmap`, so
+        'field2'-scope copies blit an independently-modded playfield.
+
+        Engine parity (item 43/ENGINE_ORACLE 2b): an ActorProxy of a
+        DIFFERENTLY-modded Player must re-render that side's note pipeline,
+        not blit player 0's pixels. The two captures share the chart and
+        candidate set; only the sampled (mod, player) channels differ. The
+        player's `_note_mods` is swapped for the second consumer, the
+        candidate pipeline + note views are rebuilt against it, the field
+        layers draw into a fresh transparent pixmap (with the same effect
+        transform bracket the primary capture uses so field transforms
+        replicate), then player-0 state is restored for the rest of the
+        frame. Zero cost when no second_field spec is present."""
+        self._field2_pixmap = None
+        spec = getattr(frame, 'second_field', None)
+        if (spec is None or painter is None
+                or getattr(ctx, 'player', None) is None):
+            return
+        player = ctx.player
+        primary = getattr(player, '_note_mods', None)
+        pm = self._new_capture_pixmap(ctx, painter)
+        fp = QPainter(pm)
+        fp.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        try:
+            player._note_mods = spec.note_mods
+            self._rebuild_note_mods(ctx)
+            wrapped = self._begin_effect_transform(frame, fp, ctx)
+            self._draw_field_layers(ctx, fp, visibility)
+            if wrapped:
+                self._end_effect_transform(fp)
+        finally:
+            fp.end()
+            player._note_mods = primary
+            self._rebuild_note_mods(ctx)
+        self._field2_pixmap = pm
+
+    @staticmethod
+    def _rebuild_note_mods(ctx) -> None:
+        """Recompute the candidate y arrays + per-note mod stashes + note
+        views for the ctx's current `player._note_mods`. Idempotent given a
+        fixed candidate set, so it both applies the second consumer and,
+        on restore, rebuilds player-0 state exactly."""
+        _precompute_candidate_ys(ctx)
+        note_mods = getattr(ctx.player, '_note_mods', None)
+        if note_mods is not None:
+            note_mods.apply(ctx)
+        _notes_layer.prepare(ctx)
+
+    def _draw_field_layers(self, ctx, painter, visibility) -> None:
+        """Draw only the captured field layers (everything but the
+        background clear and the HUD) into `painter`, matching what the
+        main loop routes into the field pixmap. Used for the second-field
+        capture; the primary capture is produced inline by the main loop."""
+        for name, fn, _stage in self._layers:
+            if name == 'background' or name in _HUD_LAYERS or fn is None:
+                continue
+            if visibility.get(name, True):
+                self._draw_layer(fn, ctx, painter, name, is_hud=False)
+
     def _blit_field_instances(self, frame, ctx, painter) -> None:
         """Blit the base backdrop then one blit per field instance, each
         clipped to the chart region so no copy lands on the sidebar.
@@ -565,6 +638,8 @@ class QtPlayerRenderer:
                 continue
             if scope == _SCREEN_SCOPE and self._prev_screen is None:
                 continue
+            if scope == _FIELD2_SCOPE and self._field2_pixmap is None:
+                continue
             painter.save()
             painter.setClipRect(QRectF(*ctx.chart_rect))
             if transform is not None:
@@ -579,6 +654,9 @@ class QtPlayerRenderer:
                 # The retained composite already holds the whole chart area
                 # (backdrop, field, prior copies): blit it alone.
                 painter.drawPixmap(0, 0, self._prev_screen)
+            elif scope == _FIELD2_SCOPE:
+                # The second player's independently-modded field capture.
+                painter.drawPixmap(0, 0, self._field2_pixmap)
             else:
                 if scope == 'full' and self._backdrop_pixmap is not None:
                     painter.drawPixmap(0, 0, self._backdrop_pixmap)
