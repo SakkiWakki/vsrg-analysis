@@ -57,6 +57,18 @@ def test_retarget_mid_approach_starts_from_current_value():
     assert mc.value('drunk', 1.0) == pytest.approx(0.0)
 
 
+def test_retarget_speed_is_the_new_events_speed():
+    # Each event carries its own approach speed (the engine reads the
+    # TARGET's m_SpeedfFoo). Chase 0 -> 1 at speed 1 (arrival t=1); at
+    # t=0.5 (value 0.5) retarget to 0 at speed 5 => arrives 0 after
+    # 0.5/5 = 0.1s, i.e. t=0.6, NOT the first event's speed-1 pace.
+    mc = ModChannels.compile([ModEvent(0.0, 1.0, 1.0, 'drunk'),
+                              ModEvent(0.5, 0.0, 5.0, 'drunk')])
+    assert mc.value('drunk', 0.5) == pytest.approx(0.5)
+    assert mc.value('drunk', 0.55) == pytest.approx(0.25)
+    assert mc.value('drunk', 0.6) == pytest.approx(0.0)
+
+
 def test_beat_to_time_conversion():
     # events keyed in beats, 2 beats/sec => t = beat / 2.
     mc = ModChannels.compile([ModEvent(2.0, 1.0, -1, 'drunk')],

@@ -1,12 +1,27 @@
 """Bridge: harvested modfile windows -> compiled mod channels.
 
-gat-style templates run a per-frame reader: `mod,clearall`, then every
-entry whose window contains the current beat/time re-applies its
-modstring (later table entries win overlaps). Compiled equivalent:
-each window emits target=percent at its start and target=0 at its end
-(the clearall revert), same approach speed both ways; overlaps resolve
-by emit order at equal times. The channels module then solves the
-linear approach into piecewise segments.
+gat-style templates run a per-frame reader (default.xml ~3999): every
+frame it applies `mod,clearall` and then re-applies each window whose
+`beat`/time is inside it, later table entries winning overlaps.
+
+`clearall` runs PlayerOptions::Init (verified against ITGmania
+PlayerOptions.cpp FromOneModString + Init): it resets every mod's TARGET
+value to 0 AND every mod's approach SPEED to 1.0. A modstring token
+`*S P name` sets both the target (P) and the approach speed (S) via
+SET_FLOAT, so approach speed is per-mod TARGET state carried until the
+next token touches that mod. The engine chases the current value toward
+the target at the target's speed every frame (PlayerOptions::Approach:
+`fapproach(current, target, dt * other.m_SpeedfFoo)`).
+
+So the revert when a window ENDS is NOT at the window's own approach
+speed. Nothing re-applies the mod, so clearall's target (0) at clearall's
+speed (1.0) stands: the value floats back to 0 at speed 1.0 -- a smooth
+~1s ease for a full mod, not the instant snap a `*10000` window's own
+speed would give. Compiled equivalent: resolve each (mod, player) into a
+piecewise target curve where, at every instant, the active target is the
+last-emitted window covering it (0 at clearall speed where none is), then
+emit a retarget event at each change; the channels module chases those
+into linear segments.
 
 `compile_modfile` already resolves every window to seconds
 (`t_start`/`t_end`), so `ModEvent.beat` carries seconds here and
@@ -26,6 +41,8 @@ from __future__ import annotations
 
 import re
 from bisect import bisect_right
+from collections import defaultdict
+from dataclasses import dataclass
 
 from analysis.player.render.mods.channels import ModChannels, ModEvent
 
@@ -48,6 +65,12 @@ _SPEED_TOKEN = re.compile(
     r'|^(?:\*(?P<cspeed>-?\d+(?:\.\d+)?)\s+)?(?P<cmod>[cm]\d+)$')
 
 _DEFAULT_SPEED = 1.0
+
+# The approach speed a mod reverts at once no window drives it: `clearall`
+# runs PlayerOptions::Init, which resets every mod's target to 0 and its
+# approach speed to 1.0. So the float-back-to-rest is always at speed 1.0,
+# independent of the ended window's own `*S`.
+_CLEARALL_SPEED = 1.0
 
 # gat's persistent baseline scroll (the always-on `{0,9000,'2x,...'}`
 # window). Dynamic xmod changes are expressed as multipliers RELATIVE to
@@ -114,11 +137,14 @@ def compile_scroll_multipliers(mod_events, base_xmod=_DEFAULT_BASE_XMOD):
 
     Each xmod window re-targets the field's scroll to `xmod / base_xmod`
     at its start (chasing at the `*S` approach speed) and reverts to base
-    (1.0) at its end. The shared approach-chase compiler resolves the
-    chain to piecewise-linear breakpoints (the base window is always the
-    resting 1.0). Player-0 windows only, matching the note-mod consumer.
-    C/M-mods pin an absolute rate our user-scroll model cannot express;
-    they are skipped (their count is returned for the caller to log)."""
+    (1.0) at its end at clearall speed (the always-on `{0,9000,'2x'}`
+    baseline, no `*S`, re-drives the field at speed 1.0 once a burst
+    window ends -- so a `*100000` burst eases back over ~1s, it does not
+    snap). The shared approach-chase compiler resolves the chain to
+    piecewise-linear breakpoints (the base window is always the resting
+    1.0). Player-0 windows only, matching the note-mod consumer. C/M-mods
+    pin an absolute rate our user-scroll model cannot express; they are
+    skipped (their count is returned for the caller to log)."""
     events = []
     skipped_cm = 0
     for row in mod_events:
@@ -134,7 +160,7 @@ def compile_scroll_multipliers(mod_events, base_xmod=_DEFAULT_BASE_XMOD):
                 continue
             mult = value / base_xmod if base_xmod else 1.0
             events.append(ModEvent(start, mult, speed, 'xmod', 0))
-            events.append(ModEvent(end, 1.0, speed, 'xmod', 0))
+            events.append(ModEvent(end, 1.0, _CLEARALL_SPEED, 'xmod', 0))
 
     breakpoints = _xmod_breakpoints(events)
     return _breakpoints_to_scroll_events(breakpoints), skipped_cm
@@ -231,8 +257,8 @@ def compile_mod_channels(mod_events) -> ModChannels:
     """Compile `compile_modfile`'s normalized mod-window dicts
     (`t_start`/`t_end` seconds, `modstring`, `player`) into sampled
     channels."""
-    events = []
-    for row in mod_events:
+    windows = defaultdict(list)
+    for order, row in enumerate(mod_events):
         start = float(row['t_start'])
         end = float(row['t_end'])
         if end < start:
@@ -240,6 +266,68 @@ def compile_mod_channels(mod_events) -> ModChannels:
         raw_player = row.get('player')
         player = 0 if raw_player is None else max(0, int(raw_player) - 1)
         for percent, speed, name in parse_modstring(row['modstring']):
-            events.append(ModEvent(start, percent, speed, name, player))
-            events.append(ModEvent(end, 0.0, speed, name, player))
+            windows[(name, player)].append(
+                _Window(start, end, percent, speed, order))
+
+    events = []
+    for (name, player), chan_windows in windows.items():
+        for beat, value, speed in _resolve_windows(chan_windows):
+            events.append(ModEvent(beat, value, speed, name, player))
     return ModChannels.compile(events)
+
+
+@dataclass(frozen=True)
+class _Window:
+    """One window's contribution to a single (mod, player): drives `value`
+    at approach `speed` over its span (`_resolve_windows` treats it
+    half-open, reverting at `end`). `order` is the row index, breaking
+    overlap ties (later table entry wins, matching the reader's re-apply
+    order)."""
+    start: float
+    end: float
+    value: float
+    speed: float
+    order: int
+
+
+_REST_TARGET = (0.0, _CLEARALL_SPEED)
+
+
+def _resolve_windows(windows) -> list:
+    """A channel's overlapping windows -> `[(time, value, speed), ...]`
+    retarget events, one per change in the resolved target.
+
+    At any instant the engine's target is the highest-order window
+    covering it (each re-applies every frame; later table entries win), or
+    `(0, clearall speed)` where none is active. We build that step
+    function over the intervals cut by every window boundary and emit a
+    retarget wherever the target changes. Consequences: an end that a
+    still-active window overrides never dips to 0 (overlapped mods hold);
+    an isolated window's end reverts at clearall speed -- the float -- not
+    the window's own approach `*S`; a zero-length window (start == end)
+    covers no interval, so it is a no-op just as the engine's next frame
+    would already have `clearall`-ed the one-frame spike away.
+
+    Windows are treated half-open `[start, end)`: the target reverts AT
+    the window's end (the engine reverts the frame after), which is why
+    the trailing interval past the last end resets to rest."""
+    boundaries = sorted({w.start for w in windows} | {w.end for w in windows})
+    events = []
+    prev = _REST_TARGET
+    for t in boundaries:
+        target = _active_target(windows, t)
+        if target != prev:
+            events.append((t, *target))
+            prev = target
+    return events
+
+
+def _active_target(windows, t) -> tuple:
+    """The (value, speed) target on the interval starting at `t`: the
+    highest-order window covering `[t, ...)` half-open (`start <= t <
+    end`), or rest (0 at clearall speed) if none covers it."""
+    covering = [w for w in windows if w.start <= t < w.end]
+    if not covering:
+        return _REST_TARGET
+    winner = max(covering, key=lambda w: w.order)
+    return winner.value, winner.speed

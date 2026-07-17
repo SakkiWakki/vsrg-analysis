@@ -119,9 +119,23 @@ class _Segments:
         self.times.append(t)
         self.values.append(v)
 
+    def _append_step(self, t: float, v: float) -> None:
+        """A vertical jump to `v` at `t`: a second point sharing the last
+        point's time, which `_sample`'s `t1 <= t0` branch reads as the
+        value at and after `t` while the prior point holds up to `t`."""
+        self.times.append(t)
+        self.values.append(v)
+
 
 def _add_snap(seg: _Segments, t: float, target: float) -> None:
-    seg._append(t, target)
+    """Jump to `target` at `t`, holding the current value up to `t` so a
+    snap that follows an earlier breakpoint steps vertically instead of
+    interpolating across the gap (the engine holds a snapped value until
+    the next change)."""
+    frm = seg._sample(t)
+    seg._append(t, frm)
+    if target != frm:
+        seg._append_step(t, target)
 
 
 def _add_chase(seg: _Segments, t: float, target: float, speed: float) -> None:
