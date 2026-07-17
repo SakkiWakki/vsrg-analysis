@@ -97,6 +97,24 @@ def test_classic_oncommand_recorded_on_child():
 
 
 @pytest.mark.skipif(not GAT_SM.exists(), reason='local gat chart absent')
+def test_gat_compiles_via_sim_to_the_contract():
+    from analysis.games.notitg.sim.producers import compile_via_sim
+    compiled = compile_via_sim(GAT_SM, end_seconds=60.0)
+    assert compiled is not None
+    for key in ('mod_events', 'shader_flags', 'unsupported', 'elements',
+                'tree', 'has_background', 'field_copies', 'screen_transform',
+                'base_field_hidden', 'named_actors', 'recorded_keyframes',
+                'warnings'):
+        assert key in compiled, key
+    assert not any('aborted' in w for w in compiled['warnings'])
+    assert compiled['named_actors'] > 50
+    assert len(compiled['tree']) > 0
+    assert len(compiled['mod_events']) > 100
+    rows = compiled['mod_events']
+    assert all(r['t_end'] >= r['t_start'] for r in rows)
+
+
+@pytest.mark.skipif(not GAT_SM.exists(), reason='local gat chart absent')
 def test_gat_runs_under_the_loop():
     result = run_chart_sim(GAT_SM, end_seconds=45.0)
     assert result is not None

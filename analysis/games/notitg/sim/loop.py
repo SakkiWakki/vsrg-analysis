@@ -94,11 +94,21 @@ def beat_inverter(to_seconds, end_seconds):
     return to_beats
 
 
-def run_chart_sim(sm_path, end_seconds: float,
-                  tick_hz: float = _TICK_HZ) -> SimResult | None:
-    """Load a chart's modfile document (the modfile module's generic
-    FGCHANGES/XML/timing layers) and run the sim. None when the chart
-    has no resolvable lua modfile."""
+@dataclass
+class ChartDocument:
+    """A chart's modfile document plus timing, loaded once and shared by
+    the loop and the producers (all through the modfile module's generic
+    FGCHANGES/XML/timing layers)."""
+    root: object
+    classic_commands: list
+    to_seconds: object
+    start_beat: float
+    lua_dir: object
+    rng_seed: int
+
+
+def load_chart(sm_path) -> ChartDocument | None:
+    """None when the chart has no resolvable lua modfile."""
     from analysis.games.notitg import modfile
 
     entries = modfile.parse_fgchanges(sm_path)
@@ -107,14 +117,22 @@ def run_chart_sim(sm_path, end_seconds: float,
         return None
     sm_data = modfile.sm_chart.parse_sm(sm_path)
     bg_stem = modfile.Path(modfile._sm_background_name(sm_path)).stem.casefold()
-    root, _chunks, _classic = modfile._load_document(lua_dir, bg_stem)
+    root, _chunks, classic = modfile._load_document(lua_dir, bg_stem)
     _bpms, _offset, chart = modfile._timing(sm_data)
     to_seconds = modfile._beat_to_seconds(sm_data, chart)
     start_beat = min((b for b, _n, k in entries if k == 'FGCHANGES'),
                      default=0.0)
-    return run_sim(root, to_seconds, start_beat, end_seconds,
-                   rng_seed=modfile._chart_rng_seed(lua_dir),
-                   tick_hz=tick_hz)
+    return ChartDocument(root, classic, to_seconds, start_beat, lua_dir,
+                         modfile._chart_rng_seed(lua_dir))
+
+
+def run_chart_sim(sm_path, end_seconds: float,
+                  tick_hz: float = _TICK_HZ) -> SimResult | None:
+    doc = load_chart(sm_path)
+    if doc is None:
+        return None
+    return run_sim(doc.root, doc.to_seconds, doc.start_beat, end_seconds,
+                   rng_seed=doc.rng_seed, tick_hz=tick_hz)
 
 
 def run_sim(root, to_seconds, start_beat, end_seconds,

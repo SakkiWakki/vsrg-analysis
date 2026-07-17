@@ -35,8 +35,6 @@ from analysis.player.render.lua import LuaHost
 _MAX_DISPATCH_DEPTH = 24
 _MAX_DISPATCH_TOTAL = 200000
 
-_PLAYER_CHILD_NAMES = ('PlayerP1', 'PlayerP2')
-
 # The sim bridge routes two extra getters (GetSecsIntoEffect/GetText)
 # the harvest path leaves unrouted; swap the generated __GETTER set
 # literal inside the shared bootstrap. The guard catches literal drift -
@@ -75,7 +73,7 @@ class SimEnvironment:
         self._dispatch_total = 0
         self._rng_seed = int(rng_seed)
         self._screen_id: int | None = None
-        self._player_ids: dict = {}
+        self._screen_children: dict = {}
         self._install()
 
     # -- results the loop harvests ----------------------------------------
@@ -121,12 +119,80 @@ class SimEnvironment:
     def player_actor(self, name: str) -> SimActor | None:
         """The screen child recorder for 'PlayerP1'/'PlayerP2', when the
         chart fetched it (base-field hidden / player poke streams)."""
-        rec_id = self._player_ids.get(name)
+        rec_id = self._screen_children.get(name)
         return self._actors.get(rec_id) if rec_id is not None else None
 
     def screen_actor(self) -> SimActor | None:
         return (self._actors.get(self._screen_id)
                 if self._screen_id is not None else None)
+
+    # -- harvest surface (mirrors the mod_stubs shapes, so the modfile
+    # element/screen/field producers consume a sim env directly) ---------
+
+    def named_actor_keyframes(self) -> dict:
+        """global name -> {property: [Keyframe]} for chart-bound actor
+        globals (`NAME = self`) that recorded pokes."""
+        out = {}
+        for name, actor in self._named_actors().items():
+            keyframes = actor.keyframes()
+            if keyframes:
+                out[name] = keyframes
+        return out
+
+    def named_actor_meta(self) -> dict:
+        """global name -> {'aft_source', 'is_aft'} for every bound
+        global, poked or not (the field producer keys copies off it)."""
+        return {name: {'aft_source': actor.aft_source,
+                       'is_aft': actor.is_aft}
+                for name, actor in self._named_actors().items()}
+
+    def actor_keyframes(self) -> dict:
+        """recorder id -> {property: [Keyframe]}, the complete stream."""
+        return {rec_id: actor.keyframes()
+                for rec_id, actor in self._actors.items()
+                if actor.keyframes()}
+
+    def actor_oscillator_spans(self) -> dict:
+        return {rec_id: actor.oscillator_spans()
+                for rec_id, actor in self._actors.items()
+                if actor.oscillator_spans()}
+
+    def screen_keyframes(self) -> dict:
+        actor = self.screen_actor()
+        return actor.keyframes() if actor is not None else {}
+
+    def screen_oscillator_spans(self) -> tuple:
+        actor = self.screen_actor()
+        return actor.oscillator_spans() if actor is not None else ()
+
+    def player_keyframes(self, name: str) -> dict:
+        actor = self.player_actor(name)
+        return actor.keyframes() if actor is not None else {}
+
+    def player_oscillator_spans(self, name: str) -> tuple:
+        actor = self.player_actor(name)
+        return actor.oscillator_spans() if actor is not None else ()
+
+    def _named_actors(self) -> dict:
+        """Sandbox globals bound to one of our recorder tables."""
+        out = {}
+        for key, value in self._host.env.items():
+            if not isinstance(key, str):
+                continue
+            actor = self._actor_for_table(value)
+            if actor is not None:
+                out[key] = actor
+        return out
+
+    def _actor_for_table(self, table) -> SimActor | None:
+        if not hasattr(table, '__getitem__'):
+            return None
+        try:
+            rec_id = table['__recorder_id']
+        except (KeyError, TypeError):
+            return None
+        return self._actors.get(_as_int(rec_id)) if rec_id is not None \
+            else None
 
     # -- load pass ---------------------------------------------------------
 
@@ -169,6 +235,9 @@ class SimEnvironment:
             return existing
         rec_id = self._new_actor()
         actor._sim_id = rec_id
+        # The element-tree compiler picks up an actor's complete poke
+        # stream by its `_recorder_id` tag; the sim ids serve both.
+        actor._recorder_id = rec_id
         return rec_id
 
     def _new_actor(self) -> int:
@@ -308,15 +377,16 @@ class SimEnvironment:
         return value
 
     def _screen_get_child(self, name):
-        """SCREENMAN:GetTopScreen():GetChild('PlayerP1') - a persistent
-        per-name recorder, so the chart's pokes on the real players
-        (P1:hidden(1)) record as the base-field visibility stream."""
-        if not isinstance(name, str) or name not in _PLAYER_CHILD_NAMES:
+        """SCREENMAN:GetTopScreen():GetChild(name) - a persistent
+        per-name recorder. The players' pokes record the base-field
+        visibility stream (P1:hidden(1)); any other child (NoteField,
+        Judgment) is a harmless poke-able target for proxy SetTarget."""
+        if not isinstance(name, str):
             return self._host.env['__permissive']()
-        rec_id = self._player_ids.get(name)
+        rec_id = self._screen_children.get(name)
         if rec_id is None:
             rec_id = self._new_actor()
-            self._player_ids[name] = rec_id
+            self._screen_children[name] = rec_id
         return self._tables[rec_id]
 
     # -- engine singletons -------------------------------------------------
