@@ -103,6 +103,12 @@ if table.getn == nil then table.getn = function(t) return #t end end
 """
 
 
+# How far before beat 0 the actor load pass anchors when the FGCHANGES
+# start sits after beat 0, so load-time keyframes strictly precede a
+# beat-0 mod_action. Small: load values just hold from a hair earlier.
+_LOAD_LEAD_S = 0.01
+
+
 class StubEnvironment:
     """One LuaJIT host with the classic-template engine stubs installed,
     plus the harvested tables after chunks run."""
@@ -111,6 +117,20 @@ class StubEnvironment:
         self._start_beat = float(start_beat)
         self._clock_beat = float(start_beat)
         self._to_seconds = to_seconds or (lambda beat: float(beat))
+        # Actors load BEFORE the song's first beat, so their InitCommand /
+        # OnCommand keyframes must sort before any `mod_actions` closure
+        # (which can fire at beat 0 - e.g. gat's `char_shame:Spawn`). The
+        # FGCHANGES start beat can map to a LATER time than beat 0 (gat's
+        # FGCHANGES is beat 0.5), which would invert the two and let a
+        # beat-0 Spawn's zoom(1) be masked by the later-recorded
+        # InitCommand zoom(0). When the start beat sits after beat 0 we
+        # anchor load a hair before beat 0's time; otherwise load stays at
+        # the start-beat time (no shift for charts that already load
+        # first).
+        start_s = self._to_seconds(self._start_beat)
+        beat0_s = self._to_seconds(0.0)
+        self._load_seconds = (min(start_s, beat0_s - _LOAD_LEAD_S)
+                              if start_s > beat0_s else start_s)
         self._shader_flags: list = []
         self._applied_mods: list = []
         self._swallowed = 0
@@ -137,8 +157,7 @@ class StubEnvironment:
         `self` is restored to permissive afterwards so it never lingers
         as a stray recorder global: only the names the chunk assigned
         (`gat_g_rot_intro = self`) keep the recorder alive."""
-        _rec_id, recorder_table = self._new_recorder(
-            self._to_seconds(self._start_beat))
+        _rec_id, recorder_table = self._new_recorder(self._load_seconds)
         self._host.env['self'] = recorder_table
         self._host.run(source, name=name)
         self._host.env['self'] = self._host.env['__permissive']()
@@ -194,7 +213,7 @@ class StubEnvironment:
         existing = getattr(actor, '_recorder_id', None)
         if existing is not None:
             return existing
-        rec_id, _table = self._new_recorder(self._to_seconds(self._start_beat))
+        rec_id, _table = self._new_recorder(self._load_seconds)
         actor._recorder_id = rec_id
         return rec_id
 

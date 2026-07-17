@@ -47,10 +47,11 @@ chunk runs under try/except and partial output is fine.
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from pathlib import Path
 
 from analysis.games.etterna import sm_chart
-from analysis.games.notitg import sprite_sheet, xml_actors
+from analysis.games.notitg import aft_drivers, sprite_sheet, xml_actors
 from analysis.games.notitg.mod_stubs import StubEnvironment
 from analysis.games.notitg.paths import find_notitg_dirs
 from analysis.games.notitg.recording_actor import RecordingActor
@@ -166,14 +167,15 @@ def _resolve_lua_dir(sm_path, entries) -> Path | None:
     return fallback if (fallback / 'default.xml').exists() else None
 
 
-def _load_document(lua_dir: Path):
+def _load_document(lua_dir: Path, bg_stem=''):
     """Parse default.xml, splicing in any `<Layer File=...>` includes so
     included actors (modhelpers.xml helper definitions, the chara
     subtree) are present in document order. Every actor is annotated with
     the directory its XML came from (`_base_dir`) so a Sprite's `Texture=`
     / `File=` reference resolves against ITS file's location, not the top
     lua dir (chara sprites reference `shame/idle.sprite` relative to
-    `lua/chara`)."""
+    `lua/chara`). `bg_stem` (the #BACKGROUND image stem) tags any include
+    subtree that draws it as a background layer (behind the notes)."""
     entry = lua_dir / 'default.xml'
     root_parsed = xml_actors.parse_actor_xml(
         entry.read_text(encoding='utf-8', errors='replace'))
@@ -181,7 +183,7 @@ def _load_document(lua_dir: Path):
     lua_chunks = list(root_parsed.lua_chunks)
     classic = list(root_parsed.classic_commands)
     _tag_base_dir(root_parsed.root, lua_dir)
-    _splice_includes(root_parsed.root, lua_dir, lua_chunks, classic)
+    _splice_includes(root_parsed.root, lua_dir, lua_chunks, classic, bg_stem)
     return root_parsed.root, lua_chunks, classic
 
 
@@ -191,12 +193,12 @@ def _tag_base_dir(actor, base_dir) -> None:
         _tag_base_dir(child, base_dir)
 
 
-def _splice_includes(actor, lua_dir, lua_chunks, classic) -> None:
+def _splice_includes(actor, lua_dir, lua_chunks, classic, bg_stem='') -> None:
     for child in list(actor.children):
         # Recurse into the child's OWN children first (captured now, so
         # an appended include subtree - already fully spliced - is not
         # re-processed under the wrong base dir).
-        _splice_includes(child, lua_dir, lua_chunks, classic)
+        _splice_includes(child, lua_dir, lua_chunks, classic, bg_stem)
         included = _include_path(child.attrs.get('File', ''), lua_dir)
         if included is None:
             continue
@@ -204,10 +206,32 @@ def _splice_includes(actor, lua_dir, lua_chunks, classic) -> None:
             included.read_text(encoding='utf-8', errors='replace'))
         _tag_base_dir(sub.root, included.parent)
         _splice_includes(sub.root, included.parent, sub.lua_chunks,
-                         sub.classic_commands)
+                         sub.classic_commands, bg_stem)
+        # An include that renders the #BACKGROUND image is a BGCHANGES-
+        # style background layer: SM draws it BEHIND the notefield (later
+        # FG actors sit in front). Tag its subtree so the compiler routes
+        # it to a below-the-notes z band.
+        if bg_stem and _subtree_draws_background(sub.root, bg_stem):
+            _tag_background_layer(sub.root)
         child.children.append(sub.root)
         lua_chunks[:0] = sub.lua_chunks
         classic.extend(sub.classic_commands)
+
+
+def _subtree_draws_background(actor, bg_stem) -> bool:
+    """True when any actor in a spliced subtree loads the chart's
+    #BACKGROUND image (by File=/Texture=/Load= filename stem)."""
+    reference = (actor.attrs.get('File') or actor.attrs.get('Texture')
+                 or actor.attrs.get('Load') or '')
+    if reference and Path(reference).stem.casefold() == bg_stem:
+        return True
+    return any(_subtree_draws_background(c, bg_stem) for c in actor.children)
+
+
+def _tag_background_layer(actor) -> None:
+    actor._background_layer = True
+    for child in actor.children:
+        _tag_background_layer(child)
 
 
 def _include_path(include, lua_dir) -> Path | None:
@@ -408,21 +432,38 @@ def compile_element_tree(root, to_seconds, start_beat, named_keyframes=None,
 
     Empty subtrees (frames with no drawable descendants and no own
     animation) are pruned, so a chart with no real hierarchy collapses
-    back to a flat element list."""
+    back to a flat element list.
+
+    Background-layer subtrees (BGCHANGES actors tagged by _load_document)
+    are HOISTED to top-level elements with a below-the-notes z, so SM's
+    'background behind the notefield, foreground in front' draw order is
+    honoured (the StoryboardEffect only bands top-level elements)."""
     start_time = to_seconds(start_beat)
     named_keyframes = named_keyframes or {}
     children = []
+    below = []
     for child in root.children:
-        element = _compile_actor(child, start_time, named_keyframes, fonts)
+        element = _compile_actor(child, start_time, named_keyframes, fonts,
+                                 below)
         if element is not None:
             children.append(element)
-    return children
+    return below + children
 
 
-def _compile_actor(actor, start_time, named_keyframes, fonts):
+def _compile_actor(actor, start_time, named_keyframes, fonts, below=None):
+    if below is None:
+        below = []
+    if getattr(actor, '_background_layer', False):
+        element = _compile_background_actor(actor, start_time, named_keyframes,
+                                           fonts)
+        if element is not None:
+            below.append(element)
+        return None
+
     child_elements = []
     for child in actor.children:
-        element = _compile_actor(child, start_time, named_keyframes, fonts)
+        element = _compile_actor(child, start_time, named_keyframes, fonts,
+                                 below)
         if element is not None:
             child_elements.append(element)
 
@@ -432,6 +473,37 @@ def _compile_actor(actor, start_time, named_keyframes, fonts):
                               tuple(child_elements))
     return _leaf_element(actor, start_time, named_keyframes,
                          precomputed=keyframes, fonts=fonts)
+
+
+# The background band z: below the notes/field (z=0) but a valid
+# storyboard slot. gat's whole BGCHANGES tree lands here.
+_BACKGROUND_Z = -100
+
+
+def _compile_background_actor(actor, start_time, named_keyframes, fonts):
+    """Compile a background-layer subtree as one top-level element at the
+    background z. The subtree is self-contained (its own gat_all_bg /
+    gat_bg transforms), so hoisting it past the identity top frames keeps
+    its placement while moving it behind the notes."""
+    child_elements = []
+    for child in actor.children:
+        element = _compile_background_actor(child, start_time,
+                                           named_keyframes, fonts)
+        if element is not None:
+            child_elements.append(element)
+
+    keyframes = _merged_keyframes(actor, start_time, named_keyframes)
+    if child_elements:
+        element = _group_element(actor, start_time, keyframes,
+                                tuple(child_elements))
+    else:
+        element = _leaf_element(actor, start_time, named_keyframes,
+                               precomputed=keyframes, fonts=fonts)
+    return _with_z(element, _BACKGROUND_Z) if element is not None else None
+
+
+def _with_z(element, z):
+    return replace(element, z=z)
 
 
 def _merged_keyframes(actor, start_time, named_keyframes):
@@ -677,7 +749,8 @@ def _compile_modfile(sm_path):
         return None
 
     sm_data = sm_chart.parse_sm(sm_path)
-    root, _lua_chunks, classic_commands = _load_document(lua_dir)
+    bg_stem = Path(_sm_background_name(sm_path)).stem.casefold()
+    root, _lua_chunks, classic_commands = _load_document(lua_dir, bg_stem)
 
     _bpms, _offset, chart = _timing(sm_data)
     to_seconds = _beat_to_seconds(sm_data, chart)
@@ -701,8 +774,9 @@ def _compile_modfile(sm_path):
         'elements': _compile_elements(classic_commands, to_seconds,
                                       start_beat, named_keyframes),
         'tree': tree,
+        'has_background': _has_background_actors(tree, sm_path),
         'field_copies': _field_copies(root, named_keyframes, named_meta,
-                                      to_seconds(start_beat)),
+                                      to_seconds, start_beat),
         'named_actors': len(named_keyframes),
         'recorded_keyframes': _count_recorded_keyframes(named_keyframes),
         'replay': {'fired': fired, 'failed': failed,
@@ -717,6 +791,37 @@ def _count_recorded_keyframes(named_keyframes) -> int:
                for frames in props.values())
 
 
+def _has_background_actors(tree, sm_path) -> bool:
+    """True when the compiled actor tree draws the chart's own background
+    image (gat's `bg/` BGCHANGES tree renders bg.png). When it does, the
+    built-in MapBackgroundEffect is a duplicate and the adapter drops it
+    (`background_path` -> None), leaving the modfile's animated background
+    (which rides the actor/AFT transforms) as the sole one."""
+    background = _sm_background_name(sm_path)
+    if not background:
+        return False
+    stem = Path(background).stem.casefold()
+    return any(_is_background_sprite(el, stem) for el in _iter_elements(tree))
+
+
+def _sm_background_name(sm_path) -> str:
+    match = re.search(r'#BACKGROUND:([^;]*);',
+                      Path(sm_path).read_text(encoding='utf-8',
+                                              errors='replace'))
+    return match.group(1).strip() if match else ''
+
+
+def _is_background_sprite(element, stem) -> bool:
+    asset = getattr(element, 'asset', None)
+    return bool(asset and Path(asset).stem.casefold() == stem)
+
+
+def _iter_elements(elements):
+    for element in elements:
+        yield element
+        yield from _iter_elements(element.children)
+
+
 # Proxy-actor globals (Proxy(pn) = _G['P<n>p']) re-render a player's
 # whole notefield elsewhere - true field copies, same as an AFT-copy
 # sprite, so they feed the field producer alongside the AFT copies.
@@ -728,7 +833,8 @@ _FIELD_PROPS = ('x', 'y', 'rotation', 'scale_x', 'scale_y',
                 'base_scale_x', 'base_scale_y', 'alpha')
 
 
-def _field_copies(root, named_keyframes, named_meta, start_time) -> list:
+def _field_copies(root, named_keyframes, named_meta, to_seconds,
+                  start_beat) -> list:
     """Actors that draw a copy of the playfield - AFT-screen copy
     sprites (`aft_source` set) and Proxy notefield actors - as
     ready-to-sample transform timelines for the field producer.
@@ -739,7 +845,14 @@ def _field_copies(root, named_keyframes, named_meta, start_time) -> list:
     tree elements - so a copy's base screen-center placement and its
     relative addx/addy moves resolve together. Ordinary named actors
     (mod-driver quads, rotators) are excluded: only actors whose texture
-    IS the captured field become field instances."""
+    IS the captured field become field instances.
+
+    Copies with a per-frame data-holder-quad DRIVER (aft_drivers) also
+    get compile-time grid-sampled keyframes over the driver window,
+    reading the compiled quad curves - the drivers never poke the copy's
+    own timeline, so without this the copy would sit at its base."""
+    start_time = to_seconds(start_beat)
+    quad_timelines = _quad_source_timelines(named_keyframes)
     copies = []
     for actor in _iter_actors(root):
         name = _bound_global_name(actor)
@@ -749,6 +862,8 @@ def _field_copies(root, named_keyframes, named_meta, start_time) -> list:
         keyframes = _merged_keyframes(actor, start_time, named_keyframes)
         field_keyframes = {prop: keyframes[prop] for prop in _FIELD_PROPS
                            if keyframes.get(prop)}
+        _merge_driven_keyframes(field_keyframes, name, quad_timelines,
+                                to_seconds)
         if not field_keyframes:
             continue
         copies.append({
@@ -757,6 +872,22 @@ def _field_copies(root, named_keyframes, named_meta, start_time) -> list:
                                          keyframes=field_keyframes),
         })
     return copies
+
+
+def _quad_source_timelines(named_keyframes) -> dict:
+    """Compiled {prop: EventTimeline} per named actor, so a copy's driver
+    can sample the data-holder quads it reads (gat_aftx GetX, ...)."""
+    return {name: build_timelines(keyframes=props)
+            for name, props in named_keyframes.items()}
+
+
+def _merge_driven_keyframes(field_keyframes, name, quad_timelines,
+                            to_seconds) -> None:
+    if not aft_drivers.has_driver(name):
+        return
+    driven = aft_drivers.driven_keyframes(name, quad_timelines, to_seconds)
+    for prop, frames in driven.items():
+        field_keyframes.setdefault(prop, []).extend(frames)
 
 
 def _field_source(name, named_meta):

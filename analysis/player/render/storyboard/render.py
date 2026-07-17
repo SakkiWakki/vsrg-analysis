@@ -61,6 +61,12 @@ def _design_transform(storyboard, chart_rect):
     return k, ox, oy
 
 
+def _design_box_rect(storyboard, k, ox, oy) -> QRectF:
+    """The mapped design rect in screen space - NotITG's hard 640x480
+    crop box. Content painted past its edges is clipped away."""
+    return QRectF(ox, oy, storyboard.design_w * k, storyboard.design_h * k)
+
+
 def _bitmaptext_width(font, text: str) -> float:
     """Total pen advance for `text` in an SM bitmap font (design px)."""
     return sum(font.advance(ord(char)) for char in text)
@@ -133,9 +139,16 @@ class StoryboardEffect:
     def _layer_draw(self, indices, t):
         def draw(ctx, painter):
             k, ox, oy = _design_transform(self._sb, ctx.chart_rect)
+            clipped = self._sb.clip_design_box
+            if clipped:
+                painter.save()
+                painter.setClipRect(_design_box_rect(self._sb, k, ox, oy),
+                                    Qt.ClipOperation.IntersectClip)
             for i in indices:
                 self._paint_element(painter, self._elements[i], t, k, ox, oy,
                                     self._sb.design_w, self._sb.design_h)
+            if clipped:
+                painter.restore()
         return draw
 
     # -- element painting -------------------------------------------------

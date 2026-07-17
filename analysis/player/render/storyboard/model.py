@@ -108,6 +108,12 @@ class Storyboard:
     # widescreen x range instead of letterboxing).
     fit: str
     elements: tuple = field(default=())
+    # Clip every layer draw to the mapped design rect, not just the chart
+    # region. NotITG presents a hard-cropped 640x480 box: actors that run
+    # offscreen must crop at the design edges, and the box centered in the
+    # chart region is where the notefield centers too. fluXis/osu leave
+    # this off (their design space IS the viewport).
+    clip_design_box: bool = False
 
     def __bool__(self):
         return bool(self.elements)

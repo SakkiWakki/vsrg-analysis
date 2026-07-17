@@ -28,6 +28,7 @@ tween keyframes - sampling the timelines at t interpolates them.
 """
 from __future__ import annotations
 
+from PySide6.QtCore import QRectF
 from PySide6.QtGui import QTransform
 
 from analysis.player.render.effects.base import EffectFrame
@@ -41,15 +42,23 @@ _MIN_VISIBLE_ALPHA = 1.0 / 255.0
 
 def _design_map(chart_rect):
     """(k, ox, oy) mapping SM 640x480 design space to the chart region,
-    'height' fit (scale by height; wide regions extend sideways). Kept
-    in lockstep with the storyboard renderer's _design_transform - both
-    place SM/design content into the same chart_rect, so a field copy
-    lines up with the storyboard actors drawn over it."""
+    'min' letterbox fit (the exact 640x480 box, centered) - kept in
+    lockstep with the notitg storyboard's _design_transform so a field
+    copy lines up with the storyboard actors drawn over it and with the
+    notefield centered in the same box."""
     x, y, w, h = chart_rect
-    k = h / _DESIGN_H
+    k = min(w / _DESIGN_W, h / _DESIGN_H)
     ox = x + (w - _DESIGN_W * k) / 2.0
     oy = y + (h - _DESIGN_H * k) / 2.0
     return k, ox, oy
+
+
+def design_box(chart_rect) -> QRectF:
+    """The mapped SM 640x480 box in screen space (the hard crop region),
+    matching _design_map. Used by the renderer to clip AFT copies to the
+    design box so offscreen content never bleeds into a copy."""
+    k, ox, oy = _design_map(chart_rect)
+    return QRectF(ox, oy, _DESIGN_W * k, _DESIGN_H * k)
 
 
 class NotitgFieldInstances:

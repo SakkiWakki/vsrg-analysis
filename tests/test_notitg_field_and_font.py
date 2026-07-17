@@ -10,7 +10,8 @@ pytest.importorskip('PySide6')
 from PySide6.QtCore import QPointF
 
 from analysis.games.notitg.field_instances import (NotitgFieldInstances,
-                                                   _copy_transform, _design_map)
+                                                   _copy_transform, _design_map,
+                                                   design_box)
 from analysis.games.notitg.modfile import compile_modfile
 from analysis.games.notitg.recording_actor import RecordingActor
 from analysis.player.render.storyboard import bitmap_font
@@ -190,3 +191,104 @@ def _flatten(elements):
     for element in elements:
         yield element
         yield from _flatten(element.children)
+
+
+# -- design box (min-fit crop) + screen-constant resolution ---------------
+
+def test_design_box_is_centered_min_fit():
+    """The 640x480 design box letterboxes ('min' fit) centered in a wide
+    chart region - its center coincides with the region center so the
+    notefield and actors agree on where 320 is."""
+    rect = (0, 0, 900, 600)
+    box = design_box(rect)
+    assert box.center().x() == pytest.approx(450)
+    assert box.center().y() == pytest.approx(300)
+    # min fit: scaled by the tighter axis (height here), 4:3 box.
+    assert box.height() == pytest.approx(600)
+    assert box.width() == pytest.approx(800)
+
+
+def test_design_map_matches_design_box():
+    rect = (0, 0, 900, 600)
+    k, ox, oy = _design_map(rect)
+    box = design_box(rect)
+    assert (ox, oy) == pytest.approx((box.x(), box.y()))
+    assert k == pytest.approx(box.height() / 480.0)
+
+
+def test_screen_constants_resolve_in_classic_commands():
+    """`x,SCREEN_CENTER_X` records the numeric center, not a dropped
+    None - so an AFT copy's InitCommand base sits at screen center."""
+    actor = RecordingActor()
+    actor.poke('x', ['SCREEN_CENTER_X'])
+    actor.poke('y', ['SCREEN_CENTER_Y'])
+    assert actor.get('x') == pytest.approx(320.0)
+    assert actor.get('y') == pytest.approx(240.0)
+
+
+# -- gat: AFT driver, load ordering, background layering ------------------
+
+@pytest.mark.skipif(not _GAT_SM.exists(), reason='NotITG gat pilot not present')
+def test_gat_aft_target_driven_by_data_holder_quads():
+    """gat_aft_target sits at the identity base (320,240) before its
+    driver window and translates/zooms/rotates inside it (beat 1140-1146
+    ~ t=369), sampled from the gat_aftx/afty/aftzoom/aftrz quad curves."""
+    result = compile_modfile(str(_GAT_SM))
+    copies = {c['name']: c for c in result['field_copies']}
+    tl = copies['gat_aft_target']['timelines']
+    # Base: screen center, unit zoom, no rotation (identity placement).
+    assert tl['x'].sample(42.0)[0] == pytest.approx(320.0)
+    assert tl['y'].sample(42.0)[0] == pytest.approx(240.0)
+    # Driven inside the window: shifted off center and rotated/zoomed.
+    assert tl['x'].sample(369.0)[0] != pytest.approx(320.0, abs=1.0)
+    assert tl['rotation'].sample(369.0)[0] != pytest.approx(0.0, abs=1.0)
+
+
+@pytest.mark.skipif(not _GAT_SM.exists(), reason='NotITG gat pilot not present')
+def test_gat_intro_chara_spawns_at_load():
+    """char_shame's beat-0 Spawn mod_action must win over its later-timed
+    InitCommand zoom(0): the intro chara is at unit scale, centered, at
+    t=5 (before the load-order fix it sampled scale 0 = invisible)."""
+    from analysis.games.notitg.mod_stubs import StubEnvironment
+    from analysis.games.notitg.modfile import (_beat_to_seconds,
+                                               _load_document, _resolve_lua_dir,
+                                               _timing, parse_fgchanges)
+    from analysis.games.etterna import sm_chart
+    from analysis.player.render.storyboard.model import build_timelines
+
+    entries = parse_fgchanges(str(_GAT_SM))
+    lua_dir = _resolve_lua_dir(str(_GAT_SM), entries)
+    data = sm_chart.parse_sm(str(_GAT_SM))
+    _b, _o, chart = _timing(data)
+    to_s = _beat_to_seconds(data, chart)
+    root, _lc, _cc = _load_document(lua_dir)
+    start_beat = min((b for b, _n, k in entries if k == 'FGCHANGES'),
+                     default=0.0)
+    env = StubEnvironment(start_beat, to_seconds=to_s)
+    env.load_actors(root)
+    env.replay_mod_actions()
+    tl = build_timelines(keyframes=env.named_actor_keyframes()['char_shame'])
+    assert tl['scale_x'].sample(5.0)[0] == pytest.approx(1.0)
+    assert tl['scale_y'].sample(5.0)[0] == pytest.approx(1.0)
+    assert tl['x'].sample(5.0)[0] == pytest.approx(320.0)
+
+
+@pytest.mark.skipif(not _GAT_SM.exists(), reason='NotITG gat pilot not present')
+def test_gat_background_hoisted_below_notes():
+    """The BGCHANGES bg tree is a top-level element at a below-the-notes
+    z (behind the field); the foreground tree stays at z=0."""
+    result = compile_modfile(str(_GAT_SM))
+    tree = result['tree']
+    zs = sorted(e.z for e in tree)
+    assert zs[0] < 0 < len(tree)  # at least one below-band element
+    assert 0 in zs                # foreground stays at z=0
+    assert result['has_background'] is True
+
+
+@pytest.mark.skipif(not _GAT_SM.exists(), reason='NotITG gat pilot not present')
+def test_gat_adapter_drops_builtin_background():
+    """With its own background actors compiled, the notitg adapter returns
+    no #BACKGROUND path (the built-in MapBackground would duplicate it)."""
+    from analysis.games.notitg.adapter import NotitgAdapter
+    replay = {'filepath': f'{_GAT_SM}::0'}
+    assert NotitgAdapter().background_path(replay) is None

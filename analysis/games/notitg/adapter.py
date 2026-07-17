@@ -106,6 +106,12 @@ class NotitgAdapter(EtternaAdapter):
     def transparent_field(self) -> bool:
         return True
 
+    def field_capture_scope(self) -> str:
+        # gat's AFT copies (gat_aft = ActorFrameTexture with ShowAFTBG)
+        # capture the WHOLE screen incl. background, so the field copies
+        # must replicate background + below-draws, not a bare notefield.
+        return 'full'
+
     def upscroll(self) -> bool:
         return True
 
@@ -120,6 +126,18 @@ class NotitgAdapter(EtternaAdapter):
         compiled = compile_modfile(sm_path)
         replay['_notitg_modfile'] = compiled or {}
         return compiled
+
+    def background_path(self, replay) -> str | None:
+        """Drop the built-in #BACKGROUND when the modfile draws its own
+        background actors (gat's BGCHANGES `bg/` tree renders bg.png):
+        the built-in static/dimmed copy would duplicate it and, unlike
+        the actor tree, never ride the mirror/AFT transforms - reading as
+        'the background copied per mirror'. Falls back to the base
+        (Etterna) resolution for charts with no compiled background."""
+        compiled = self._compiled_modfile(replay)
+        if compiled and compiled.get('has_background'):
+            return None
+        return super().background_path(replay)
 
     def note_mods(self, replay):
         from analysis.games.notitg.mod_channels import compile_mod_channels
@@ -141,12 +159,18 @@ class NotitgAdapter(EtternaAdapter):
         return events or None
 
     def effects(self, replay):
+        from analysis.games.notitg.background_tint import NotitgBackgroundTint
         from analysis.games.notitg.field_instances import NotitgFieldInstances
+        from analysis.games.notitg.mod_channels import compile_mod_channels
         from analysis.games.notitg.shader_bridge import notitg_shader_effects
         compiled = self._compiled_modfile(replay)
         if not compiled:
             return []
         effects = list(notitg_shader_effects(compiled.get('shader_flags')))
+        mod_events = compiled.get('mod_events')
+        if mod_events:
+            effects.append(
+                NotitgBackgroundTint(compile_mod_channels(mod_events)))
         field_copies = compiled.get('field_copies')
         if field_copies:
             effects.append(NotitgFieldInstances(field_copies))
@@ -163,8 +187,13 @@ class NotitgAdapter(EtternaAdapter):
         elements = compiled.get('tree') or compiled.get('elements')
         if not elements:
             return None
-        return Storyboard(design_w=640.0, design_h=480.0, fit='height',
-                          elements=tuple(elements))
+        # NotITG presents a hard-cropped 640x480 box, so letterbox that
+        # exact box ('min') centered in the chart region and clip to it -
+        # actors that run offscreen crop at the design edges, and the
+        # centered box lines up with the notefield center (see
+        # field_instances._design_map, kept in lockstep).
+        return Storyboard(design_w=640.0, design_h=480.0, fit='min',
+                          elements=tuple(elements), clip_design_box=True)
 
     def judgment_colors(self) -> dict:
         return {

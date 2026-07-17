@@ -88,11 +88,29 @@ _SCALAR_GETTERS = {
 }
 
 
+# SM screen constants that appear as classic-command args (`x,
+# SCREEN_CENTER_X`). The Lua stub env resolves these for %function
+# bodies; classic strings are parsed to raw tokens, so the recorder
+# resolves them here. 640x480 design space, matching mod_stubs.
+_SCREEN_CONSTANTS = {
+    'SCREEN_WIDTH': 640.0, 'SCREEN_HEIGHT': 480.0,
+    'SCREEN_CENTER_X': 320.0, 'SCREEN_CENTER_Y': 240.0,
+    'SCREEN_LEFT': 0.0, 'SCREEN_RIGHT': 640.0,
+    'SCREEN_TOP': 0.0, 'SCREEN_BOTTOM': 480.0,
+    'sw': 640.0, 'sh': 480.0,
+}
+
+
 def _as_float(value, default=None):
     try:
         return float(value)
     except (TypeError, ValueError):
-        return default
+        pass
+    if isinstance(value, str):
+        constant = _SCREEN_CONSTANTS.get(value.strip())
+        if constant is not None:
+            return constant
+    return default
 
 
 def _as_int(value, default=None):
