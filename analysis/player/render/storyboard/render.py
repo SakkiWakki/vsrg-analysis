@@ -44,6 +44,11 @@ def _design_transform(storyboard, chart_rect):
     return k, ox, oy
 
 
+def _bitmaptext_width(font, text: str) -> float:
+    """Total pen advance for `text` in an SM bitmap font (design px)."""
+    return sum(font.advance(ord(char)) for char in text)
+
+
 def _is_white_texture(path: str) -> bool:
     """SM's built-in solid-white texture. Quads/Sprites that fill a
     flat color reference the virtual asset name 'white' (no real file on
@@ -201,6 +206,31 @@ class StoryboardEffect:
                 painter.setFont(font)
                 painter.setPen(color)
                 painter.drawText(QPointF(0.0, metrics.ascent()), el.text)
+            case 'bitmaptext':
+                self._paint_bitmaptext(painter, el, color)
+
+    def _paint_bitmaptext(self, painter, el, color) -> None:
+        """Composite `el.text` from its SM bitmap-font atlas: one glyph
+        cell per character, each drawn centred on the advancing pen so
+        ink lines up like StepMania's own drawing, tinted by `color`.
+        The whole string is centred on the element origin (SM BitmapText
+        default), matching the (0.5, 0.5) origin the compiler assigns."""
+        atlas = self._pixmap(el.font.texture_path)
+        if atlas is None:
+            return
+        glyphs = self._tinted_pixmap(el.font.texture_path, color)
+        pen = -_bitmaptext_width(el.font, el.text) / 2.0
+        cell_h = atlas.height() / el.font.rows
+        top = -cell_h / 2.0
+        for char in el.text:
+            codepoint = ord(char)
+            advance = el.font.advance(codepoint)
+            cell = el.font.cell(codepoint, atlas.width(), atlas.height())
+            if cell is not None:
+                cx, cy, cw, ch = cell
+                dest = QRectF(pen + (advance - cw) / 2.0, top, cw, ch)
+                painter.drawPixmap(dest, glyphs, QRectF(cx, cy, cw, ch))
+            pen += advance
 
     def _element_size(self, el, t):
         """Natural (w, h) in design units, or None when undrawable."""
@@ -212,6 +242,12 @@ class StoryboardEffect:
                 _font, metrics = self._font_for(el)
                 bounds = metrics.boundingRect(el.text)
                 return (bounds.width(), metrics.height())
+            case 'bitmaptext':
+                atlas = self._pixmap(el.font.texture_path)
+                if atlas is None:
+                    return None
+                return (_bitmaptext_width(el.font, el.text),
+                        atlas.height() / el.font.rows)
             case _:
                 (w,) = el.sample('w', t)
                 (h,) = el.sample('h', t)

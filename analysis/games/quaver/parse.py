@@ -73,6 +73,71 @@ def parse_replay(qr_path, qua_path=None, songs_dir=None, judge='Standard'):
     }
 
 
+def _perfect_sim(by_col_notes):
+    """Autoplay sim records: every note hit dead-on. Mirrors the dict
+    shape `simulate_mania` produces so `_build_arrays` treats a synth
+    identically to a real play - zero offsets, no misses, LN tails
+    released exactly on time."""
+    sim = []
+    for col, notes in enumerate(by_col_notes):
+        for note in notes:
+            end = note['end_time']
+            is_hold = end is not None
+            sim.append({
+                'col': col, 'time': note['time'], 'end_time': end,
+                'is_hold': is_hold,
+                'press_t': note['time'], 'release_t': end,
+                'head_off': 0.0, 'tail_off': 0.0 if is_hold else None,
+                'judgement': 'marv', 'broken': False, 'missed': False,
+            })
+    return sim
+
+
+def autoplay_replay(qua_path, judge='Standard'):
+    """Synthesize a perfect autoplay replay from a `.qua` chart alone -
+    no `.qr` decode, no judge sim. Powers the library's unplayed-charts
+    feature: the entry's `replay_path` is the chart file, and this fills
+    the same dict `parse_replay` returns. Mines are charted but never
+    detonated (a flawless play hits none)."""
+    chart = parse_qua_file(qua_path)
+    keycount = chart.get('keycount') or 4
+
+    by_col_notes, holds_meta, mines_by_col = _group_notes_by_col(
+        chart['hitobjects'], keycount)
+    mine_arrays = _build_mine_arrays(mines_by_col, [])
+    note_group_map = {(int(h['time']), int(h['column'])): h['group']
+                      for h in chart['hitobjects']}
+    arrays = _build_arrays(_perfect_sim(by_col_notes), note_group_map)
+    note_groups = arrays.pop('_quaver_note_groups')
+    bpms = _quaver_bpms_to_beat_space(chart['timing_points'])
+    sv_doc = SvReplayDoc(
+        engine_kind=KIND_TIME_SPACE,
+        engine_key='quaver_time',
+        sections=list(chart['sv_sections']),
+        initial_velocity=float(chart['initial_velocity']),
+        groups=chart['groups'],
+        bpms=bpms,
+        note_groups=note_groups,
+        flags={'legacy_ln': bool(chart.get('legacy_ln_rendering', False))},
+    )
+    return {
+        **arrays,
+        **mine_arrays,
+        'sv': sv_doc,
+        'holds': holds_meta,
+        'keycount': keycount,
+        'filepath': str(qua_path),
+        'chart_path': str(qua_path),
+        'meta': {'mods': 0},
+        'chart_meta': {k: chart[k]
+                       for k in ('title', 'artist', 'creator', 'version',
+                                 'keycount')},
+        '_quaver_audio_file': chart.get('audio', ''),
+        'judge': judge,
+        'mods': 0,
+    }
+
+
 def _resolve_qua_path(qr_path, qua_path, songs_dir, map_md5):
     if qua_path is not None:
         return qua_path

@@ -246,6 +246,63 @@ def parse_replay(osr_path, osu_path=None, songs_dir=None, hit_window_ms=None):
     }
 
 
+def _perfect_sim(by_col_notes):
+    """Autoplay sim records: every note hit dead-on. Mirrors the dict
+    shape `simulate_mania` produces (see `judge._new_result`) so
+    `_build_arrays` and the ghost/miss-hold post-passes treat a synth
+    identically to a real play - zero offsets, no misses, LN tails
+    released exactly on time."""
+    sim = []
+    for col, notes in enumerate(by_col_notes):
+        for note in notes:
+            end = note['end_time']
+            is_hold = end is not None
+            sim.append({
+                'col': col, 'time': note['time'], 'end_time': end,
+                'is_hold': is_hold,
+                'press_t': note['time'], 'release_t': end,
+                'head_off': 0.0, 'tail_off': 0.0 if is_hold else None,
+                'judgement': 'MAX', 'broken': False, 'missed': False,
+            })
+    return sim
+
+
+def autoplay_replay(osu_path):
+    """Synthesize a perfect autoplay replay from a `.osu` chart alone -
+    no `.osr` decode, no judge sim. Used by the library's unplayed-charts
+    feature: the entry's `replay_path` is the chart file, and this fills
+    the same dict `parse_replay` returns (minus the player-derived
+    ghost taps / miss holds, which a flawless play has none of)."""
+    chart = parse_osu_file(osu_path)
+    keycount = chart.get('keycount') or 4
+    by_col_notes, holds_meta = _group_notes_by_col(
+        chart['hitobjects'], keycount, col_perm=None)
+    sim = _perfect_sim(by_col_notes)
+
+    arrays = _build_arrays(sim)
+    sv_doc = SvReplayDoc(
+        engine_kind=KIND_TIME_SPACE,
+        engine_key='osu_time',
+        sections=list(chart.get('sv_sections', [])),
+        bpms=_osu_bpms_from_timing_points(chart.get('timing_points', [])),
+    )
+    return {
+        **arrays,
+        'sv': sv_doc,
+        'holds': holds_meta,
+        'ghost_taps': [],
+        'miss_holds': [],
+        'keycount': keycount,
+        'filepath': str(osu_path),
+        'chart_path': str(osu_path),
+        'meta': {'mods': 0},
+        'chart_meta': {k: chart[k] for k in
+                       ('title', 'artist', 'creator', 'version', 'keycount')},
+        'od': float(chart.get('od', 8.0)),
+        'mods': 0,
+    }
+
+
 def _osu_bpms_from_timing_points(timing_points):
     """Project uninherited timing points to (beat, bpm) pairs in
     Etterna's beat-space convention. Beats accumulate from t=0 along the

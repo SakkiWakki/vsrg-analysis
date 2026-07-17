@@ -22,6 +22,14 @@ State keys (shared across head-like sprites):
 
 LN bodies are 1-row tile pixmaps meant for `drawTiledPixmap`; they get
 their height from the draw-time rect, not from `size()`.
+
+Head/tail/body/lift/fake sprites read their column color from
+`ctx.player.palette[col]`. That palette is normally static, but games
+with animated theming (fluXis `colorfade`) rewrite it per frame; the
+sprite cache is keyed by `(col, state)`, so the animating consumer
+(PaletteFadeEffect) invalidates the cache only when its QUANTIZED palette
+changes, bounding re-rasterization. These callbacks stay palette-agnostic
+-- they just read the current color.
 """
 from __future__ import annotations
 

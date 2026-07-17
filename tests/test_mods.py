@@ -265,3 +265,198 @@ def test_receptor_offsets_have_zero_dizzy():
     np.testing.assert_array_equal(r.rotation_deg, np.zeros(4))
     # drunk still displaces receptors (y_offset = 0).
     assert r.dx[0] != 0.0
+
+
+# --- reverse family (GetReversePercentForColumn) --------------------
+
+def test_reverse_all_columns_full():
+    # reverse 100% => every column r = 1.
+    cols = np.array([0, 1, 2, 3])
+    r = ae.reverse_fractions({'reverse': 1.0}, cols, 4)
+    np.testing.assert_allclose(r, [1.0, 1.0, 1.0, 1.0])
+
+
+def test_split_only_right_half():
+    # split hits iCol >= N/2 = 2 => cols 2,3 only (4k).
+    cols = np.array([0, 1, 2, 3])
+    r = ae.reverse_fractions({'split': 1.0}, cols, 4)
+    np.testing.assert_allclose(r, [0.0, 0.0, 1.0, 1.0])
+
+
+def test_alternate_odd_columns():
+    cols = np.array([0, 1, 2, 3])
+    r = ae.reverse_fractions({'alternate': 1.0}, cols, 4)
+    np.testing.assert_allclose(r, [0.0, 1.0, 0.0, 1.0])
+
+
+def test_cross_middle_half():
+    # 4k: first = N/4 = 1, last = N-1-1 = 2 => cols 1,2.
+    cols = np.array([0, 1, 2, 3])
+    r = ae.reverse_fractions({'cross': 1.0}, cols, 4)
+    np.testing.assert_allclose(r, [0.0, 1.0, 1.0, 0.0])
+
+
+def test_reverse_wrap_folds_double_reverse():
+    # reverse + split on col 3 = 2.0; > 1 folds via SCALE(f,1,2,1,0):
+    # f=2 -> 0 (double reverse reads as none). col 0 stays at reverse=1.
+    cols = np.array([0, 3])
+    r = ae.reverse_fractions({'reverse': 1.0, 'split': 1.0}, cols, 4)
+    assert r[0] == pytest.approx(1.0)
+    assert r[1] == pytest.approx(0.0)
+
+
+def test_reverse_fractions_odd_keycount():
+    # 5k: N/2 = 2 (split cols 2,3,4); N/4 = 1, last = 3 (cross cols 1..3);
+    # alternate odd cols 1,3. Check split membership on the middle col 2.
+    cols = np.array([0, 1, 2, 3, 4])
+    r = ae.reverse_fractions({'split': 1.0}, cols, 5)
+    np.testing.assert_allclose(r, [0.0, 0.0, 1.0, 1.0, 1.0])
+
+
+# --- accel family (GetYOffset second half) --------------------------
+
+def test_accel_no_mods_is_identity():
+    y = np.array([100.0, -50.0, 0.0])
+    out = ae.accel_y_offset({}, y)
+    np.testing.assert_array_equal(out, y)
+
+
+def test_accel_leaves_past_notes_untouched():
+    # y < 0 (past the receptor) returns unchanged for every accel.
+    y = np.array([-30.0])
+    out = ae.accel_y_offset({'boost': 1.0, 'brake': 1.0, 'wave': 1.0}, y)
+    assert out[0] == -30.0
+
+
+def test_boost_compresses_near_notes():
+    # boost pulls close notes IN (smaller offset) and far notes OUT.
+    # fNewY = y*1.5/((y + H/1.2)/H); H = 480. At y = 100:
+    #   denom = (100 + 400)/480 = 500/480; fNewY = 150 / (500/480) = 144.
+    #   adjust = 1*(144 - 100) = 44 => out = 144.
+    y = np.array([100.0])
+    out = ae.accel_y_offset({'boost': 1.0}, y)
+    assert out[0] == pytest.approx(144.0)
+    # a far note (y large) is pushed further than a near note relative gap:
+    near = ae.accel_y_offset({'boost': 1.0}, np.array([20.0]))[0]
+    assert near < out[0]
+
+
+def test_brake_slows_near_receptor():
+    # brake: scale = y/H, fNewY = y*scale; adjust = brake*(fNewY - y).
+    # y = 240, H = 480: scale = 0.5, fNewY = 120, adjust = 1*(120-240) = -120.
+    y = np.array([240.0])
+    out = ae.accel_y_offset({'brake': 1.0}, y)
+    assert out[0] == pytest.approx(120.0)
+
+
+def test_wave_adds_sine():
+    # wave adds wave*20*sin(y/38). At y = 38*pi/2, sin = 1 => +20*wave.
+    y = np.array([38.0 * math.pi / 2.0])
+    out = ae.accel_y_offset({'wave': 0.5}, y)
+    assert out[0] == pytest.approx(y[0] + 0.5 * 20.0 * 1.0)
+
+
+def test_accel_adjust_clamped():
+    # boost adjust is clamped to +/- 400. At huge y, fNewY -> ~1.5*480 so
+    # adjust = fNewY - y is a large negative, clamped to -400.
+    y = np.array([100000.0])
+    out = ae.accel_y_offset({'boost': 1.0}, y)
+    assert out[0] == pytest.approx(100000.0 - 400.0)
+
+
+def test_expand_scales_whole_offset():
+    # expand at phase 0: cos(0)=1 => mult = SCALE(1,-1,1,0.75,1.75) = 1.75;
+    # scroll factor = SCALE(1,0,1,1,1.75) = 1.75. out = y * 1.75.
+    y = np.array([100.0])
+    out = ae.accel_y_offset({'expand': 1.0, '_expand_phase': 0.0}, y)
+    assert out[0] == pytest.approx(175.0)
+
+
+# --- tiny / dark ----------------------------------------------------
+
+def test_tiny_shrinks_notes():
+    # tiny 100% = half size, 200% = zero, same curve as mini but zoom-only.
+    p = {'tiny': 1.0}
+    r = note_offsets(p, np.array([0]), np.array([100.0]),
+                     t_now=0.0, beat_now=0.0, keycount=4)
+    assert r.zoom[0] == pytest.approx(0.5)
+
+
+def test_dark_hides_receptor_alpha():
+    assert ae.receptor_alpha_from_dark(0.0) == 1.0
+    assert ae.receptor_alpha_from_dark(1.0) == 0.0
+    assert ae.receptor_alpha_from_dark(0.4) == pytest.approx(0.6)
+
+
+# --- note_mods reverse/centered remap (fake-ctx integration) ---------
+
+class _FakeNotes:
+    def __init__(self, n):
+        self.noterows_list = list(range(n))
+
+
+class _FakePlayer:
+    def __init__(self, cols, keycount):
+        self.columns = np.asarray(cols, dtype=np.int64)
+        self.keycount = keycount
+        self.notes = _FakeNotes(len(cols))
+
+
+class _FakeCtx:
+    def __init__(self, player, heads, judge_y, chart_h):
+        self.player = player
+        self.candidates = list(range(len(heads)))
+        self.t_now = 0.0
+        self.lane_w = ae.ARROW_SIZE  # scale = 1
+        self.judge_y = judge_y
+        self.chart_rect = (0.0, 0.0, 400.0, float(chart_h))
+        self.candidate_head_y = np.asarray(heads, dtype=np.float64)
+        self.candidate_tail_y = np.asarray(heads, dtype=np.float64)
+        self.candidate_press_y = np.asarray(heads, dtype=np.float64)
+
+
+def _mods(events):
+    from analysis.games.notitg.note_mods import NotitgNoteMods
+    mc = ModChannels.compile(events)
+    return NotitgNoteMods(mc, [(0.0, 120.0)])
+
+
+def test_reverse_100_flips_positions_about_midline():
+    # judge_y = 100, chart center = 200 => mirror_y = 300. A note at
+    # head_y = 40 (60 above judge line) fully reversed sits at
+    # mirror_y - (40 - 100) = 300 + 60 = 360 (60 below the mirrored line).
+    player = _FakePlayer([0, 1, 2, 3], 4)
+    ctx = _FakeCtx(player, [40.0, 40.0, 40.0, 40.0], judge_y=100, chart_h=400)
+    _mods([ModEvent(0.0, 1.0, -1, 'reverse')]).apply(ctx)
+    np.testing.assert_allclose(ctx.candidate_head_y, [360.0] * 4)
+
+
+def test_centered_converges_receptor_to_midscreen():
+    # centered 50% slides each receptor halfway to field center (200).
+    # receptors at judge_y = 100 -> 100 + 0.5*(200 - 100) = 150. A note at
+    # head_y = judge_y (y_offset 0) lands exactly on the receptor.
+    player = _FakePlayer([0, 1, 2, 3], 4)
+    ctx = _FakeCtx(player, [100.0] * 4, judge_y=100, chart_h=400)
+    _mods([ModEvent(0.0, 0.5, -1, 'centered')]).apply(ctx)
+    np.testing.assert_allclose(ctx.candidate_head_y, [150.0] * 4)
+    np.testing.assert_allclose(ctx.receptor_offsets['dy'], [50.0] * 4)
+
+
+def test_split_reverses_only_right_half():
+    # split 100%: cols 2,3 fully reverse, cols 0,1 stay put.
+    player = _FakePlayer([0, 1, 2, 3], 4)
+    ctx = _FakeCtx(player, [40.0] * 4, judge_y=100, chart_h=400)
+    _mods([ModEvent(0.0, 1.0, -1, 'split')]).apply(ctx)
+    # left half unchanged (r = 0 => identity), right half flipped to 360.
+    np.testing.assert_allclose(ctx.candidate_head_y, [40.0, 40.0, 360.0, 360.0])
+
+
+def test_boost_compresses_via_apply():
+    # boost remaps y_offset before positions rebuild. head_y = 60 =>
+    # y_offset = 100 - 60 = 40 (scale 1). boost 100%: fNewY = 40*1.5/
+    # ((40 + 400)/480) = 60/(440/480) = 65.4545; new head_y = 100 - 65.4545.
+    player = _FakePlayer([0], 1)
+    ctx = _FakeCtx(player, [60.0], judge_y=100, chart_h=400)
+    _mods([ModEvent(0.0, 1.0, -1, 'boost')]).apply(ctx)
+    expect_off = 40.0 * 1.5 / ((40.0 + 480.0 / 1.2) / 480.0)
+    assert ctx.candidate_head_y[0] == pytest.approx(100.0 - expect_off)

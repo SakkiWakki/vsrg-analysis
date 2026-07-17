@@ -544,6 +544,58 @@ class EtternaAdapter(GameAdapter):
         except (TypeError, ValueError):
             return 1.0
 
+    # --- modfiles (#FGCHANGES .lua) ---------------------------------------
+    # Etterna HAS replays, so modfile compilation ENHANCES existing replay
+    # playback: the SM5 actor-tree Lua runs once under a stub environment
+    # (sm5_env / modfile) to harvest per-note mod events (poptions method
+    # calls) and storyboard actors. Shares one memoized compile between
+    # note_mods / storyboard so the Lua runs at most once per replay.
+
+    def _modfile_simfile(self, replay):
+        """The .sm/.ssc backing this replay, resolved once _find_chart has
+        stashed it (`resolve_all`/`background_path` run before the effect
+        build). None when the chart was never matched."""
+        return (replay or {}).get('_song_file')
+
+    def _compiled_modfile(self, replay):
+        cached = replay.get('_etterna_modfile')
+        if cached is not None:
+            return cached or None
+        sm_path = self._modfile_simfile(replay)
+        if not sm_path:
+            return None
+        from analysis.games.etterna.modfile import compile_modfile
+        compiled = compile_modfile(sm_path)
+        replay['_etterna_modfile'] = compiled or {}
+        return compiled
+
+    def note_mods(self, replay):
+        from analysis.games.etterna.modfile import compile_mod_channels
+        from analysis.games.etterna.sm_chart import parse_sm, parse_ssc
+        from analysis.games.notitg.note_mods import NotitgNoteMods
+        compiled = self._compiled_modfile(replay)
+        if not compiled or not compiled.get('mod_events'):
+            return None
+        channels = compile_mod_channels(compiled['mod_events'])
+        sm_path = self._modfile_simfile(replay)
+        data = (parse_ssc(sm_path) if str(sm_path).endswith('.ssc')
+                else parse_sm(sm_path))
+        return NotitgNoteMods(channels, data['bpms'])
+
+    def storyboard(self, replay):
+        """Modfile actors (Def.Quad/Sprite/BitmapText prank overlays and
+        ActorFrame groups) render through the storyboard pipeline in SM's
+        640x480 screen space. The nested `tree` (ActorFrame = a group
+        whose transform composes onto children) is preferred; the flat
+        `elements` list is the fallback for charts with no hierarchy."""
+        from analysis.player.render.storyboard import Storyboard
+        compiled = self._compiled_modfile(replay) or {}
+        elements = compiled.get('tree') or compiled.get('elements')
+        if not elements:
+            return None
+        return Storyboard(design_w=640.0, design_h=480.0, fit='height',
+                          elements=tuple(elements))
+
     # --- library scan -----------------------------------------------------
     _STEPSTYPE_KEYCOUNT = {
         'dance-single': 4, 'dance-solo': 6, 'dance-double': 8,

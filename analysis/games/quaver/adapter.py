@@ -18,6 +18,12 @@ class QuaverAdapter(GameAdapter):
     name = 'quaver'
 
     def parse_replay(self, path, chart_path=None):
+        # Unplayed-charts entries carry the `.qua` chart itself as their
+        # replay_path; synthesize a perfect autoplay instead of decoding
+        # a `.qr`. Everything downstream sees the same replay dict shape.
+        if str(path).lower().endswith('.qua'):
+            from analysis.games.quaver.parse import autoplay_replay
+            return autoplay_replay(path)
         from analysis.games.quaver.parse import parse_replay
         return parse_replay(path, qua_path=chart_path,
                             songs_dir=_quaver_songs_dir())
@@ -153,6 +159,7 @@ class QuaverAdapter(GameAdapter):
         _CHART_INDEX_CACHE.clear()
         paths = _qr_paths()
         entries = _parse_qr_batch(paths, progress=progress)
+        entries += _unplayed_entries(entries, progress=progress)
         # Persist only when we found something so the next click retries
         # cleanly when the install folder isn't configured yet.
         if entries:
@@ -165,15 +172,17 @@ class QuaverAdapter(GameAdapter):
             return self.rebuild(progress=progress)
 
         known = {e['replay_path']: e for e in cached}
-        all_paths = _qr_paths()
-        new_paths = [p for p in all_paths if str(p) not in known]
-        if not new_paths:
+        new_paths = [p for p in _qr_paths() if str(p) not in known]
+        # Nothing new and the unplayed set is already materialized: the
+        # cache is current. Skip re-deriving so the common launch path
+        # never re-loads the chart index.
+        if not new_paths and any(e.get('unplayed') for e in cached):
             return cached
 
-        if progress:
+        if new_paths and progress:
             progress(f'quaver: {len(new_paths)} new replay(s)…')
-        new_entries = _parse_qr_batch(new_paths, progress=progress)
-        merged = cached + new_entries
+        new_plays = _parse_qr_batch(new_paths, progress=progress)
+        merged = _remerge_unplayed(cached, new_plays, progress=progress)
         _LIBRARY_CACHE.save(merged)
         return merged
 
@@ -333,6 +342,63 @@ def _parse_qr_batch(paths, progress=None):
             if progress and i % 200 == 0:
                 progress(f'quaver: parsed {i}/{len(paths)} replays…')
     return out
+
+
+def _remerge_unplayed(cached, new_plays, progress=None):
+    """Played entries (cached + freshly parsed) followed by a freshly
+    derived unplayed set. New plays can retire a chart from the unplayed
+    set, and a cache predating this feature has no unplayed entries yet,
+    so the set is always re-derived rather than carried forward."""
+    played = [e for e in cached if not e.get('unplayed')] + new_plays
+    return played + _unplayed_entries(played, progress=progress)
+
+
+def _unplayed_entries(played, progress=None):
+    """One chart-only entry per `.qua` with no score in `played`.
+
+    A cheap post-pass: it reads the chart-hash index the replay scan
+    already built (no extra hashing) and skips every chart whose md5
+    appears on a played replay. The entry's `replay_path` is the `.qua`
+    itself, which `QuaverAdapter.parse_replay` recognizes and turns into
+    a perfect autoplay - so the rest of the pipeline never special-cases
+    it. Every Quaver chart is mania; score-ish fields zeroed."""
+    index = _CHART_INDEX_CACHE.load() or {}
+    if not index:
+        return []
+    played_hashes = {e.get('beatmap_hash') for e in played
+                     if e.get('beatmap_hash')}
+    if progress:
+        progress('quaver: collecting unplayed charts…')
+    return [_unplayed_entry(path_str, md5, mtime, meta)
+            for path_str, (mtime, _size, md5, meta) in index.items()
+            if _is_unplayed(md5, meta, played_hashes)]
+
+
+def _is_unplayed(md5, meta, played_hashes):
+    return bool(md5) and md5 not in played_hashes and meta is not None
+
+
+def _unplayed_entry(path_str, md5, mtime, meta):
+    return {
+        'game': 'quaver',
+        'unplayed': True,
+        'replay_path': path_str,
+        'beatmap_hash': md5,
+        'chart_path': path_str,
+        'song': meta['song'],
+        'pack': meta.get('creator', ''),
+        'steps': meta.get('steps', ''),
+        'keycount': meta.get('keycount'),
+        'rate': 1.0,
+        'mods': 0,
+        'wife': 0.0,
+        'grade': '',
+        'judgments': {},
+        'datetime': '',
+        'mtime': mtime,
+        'ssrs': {},
+        'maxcombo': 0,
+    }
 
 
 def _build_chart_hash_lookup(progress=None):

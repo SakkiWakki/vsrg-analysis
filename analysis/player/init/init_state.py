@@ -117,10 +117,17 @@ class PlayerInitState:
 
     def init_palette(self):
         p = self.p
-        p.palette = [
-            tuple(int(c[i:i + 2], 16) for i in (1, 3, 5))
-            for c in col_colors(p.keycount)
-        ]
+        p._note_palette = p._adapter.note_palette(p.replay)
+        if p._note_palette is not None:
+            # Game-themed per-column colors (fluXis accent trio). `p.palette`
+            # holds the current colors; when the palette animates it gets
+            # re-sampled + quantized per frame by PaletteFadeEffect.
+            p.palette = list(p._note_palette.static_colors())
+        else:
+            p.palette = [
+                tuple(int(c[i:i + 2], 16) for i in (1, 3, 5))
+                for c in col_colors(p.keycount)
+            ]
 
     def init_notes_model(self, replay):
         from analysis.player.init.notes_model import build_notes_model, link_miss_holds

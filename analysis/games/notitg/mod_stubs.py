@@ -48,9 +48,24 @@ end
 -- chained `a:linear(1):x(0)` keeps working. `id` ties it to a Python
 -- RecordingActor; the table is what an InitCommand self-assigns to a
 -- global, so later closures poking that global hit the same recorder.
+--
+-- Getters (`a:GetX()`, `a:getrotation()`, `AFT:GetTexture()`) route to
+-- __actor_get, which returns the recorder's current value(s) so driver
+-- closures can read one actor to drive another (`b:zoomx(a:GetX())`)
+-- without faulting on a table. __actor_get hands back the permissive
+-- sentinel for getters we do not model (`GetChild()` etc.), so those
+-- chains keep working as before.
+local __GETTER = {
+    GetX=true, GetY=true, GetZ=true, GetZoom=true, GetZoomX=true,
+    GetZoomY=true, GetRotationX=true, GetRotationY=true,
+    GetRotationZ=true, GetTexture=true, getrotation=true,
+}
 function __make_recorder(id)
     local t = {__recorder_id = id}
     setmetatable(t, {__index = function(_, key)
+        if __GETTER[key] then
+            return function(_self, ...) return __actor_get(id, key) end
+        end
         return function(_self, ...)
             __actor_poke(id, key, ...)
             return t
@@ -147,6 +162,20 @@ class StubEnvironment:
         if recorder is not None and isinstance(verb, str):
             recorder.poke(verb, list(args))
 
+    def _actor_get(self, rec_id, verb=None):
+        """Return a recorder getter's value for a driver closure. Falls
+        back to the permissive sentinel for getters the recorder does not
+        model (e.g. `GetChild`), so those chained reads keep degrading to
+        no-ops instead of returning a stray number."""
+        recorder = self._recorders.get(_to_int(rec_id))
+        if recorder is not None and isinstance(verb, str):
+            if verb == 'getrotation':
+                return recorder.getrotation()
+            value = recorder.read(verb)
+            if value is not None:
+                return value
+        return self._host.env['__permissive']()
+
     def named_actor_keyframes(self) -> dict:
         """global name -> {property: [Keyframe]} for every actor a chunk
         self-assigned to a Lua global (the closures' poke targets). Only
@@ -161,6 +190,20 @@ class StubEnvironment:
             keyframes = recorder.keyframes()
             if keyframes:
                 out[name] = keyframes
+        return out
+
+    def named_actor_meta(self) -> dict:
+        """global name -> {'aft_source': str|None, 'is_aft': bool} for
+        every recorder-bound global, whether or not it recorded any
+        pokes. The field producer reads `aft_source` to pick out the
+        AFT-screen-copy sprites (they draw the captured playfield) from
+        ordinary named actors."""
+        out = {}
+        for name in self._recorder_global_names():
+            recorder = self._recorder_for_table(self._host.env[name])
+            if recorder is not None:
+                out[name] = {'aft_source': recorder.aft_source,
+                             'is_aft': recorder.is_aft}
         return out
 
     def _recorder_global_names(self):
@@ -297,6 +340,7 @@ class StubEnvironment:
         host.run('_G.self = __permissive()', name='self-stub')
 
         host.expose('__actor_poke', self._actor_poke)
+        host.expose('__actor_get', self._actor_get)
         host.expose('Trace', lambda *_a: None)
         host.expose('print', lambda *_a: None)
 

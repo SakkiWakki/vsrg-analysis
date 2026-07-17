@@ -141,11 +141,16 @@ class NotitgAdapter(EtternaAdapter):
         return events or None
 
     def effects(self, replay):
+        from analysis.games.notitg.field_instances import NotitgFieldInstances
         from analysis.games.notitg.shader_bridge import notitg_shader_effects
         compiled = self._compiled_modfile(replay)
         if not compiled:
             return []
-        return notitg_shader_effects(compiled.get('shader_flags'))
+        effects = list(notitg_shader_effects(compiled.get('shader_flags')))
+        field_copies = compiled.get('field_copies')
+        if field_copies:
+            effects.append(NotitgFieldInstances(field_copies))
+        return effects
 
     def storyboard(self, replay):
         """Modfile actors (prank overlays, quads, text, ActorFrame

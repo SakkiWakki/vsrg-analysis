@@ -169,7 +169,7 @@ def test_composite_concatenates_shader_passes_in_effect_order():
 
 def test_fluxis_adapter_effects_include_shader_stack():
     from analysis.games.fluxis.adapter import FluxisAdapter
-    replay = {'_fluxis_effect_streams': {
+    replay = {'keycount': 4, '_fluxis_effect_streams': {
         'shader': [_event('Bloom', 0, end={'strength': 1.0})]}}
     effects = FluxisAdapter().effects(replay)
     assert any(isinstance(e, ShaderStackEffect) for e in effects)
@@ -177,13 +177,20 @@ def test_fluxis_adapter_effects_include_shader_stack():
 
 # ── library contract ---------------------------------------------------
 
-FLUXIS_PORTED = ('chromatic', 'fisheye', 'glitch', 'greyscale', 'hueshift',
-                 'invert', 'mosaic', 'noise', 'reflections', 'retro',
-                 'splitscreen', 'vignette')
+FLUXIS_PORTED = ('chromatic', 'fisheye', 'glitch', 'glitch2', 'greyscale',
+                 'hueshift', 'invert', 'mosaic', 'noise', 'reflections',
+                 'retro', 'splitscreen', 'vignette')
+
+# Bloom has no single frag: its stack id fans out to these sub-passes.
+BLOOM_SUBPASSES = ('bloom_blur_h', 'bloom_blur_v', 'bloom_compose')
 
 
 def test_library_lists_ported_fluxis_set():
     assert set(FLUXIS_PORTED) <= set(library.available())
+
+
+def test_library_serves_bloom_subpasses():
+    assert set(BLOOM_SUBPASSES) <= set(library.available())
 
 
 def test_library_sources_follow_uniform_contract():
@@ -372,6 +379,17 @@ def test_uniform_floats_coercions():
     assert _uniform_floats((1.0, 2, 3, 4, 5)) is None  # unsupported width
 
 
+def test_expand_fans_bloom_out_and_passes_others_through():
+    from analysis.player.render.shaders.gl_pipeline import _expand
+    u = {'u_strength': (0.6, 0.0, 0.0)}
+    bloom = list(_expand([('bloom', u)]))
+    assert [name for name, _ in bloom] == ['bloom_blur_h', 'bloom_blur_v',
+                                           'bloom_compose']
+    assert all(sub_u is u for _, sub_u in bloom)   # same uniforms to each
+    passthrough = list(_expand([('invert', u), ('glitch2', u)]))
+    assert [name for name, _ in passthrough] == ['invert', 'glitch2']
+
+
 # ── GL: register a real corpus frag and run it as a pass --------------
 
 def _run_single_pass(pipeline, shader_id, uniforms, w=64, h=64, split=False):
@@ -455,6 +473,42 @@ def test_gl_u_time_reaches_shader(gl):
         return (c.red(), c.green(), c.blue())
 
     assert sample(0.0) != sample(9.0)
+
+
+def _run_bloom(strength, w=64, h=64, fill=(120, 120, 120)):
+    """Run bloom (blur h/v -> compose) at `strength`, then a strength-0
+    invert (identity) so the compose output lands in a readable ping-pong
+    slot instead of the write-only host FBO. Returns that slot's image."""
+    from PySide6.QtGui import QColor, QPainter
+    from PySide6.QtOpenGL import QOpenGLPaintDevice
+    from analysis.player.render.shaders.gl_pipeline import ShaderGLPipeline
+    pipeline = ShaderGLPipeline()
+    host_device = QOpenGLPaintDevice(w, h)   # keep referenced for the painter
+    host = QPainter(host_device)
+    try:
+        painter = pipeline.begin_capture(host, w, h)
+        assert painter is not None
+        painter.fillRect(0, 0, w, h, QColor(*fill))
+        pipeline.end_capture(
+            (('bloom', {'u_strength': (strength, 0.0, 0.0)}),
+             ('invert', {'u_strength': (0.0, 0.0, 0.0)})),
+            t_now=0.0)
+    finally:
+        host.end()
+    assert not pipeline._broken
+    return pipeline._fbos[1].toImage()
+
+
+def test_gl_bloom_expands_and_composes(gl):
+    # Blur of a solid fill is that fill, so compose = scene + glow*strength:
+    # strength 0 is identity (glow*0), a positive strength brightens.
+    def grey(img):
+        c = img.pixelColor(32, 32)
+        return (c.red(), c.green(), c.blue())
+
+    assert grey(_run_bloom(0.0)) == (120, 120, 120)
+    lit = grey(_run_bloom(0.6))
+    assert all(v > 120 for v in lit), lit
 
 
 @pytest.mark.skipif(not _REAL_FISHEYE_PATH.is_file(),

@@ -47,12 +47,17 @@ _FALLBACK_TWEEN_EASING = 0
 # Setter verb -> storyboard property (or a tuple of properties it feeds,
 # for uniform zoom). 'z'/'rotationx'/'rotationy' have no 2D-storyboard
 # analogue; they still record so an actor's full poke stream is legible,
-# just onto their own synthetic property names.
+# just onto their own synthetic property names. `basezoom` is SM's
+# separate pre-multiplier (the AFT copies set basezoomy(-1) to flip the
+# upside-down capture); it records onto its own property so `zoom` can
+# animate on top without clobbering it (the field producer folds the
+# two).
 _SCALAR_SETTERS = {
     'x': 'x', 'y': 'y', 'z': 'z',
     'zoom': ('scale_x', 'scale_y'), 'zoomx': 'scale_x', 'zoomy': 'scale_y',
     'zoomz': 'scale_z',
-    'basezoomx': 'scale_x', 'basezoomy': 'scale_y',
+    'basezoom': ('base_scale_x', 'base_scale_y'),
+    'basezoomx': 'base_scale_x', 'basezoomy': 'base_scale_y',
     'rotationz': 'rotation', 'rotationx': 'rotation_x',
     'rotationy': 'rotation_y',
     'diffusealpha': 'alpha', 'skewx': 'skew_x', 'skewy': 'skew_y',
@@ -62,9 +67,23 @@ _ADD_SETTERS = {'addx': 'x', 'addy': 'y', 'addz': 'z'}
 _REST = {
     'x': 0.0, 'y': 0.0, 'z': 0.0,
     'scale_x': 1.0, 'scale_y': 1.0, 'scale_z': 1.0,
+    'base_scale_x': 1.0, 'base_scale_y': 1.0,
     'rotation': 0.0, 'rotation_x': 0.0, 'rotation_y': 0.0,
     'alpha': 1.0, 'skew_x': 0.0, 'skew_y': 0.0,
     'color': (1.0, 1.0, 1.0),
+}
+
+# Actor getter verb -> the property whose CURRENT value it returns.
+# Per-frame driver closures read these (`gat_afty2:GetY()`,
+# `gat_aft_target:GetZoom()`) to feed sibling actors, so a getter must
+# hand back a real number for that arithmetic to land as a keyframe
+# instead of faulting on a table. Reads use the last set value (rest
+# when never poked), ignoring in-flight tweens - a load-time snapshot.
+_SCALAR_GETTERS = {
+    'GetX': 'x', 'GetY': 'y', 'GetZ': 'z',
+    'GetZoom': 'scale_x', 'GetZoomX': 'scale_x', 'GetZoomY': 'scale_y',
+    'GetRotationX': 'rotation_x', 'GetRotationY': 'rotation_y',
+    'GetRotationZ': 'rotation',
 }
 
 
@@ -86,6 +105,8 @@ class RecordingActor:
         self._pending_ease = _FALLBACK_TWEEN_EASING
         self._frames: dict = {}
         self._current: dict = {}
+        self._aft_source: str | None = None
+        self._aft_texture_name: str | None = None
 
     def reset_clock(self, clock: float) -> None:
         """Point the local clock at a new poke stream's start time (the
@@ -101,30 +122,108 @@ class RecordingActor:
         poked. Empty when the actor was never touched."""
         return {prop: kfs for prop, kfs in self._frames.items() if kfs}
 
+    @property
+    def aft_source(self) -> str | None:
+        """The ActorFrameTexture name this actor draws, when it is an
+        AFT-screen-copy sprite (it called `SetTexture(AFT:GetTexture())`
+        so its texture is the captured field), else None. The field
+        producer uses this to tell field copies from ordinary sprites."""
+        return self._aft_source
+
+    @property
+    def is_aft(self) -> bool:
+        """True when this actor is itself an ActorFrameTexture render
+        target (it called `SetTextureName(...)`), the source a copy
+        sprite draws - not a copy."""
+        return self._aft_texture_name is not None
+
+    def get(self, prop: str) -> float:
+        """Current value of a scalar property (rest when never set).
+        Reads the last SET target, ignoring any in-flight tween - a
+        load-time snapshot, matching what a driver closure sees when it
+        reads a sibling actor mid-command."""
+        return self._current.get(prop, (_REST.get(prop, 0.0),))[0]
+
     # -- poke dispatch ----------------------------------------------------
 
     def poke(self, verb: str, args: list) -> None:
         arg0 = args[0] if args else None
+        if self._poke_channel(verb, arg0) or self._poke_tween(verb, arg0):
+            return
         match verb:
-            case v if v in _TWEEN_EASING:
-                self._open_tween(_as_float(arg0, 0.0), _TWEEN_EASING[v])
-            case v if v in _SCALAR_SETTERS:
-                self._set_scalar(_SCALAR_SETTERS[v], _as_float(arg0))
-            case v if v in _ADD_SETTERS:
-                self._add_scalar(_ADD_SETTERS[v], _as_float(arg0))
-            case 'sleep':
-                self._sleep(_as_float(arg0, 0.0))
-            case 'finishtweening':
-                self._finish_tweening()
-            case 'stoptweening':
-                self._stop_tweening()
             case 'diffuse':
                 self._diffuse(args)
             case 'hidden':
                 self._visibility(_as_float(arg0, 1.0) != 0.0)
             case 'visible':
                 self._visibility(_as_float(arg0, 1.0) == 0.0)
+            case 'SetTextureName' | 'SetTexture':
+                self._texture(verb, arg0)
             # Any other verb pokes actor state we do not model; ignore it.
+
+    def _poke_channel(self, verb, arg0) -> bool:
+        """Handle the value-carrying verbs - tween opens and scalar/add
+        setters, all keyed by lookup table - returning whether `verb` was
+        one. Split out of `poke` so its match stays flat."""
+        if verb in _TWEEN_EASING:
+            self._open_tween(_as_float(arg0, 0.0), _TWEEN_EASING[verb])
+        elif verb in _SCALAR_SETTERS:
+            self._set_scalar(_SCALAR_SETTERS[verb], _as_float(arg0))
+        elif verb in _ADD_SETTERS:
+            self._add_scalar(_ADD_SETTERS[verb], _as_float(arg0))
+        else:
+            return False
+        return True
+
+    def _poke_tween(self, verb, arg0) -> bool:
+        """The tween-interval control verbs (no channel value), returning
+        whether `verb` was one."""
+        match verb:
+            case 'sleep':
+                self._sleep(_as_float(arg0, 0.0))
+            case 'finishtweening':
+                self._finish_tweening()
+            case 'stoptweening':
+                self._stop_tweening()
+            case _:
+                return False
+        return True
+
+    def read(self, verb: str):
+        """Value for a getter call, or None when `verb` is not a getter
+        we model (the Lua bridge then falls back to the poke path so the
+        chained-table behaviour is preserved for unknown reads).
+
+        `GetTexture` on an AFT returns the 'aft:<name>' marker a copy
+        sprite feeds to its own SetTexture, so the copy learns which
+        capture it draws."""
+        match verb:
+            case v if v in _SCALAR_GETTERS:
+                return self.get(_SCALAR_GETTERS[v])
+            case 'GetTexture' if self._aft_texture_name is not None:
+                return f'aft:{self._aft_texture_name}'
+            case _:
+                return None
+
+    def getrotation(self):
+        """SM's `getrotation()` returns (rx, ry, rz). Copy sprites read
+        the z component (`local x,y,z = a:getrotation()`) to mirror a
+        source's spin, so all three come back as numbers."""
+        return (self.get('rotation_x'), self.get('rotation_y'),
+                self.get('rotation'))
+
+    def _texture(self, verb, arg) -> None:
+        """`SetTextureName('gat_aft')` marks this actor AS an AFT render
+        target; `SetTexture(AFT:GetTexture())` marks it a COPY of one
+        (GetTexture bridges to the 'aft:<name>' marker). Any other
+        texture (a name/path) is an ordinary sprite and leaves both
+        unset."""
+        if not isinstance(arg, str):
+            return
+        if verb == 'SetTextureName':
+            self._aft_texture_name = arg
+        elif arg.startswith('aft:'):
+            self._aft_source = arg[len('aft:'):]
 
     # -- tween interval bookkeeping ---------------------------------------
 

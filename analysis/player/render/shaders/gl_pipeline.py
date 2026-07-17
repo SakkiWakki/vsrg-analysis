@@ -65,6 +65,29 @@ void main(void) { gl_Position = vec4(a_pos, 0.0, 1.0); }
 
 _UNIFORMS = ('u_tex', 'u_resolution', 'u_time', 'u_strength')
 
+# Second sampler for two-input passes (bloom's compose reads the original
+# pre-chain frame alongside the blurred glow). Tracked apart from the
+# required contract so single-input shaders need not declare it; bound to
+# texture unit 1 only when a program actually resolves the location.
+_SECOND_SAMPLER = 'u_tex2'
+_CAPTURE_UNIT = 1
+
+# Multi-pass shaders whose single stack id fans out to several library
+# frags. Bloom mirrors fluXis: separable gaussian blur (horizontal then
+# vertical) into a compose that adds the glow onto the original frame.
+_EXPANSIONS = {
+    'bloom': ('bloom_blur_h', 'bloom_blur_v', 'bloom_compose'),
+}
+
+
+def _expand(passes):
+    """Fan multi-pass shader ids out to their sub-pass frags, carrying the
+    same uniforms to each; single-pass ids pass through unchanged."""
+    for name, uniforms in passes:
+        for sub in _EXPANSIONS.get(name, (name,)):
+            yield sub, uniforms
+
+
 _QUAD = struct.pack('8f', -1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0)
 
 
@@ -114,7 +137,10 @@ def _adapt_dialect(src: str) -> str:
 class ShaderGLPipeline:
     def __init__(self):
         self._programs = {}          # name -> (program, locs) | None
-        self._fbos = [None, None]
+        # Slot 0 is the capture (read-only during passes so two-input
+        # passes can re-read the original frame); slots 1 and 2 ping-pong
+        # the intermediates without ever clobbering the capture.
+        self._fbos = [None, None, None]
         self._size = (0, 0)
         self._vao = None
         self._vbo = None
@@ -140,7 +166,7 @@ class ShaderGLPipeline:
             # New/recreated context (first frame, widget reparented):
             # cached GL objects belong to the old one, start over.
             self._programs = {}
-            self._fbos = [None, None]
+            self._fbos = [None, None, None]
             self._size = (0, 0)
             self._vao = None
             self._vbo = None
@@ -225,7 +251,7 @@ class ShaderGLPipeline:
         if self._size != (pw, ph):
             # Dropping the old FBOs while the context is current lets
             # their GL resources delete cleanly.
-            self._fbos = [None, None]
+            self._fbos = [None, None, None]
             self._size = (pw, ph)
 
         capture = self._ensure_fbo(f, 0)
@@ -243,22 +269,14 @@ class ShaderGLPipeline:
         return painter if painter.isActive() else None
 
     def _run_passes(self, f, passes, t_now) -> bool:
-        """Run the runnable passes over the capture: intermediates
-        ping-pong between the two FBOs, the last pass renders into the
-        host framebuffer. Returns False when nothing was runnable (the
-        capture FBO still holds the frame)."""
-        runnable = []
-        for name, uniforms in passes:
-            entry = self._program(name)
-            if entry is not None:
-                runnable.append((entry, uniforms))
+        """Run the runnable passes over the capture: the capture stays in
+        slot 0 (read-only, so two-input passes can re-read the original
+        frame), intermediates ping-pong between slots 1 and 2, and the
+        last pass renders into the host framebuffer. Returns False when
+        nothing was runnable (the capture FBO still holds the frame)."""
+        runnable = self._prepare_runnable(f, passes)
         if not runnable:
             return False
-
-        # Chaining needs the ping-pong buffer; if it can't be created,
-        # degrade to the last pass alone rather than dropping the frame.
-        if len(runnable) > 1 and self._ensure_fbo(f, 1) is None:
-            runnable = runnable[-1:]
 
         pw, ph = self._size
         f.glDisable(GL_BLEND)
@@ -266,37 +284,77 @@ class ShaderGLPipeline:
         f.glDisable(GL_STENCIL_TEST)
         f.glDisable(GL_SCISSOR_TEST)
         f.glDisable(GL_CULL_FACE)
-        f.glActiveTexture(GL_TEXTURE0)
         self._bind_quad(f)
 
         last = len(runnable) - 1
+        # Slot 0 is the capture (first pass' input); intermediates land in
+        # slots 1 and 2 alternately, leaving slot 0 intact for u_tex2.
         src = 0
-        for i, ((program, locs), uniforms) in enumerate(runnable):
+        dst = 1
+        for i, (entry, uniforms) in enumerate(runnable):
             if i == last:
                 f.glBindFramebuffer(GL_FRAMEBUFFER, self._host_fbo)
             else:
-                self._fbos[1 - src].bind()
-            f.glViewport(0, 0, pw, ph)
-            f.glBindTexture(GL_TEXTURE_2D, self._fbos[src].texture())
-            program.bind()
-            program.setUniformValue(locs['u_tex'], 0)
-            program.setUniformValue(locs['u_resolution'],
-                                    QVector2D(pw, ph))
-            program.setUniformValue(
-                locs['u_strength'],
-                QVector3D(*uniforms.get('u_strength', (0.0, 0.0, 0.0))))
-            # u_time is a scalar float: set it through glUniform1f, not
-            # setUniformValue -- a Python float there binds PySide6's
-            # QColor/int overload and never reaches the uniform (time-
-            # animated shaders like noise/glitch would otherwise freeze).
-            f.glUniform1f(locs['u_time'], float(t_now))
-            _set_custom_uniforms(f, program, uniforms)
-            f.glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
-            program.release()
-            src = 1 - src
+                self._fbos[dst].bind()
+            self._draw_pass(f, entry, uniforms, src, t_now)
+            # Ping-pong between slots 1 and 2 (which sum to 3), never
+            # slot 0: the source just written becomes next input, its
+            # partner becomes the next target.
+            src, dst = dst, 3 - dst
 
         self._vao.release()
         return True
+
+    def _prepare_runnable(self, f, passes):
+        """The `(entry, uniforms)` list to draw: multi-pass ids expanded,
+        unknown/failed shaders dropped, and -- when the ping-pong slots
+        can't be created for a chain -- degraded to the last pass alone
+        rather than dropping the frame."""
+        runnable = [(entry, uniforms)
+                    for name, uniforms in _expand(passes)
+                    if (entry := self._program(name)) is not None]
+        degrade = len(runnable) > 1 and not self._pingpong_ready(f)
+        return runnable[-1:] if degrade else runnable
+
+    def _pingpong_ready(self, f) -> bool:
+        """Both intermediate ping-pong slots exist (slot 0 is the capture)."""
+        return (self._ensure_fbo(f, 1) is not None
+                and self._ensure_fbo(f, 2) is not None)
+
+    def _draw_pass(self, f, entry, uniforms, src, t_now) -> None:
+        """Bind `entry`'s program and its contract uniforms, then draw the
+        fullscreen quad. The target FBO and viewport are set by the caller."""
+        program, locs = entry
+        pw, ph = self._size
+        f.glViewport(0, 0, pw, ph)
+        program.bind()
+        self._bind_pass_textures(f, locs, src)
+        program.setUniformValue(locs['u_tex'], 0)
+        program.setUniformValue(locs['u_resolution'], QVector2D(pw, ph))
+        program.setUniformValue(
+            locs['u_strength'],
+            QVector3D(*uniforms.get('u_strength', (0.0, 0.0, 0.0))))
+        # u_time is a scalar float: set it through glUniform1f, not
+        # setUniformValue -- a Python float there binds PySide6's QColor/int
+        # overload and never reaches the uniform (time-animated shaders like
+        # noise/glitch would otherwise freeze).
+        f.glUniform1f(locs['u_time'], float(t_now))
+        _set_custom_uniforms(f, program, uniforms)
+        f.glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
+        program.release()
+
+    def _bind_pass_textures(self, f, locs, src) -> None:
+        """Bind the pass source (slot `src`) to unit 0, and, when the
+        program declares `u_tex2`, the untouched capture (slot 0) to unit
+        1 so a two-input pass (bloom compose) reads the original frame
+        alongside the chain source. Leaves unit 0 active so the next pass'
+        single-texture default lands correctly."""
+        if locs[_SECOND_SAMPLER] != -1:
+            f.glActiveTexture(GL_TEXTURE0 + _CAPTURE_UNIT)
+            f.glBindTexture(GL_TEXTURE_2D, self._fbos[0].texture())
+            f.glUniform1i(locs[_SECOND_SAMPLER], _CAPTURE_UNIT)
+        f.glActiveTexture(GL_TEXTURE0)
+        f.glBindTexture(GL_TEXTURE_2D, self._fbos[src].texture())
 
     def _bind_quad(self, f):
         if self._vao is not None:
@@ -337,8 +395,9 @@ class ShaderGLPipeline:
                          _adapt_dialect(src)))
             program.bindAttributeLocation('a_pos', 0)
             if built and program.link():
-                entry = (program,
-                         {u: program.uniformLocation(u) for u in _UNIFORMS})
+                locs = {u: program.uniformLocation(u) for u in _UNIFORMS}
+                locs[_SECOND_SAMPLER] = program.uniformLocation(_SECOND_SAMPLER)
+                entry = (program, locs)
             else:
                 print(f'shader {name!r} failed to build: {program.log()}')
 

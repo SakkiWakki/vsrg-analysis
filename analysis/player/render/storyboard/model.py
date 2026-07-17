@@ -20,7 +20,9 @@ Properties and arities:
 `anchor` is a fraction of the design rect (where the element hangs);
 `origin` is a fraction of the element's own size (what point lands on
 the anchor + offset). Kinds: 'sprite', 'frames' (sprite sequence),
-'rect', 'ellipse', 'outline_rect', 'outline_ellipse', 'text', 'group'.
+'rect', 'ellipse', 'outline_rect', 'outline_ellipse', 'text',
+'bitmaptext' (a 'text' whose glyphs come from an SM bitmap-font atlas
+carried in `font`), 'group'.
 
 A 'group' is an ActorFrame: it draws nothing itself but carries its
 own property timelines, and its transform (translate about anchor +
@@ -68,6 +70,7 @@ class Element:
     asset: str | None = None  # absolute file path for 'sprite'
     text: str = ''
     font_px: float = 0.0      # 'text' size in design px
+    font: object = None       # BitmapFont for 'bitmaptext', else None
     additive: bool = False
     flip_h: bool = False
     flip_v: bool = False

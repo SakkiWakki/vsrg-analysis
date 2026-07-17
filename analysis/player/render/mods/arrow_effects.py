@@ -163,6 +163,45 @@ def tornado_x(percent, cols, y_offset, keycount, arrow_size=ARROW_SIZE):
     return (adjusted - real) * percent
 
 
+def reverse_fractions(percents: dict, cols: np.ndarray, keycount: int) -> np.ndarray:
+    """Per-column reverse fraction r_col, ported from OpenITG
+    PlayerOptions::GetReversePercentForColumn (PlayerOptions.cpp:539-562).
+
+    The scroll family is four additive percents whose column membership
+    matches the engine's integer tests exactly:
+      - reverse   : every column.
+      - split     : columns in the RIGHT half (iCol >= N/2, integer div).
+      - alternate : ODD columns (iCol % 2 == 1).
+      - cross     : the MIDDLE half [N/4, N-1-N/4] inclusive.
+    The raw sum is wrapped the engine's way: > 2 folds mod 2, then a value
+    in (1, 2] mirrors back down via SCALE(f, 1,2, 1,0) so r stays in [0, 1]
+    (a note fully reversed twice reads as un-reversed). Returns one r per
+    note aligned with `cols`; `centered` is handled separately (it is a
+    SCROLL_CENTERED shift, not part of the per-column reverse percent).
+
+    Odd keycounts: N/2 and N/4 are integer divisions exactly as in C, so
+    e.g. N=5 -> split covers cols {2,3,4}, cross covers [1, 3]; the middle
+    column of an odd field is whatever those integer bounds include."""
+    reverse = float(percents.get('reverse', 0.0))
+    split = float(percents.get('split', 0.0))
+    alternate = float(percents.get('alternate', 0.0))
+    cross = float(percents.get('cross', 0.0))
+
+    col_i = cols.astype(np.int64)
+    f = np.full(col_i.shape, reverse, dtype=np.float64)
+    f += np.where(col_i >= keycount // 2, split, 0.0)
+    f += np.where((col_i % 2) == 1, alternate, 0.0)
+
+    first_cross = keycount // 4
+    last_cross = keycount - 1 - first_cross
+    in_cross = (col_i >= first_cross) & (col_i <= last_cross)
+    f += np.where(in_cross, cross, 0.0)
+
+    f = np.where(f > 2.0, np.mod(f, 2.0), f)
+    f = np.where(f > 1.0, _scale(f, 1.0, 2.0, 1.0, 0.0), f)
+    return f
+
+
 def _mirror_column_shift(percent, cols, keycount, permutation, arrow_size):
     xoffsets = column_offsets(keycount, arrow_size)
     new_cols = permutation[cols]
@@ -248,6 +287,64 @@ def movex_x(percent, arrow_size=ARROW_SIZE):
     """NotITG movex: 100% = one arrow width along x. `percent` is a
     per-note array (per-column variants handled upstream)."""
     return percent * arrow_size
+
+
+def accel_y_offset(percents: dict, y_offset: np.ndarray,
+                   field_height: float = SCREEN_HEIGHT) -> np.ndarray:
+    """Reshape the pre-mod y_offset per ArrowEffects::GetYOffset's accel
+    section (ArrowEffects.cpp:64-84, 123-135). Returns a NEW y_offset the
+    position pipeline should use in place of the raw one.
+
+    Ported exactly:
+      - BOOST (:64-72): notes bunch far away and accelerate in. fNewY =
+        y * 1.5 / ((y + H/1.2) / H); adjust = boost * (fNewY - y), clamped
+        [-400, 400].
+      - BRAKE (:73-82): notes slow near the receptor. scale = y/H;
+        fNewY = y * scale; adjust = brake * (fNewY - y), clamped [-400, 400].
+      - WAVE (:83-84): adjust += wave * 20 * sin(y / 38).
+      - EXPAND (:123-133): a periodic SCROLL-SPEED multiplier (cos of a
+        wall-clock timer). WALLCLOCK -> we key it to song time via the
+        `_expand_phase` percent the caller injects (radians); multiplier =
+        SCALE(cos(phase), -1,1, 0.75,1.75), applied as
+        SCALE(expand, 0,1, 1, mult) scaling the whole offset.
+
+    Notes past the receptor (y < 0) are returned untouched, matching the
+    engine's early `if (fYOffset < 0) return` before any accel runs.
+
+    DEFERRED: BOOMERANG (:89-98) rewrites y into a parabola with a peak
+    (fPeakYOffsetOut / bIsPastPeakOut) that the engine feeds into culling
+    and alpha-at-peak logic we do not model (our culling reads raw scroll
+    distance); applying only its position parabola without the peak
+    bookkeeping would double-draw arrows past the fold. Deferred until the
+    culling/peak contract exists; documented, not silently dropped."""
+    boost = float(percents.get('boost', 0.0))
+    brake = float(percents.get('brake', 0.0))
+    wave = float(percents.get('wave', 0.0))
+    expand = float(percents.get('expand', 0.0))
+    if not (boost or brake or wave or expand):
+        return y_offset
+
+    y = np.asarray(y_offset, dtype=np.float64)
+    past = y < 0.0
+    adjust = np.zeros_like(y)
+
+    if boost:
+        new_y = y * 1.5 / ((y + field_height / 1.2) / field_height)
+        adjust += np.clip(boost * (new_y - y), -400.0, 400.0)
+    if brake:
+        scale = _scale(y, 0.0, field_height, 0.0, 1.0)
+        new_y = y * scale
+        adjust += np.clip(brake * (new_y - y), -400.0, 400.0)
+    if wave:
+        adjust += wave * 20.0 * np.sin(y / 38.0)
+
+    out = y + adjust
+    if expand:
+        phase = float(percents.get('_expand_phase', 0.0))
+        mult = _scale(np.cos(phase), -1.0, 1.0, 0.75, 1.75)
+        out = out * _scale(expand, 0.0, 1.0, 1.0, mult)
+
+    return np.where(past, y, out)
 
 
 def tipsy_y(percent, cols, t_now, arrow_size=ARROW_SIZE):
@@ -355,8 +452,26 @@ def alpha_from_visible(visible):
 
 def zoom_from_mini(mini_percent):
     """GetZoom / mini (ArrowEffects.cpp:389): 100% mini = half size, 200%
-    = zero. NotITG tiny shares EFFECT_MINI. Returns a scalar zoom."""
+    = zero. Returns a scalar zoom."""
     return 1.0 - mini_percent * 0.5
+
+
+def tiny_zoom(tiny_percent):
+    """NotITG tiny: shrinks arrows WITHOUT changing spacing (docs:
+    "200% will cause the arrows to disappear entirely"). Same 1 - p*0.5
+    curve as mini but applied only to the sprite zoom, never to spacing.
+    In our 2D pipeline mini already contributes zoom-only (spacing is not
+    rescaled here), so the two differ only in that tiny never touches the
+    field transform; both fold into the per-note zoom multiplier."""
+    return 1.0 - tiny_percent * 0.5
+
+
+def receptor_alpha_from_dark(dark_percent):
+    """NotITG dark: hides the RECEPTORS (docs: "Hides the receptors, while
+    keeping the ... flashes when tapping"). It is receptor-only, so it
+    never enters note visibility; the receptor layer multiplies its mark
+    alpha by this. 100% dark = invisible receptors, clamped to [0, 1]."""
+    return float(np.clip(1.0 - dark_percent, 0.0, 1.0))
 
 
 @dataclass(frozen=True)
@@ -432,7 +547,8 @@ def _rotation(percents, note_beats, beat_now, n):
 
 
 def _zoom(percents, y_offset, n):
-    zoom = np.full(n, zoom_from_mini(_get(percents, 'mini')), dtype=np.float64)
+    base = zoom_from_mini(_get(percents, 'mini')) * tiny_zoom(_get(percents, 'tiny'))
+    zoom = np.full(n, base, dtype=np.float64)
     if _get(percents, 'bumpy'):
         zoom = zoom * bumpy_zoom(_get(percents, 'bumpy'), y_offset)
     return zoom

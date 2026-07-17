@@ -131,6 +131,20 @@ class GameAdapter:
         analysis/games/notitg/note_mods.py for the contract."""
         return None
 
+    def note_palette(self, replay):
+        """Per-column note-color timeline for this replay, or None for a
+        static per-column palette (the default `p.palette`). Returns an
+        object with `static_colors() -> [(r,g,b), ...]` and `sample(t) ->
+        [(r,g,b), ...]` (length keycount); `animated` is False when the
+        colors never change so the consumer can skip per-frame work.
+
+        fluXis themes notes from an accent trio and eases those accents
+        via `colorfade` events; see
+        analysis/games/fluxis/note_palette.py. The player seeds
+        `p.palette` from `static_colors()` and, when `animated`, re-samples
+        + re-rasterizes note sprites as the quantized palette changes."""
+        return None
+
     def upscroll(self) -> bool:
         """True when the game's native orientation is receptors-on-top
         (NotITG/ITG). The player mirrors the field vertically via a

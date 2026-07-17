@@ -123,6 +123,7 @@ class FluxisAdapter(GameAdapter):
         from analysis.player.render.effects.shake import ShakeEffect
         from analysis.player.render.shaders import ShaderStackEffect
         from analysis.player.render.effects.camera import CameraEffect
+        from analysis.games.fluxis.palette_effect import PaletteFadeEffect
         streams = replay.get('_fluxis_effect_streams') or {}
         transform = PlayfieldTransformEffect(
             move=streams.get('playfieldmove'),
@@ -141,12 +142,21 @@ class FluxisAdapter(GameAdapter):
         pulse = PulseEffect(streams.get('pulse'))
         flash = FlashEffect(streams.get('flash'))
         shaders = ShaderStackEffect(streams.get('shader'))
-        return [e for e in (transform, camera, beat_pulse, shake, layer_fade,
-                            pulse, flash, shaders) if e]
+        palette = PaletteFadeEffect(self.note_palette(replay))
+        return [e for e in (palette, transform, camera, beat_pulse, shake,
+                            layer_fade, pulse, flash, shaders) if e]
 
     def scroll_multipliers(self, replay):
         streams = replay.get('_fluxis_effect_streams') or {}
         return streams.get('scroll-multiply') or None
+
+    def note_palette(self, replay):
+        from analysis.games.fluxis.note_palette import build_note_palette
+        streams = replay.get('_fluxis_effect_streams') or {}
+        return build_note_palette(
+            replay.get('_fluxis_colors'),
+            int(replay.get('keycount') or 0),
+            streams.get('colorfade'))
 
     def storyboard(self, replay):
         from analysis.games.fluxis.fsb_storyboard import parse_fsb

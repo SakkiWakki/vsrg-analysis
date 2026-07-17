@@ -22,6 +22,33 @@ HO_LANDMINE = 2
 
 DEFAULT_ACCURACY_DIFFICULTY = 8.0
 
+# The four accent slots a map's `colors` object can theme. fluXis maps
+# note columns onto primary/secondary/middle (accent is the UI tint, not
+# a lane color); see analysis/games/fluxis/note_palette.py.
+_COLOR_SLOTS = ('accent', 'primary', 'secondary', 'middle')
+
+
+def _parse_hex_rgb(value):
+    """`#RRGGBB` (or `RRGGBB`) hex string -> `(r, g, b)` 0-255, or None
+    when absent/malformed so the palette can fall back to fluXis's
+    theme defaults."""
+    if not isinstance(value, str):
+        return None
+    h = value.strip().lstrip('#')
+    if len(h) != 6:
+        return None
+    try:
+        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return None
+
+
+def _parse_colors(raw_colors):
+    """Map the `.fsc` `colors` object to `{slot: (r,g,b) | None}` over
+    the four accent slots. Missing slots stay None."""
+    colors = raw_colors if isinstance(raw_colors, dict) else {}
+    return {slot: _parse_hex_rgb(colors.get(slot)) for slot in _COLOR_SLOTS}
+
 
 def _coerce_hitobject(h):
     lane = int(h.get('lane', 0))
@@ -169,4 +196,5 @@ def parse_fsc(fsc_path):
         'lane_switches': lane_switches,
         'ls_v2': bool(raw.get('ls-v2', False)),
         'effect_streams': effect_streams,
+        'colors': _parse_colors(raw.get('colors')),
     }

@@ -52,7 +52,9 @@ from pathlib import Path
 from analysis.games.etterna import sm_chart
 from analysis.games.notitg import xml_actors
 from analysis.games.notitg.mod_stubs import StubEnvironment
+from analysis.games.notitg.paths import find_notitg_dirs
 from analysis.games.notitg.recording_actor import RecordingActor
+from analysis.player.render.storyboard import bitmap_font
 from analysis.player.render.storyboard.model import Element, build_timelines
 
 _DESIGN_W = 640.0
@@ -77,6 +79,52 @@ _MAX_UNSUPPORTED_DESCRIBED = 20
 # broadcasts and index the live actor (`self`); running them at load
 # just faults on nil `self`, so they stay in the deferred tail.
 _LOAD_TIME_ATTRS = frozenset({'InitCommand', 'OnCommand'})
+
+
+def _font_search_dirs(lua_dir) -> list:
+    """Where a BitmapText `File=` font resolves: the chart's own lua dir
+    first (chart-bundled fonts win), then the NotITG theme Fonts dirs
+    (gat's `_eurostile normal`, `Common normal`, ... live there). The
+    install root is derived from the chart's own path (its `Songs`
+    ancestor) so the compile is self-contained, then the runtime path
+    override backfills if the chart sits outside a `Songs` tree."""
+    dirs = [str(lua_dir)]
+    for theme_fonts in _theme_font_dirs(_install_root(lua_dir)):
+        dirs.append(str(theme_fonts))
+    return dirs
+
+
+def _install_root(lua_dir):
+    for parent in Path(lua_dir).parents:
+        if parent.name == 'Songs':
+            return parent.parent
+    return find_notitg_dirs().get('root')
+
+
+def _theme_font_dirs(root):
+    if not root:
+        return
+    themes = Path(root) / 'Themes'
+    if themes.is_dir():
+        for theme in themes.iterdir():
+            if (theme / 'Fonts').is_dir():
+                yield theme / 'Fonts'
+
+
+def _font_resolver(lua_dir):
+    """A cached `reference -> BitmapFont | None` resolver over the font
+    search dirs. Cached so a chart with many BitmapText actors sharing
+    one font parses the .ini once."""
+    search_dirs = _font_search_dirs(lua_dir)
+    cache: dict = {}
+
+    def resolve(reference):
+        if not reference:
+            return None
+        if reference not in cache:
+            cache[reference] = bitmap_font.load_font(reference, search_dirs)
+        return cache[reference]
+    return resolve
 
 
 def parse_fgchanges(sm_path) -> list:
@@ -321,12 +369,16 @@ def _compile_elements(classic_commands, to_seconds, start_beat,
     return elements
 
 
-def compile_element_tree(root, to_seconds, start_beat, named_keyframes=None):
+def compile_element_tree(root, to_seconds, start_beat, named_keyframes=None,
+                         fonts=None):
     """HIERARCHICAL compile: the actor tree becomes a tree of storyboard
     Elements. An ActorFrame with drawable descendants becomes a 'group'
     whose transform composes onto its children; a Sprite/Quad/BitmapText
     becomes a leaf. Each actor's timeline merges its XML command-string
     keyframes with the pokes recorded onto the global it self-assigned.
+
+    `fonts` resolves a BitmapText actor's `File=` to a parsed SM font
+    (bitmaptext elements); None falls back to system-font text.
 
     Empty subtrees (frames with no drawable descendants and no own
     animation) are pruned, so a chart with no real hierarchy collapses
@@ -335,16 +387,16 @@ def compile_element_tree(root, to_seconds, start_beat, named_keyframes=None):
     named_keyframes = named_keyframes or {}
     children = []
     for child in root.children:
-        element = _compile_actor(child, start_time, named_keyframes)
+        element = _compile_actor(child, start_time, named_keyframes, fonts)
         if element is not None:
             children.append(element)
     return children
 
 
-def _compile_actor(actor, start_time, named_keyframes):
+def _compile_actor(actor, start_time, named_keyframes, fonts):
     child_elements = []
     for child in actor.children:
-        element = _compile_actor(child, start_time, named_keyframes)
+        element = _compile_actor(child, start_time, named_keyframes, fonts)
         if element is not None:
             child_elements.append(element)
 
@@ -353,7 +405,7 @@ def _compile_actor(actor, start_time, named_keyframes):
         return _group_element(actor, start_time, keyframes,
                               tuple(child_elements))
     return _leaf_element(actor, start_time, named_keyframes,
-                         precomputed=keyframes)
+                         precomputed=keyframes, fonts=fonts)
 
 
 def _merged_keyframes(actor, start_time, named_keyframes):
@@ -385,8 +437,11 @@ def _group_element(actor, start_time, keyframes, children):
     )
 
 
-def _leaf_element(actor, start_time, named_keyframes, precomputed=None):
-    kind = _element_kind(actor.kind)
+def _leaf_element(actor, start_time, named_keyframes, precomputed=None,
+                  fonts=None):
+    text = actor.attrs.get('Text', '')
+    font = _resolve_font(actor, fonts)
+    kind = _element_kind(actor.kind, has_text=bool(text), font=font)
     if kind is None:
         return None
 
@@ -396,16 +451,27 @@ def _leaf_element(actor, start_time, named_keyframes, precomputed=None):
     if not any(drawable.values()):
         return None
 
-    text = actor.attrs.get('Text', '')
-    asset = actor.attrs.get('Texture') or actor.attrs.get('File')
+    asset = None if font is not None else (
+        actor.attrs.get('Texture') or actor.attrs.get('File'))
     return Element(
         kind=kind, z=0, z_index=0,
         t_start=start_time, t_end=float('inf'),
         anchor=(0.5, 0.5), origin=(0.5, 0.5),
         timelines=build_timelines(keyframes=drawable),
         asset=str(asset) if asset else None,
-        text=str(text),
+        text=str(text), font=font,
     )
+
+
+def _resolve_font(actor, fonts):
+    """The parsed SM bitmap font a text actor draws with, or None. A
+    `File=` that resolves to a font .ini marks a BitmapText (gat's
+    `<LAER File="_eurostile normal" Text=...>`); a Texture= sprite or an
+    unresolvable name stays a plain sprite/text."""
+    if fonts is None or actor.attrs.get('Texture'):
+        return None
+    reference = actor.attrs.get('Font') or actor.attrs.get('File')
+    return fonts(reference) if reference else None
 
 
 # Storyboard properties the renderer samples. The recorder also captures
@@ -421,8 +487,10 @@ def _drawable_props(keyframes):
             if prop in _DRAWABLE_PROPS and frames}
 
 
-def _element_kind(actor_kind: str):
-    if actor_kind in _TEXT_KINDS:
+def _element_kind(actor_kind: str, has_text=False, font=None):
+    if font is not None:
+        return 'bitmaptext'
+    if actor_kind in _TEXT_KINDS or has_text:
         return 'text'
     if actor_kind in _SPRITE_KINDS:
         return 'sprite' if actor_kind == 'Sprite' else 'rect'
@@ -460,10 +528,13 @@ def _compile_modfile(sm_path):
     env, chunk_warnings = _run_chunks(lua_chunks, start_beat, to_seconds)
     fired, failed = env.replay_mod_actions()
     named_keyframes = env.named_actor_keyframes()
+    named_meta = env.named_actor_meta()
 
     mod_events = _normalize_mod_events(env, to_seconds)
     mod_events.extend(_normalize_applied_mods(env, to_seconds))
-    tree = compile_element_tree(root, to_seconds, start_beat, named_keyframes)
+    fonts = _font_resolver(lua_dir)
+    tree = compile_element_tree(root, to_seconds, start_beat, named_keyframes,
+                                fonts=fonts)
     return {
         'mod_events': mod_events,
         'shader_flags': _normalize_shader_flags(env, to_seconds),
@@ -471,6 +542,8 @@ def _compile_modfile(sm_path):
         'elements': _compile_elements(classic_commands, to_seconds,
                                       start_beat, named_keyframes),
         'tree': tree,
+        'field_copies': _field_copies(root, named_keyframes, named_meta,
+                                      to_seconds(start_beat)),
         'named_actors': len(named_keyframes),
         'recorded_keyframes': _count_recorded_keyframes(named_keyframes),
         'replay': {'fired': fired, 'failed': failed,
@@ -483,3 +556,70 @@ def _compile_modfile(sm_path):
 def _count_recorded_keyframes(named_keyframes) -> int:
     return sum(len(frames) for props in named_keyframes.values()
                for frames in props.values())
+
+
+# Proxy-actor globals (Proxy(pn) = _G['P<n>p']) re-render a player's
+# whole notefield elsewhere - true field copies, same as an AFT-copy
+# sprite, so they feed the field producer alongside the AFT copies.
+_PROXY_NAMES = frozenset({'P1p', 'P2p', 'P3p', 'P4p'})
+
+# Field-copy transform properties the producer samples. base_scale
+# folds into scale (SM's separate pre-multiplier); rotation is degrees.
+_FIELD_PROPS = ('x', 'y', 'rotation', 'scale_x', 'scale_y',
+                'base_scale_x', 'base_scale_y', 'alpha')
+
+
+def _field_copies(root, named_keyframes, named_meta, start_time) -> list:
+    """Actors that draw a copy of the playfield - AFT-screen copy
+    sprites (`aft_source` set) and Proxy notefield actors - as
+    ready-to-sample transform timelines for the field producer.
+
+    Each entry: {'name', 'source', 'timelines'} where `timelines` is one
+    EventTimeline per _FIELD_PROPS, built from the actor's FULL merged
+    poke stream (InitCommand base position + closure pokes), same as the
+    tree elements - so a copy's base screen-center placement and its
+    relative addx/addy moves resolve together. Ordinary named actors
+    (mod-driver quads, rotators) are excluded: only actors whose texture
+    IS the captured field become field instances."""
+    copies = []
+    for actor in _iter_actors(root):
+        name = _bound_global_name(actor)
+        source = _field_source(name, named_meta)
+        if source is None:
+            continue
+        keyframes = _merged_keyframes(actor, start_time, named_keyframes)
+        field_keyframes = {prop: keyframes[prop] for prop in _FIELD_PROPS
+                           if keyframes.get(prop)}
+        if not field_keyframes:
+            continue
+        copies.append({
+            'name': name, 'source': source,
+            'timelines': build_timelines(rests=_FIELD_RESTS,
+                                         keyframes=field_keyframes),
+        })
+    return copies
+
+
+def _field_source(name, named_meta):
+    """The playfield capture a named actor draws, or None. AFT-copy
+    sprites carry it in their recorder meta; Proxy actors ARE their own
+    source (they re-render a player's notefield directly)."""
+    if not name:
+        return None
+    aft_source = named_meta.get(name, {}).get('aft_source')
+    if aft_source:
+        return aft_source
+    return name if name in _PROXY_NAMES else None
+
+
+def _iter_actors(actor):
+    yield actor
+    for child in actor.children:
+        yield from _iter_actors(child)
+
+
+_FIELD_RESTS = {
+    'x': 0.0, 'y': 0.0, 'rotation': 0.0,
+    'scale_x': 1.0, 'scale_y': 1.0,
+    'base_scale_x': 1.0, 'base_scale_y': 1.0, 'alpha': 1.0,
+}

@@ -22,6 +22,7 @@ _META_KEYS = {
     'Creator': ('creator', str),
     'Version': ('version', str),
     'AudioFilename': ('audio', str),
+    'Mode': ('mode', _set_int),
     'CircleSize': ('keycount', _set_int),
     'OverallDifficulty': ('od', _set_float),
 }
@@ -52,8 +53,9 @@ def parse_osu_file(osu_path):
     """Parse a `.osu` file. Return metadata + hitobjects + sv_sections
     (list of `(time_sec, sv_multiplier)` from [TimingPoints])."""
     meta = {'title': '', 'artist': '', 'creator': '', 'version': '',
-            'audio': '', 'background': '', 'keycount': None, 'hitobjects': [],
-            'timing_points': [], 'sv_sections': [], 'od': 8.0}
+            'audio': '', 'background': '', 'mode': 0, 'keycount': None,
+            'hitobjects': [], 'timing_points': [], 'sv_sections': [],
+            'od': 8.0}
     section = None
     with open(osu_path, encoding='utf-8', errors='replace') as f:
         for raw in f:

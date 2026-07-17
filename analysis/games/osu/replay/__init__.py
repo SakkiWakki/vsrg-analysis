@@ -11,11 +11,12 @@ from analysis.games.osu.replay.osr import (parse_osr_events, rate_for_mods,
 from analysis.games.osu.replay.judge import (stable_hit_windows,
                                               simulate_mania,
                                               TAIL_RELEASE_LENIENCE)
-from analysis.games.osu.replay.parse import parse_replay
+from analysis.games.osu.replay.parse import parse_replay, autoplay_replay
 from analysis.games.osu.replay.paths import find_osu_dirs, list_osu_profiles
 
 __all__ = [
     'parse_replay',
+    'autoplay_replay',
     'parse_osu_file',
     'parse_osr_events',
     'find_osu_dirs',

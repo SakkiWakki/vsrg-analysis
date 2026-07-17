@@ -74,6 +74,7 @@ def parse_replay(frp_path, fsc_path, rate=1.0):
         '_fluxis_lane_mask': build_lane_mask_timeline(
             chart['lane_switches'], keycount, v2=chart['ls_v2']),
         '_fluxis_effect_streams': chart['effect_streams'],
+        '_fluxis_colors': chart['colors'],
         '_fluxis_timing_points': chart['timing_points'],
         '_fluxis_hitobjects': chart['hitobjects'],
         '_fluxis_scroll_velocities': chart['scroll_velocities'],
