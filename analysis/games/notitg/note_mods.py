@@ -103,13 +103,38 @@ class NotitgNoteMods:
         self._segments = segments or [(0.0, 0.0, 2.0)]
 
     def _beat_at(self, t: float) -> float:
+        t0, beat0, bps = self._segment_at(t)
+        return beat0 + max(0.0, t - t0) * bps
+
+    def _segment_at(self, t: float) -> tuple:
         lo = self._segments[0]
         for seg in self._segments:
             if seg[0] > t:
                 break
             lo = seg
-        t0, beat0, bps = lo
-        return beat0 + max(0.0, t - t0) * bps
+        return lo
+
+    def _px_per_engine(self, ctx, t: float, fallback: float) -> float:
+        """Screen px per engine y_offset px at `t`. The engine maps
+        offsets from beats (y_off = beat_diff * 64 * xmod), our display
+        maps from time and the effective scroll rate; kernels must see
+        ENGINE offsets so mod geometry (waveform wavelengths, accel
+        shapes) is chart-faithful and invariant to the user's scroll
+        setting. ctx.scroll_speed already contains the chart multiplier
+        (effective_scroll_speed), so the ratio is speed / (64*bps*xmod).
+        Falls back to the sprite scale when the context carries no
+        scroll rate (narrow test ctxs) or the rate degenerates
+        (xmod ~ 0 pause sections)."""
+        pps = getattr(ctx, 'scroll_speed', None)
+        if not pps or pps <= 0.0:
+            return fallback
+        _t0, _b0, bps = self._segment_at(t)
+        timeline = getattr(ctx.player, '_scroll_mult_timeline', None)
+        mult = timeline.sample(t)[0] if timeline is not None else 1.0
+        engine_rate = ARROW_SIZE * bps * mult
+        if engine_rate <= 1e-6:
+            return fallback
+        return pps / engine_rate
 
     def apply(self, ctx) -> None:
         t = float(ctx.t_now)
@@ -118,12 +143,13 @@ class NotitgNoteMods:
         judge_y = float(ctx.judge_y)
 
         if ctx.candidates:
-            self._apply_to_notes(ctx, percents, scale, judge_y, t)
+            ppe = self._px_per_engine(ctx, t, scale)
+            self._apply_to_notes(ctx, percents, scale, ppe, judge_y, t)
         # Receptors carry the scroll orientation even on empty frames.
         ctx.receptor_offsets = self._receptor_offsets(
             ctx, percents, ctx.player.keycount, scale, t, judge_y)
 
-    def _apply_to_notes(self, ctx, percents, scale, judge_y, t) -> None:
+    def _apply_to_notes(self, ctx, percents, scale, ppe, judge_y, t) -> None:
         p = ctx.player
         idx = np.asarray(ctx.candidates, dtype=np.int64)
         cols = np.asarray(p.columns[idx], dtype=np.int64)
@@ -133,15 +159,16 @@ class NotitgNoteMods:
         # y_offset -> position mapping BEFORE any dy contribution. Each of
         # head/tail/press is a position on the same scroll axis, so all
         # three are remapped by the same function; positions rebuild as
-        # y = judge_y - y_offset' * scale (native downscroll space).
+        # y = judge_y - y_offset' * ppe (native downscroll space; `ppe`
+        # converts ENGINE offset px to screen px, see _px_per_engine).
         offs = None
         if active:
-            head_off = self._remap_accel(percents, ctx.candidate_head_y, judge_y, scale)
-            tail_off = self._remap_accel(percents, ctx.candidate_tail_y, judge_y, scale)
-            press_off = self._remap_accel(percents, ctx.candidate_press_y, judge_y, scale)
-            ctx.candidate_head_y = judge_y - head_off * scale
-            ctx.candidate_tail_y = judge_y - tail_off * scale
-            ctx.candidate_press_y = judge_y - press_off * scale
+            head_off = self._remap_accel(percents, ctx.candidate_head_y, judge_y, ppe)
+            tail_off = self._remap_accel(percents, ctx.candidate_tail_y, judge_y, ppe)
+            press_off = self._remap_accel(percents, ctx.candidate_press_y, judge_y, ppe)
+            ctx.candidate_head_y = judge_y - head_off * ppe
+            ctx.candidate_tail_y = judge_y - tail_off * ppe
+            ctx.candidate_press_y = judge_y - press_off * ppe
 
             note_beats = (np.asarray(p.notes.noterows_list,
                                      dtype=np.float64)[idx] / 48.0)
@@ -170,10 +197,10 @@ class NotitgNoteMods:
         ctx.candidate_zoom = offs.zoom
 
         self._stash_hold_body_samples(ctx, percents, cols, idx, head_off,
-                                      tail_off, scale, t)
+                                      tail_off, scale, ppe, t)
 
     def _stash_hold_body_samples(self, ctx, percents, cols, idx, head_off,
-                                 tail_off, scale, t) -> None:
+                                 tail_off, scale, ppe, t) -> None:
         """Sample each visible hold's body so the notes layer can draw it
         as a polyline that BENDS under the per-note x/y mods, instead of a
         straight head-to-tail rect (drunk/wave/digital etc. displace every
@@ -209,7 +236,7 @@ class NotitgNoteMods:
         window = (ry - h * _BODY_WINDOW_PAD, ry + h * (1.0 + _BODY_WINDOW_PAD))
         segments = self._build_body_segments(
             np.nonzero(is_ln)[0], cols, head_off, tail_off, head_y, tail_y,
-            note_beats, scale, window)
+            note_beats, ppe, window)
         if not segments['holds']:
             return
 
@@ -233,7 +260,7 @@ class NotitgNoteMods:
             ctx.hold_body_samples = samples
 
     def _build_body_segments(self, ln_positions, cols, head_off, tail_off,
-                             head_y, tail_y, note_beats, scale,
+                             head_y, tail_y, note_beats, ppe,
                              window) -> dict:
         """Subdivide each hold's body into y samples and pack them into the
         flat arrays one batched `note_offsets` call consumes. Returns the
@@ -259,7 +286,7 @@ class NotitgNoteMods:
                 continue
             f0, f1 = span
             count = self._body_sample_count(
-                abs(tail_y[pos] - head_y[pos]) * (f1 - f0), scale)
+                abs(tail_y[pos] - head_y[pos]) * (f1 - f0), ppe)
             frac = np.linspace(f0, f1, count)
             # Box filter: each body point is the mean of _BODY_BOX_FILTER
             # sub-positions spread across its sample cell, so waveform
@@ -305,11 +332,12 @@ class NotitgNoteMods:
             return None
         return f0, f1
 
-    def _body_sample_count(self, visible_span_px, scale) -> int:
+    def _body_sample_count(self, visible_span_px, ppe) -> int:
         """Samples for the VISIBLE part of a hold's body, at
-        `_BODY_SAMPLE_SPACING` engine px, clamped per hold. At least 2
-        (the span endpoints) so every polyline is valid."""
-        spacing = _BODY_SAMPLE_SPACING * scale
+        `_BODY_SAMPLE_SPACING` engine px (converted to screen px by
+        `ppe`), clamped per hold. At least 2 (the span endpoints) so
+        every polyline is valid."""
+        spacing = _BODY_SAMPLE_SPACING * ppe
         return int(np.clip(round(float(visible_span_px) / spacing) + 1,
                            2, _MAX_BODY_SAMPLES))
 
