@@ -377,7 +377,12 @@ def _draw_ln(ctx, painter, n):
         _draw_ln_tail_sprite(ctx, painter, n)
 
     # ── release guide ──
-    if n.rel_off is not None and n.state not in ('released', 'missed'):
+    # Straight-lane analyzer UI: on a curved body the vertical stroke
+    # would slash across the noodle (it assumes the lane is the path).
+    # Skipped until the guide learns to follow the path; the tail cap
+    # still marks the release end.
+    if (n.rel_off is not None and n.body_path is None
+            and n.state not in ('released', 'missed')):
         rel_y = ctx.time_to_y(float(n.release_t))
         _draw_stroke_with_tick(ctx, painter, n.jcolor,
                                 n.lx, n.y_end, rel_y, n.col)
