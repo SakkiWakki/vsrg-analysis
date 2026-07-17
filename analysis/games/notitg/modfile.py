@@ -967,10 +967,14 @@ def _proxy_grid_copies(proxy_grid) -> list:
         return []
     parent = _timelines_for(proxy_grid.get('parent'), _FIELD_RESTS)
     offset = _timelines_for(proxy_grid.get('parent_offset'), _FIELD_RESTS)
+    spans = proxy_grid.get('spans') or ()
     copies = []
     for index, frame in enumerate(proxy_grid.get('frames') or []):
         copy = _proxy_grid_copy(frame, parent, offset, index)
         if copy is not None:
+            if spans:
+                copy['timelines']['hidden'] = _SpanGatedTimeline(
+                    copy['timelines']['hidden'], spans)
             copies.append(copy)
     return copies
 
@@ -996,6 +1000,30 @@ def _proxy_grid_copy(frame, parent, offset, index):
 
 def _timelines_for(keyframes, rests):
     return build_timelines(rests=rests, keyframes=keyframes or {})
+
+
+# Grace beyond a driven span before a copy stops rendering: one-ish
+# integration tick, so the last tick's placement still draws.
+_DRIVEN_SPAN_MARGIN = 0.1
+
+
+class _SpanGatedTimeline:
+    """Visibility gate for per-frame-driven copies: inside a span in which
+    the integrator actually poked the driver, defer to the recorded hidden
+    channel; outside every span the copy is simply not rendered (samples
+    hidden=1). A per-frame-driven visual has no compiled definition beyond
+    its driver's lifetime, so the last recorded cull state must not hold
+    forever."""
+
+    def __init__(self, child, spans):
+        self._child = child
+        self._spans = tuple(spans)
+
+    def sample(self, t) -> tuple:
+        for start, end in self._spans:
+            if start - _DRIVEN_SPAN_MARGIN <= t <= end + _DRIVEN_SPAN_MARGIN:
+                return self._child.sample(t)
+        return (1.0,)
 
 
 class _SumTimeline:

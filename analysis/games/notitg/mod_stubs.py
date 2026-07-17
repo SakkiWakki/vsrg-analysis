@@ -528,6 +528,9 @@ class StubEnvironment:
             'parent': parent.keyframes() if parent is not None else {},
             'parent_offset': offset.keyframes() if offset is not None else {},
             'frames': frames,
+            # The accumulator is poked every tick its driver runs, so its
+            # driven spans are the envelope in which the grid exists at all.
+            'spans': parent.driven_spans() if parent is not None else (),
         }
 
     def _proxy_grid_frames(self, table, content, player) -> list:

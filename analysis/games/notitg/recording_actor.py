@@ -50,6 +50,11 @@ _TWEEN_EASING = {
 }
 _FALLBACK_TWEEN_EASING = 0
 
+# Integration pokes closer together than this belong to one driving
+# window; a real gap between perframe sections is seconds long, while
+# in-window ticks are 1/60s apart.
+_DRIVEN_SPAN_GAP = 0.5
+
 # Setter verb -> storyboard property (or a tuple of properties it feeds,
 # for uniform zoom). 'z'/'rotationx'/'rotationy' have no 2D-storyboard
 # analogue; they still record so an actor's full poke stream is legible,
@@ -193,6 +198,7 @@ class RecordingActor:
         self._baseline: dict | None = None
         self._sample_clock: list | None = None
         self._live_props: set = set()
+        self._driven_spans: list = []
 
     def reset_clock(self, clock: float) -> None:
         """Point the local clock at a new poke stream's start time (the
@@ -244,6 +250,20 @@ class RecordingActor:
         self._baseline = None
         self._sample_clock = None
         self._live_props = set()
+
+    def _track_driven(self, t: float) -> None:
+        spans = self._driven_spans
+        if spans and t - spans[-1][1] <= _DRIVEN_SPAN_GAP:
+            spans[-1][1] = max(spans[-1][1], t)
+        elif not spans or t > spans[-1][1]:
+            spans.append([t, t])
+
+    def driven_spans(self) -> tuple:
+        """(start, end) second-spans in which a per-frame integration pass
+        actually poked this actor. A per-frame-driven visual only exists
+        while its driver runs, so consumers gate visibility to these spans
+        instead of letting the last recorded state hold forever."""
+        return tuple((s, e) for s, e in self._driven_spans)
 
     @property
     def aft_source(self) -> str | None:
@@ -409,6 +429,7 @@ class RecordingActor:
         self._current[prop] = values
         if self._baseline is not None:
             self._live_props.add(prop)
+            self._track_driven(self._clock)
 
     def _set_scalar(self, prop, value) -> None:
         if value is None:
