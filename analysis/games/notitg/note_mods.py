@@ -291,7 +291,7 @@ class NotitgNoteMods:
             offs = note_offsets(
                 percents, cols, head_off,
                 t_now=t, beat_now=self._beat_at(t), keycount=p.keycount,
-                note_beats=note_beats)
+                note_beats=note_beats, project_3d=True)
 
         # REVERSE FAMILY (reverse/split/alternate/cross/centered): per
         # column, the receptor slides toward the mirrored judge line by
@@ -312,6 +312,15 @@ class NotitgNoteMods:
         ctx.candidate_alpha = offs.alpha_mult
         ctx.candidate_rot_deg = offs.rotation_deg
         ctx.candidate_zoom = offs.zoom
+        # Per-note 3D: real depth (engine px) + out-of-plane tilt (deg).
+        # The note draw projects the quad through the field camera; when
+        # every note rests flat (z=0, no tilt) the draw keeps its 2D
+        # path. dy/dx already scaled to our pixels; z stays in engine px
+        # (the projection's design space) - the camera divide is scale-
+        # free, so no lane_w conversion.
+        ctx.candidate_z = offs.z
+        ctx.candidate_rot_x = offs.rot_x
+        ctx.candidate_rot_y = offs.rot_y
 
         self._stash_hold_body_samples(ctx, percents, cols, idx, head_off,
                                       tail_off, scale, ppe, t)

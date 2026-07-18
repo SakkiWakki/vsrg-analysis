@@ -1438,3 +1438,50 @@ def test_extreme_mini_does_not_crash():
 def test_center_line_infinite_at_zoom_zero():
     assert not np.isfinite(ae._center_line(2.0))     # zoom 0 -> inf
     assert ae._center_line(0.0) == ae.CENTER_LINE_Y   # no mini -> base
+
+
+def test_note_offsets_2d_path_has_no_z():
+    # Without project_3d the offsets carry no z/tilt (the 2D path folds
+    # depth into zoom) - unchanged legacy behavior.
+    p = {'bumpy': 1.0}
+    r = note_offsets(p, np.array([0, 1]), np.array([100.0, 100.0]),
+                     t_now=0.0, beat_now=4.0, keycount=4)
+    assert r.z is None and r.rot_x is None and r.rot_y is None
+
+
+def test_note_offsets_3d_path_exposes_real_z():
+    # With project_3d, bumpy's +z push is a real per-note z (engine px),
+    # NOT folded into zoom.
+    p = {'bumpy': 1.0}
+    y = np.array([100.0, 200.0])
+    flat = note_offsets(p, np.array([0, 1]), y, t_now=0.0, beat_now=4.0,
+                        keycount=4)
+    proj = note_offsets(p, np.array([0, 1]), y, t_now=0.0, beat_now=4.0,
+                        keycount=4, project_3d=True)
+    assert proj.z is not None and np.any(proj.z != 0.0)
+    # the 2D path folded the same push into zoom; the 3D path did not.
+    assert np.any(flat.zoom != proj.zoom)
+
+
+def test_roll_twirl_become_out_of_plane_tilt():
+    # roll -> rot_x, twirl -> rot_y = effect * yOffset/2 (deg); dropped on
+    # the 2D path (a flat sprite can't tilt).
+    y = np.array([100.0, -80.0])
+    r = note_offsets({'roll': 1.0, 'twirl': 0.5}, np.array([0, 1]), y,
+                     t_now=0.0, beat_now=4.0, keycount=4, project_3d=True)
+    assert np.allclose(r.rot_x, y / 2.0)
+    assert np.allclose(r.rot_y, 0.5 * y / 2.0)
+
+
+def test_projected_z_matches_perspective_scale():
+    # A pure +z note projects to exactly the center-plane d/(d-z) scale
+    # the 2D zoom fake used - the projection is an upgrade, not a
+    # divergence, at the design center.
+    from analysis.player.render.layers import notes as N
+    from analysis.player.render import transform3d as t3d
+    cam = N._note_camera()
+    model = t3d.translate(0.0, 0.0, 100.0)
+    v, H, _ = t3d.project_with_verdict(model, cam, N._NOTE_CORNERS)
+    px = t3d.project_corners(np.array(N._NOTE_CORNERS), H)
+    scale = (px[1][0] - px[0][0]) / (2 * N._NOTE_HALF)
+    assert abs(scale - float(ae.perspective_z_scale(np.array([100.0]))[0])) < 0.01

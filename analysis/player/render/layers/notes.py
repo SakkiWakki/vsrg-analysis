@@ -21,6 +21,7 @@ from PySide6.QtGui import (QBrush, QPainterPath, QPainterPathStroker,
 
 import math
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import TYPE_CHECKING, Callable, NamedTuple
 
 import numpy as np
@@ -33,6 +34,15 @@ from analysis.player.render.primitives import _NO_PEN
 
 if TYPE_CHECKING:
     from analysis.player.render.render_context import RenderContext
+
+
+# Per-note 3D projection corners: a note-sized quad centered at the
+# origin (the note center is conjugated in around it). Only the planar
+# homography + front/behind verdict are read from these, so the exact
+# size just needs to bracket the sprite; ARROW_SIZE (64) is one arrow.
+_NOTE_HALF = 32.0
+_NOTE_CORNERS = ((-_NOTE_HALF, -_NOTE_HALF), (_NOTE_HALF, -_NOTE_HALF),
+                 (_NOTE_HALF, _NOTE_HALF), (-_NOTE_HALF, _NOTE_HALF))
 
 
 # Shared vector constant for LN release-guide + press-mark strokes.
@@ -70,6 +80,14 @@ class _NoteView:
     # spins/scales -- documented in `_draw_view`).
     rotation_deg: float = 0.0
     zoom: float = 1.0
+    # Per-note 3D: depth (engine px, +z toward the camera) and the
+    # out-of-plane tilts roll/twirl (deg). When any is non-rest the head
+    # sprite projects through the field's perspective camera about its
+    # center (real depth scale + tilt) instead of the 2D zoom/rotate
+    # bracket; all-rest keeps the flat path (unmodded notes pay nothing).
+    z: float = 0.0
+    rot_x: float = 0.0
+    rot_y: float = 0.0
     # The hold's body as a path: `(xs, ys)` arrays where `xs` is the
     # per-sample LEFT edge (lane_x + any per-note dx) and `ys` the screen
     # y, running head -> tail. Every LN body is this path; the renderer
@@ -219,6 +237,9 @@ def _build(ctx, i, pos) -> _NoteView | None:
     mod_alpha = getattr(ctx, 'candidate_alpha', None)
     mod_rot = getattr(ctx, 'candidate_rot_deg', None)
     mod_zoom = getattr(ctx, 'candidate_zoom', None)
+    mod_z = getattr(ctx, 'candidate_z', None)
+    mod_rx = getattr(ctx, 'candidate_rot_x', None)
+    mod_ry = getattr(ctx, 'candidate_rot_y', None)
     return _NoteView(
         i=i, col=col,
         y=head_y, y_end=y_end,
@@ -229,6 +250,9 @@ def _build(ctx, i, pos) -> _NoteView | None:
                if mod_alpha is not None else 1.0),
         rotation_deg=float(mod_rot[pos]) if mod_rot is not None else 0.0,
         zoom=float(mod_zoom[pos]) if mod_zoom is not None else 1.0,
+        z=float(mod_z[pos]) if mod_z is not None else 0.0,
+        rot_x=float(mod_rx[pos]) if mod_rx is not None else 0.0,
+        rot_y=float(mod_ry[pos]) if mod_ry is not None else 0.0,
         off=off, press_t=press_t,
         release_t=release_t, rel_off=rel_off, end_t=end_t,
         is_ln=is_ln,
@@ -288,7 +312,8 @@ def _draw_view(ctx, painter, n, draw_fn) -> None:
     -- an accepted simplification (per-note LN-body deformation would
     need the body to be rebuilt in the rotated frame)."""
     faded = n.alpha < 1.0
-    transformed = n.rotation_deg or n.zoom != 1.0
+    is_3d = n.z != 0.0 or n.rot_x != 0.0 or n.rot_y != 0.0
+    transformed = n.rotation_deg or n.zoom != 1.0 or is_3d
     if not faded and not transformed:
         draw_fn(ctx, painter, n)
         return
@@ -300,14 +325,62 @@ def _draw_view(ctx, painter, n, draw_fn) -> None:
         painter.setOpacity(painter.opacity() * n.alpha)
     if transformed:
         cx = n.lx + _lane_width(ctx, n.col) / 2.0
-        painter.translate(cx, float(n.y))
-        if n.rotation_deg:
-            painter.rotate(n.rotation_deg)
-        if n.zoom != 1.0:
-            painter.scale(n.zoom, n.zoom)
-        painter.translate(-cx, -float(n.y))
+        cy = float(n.y)
+        if is_3d:
+            painter.setTransform(_note_projection(ctx, n, cx, cy),
+                                 combine=True)
+        else:
+            painter.translate(cx, cy)
+            if n.rotation_deg:
+                painter.rotate(n.rotation_deg)
+            if n.zoom != 1.0:
+                painter.scale(n.zoom, n.zoom)
+            painter.translate(-cx, -cy)
     draw_fn(ctx, painter, n)
     painter.restore()
+
+
+def _note_projection(ctx, n, cx, cy):
+    """A QTransform projecting the note's head sprite through the field's
+    perspective camera about its center `(cx, cy)`: the in-plane
+    zoom/rotation, then the out-of-plane tilt (roll/twirl) and z depth.
+    General scene projection (any SM-family game's per-note 3D mods),
+    built on the shared transform3d authority.
+
+    Works in a frame centered on the note: the model tilts/pushes the
+    unit plane, the camera (LoadMenuPerspective at the field's eye
+    distance) projects it, and the result is conjugated back to the
+    note's screen position. At the design center a pure +z push yields
+    exactly the `perspective_z_scale` d/(d-z) the 2D fake used, so this
+    is an upgrade (adds off-center parallax + tilt), consistent with the
+    field/receptor cameras. A near-flat note yields ~identity."""
+    from analysis.player.render import transform3d as t3d
+
+    model = (t3d.scale(n.zoom, n.zoom, 1.0)
+             @ t3d.rotate_xyz(n.rot_x, n.rot_y, n.rotation_deg)
+             @ t3d.translate(0.0, 0.0, n.z))
+    verdict, H, _clip = t3d.project_with_verdict(
+        model, _note_camera(), _NOTE_CORNERS)
+    if verdict == 'gone':
+        return QTransform()
+    to_center = QTransform.fromTranslate(-cx, -cy)
+    from_center = QTransform.fromTranslate(cx, cy)
+    return to_center * t3d.qtransform_from_h(H) * from_center
+
+
+@lru_cache(maxsize=1)
+def _note_camera():
+    """The per-note perspective camera: LoadMenuPerspective at the field's
+    fov/eye distance, centered on the origin (the note center is
+    conjugated in), so a note's z push scales by the same d/(d-z) the
+    field and the old zoom-fake used - consistent depth across the
+    scene."""
+    from analysis.player.render import transform3d as t3d
+    from analysis.games.notitg import field_projection
+    # A viewport the design WIDTH wide (the field eye distance depends on
+    # fov + width), so the note z-scale matches perspective_z_scale.
+    return t3d.projection(field_projection.FOV, field_projection.DESIGN_W,
+                          field_projection.DESIGN_W)
 
 
 def _draw_alpha_only(ctx, painter, n, draw_fn) -> None:
