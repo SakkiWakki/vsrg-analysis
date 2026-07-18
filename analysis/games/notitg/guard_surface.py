@@ -163,6 +163,12 @@ class NotitgGuardSurface:
                      if rec_id == self._env._screen_id
                      else self._env._actor_get_child(rec_id, arg))
             return child if child is not None else UNRESOLVED
+        if name == 'GetShader':
+            # `GetShader()` chains the actor's own recorder back (the Lua
+            # metatable returns `self` for this unmodeled verb), so a following
+            # `:uniform1f(name, v)` pokes the frag-owning actor's uniform
+            # channel. Return the recv unchanged to continue the chain.
+            return recv
         value = self._env._actor_get(rec_id, name)
         return UNRESOLVED if value is None else value
 

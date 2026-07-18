@@ -77,6 +77,20 @@ def test_singleton_method_resolves_through_the_surface():
     assert surface.method(gamestate, 'GetSongBeat', []) == 6.0
 
 
+def test_getshader_uniform_chains_onto_the_owning_actor():
+    # `self:GetShader():uniform1f('timer', beat)` - GetShader chains the actor
+    # back, so the uniform poke lands on the frag-owning actor's uniform:timer
+    # channel (the gat2 shader-driver idiom). Compiled must match Lua.
+    body = ("%function(self) if beat >= 2 then "
+            "self:GetShader():uniform1f('timer', beat) end end")
+    lua = _run(body, compiled=False)
+    comp = _run(body, compiled=True)
+    assert diff_runs(lua, comp, sample_grid(0.0, 3.0)) == []
+    # and it actually recorded the uniform (not a no-op parity)
+    rec = _quad_id(comp)
+    assert 'uniform:timer' in comp.actor_keyframes().get(rec, {})
+
+
 def test_screen_getchild_seeds_player_start_position():
     # The top screen's GetChild seeds the player at its engine start X (the
     # Lua metatable path) - not a plain synthetic child at rest.
