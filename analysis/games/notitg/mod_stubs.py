@@ -236,10 +236,22 @@ class StubEnvironment:
         Returns a list of `name: message` warnings from faulting chunks.
         Each actor's recorder is the SAME object its message commands
         poke, so `SetupFUCK` inserting `self` into a pool and a later
-        `fuck_get()` poke land on one timeline."""
+        `fuck_get()` poke land on one timeline.
+
+        Load is TWO-PHASE (the engine's order, and SimEnvironment's): every
+        actor's InitCommand runs across the whole tree first, then every
+        OnCommand. InitCommands define the chart's helper functions and bind
+        its globals (a modhelpers `function mod_message`, a `NAME = self`),
+        so an OnCommand may reference a global a LATER actor's InitCommand
+        binds - the classic forward reference (`m2 = mod_message` aliasing a
+        helper an included file defines). A single Init-then-On-per-actor
+        pass would run an early actor's OnCommand before a later actor's
+        InitCommand and fault on the still-nil global; two phases fix that
+        for every chart, not one."""
         warnings: list = []
         self._register_all_commands(root)
-        self._run_load_commands(root, warnings)
+        self._run_load_phase(root, 'InitCommand', warnings)
+        self._run_load_phase(root, 'OnCommand', warnings)
         return warnings
 
     def _register_all_commands(self, actor) -> None:
@@ -260,18 +272,20 @@ class StubEnvironment:
         for child in actor.children:
             self._register_all_commands(child)
 
-    def _run_load_commands(self, actor, warnings) -> None:
+    def _run_load_phase(self, actor, attr, warnings) -> None:
+        """Run one load-time command (`attr`) for `actor` then, depth-first,
+        every descendant - a whole-tree pass for a single command kind. Two
+        such passes (InitCommand, then OnCommand) give the engine's load
+        order so a forward reference across actors resolves."""
         rec_id = self._recorder_id_for(actor)
-        for attr in ('InitCommand', 'OnCommand'):
-            value = actor.attrs.get(attr, '')
-            if value.startswith('%'):
-                body = _strip_lua_wrapper(value)
-                self._run_body_on(rec_id, body, f'{actor.kind}.{attr}',
-                                  warnings)
-            elif value:
-                self._poke_classic_body(rec_id, value)
+        value = actor.attrs.get(attr, '')
+        if value.startswith('%'):
+            body = _strip_lua_wrapper(value)
+            self._run_body_on(rec_id, body, f'{actor.kind}.{attr}', warnings)
+        elif value:
+            self._poke_classic_body(rec_id, value)
         for child in actor.children:
-            self._run_load_commands(child, warnings)
+            self._run_load_phase(child, attr, warnings)
 
     def _poke_classic_body(self, rec_id, value) -> None:
         """Poke a classic-string InitCommand/OnCommand (`diffusealpha,0`)
@@ -912,6 +926,12 @@ class StubEnvironment:
             'GetSongBeat': lambda _self: self._clock_beat,
             'GetSongBeatNoOffset': lambda _self: self._clock_beat,
             'GetSongTime': lambda _self: self._song_time(),
+            # Charts gate their whole setup on a minimum engine build
+            # (`tonumber(GetVersionDate()) >= ...`); a modern date string keeps
+            # that guard from faulting on a nil compare (the permissive stub
+            # would return a table, and `tonumber(table)` is nil -> the setup
+            # chunk that builds the mods tables aborts before it runs).
+            'GetVersionDate': lambda _self: '20990101',
             'SetShaderFlag': self._set_shader_flag,
             'SetShaderFlagNum': self._set_shader_flag_num,
             'ApplyGameCommand': self._apply_game_command,
