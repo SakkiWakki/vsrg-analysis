@@ -20,14 +20,20 @@ class LibraryContextMenu:
         menu, handlers = self._build_menu(entry)
         chosen = menu.exec(self.tab.tree.viewport().mapToGlobal(pos))
 
+        # chosen is None when the menu is dismissed without a selection
+        # (click-away / Escape); nothing to do in that case. A real
+        # action with no handler is a wiring bug, so still fail fast.
+        if chosen is None:
+            return
         handler = handlers.get(chosen)
-        assert handler is not None, f"No handler avaliable!"
+        assert handler is not None, 'context-menu action has no registered handler'
         handler()
 
 
     def _entry_at(self, pos):
         item = self.tab.tree.itemAt(pos)
-        assert item is not None, f"Wtf"
+        if item is None:
+            return None
         return item.data(0, Qt.UserRole)
 
     def _copy_text(self, text):
