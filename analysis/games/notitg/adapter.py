@@ -118,21 +118,15 @@ class NotitgAdapter(EtternaAdapter):
     def _compiled_modfile(self, replay):
         """The compiled modfile for this replay's chart, memoized on the
         replay so note_mods / scroll_multipliers / effects share one
-        compile. The engine-loop compiler (DESIGN_engine_loop.md) is the
-        default; VSRG_NOTITG_SIM=0 opts back to the harvest path (kept on
-        its own branch too) until cutover deletes it."""
-        import os
-
+        compile. The engine-loop compiler (DESIGN_engine_loop.md) runs the
+        chart against a headless SM simulation and records its per-frame
+        behaviour into the compiled document."""
         cached = replay.get('_notitg_modfile')
         if cached is not None:
             return cached or None
         sm_path, _index = split_chart_ref(replay.get('filepath', ''))
-        if os.environ.get('VSRG_NOTITG_SIM') == '0':
-            from analysis.games.notitg.modfile import compile_modfile
-            compiled = compile_modfile(sm_path)
-        else:
-            from analysis.games.notitg.sim.producers import compile_via_sim
-            compiled = compile_via_sim(sm_path)
+        from analysis.games.notitg.sim.producers import compile_via_sim
+        compiled = compile_via_sim(sm_path)
         replay['_notitg_modfile'] = compiled or {}
         return compiled
 
@@ -173,7 +167,7 @@ class NotitgAdapter(EtternaAdapter):
             or compile_mod_channels(compiled.get('mod_events') or [])
 
     @staticmethod
-    def _field_3d_for(compiled, sm_path, channels, bpms, player=0):
+    def _field_3d_for(compiled, channels, bpms, player=0):
         """The field-3D effect wired to its tilt producers: the recorded
         actor pokes always, plus the scalar confusion tilt mods (with the
         compiled SetVanishPoint stream) when `channels` is supplied.
@@ -191,7 +185,7 @@ class NotitgAdapter(EtternaAdapter):
         compiled = compiled or {}
         segments = beat_segments(bpms)
         return notitg_field_3d(
-            sm_path, base_hidden=compiled.get('base_field_hidden'),
+            base_hidden=compiled.get('base_field_hidden'),
             player_keyframes=compiled.get('player_field_keyframes'),
             channels=channels, beat_at=lambda t: beat_at(segments, t),
             field_vanish=compiled.get('field_vanish'), player=player)
@@ -210,7 +204,7 @@ class NotitgAdapter(EtternaAdapter):
         sm_path, _index = split_chart_ref(replay.get('filepath', ''))
         bpms = parse_sm(sm_path)['bpms']
         mod_source = player == 0 and not self._field_owned(compiled)
-        field_3d = self._field_3d_for(compiled, sm_path,
+        field_3d = self._field_3d_for(compiled,
                                       channels if mod_source else None,
                                       bpms, player=player)
         tilt_active = field_3d.tilt_active if field_3d is not None else None
@@ -293,7 +287,7 @@ class NotitgAdapter(EtternaAdapter):
             # way (_note_mods_for).
             bpms = parse_sm(sm_path)['bpms']
             field_3d = self._field_3d_for(
-                compiled, sm_path, self._mod_channels(compiled), bpms)
+                compiled, self._mod_channels(compiled), bpms)
             if field_3d is not None:
                 effects.append(field_3d)
         screen_transform = compiled.get('screen_transform')

@@ -1,10 +1,10 @@
-"""NotITG live-host `Surface`: resolve guard operands against StubEnvironment.
+"""NotITG live-host `Surface`: resolve guard operands against the engine host.
 
 The guard evaluator/compiler (`analysis/player/render/expr/`) reads names,
 table elements, and calls off a `Surface`. This is NotITG's implementation,
-backed by the running `StubEnvironment` (`mod_stubs.py`): the SAME live host
-whose beat/time clocks and Lua globals the chart's Update body mutates, so a
-guard reads one source of truth with the sim.
+backed by the running engine-loop host (`sim.env.SimEnvironment`): the SAME
+live host whose beat/time clocks and Lua globals the chart's Update body
+mutates, so a guard reads one source of truth with the sim.
 
 Clock symbols (`beat`, `mod_time`, ...) resolve to the host's live clock
 values. Every other name is read from the shared Lua env; a nil global is
@@ -28,8 +28,8 @@ _BEATS_PER_MEASURE = 4.0
 
 
 def _is_lua_table(value) -> bool:
-    """Duck-typed lupa-table check, matching StubEnvironment._is_lua_table:
-    a Lua table supports integer indexing but is not a Python string/bytes."""
+    """Duck-typed lupa-table check: a Lua table supports integer indexing
+    but is not a Python string/bytes."""
     return hasattr(value, '__getitem__') and not isinstance(
         value, (str, bytes))
 
@@ -53,7 +53,7 @@ class _LuaIndexable:
 
 
 class NotitgGuardSurface:
-    """`Surface` over a live `StubEnvironment`. Clock symbols read the host's
+    """`Surface` over a live engine host. Clock symbols read the host's
     current beat/time; other names read the shared Lua env; `perframe`
     resolves live range membership; `to_beat` (seconds -> beat) is supplied
     for the compile path's `beat` reader."""

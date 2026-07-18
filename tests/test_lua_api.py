@@ -16,8 +16,7 @@ import pytest
 from analysis.games.notitg import lua_api
 from analysis.games.notitg.lua_api import (
     COMMAND_NAMES, DEFERRED, GETTER_NAMES, IGNORED, IMPLEMENTED,
-    VERB_REGISTRY, resolve)
-from analysis.games.notitg.mod_stubs import _lua_name_set
+    VERB_REGISTRY, _lua_name_set, resolve)
 from analysis.games.notitg.recording_actor import RecordingActor
 from analysis.player.render.effects.timeline import Keyframe
 from analysis.player.render.storyboard.model import Element, build_timelines

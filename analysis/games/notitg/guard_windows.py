@@ -9,7 +9,7 @@ surface (literals + any compiled `v`/`e` tables); a guard over live locals
 or nil tables yields no window (skipped, not guessed).
 
 The window set is merged and sorted, matching the consumed shape at
-`mod_stubs._run_update_ticks`.
+`update_integrator._live_windows`.
 """
 from __future__ import annotations
 

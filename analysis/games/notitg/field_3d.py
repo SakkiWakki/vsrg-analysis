@@ -40,8 +40,6 @@ projection executes - one guard, both producers.
 """
 from __future__ import annotations
 
-from functools import lru_cache
-
 from analysis.games.notitg import field_projection
 from analysis.games.notitg.field_instances import _design_map
 from analysis.player.render import transform3d
@@ -55,44 +53,6 @@ _CHANNEL_RESTS = {
     'rotation_x': 0.0, 'rotation_y': 0.0, 'rotation': 0.0, 'skew_x': 0.0,
 }
 
-# The recorded player actors, in player order. P1 is player 0's real
-# NoteField (the base field capture); P2 is the dual-field sibling.
-@lru_cache(maxsize=8)
-def _player_field_keyframes(sm_path):
-    """Harvest the P1/P2 named-actor poke streams for a chart.
-
-    Runs the modfile compile pipeline (chunks + mod-action replay +
-    update integrator) purely to recover the player-actor keyframes;
-    the crossup/rotator pokes live inside the per-frame UpdateCommand,
-    so the integrator must run. Memoized per chart (a full compile), so
-    the load-time cost is paid once. Returns {} on any failure - a chart
-    with no 3D pokes (or no modfile) simply gets no actor tilt source.
-    The engine-loop compiler supplies `player_field_keyframes` directly
-    and skips this fallback."""
-    from analysis.games.etterna import sm_chart
-    from analysis.games.notitg import modfile, update_integrator
-    from pathlib import Path
-
-    try:
-        entries = modfile.parse_fgchanges(sm_path)
-        lua_dir = modfile._resolve_lua_dir(sm_path, entries)
-        if lua_dir is None:
-            return {}
-        sm_data = sm_chart.parse_sm(sm_path)
-        bg_stem = Path(modfile._sm_background_name(sm_path)).stem.casefold()
-        root, _chunks, _classic = modfile._load_document(lua_dir, bg_stem)
-        _bpms, _offset, chart = modfile._timing(sm_data)
-        to_seconds = modfile._beat_to_seconds(sm_data, chart)
-        start_beat = min((b for b, _n, k in entries if k == 'FGCHANGES'),
-                         default=0.0)
-        env, _warn = modfile._run_chunks(root, start_beat, to_seconds)
-        env.replay_mod_actions()
-        update_integrator.integrate_update(env, root, to_seconds)
-        return env.named_actor_keyframes()
-    except Exception:
-        return {}
-
-
 def _actor_3d_timelines(frames):
     """3D-channel EventTimelines for one recorded actor's poke streams, or
     None when it carries no 3D pokes."""
@@ -103,35 +63,34 @@ def _actor_3d_timelines(frames):
     return build_timelines(rests=_CHANNEL_RESTS, keyframes=keyframes)
 
 
-def _player_actor_timelines(sm_path, named, player):
+def _player_actor_timelines(named, player):
     """EventTimelines for one player's 3D actor channels, or None when
     that player's actor carries no 3D poke (the common no-3D case). The
-    compiler-supplied P1/P2 streams are used directly; otherwise a
-    private harvest compile is run (and cached per chart). `player` is
+    compiler-supplied P1/P2 streams are the sole source. `player` is
     0-based; extra proxy-source players (P3+) have no compiled
     player-actor stream, so they resolve to None (no field-3D tilt -
     their transform comes from the proxy's own pokes)."""
-    if named is None:
-        named = _player_field_keyframes(sm_path)
+    if not named:
+        return None
     return _actor_3d_timelines(named.get(f'P{player + 1}'))
 
 
-def notitg_field_3d(sm_path, base_hidden=None, player_keyframes=None,
+def notitg_field_3d(base_hidden=None, player_keyframes=None,
                     channels=None, beat_at=None, field_vanish=None,
                     player=0):
     """The field-3D effect for a chart, or None when neither producer
     drives a tilt (no actor 3D pokes AND no scalar confusion tilt mods).
 
-    `player_keyframes` is the compiled dict's P1/P2 poke streams when the
-    compiler provides them (the engine-loop path does); without it this
-    falls back to a private harvest compile. `channels`/`beat_at` supply
-    the scalar confusion tilt mods; `field_vanish` is the compiled
-    per-player SetVanishPoint stream dict (1-based players). `base_hidden`
+    `player_keyframes` is the compiled dict's P1/P2 poke streams (the
+    engine-loop compiler supplies them); absent, this player gets no
+    actor tilt source. `channels`/`beat_at` supply the scalar confusion
+    tilt mods; `field_vanish` is the compiled per-player SetVanishPoint
+    stream dict (1-based players). `base_hidden`
     is the compiled `base_field_hidden` timeline (the same one the
     field-instances effect reads): while it is set the copies own the
     field and this effect defers, so the field capture stays flat and
     copies never inherit the base tilt."""
-    actor_tl = _player_actor_timelines(sm_path, player_keyframes, player)
+    actor_tl = _player_actor_timelines(player_keyframes, player)
     mod_tilt = field_projection.has_mod_tilt(channels, player)
     if actor_tl is None and not mod_tilt:
         return None

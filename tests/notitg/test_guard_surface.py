@@ -15,7 +15,7 @@ from analysis.player.render.lua.host import LuaHost
 
 
 class _FakeEnv:
-    """Minimal StubEnvironment stand-in: the two clock accessors the surface
+    """Minimal engine-host stand-in: the two clock accessors the surface
     reads plus a real Lua host, so lupa-table globals resolve for real."""
 
     def __init__(self, beat: float, seconds: float):

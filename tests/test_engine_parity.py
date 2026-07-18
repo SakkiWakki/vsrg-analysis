@@ -709,9 +709,9 @@ def _gat_channels_cached():
     import os
     if not os.path.exists(_GAT_SM):
         return None
-    from analysis.games.notitg.modfile import compile_modfile
+    from analysis.games.notitg.sim.producers import compile_via_sim
     from analysis.games.notitg.mod_channels import compile_mod_channels
-    compiled = compile_modfile(_GAT_SM)
+    compiled = compile_via_sim(_GAT_SM)
     if not compiled or not compiled.get('mod_events'):
         return None
     return compile_mod_channels(compiled['mod_events'])

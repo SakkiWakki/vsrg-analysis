@@ -4,10 +4,9 @@ This module is the SINGLE SOURCE OF TRUTH for every actor/GAMESTATE Lua
 function a NotITG modfile can call. It has two layers:
 
 - the VERB TABLES the recorder and the Lua stub bridge consume (setter /
-  add / size / tween / getter maps, screen-constant resolution) - these
-  were the scattered module-level tables in recording_actor.py and the
-  Lua `__GETTER`/`__COMMAND` sets in mod_stubs.py, relocated here so both
-  consumers import ONE copy;
+  add / size / tween / getter maps, screen-constant resolution), plus the
+  permissive-singleton bootstrap and recorder metatable (`_PERMISSIVE_BOOTSTRAP`)
+  the engine-loop host runs - one copy, imported by the recorder and the sim;
 - a declarative `VERB_REGISTRY` covering the COMPLETE called surface (the
   committed called-methods list beside this module + the ENGINE_ORACLE
   fork-additions list): every name maps to a `Verb(category, native,
@@ -154,7 +153,7 @@ _SCALAR_GETTERS = {
 # SM screen constants that appear as classic-command args (`x,
 # SCREEN_CENTER_X`). The Lua stub env resolves these for %function
 # bodies; classic strings are parsed to raw tokens, so the recorder
-# resolves them here. 640x480 design space, matching mod_stubs.
+# resolves them here. 640x480 design space, the engine's default.
 _SCREEN_CONSTANTS = {
     'SCREEN_WIDTH': 640.0, 'SCREEN_HEIGHT': 480.0,
     'SCREEN_CENTER_X': 320.0, 'SCREEN_CENTER_Y': 240.0,
@@ -403,7 +402,7 @@ VERB_REGISTRY['GetRandomVanishTransform'] = Verb(
     'ActorFrame.cpp')
 
 # Command / message dispatch - actor-side. The Lua bridge routes these to
-# the message system (mod_stubs __COMMAND set); queuemessage is queued the
+# the message system (the __COMMAND set); queuemessage is queued the
 # same way play/queuecommand are.
 VERB_REGISTRY.update(_entries(
     ('playcommand', 'queuecommand', 'queuemessage'), COMMAND_DISPATCH,
@@ -491,7 +490,7 @@ VERB_REGISTRY.update(_entries(
      'DrawHoldHeadForTapsOnSameRow'), NOTEFIELD, DEFERRED, None,
     note='fine-grained notefield draw splitting - not consumed'))
 
-# Engine-state queries: stubbed to benign constants at load (mod_stubs).
+# Engine-state queries: stubbed to benign constants at load.
 VERB_REGISTRY.update(_entries(
     ('GetSongBeat', 'GetSongBeatNoOffset'), ENGINE_QUERY, IMPLEMENTED, None,
     note='current song beat - drives perframe math (integrator ticks)'))
@@ -531,7 +530,7 @@ def names_by_category(category: str) -> tuple:
                         if v.category == category))
 
 
-# Name lists the Lua stub bridge (mod_stubs) builds its `__GETTER` /
+# Name lists the Lua stub bridge (_PERMISSIVE_BOOTSTRAP) builds its `__GETTER` /
 # `__COMMAND` sets FROM, so those sets are generated here instead of
 # hand-kept in the Lua bootstrap. `__GETTER` routes a call to the
 # recorder's value-returning path (`__actor_get`); it is exactly the
@@ -567,3 +566,119 @@ def resolve(name: str) -> Verb | None:
     """The registry entry for a called method name, or None when the name
     is unmapped (the coverage test's failure signal)."""
     return VERB_REGISTRY.get(name)
+
+
+# -- the Lua stub bridge ------------------------------------------------------
+#
+# The permissive-singleton bootstrap and the recorder metatable that route
+# `a:x(100)` / `a:GetX()` / `a:playcommand('N')` to Python (`__actor_poke` /
+# `__actor_get` / `__actor_command`). Both the engine-loop host (sim/env.py)
+# run this SAME bootstrap - it is the shared recorder bridge, generated here
+# from the one name-set source of truth (GETTER_NAMES / COMMAND_NAMES) so the
+# bridge and the recorder cannot drift on which calls return a value vs run a
+# command.
+
+
+def _lua_name_set(names) -> str:
+    """A Lua set literal (`{GetX=true, GetY=true}`) from registry name
+    lists, so the bridge's `__GETTER` / `__COMMAND` sets are generated
+    from the one source of truth instead of hand-kept in the bootstrap."""
+    return '{' + ', '.join(f'{name}=true' for name in names) + '}'
+
+
+# A metatable that makes any missing key return a callable/indexable dummy.
+# Colon-calls on our python tables pass the table as arg 1, so the dummy
+# ignores every argument. Chained access (A:B():C()) and field reads (A.x)
+# both land back on a permissive value.
+_PERMISSIVE_BOOTSTRAP = """
+local function permissive()
+    local t = {}
+    local mt = {}
+    mt.__index = function(_, _key) return permissive() end
+    mt.__call = function(_, ...) return permissive() end
+    setmetatable(t, mt)
+    return t
+end
+_G.__permissive = permissive
+
+function __make_singleton(overrides)
+    local t = overrides or {}
+    setmetatable(t, {__index = function(_, _key)
+        return function(...) return permissive() end
+    end})
+    return t
+end
+
+-- A recording actor: every method call (`a:x(100)`, `a:linear(1)`) is
+-- routed to Python via __actor_poke and returns the table so SM's
+-- chained `a:linear(1):x(0)` keeps working. `id` ties it to a Python
+-- recorder; the table is what an InitCommand self-assigns to a global,
+-- so later closures poking that global hit the same recorder.
+--
+-- Getters (`a:GetX()`, `a:getrotation()`, `AFT:GetTexture()`) route to
+-- __actor_get, which returns the recorder's current value(s) so driver
+-- closures can read one actor to drive another (`b:zoomx(a:GetX())`)
+-- without faulting on a table. __actor_get hands back the permissive
+-- sentinel for getters we do not model (`GetChild()` etc.), so those
+-- chains keep working as before.
+local __GETTER = __GETTER_SET
+-- Command-dispatch verbs an actor exposes to the message system:
+-- `a:playcommand('Name')` runs the actor's <Name>Command now;
+-- `a:queuecommand('Name')` runs it after the actor's pending tween
+-- time. Both route to Python (__actor_command) with the recorder id so
+-- the dispatched body records onto the same recorder as `self`.
+local __COMMAND = __COMMAND_SET
+function __make_recorder(id)
+    local t = {__recorder_id = id}
+    setmetatable(t, {__index = function(_, key)
+        if __GETTER[key] then
+            return function(_self, ...) return __actor_get(id, key) end
+        end
+        if __COMMAND[key] then
+            return function(_self, name, ...)
+                __actor_command(id, key, name)
+                return t
+            end
+        end
+        return function(_self, ...)
+            __actor_poke(id, key, ...)
+            return t
+        end
+    end})
+    return t
+end
+
+-- The top screen is a recorder (the chart pokes it directly - the
+-- `screen:effectmagnitude(..)` camera vibe and `GetTopScreen():zoom(..)`
+-- per-frame zoom), so it records like any actor, but it ALSO answers
+-- GetChild/GetTopScreen. Those return real recorder tables (a player, or
+-- the screen itself) instead of a poke, so player fetches and chained
+-- `GetTopScreen():GetChild(..)` keep working.
+function __make_screen_recorder(id)
+    local t = __make_recorder(id)
+    local mt = getmetatable(t)
+    local poke_index = mt.__index
+    mt.__index = function(tbl, key)
+        if key == 'GetChild' then
+            return function(_self, name) return __screen_get_child(name) end
+        end
+        if key == 'GetTopScreen' then
+            return function(_self) return t end
+        end
+        return poke_index(tbl, key)
+    end
+    return t
+end
+
+-- NotITG embeds Lua 5.0; these live under the LuaJIT (5.1) runtime as
+-- their renamed forms. The template calls the 5.0 names.
+if math.mod == nil then math.mod = math.fmod end
+if table.getn == nil then table.getn = function(t) return #t end end
+"""
+
+# The `__GETTER` / `__COMMAND` routing sets are the registry's name lists,
+# rendered as Lua set literals so the bridge and the recorder cannot drift
+# on which calls return a value vs run a command.
+_PERMISSIVE_BOOTSTRAP = _PERMISSIVE_BOOTSTRAP.replace(
+    '__GETTER_SET', _lua_name_set(GETTER_NAMES)).replace(
+    '__COMMAND_SET', _lua_name_set(COMMAND_NAMES))

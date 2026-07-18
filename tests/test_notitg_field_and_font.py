@@ -12,7 +12,6 @@ from PySide6.QtCore import QPointF
 from analysis.games.notitg import field_compose
 from analysis.games.notitg.field_instances import (NotitgFieldInstances,
                                                    _design_map, design_box)
-from analysis.games.notitg.modfile import compile_modfile
 from analysis.games.notitg.recording_actor import RecordingActor
 from analysis.player.render.storyboard import bitmap_font
 

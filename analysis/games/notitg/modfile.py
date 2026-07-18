@@ -1,48 +1,38 @@
-"""NotITG modfile compiler (Mode-2 recorder + actor compiler).
+"""NotITG modfile compiler library (actor/element/timeline compilers).
 
 Pre-Mirin "classic template" charts (the gat pilot) ship a `#FGCHANGES`
 lua directory whose `default.xml` is an actor tree of CODE/Quad/Sprite
 elements. The mod timeline lives in InitCommand Lua that fills plain
 data tables (`mods`, `mods2`, `mod_actions`) via helpers defined in an
-included `modhelpers.xml`. We compile this in two ways:
+included `modhelpers.xml`.
 
-- Mode-2 recording (CODE chunks -> mod harvest): run the InitCommand
-  Lua verbatim under the sandboxed LuaJIT host with stub engine globals,
-  then read the tables back. The template's applier (default.xml, the
-  `custom mod reader`) tells us the tuple semantics:
+The chart is compiled by the engine-loop simulation (`sim/`): the
+InitCommand Lua runs under a headless SM host that records each actor's
+per-frame behaviour onto one timeline. `sim.producers.compile_via_sim`
+is the entry point; it drives the SHARED compilers in this module to
+turn that recorded state into the compiled document:
+
+- Mod events (`_normalize_mod_events`): the template's `mods`/`mods2`
+  tuples, read back after the sim run. The applier (default.xml, the
+  `custom mod reader`) fixes the tuple semantics:
 
       {beat_or_time, len_or_end, modstring, apply_type, pn?}
 
   * `mods`  is beat-based, `mods2` is time-based (seconds).
   * apply_type 'len': active window [v1, v1 + v2]; 'end': [v1, v2].
   * pn (optional 5th field) is the player (1 or 2); absent = both.
-  Shader pokes come through `mod_shader`/SetShaderFlag; `mod_actions`
-  holds per-frame closures we do NOT execute (unsupported tail).
 
-- One-shot replay (mod_actions closures): the template's `mod_actions`
-  are SCHEDULED ONE-SHOTS - the per-frame reader fires each closure
-  exactly once when its beat passes (curaction advances monotonically,
-  never resets). We execute each closure once, in beat order, against
-  the recording stub, capturing the `SetShaderFlag`/`ApplyGameCommand`
-  pokes it makes. A closure that pokes an actor we do not model faults
-  harmlessly (per-closure try/except).
+- Actor compilation (`compile_element_tree` / `_compile_elements`):
+  Sprites/Quads/BitmapText with `x,100;zoom,2;linear,1;...` command
+  strings become storyboard Elements with property Keyframes, timed from
+  the actor's creation beat (the FGCHANGES start).
 
-  PERSISTENCE of message-applied mods: an `ApplyGameCommand('mod,X')`
-  fired from a closure is NOT persistent. The reader runs `mod,clearall`
-  every frame and only reapplies windows from the `mods`/`mods2` tables;
-  a closure's mod is not in those tables, so the very next frame's
-  clearall wipes it. It therefore lives for one frame (~20ms). We encode
-  each as a ZERO-LENGTH window [beat, beat] (a one-frame spike), NOT a
-  persistent [beat, +inf) start - verified against gat's reader
-  (default.xml ~line 3999 clearall + ~4680 monotonic action loop).
+- Timelines (`_screen_transform_timelines`, `_field_vanish_timelines`,
+  the oscillator context, field copies, ...): per-property EventTimelines
+  the compiled document carries for the renderer.
 
-- Actor compilation (classic command strings -> storyboard IR):
-  Sprites/Quads/BitmapText with `x,100;zoom,2;linear,1;...` commands
-  become storyboard Elements with property Keyframes, timed from the
-  actor's creation beat (the FGCHANGES start).
-
-compile_modfile never raises: any community file must load, so every
-chunk runs under try/except and partial output is fine.
+Nothing here raises on a community file: the sim run is fault-tolerant
+and partial output is fine.
 """
 from __future__ import annotations
 
@@ -54,8 +44,7 @@ from pathlib import Path
 
 from analysis.games.etterna import sm_chart
 from analysis.games.notitg import (
-    aft_drivers, guard_windows, sprite_sheet, update_integrator, xml_actors)
-from analysis.games.notitg.mod_stubs import StubEnvironment
+    aft_drivers, guard_windows, sprite_sheet, xml_actors)
 from analysis.games.notitg.paths import find_notitg_dirs
 from analysis.games.notitg.recording_actor import RecordingActor
 from analysis.player.render.effects.timeline import EventTimeline, Keyframe
@@ -77,7 +66,6 @@ _SCALAR_PROPS = {
     'zoomx': 'scale_x', 'zoomy': 'scale_y', 'rotationz': 'rotation',
     'diffusealpha': 'alpha',
 }
-_MAX_UNSUPPORTED_DESCRIBED = 20
 
 # Commands the engine fires on actor creation (the load-time moment we
 # record). *MessageCommand / named-command bodies fire on later engine
@@ -318,20 +306,6 @@ def _beat_to_seconds(sm_data, chart):
     return convert
 
 
-def _run_chunks(root, start_beat, to_seconds, rng_seed=0):
-    """Load the actor tree under a shared stubbed host: one persistent
-    recorder per actor, InitCommand/OnCommand run with `self` bound to
-    it, and every `<Name>MessageCommand` / `<Name>Command` registered so
-    later broadcasts and play/queuecommands run on the SAME recorder.
-    A trailing `NAME = self` still binds a global (the poke target for the
-    mod_actions closures). Per-chunk failures warn; a partial harvest
-    survives. `rng_seed` seeds the sandbox `math.random` so the chart's
-    random spawner scatter (the FUCK datamosh pool) records reproducibly."""
-    env = StubEnvironment(start_beat, to_seconds=to_seconds, rng_seed=rng_seed)
-    warnings = env.load_actors(root)
-    return env, warnings
-
-
 def _chart_rng_seed(lua_dir) -> int:
     """A stable per-chart RNG seed from the chart's modfile directory, so
     `math.random`-driven spawns record the same scatter every compile
@@ -401,52 +375,6 @@ def _mod_event(row, to_seconds, beat_based):
         'apply_type': apply_type, 'player': player,
         't_start': start_s, 't_end': end_s, 'time_based': not beat_based,
     }
-
-
-def _normalize_applied_mods(env, to_seconds):
-    """`ApplyGameCommand('mod,X')` recordings from the one-shot replay ->
-    zero-length mod windows [beat, beat]. See the module docstring: these
-    are one-frame spikes (wiped by the next frame's clearall), not
-    persistent windows, so start and end coincide."""
-    events = []
-    for beat, modstring, player in env.applied_mods:
-        if not isinstance(modstring, str) or not modstring:
-            continue
-        t = to_seconds(beat)
-        events.append({
-            'beat': beat, 'len_beats': 0.0, 'modstring': modstring,
-            'apply_type': 'oneshot', 'player': player,
-            't_start': t, 't_end': t, 'time_based': False,
-        })
-    return events
-
-
-def _normalize_shader_flags(env, to_seconds):
-    flags = []
-    for beat, key, which in env.shader_flags:
-        flags.append({
-            'beat': beat, 't': to_seconds(beat),
-            'key': key, 'which': which,
-        })
-    return flags
-
-
-def _describe_unsupported(env):
-    described = []
-    for row in env.mod_actions[:_MAX_UNSUPPORTED_DESCRIBED]:
-        beat = row.get(1) if isinstance(row, dict) else None
-        payload = row.get(2) if isinstance(row, dict) else None
-        described.append({'beat': _as_float(beat),
-                          'payload': _kind_of(payload)})
-    return {'count': len(env.mod_actions), 'described': described}
-
-
-def _kind_of(value) -> str:
-    if callable(value):
-        return 'function'
-    if isinstance(value, str):
-        return f'message:{value}'
-    return type(value).__name__
 
 
 def _as_float(value):
@@ -614,7 +542,7 @@ def _merged_keyframes(actor, start_time, named_keyframes, actor_keyframes=None,
     crossfades only here - they self-assign no global), so we use it
     directly.
 
-    The FLAT path (tests / charts compiled without a StubEnvironment) has
+    The FLAT path (tests / charts compiled without a recording env) has
     no recorder ids: it re-poks the classic InitCommand/OnCommand strings
     on a fresh recorder and merges whatever the actor's bound global
     recorded from the closures.
@@ -1068,8 +996,8 @@ def _build_osc_context(env, to_seconds, start_beat, lua_dir,
                        end_seconds=None):
     """Build the oscillator compile context, or None when the chart has no
     effect oscillators. The RNG and the integer seed are per-chart (the
-    same determinism contract as the spawner scatter, mod_stubs), so a
-    chart's vibrate shake compiles identically every run. `end_seconds`
+    same determinism contract as the spawner scatter), so a chart's
+    vibrate shake compiles identically every run. `end_seconds`
     (the compile end) is what still-open spans run to; None keeps every
     span at its recorded end."""
     import random
@@ -1411,89 +1339,6 @@ def _element_kind(actor_kind: str, has_text=False, font=None,
     if actor_kind in _SPRITE_KINDS:
         return 'sprite' if actor_kind == 'Sprite' else 'rect'
     return 'sprite' if has_image else None
-
-
-def compile_modfile(sm_path) -> dict | None:
-    """Compile a NotITG chart's modfile. Returns None when the chart has
-    no resolvable lua modfile; otherwise a dict of harvested mod events,
-    shader flags, unsupported tail, storyboard elements, and warnings.
-    Never raises: chart loading must survive any community file."""
-    try:
-        return _compile_modfile(sm_path)
-    except Exception as exc:
-        return {'mod_events': [], 'shader_flags': [], 'unsupported':
-                {'count': 0, 'described': []}, 'elements': [], 'tree': [],
-                'named_actors': 0, 'recorded_keyframes': 0,
-                'warnings': [f'compile aborted: {exc}']}
-
-
-def _compile_modfile(sm_path):
-    entries = parse_fgchanges(sm_path)
-    lua_dir = _resolve_lua_dir(sm_path, entries)
-    if lua_dir is None:
-        return None
-
-    sm_data = sm_chart.parse_sm(sm_path)
-    bg_stem = Path(_sm_background_name(sm_path)).stem.casefold()
-    root, _lua_chunks, classic_commands = _load_document(lua_dir, bg_stem)
-
-    _bpms, _offset, chart = _timing(sm_data)
-    to_seconds = _beat_to_seconds(sm_data, chart)
-    start_beat = min((b for b, _n, k in entries if k == 'FGCHANGES'),
-                     default=0.0)
-
-    env, chunk_warnings = _run_chunks(root, start_beat, to_seconds,
-                                      rng_seed=_chart_rng_seed(lua_dir))
-    fired, failed = env.replay_mod_actions()
-    integration = update_integrator.integrate_update(env, root, to_seconds)
-    named_keyframes = env.named_actor_keyframes()
-    named_meta = env.named_actor_meta()
-    actor_keyframes = env.actor_keyframes()
-    osc_context = _build_osc_context(env, to_seconds, start_beat, lua_dir)
-
-    mod_events = _normalize_mod_events(env, to_seconds)
-    mod_events.extend(_normalize_applied_mods(env, to_seconds))
-    mod_events.extend(integration.get('applied_events') or [])
-    proxy_grid = env.proxy_grid()
-    fonts = _font_resolver(lua_dir)
-    tree = compile_element_tree(root, to_seconds, start_beat, named_keyframes,
-                                fonts=fonts, actor_keyframes=actor_keyframes,
-                                osc_context=osc_context)
-    return {
-        'mod_events': mod_events,
-        'shader_flags': _normalize_shader_flags(env, to_seconds),
-        'unsupported': _describe_unsupported(env),
-        'elements': _compile_elements(classic_commands, to_seconds,
-                                      start_beat, named_keyframes),
-        'tree': tree,
-        'has_background': _has_background_actors(tree, sm_path),
-        'field_copies': _all_field_copies(
-            root, named_keyframes, named_meta, to_seconds, start_beat,
-            actor_keyframes, proxy_grid, osc_context),
-        'screen_transform': _screen_transform_timelines(env),
-        'screen_oscillator': _screen_oscillator_timelines(env, osc_context),
-        'field_oscillators': _field_oscillator_timelines(env, osc_context),
-        'field_vanish': _field_vanish_timelines(env),
-        'aft_bg_visible': _aft_bg_visible_timeline(root, bg_stem,
-                                                   actor_keyframes),
-        'base_field_hidden': _base_field_hidden_timeline(env),
-        'named_actors': len(named_keyframes),
-        'recorded_keyframes': _count_recorded_keyframes(named_keyframes),
-        'replay': {'fired': fired, 'failed': failed,
-                   'applied_mods': len(env.applied_mods),
-                   'swallowed': env.swallowed},
-        'integration': {'ran': integration.get('ran', False),
-                        'ticks': integration.get('ticks', 0),
-                        'windows': integration.get('windows', 0),
-                        'applied': integration.get('applied', 0),
-                        'faults': integration.get('faults', 0)},
-        'warnings': chunk_warnings,
-    }
-
-
-def _count_recorded_keyframes(named_keyframes) -> int:
-    return sum(len(frames) for props in named_keyframes.values()
-               for frames in props.values())
 
 
 def _has_background_actors(tree, sm_path) -> bool:

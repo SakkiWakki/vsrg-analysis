@@ -1,8 +1,8 @@
 """SimEnvironment: the engine surface the simulated chart runs against.
 
-One LuaHost carrying the same permissive bootstrap and recorder-table
-bridge as the harvest path (imported from mod_stubs - the bridge
-survives cutover), but routed onto SimActors and ONE timeline:
+One LuaHost carrying the permissive bootstrap and recorder-table
+bridge (the shared `_PERMISSIVE_BOOTSTRAP` in lua_api), routed onto
+SimActors and ONE timeline:
 
 - `queuecommand`/`queuemessage` append real zero-tweens to each subtree
   actor's queue (Actor::QueueCommand); they fire when the loop's drain
@@ -25,9 +25,8 @@ import re
 from pathlib import Path
 
 from analysis.games.notitg.lua_api import (
-    COMMAND_NAMES, GETTER_NAMES, SIM_GETTER_NAMES, _as_int)
-from analysis.games.notitg.mod_stubs import (
-    _PERMISSIVE_BOOTSTRAP, _lua_name_set)
+    COMMAND_NAMES, GETTER_NAMES, SIM_GETTER_NAMES, _PERMISSIVE_BOOTSTRAP,
+    _as_int, _lua_name_set)
 from analysis.games.notitg.sim.actor import SimActor
 from analysis.games.notitg.xml_actors import (
     _lua50_compat, _lua_expr_body, _strip_lua_wrapper,
@@ -397,8 +396,8 @@ class SimEnvironment:
         return (self._actors.get(self._screen_id)
                 if self._screen_id is not None else None)
 
-    # -- harvest surface (mirrors the mod_stubs shapes, so the modfile
-    # element/screen/field producers consume a sim env directly) ---------
+    # -- recorded-state surface (the shapes the modfile element/screen/
+    # field producers consume off a sim env directly) -------------------
 
     def named_actor_keyframes(self) -> dict:
         """global name -> {property: [Keyframe]} for chart-bound actor

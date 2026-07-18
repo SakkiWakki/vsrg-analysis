@@ -13,7 +13,6 @@ _PATTERN = re.compile(r'\bgat_[a-z0-9_]+', re.IGNORECASE)
 
 # file (relative to analysis/) -> why it is still allowed. Shrink only.
 _ALLOWED = {
-    'games/notitg/mod_stubs.py': 'proxy_grid() gat globals (item 97.1)',
     'games/notitg/modfile.py': 'AFT rig message conventions (item 97.2)',
     'games/notitg/aft_drivers.py': 'hand-ported gat driver (item 97.3)',
     # Found by this ratchet, pending item-97 triage (examples-only

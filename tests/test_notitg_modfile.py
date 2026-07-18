@@ -1,6 +1,7 @@
-"""NotITG modfile compiler: actor XML parsing, CODE-chunk mod harvest,
-classic command -> storyboard keyframes, and a guarded integration test
-against the real gat pilot."""
+"""NotITG modfile compiler: actor XML parsing, recording-actor tween and
+oscillator state, classic command -> storyboard keyframes, scroll/mod
+channels, message dispatch, and a guarded integration test against the
+real gat pilot compiled through the engine-loop sim."""
 from pathlib import Path
 
 import pytest
@@ -8,8 +9,8 @@ import pytest
 pytest.importorskip('lupa')
 
 from analysis.games.notitg import xml_actors
-from analysis.games.notitg.mod_stubs import StubEnvironment
-from analysis.games.notitg.modfile import (compile_modfile, parse_fgchanges)
+from analysis.games.notitg.modfile import parse_fgchanges
+from analysis.games.notitg.sim.producers import compile_via_sim
 from analysis.player.render.effects.timeline import Keyframe
 
 _GAT_SM = Path('/mnt/Yucky/Rhythm Games/Players/NotITG/Songs/'
@@ -200,160 +201,6 @@ def test_blend_add_marks_element_additive():
         plain.classic_commands, _seconds, start_beat=0.0)[0]
     assert plain_el.additive is False
 
-
-def test_rng_seed_makes_math_random_reproducible():
-    # The datamosh spawner scatters bars at math.random positions recorded
-    # once at compile; seeding keeps the scatter identical run to run.
-    seq_a = _random_sequence(1234)
-    seq_b = _random_sequence(1234)
-    seq_c = _random_sequence(9999)
-    assert seq_a == seq_b
-    assert seq_a != seq_c
-
-
-def _random_sequence(seed):
-    env = StubEnvironment(start_beat=0.0, rng_seed=seed)
-    env.run("vals = {} for i=1,8 do vals[i] = math.random() end", name='r')
-    table = env._host.env['vals']
-    return tuple(round(table[i], 9) for i in range(1, 9))
-
-
-# -- CODE chunk mod harvest -----------------------------------------------
-
-def test_stub_harvests_mods_table():
-    env = StubEnvironment(start_beat=0.0)
-    env.run("mods = {{4, 8, '*5 40 drunk', 'len'}, "
-            "{16, 32, '2x', 'end', 1}}", name='t')
-    rows = env.mods
-    assert len(rows) == 2
-    assert rows[0][3] == '*5 40 drunk'
-    assert rows[0][4] == 'len'
-    assert rows[1][5] == 1
-
-
-def test_stub_harvests_mods2_and_mod_actions():
-    env = StubEnvironment(start_beat=0.0)
-    env.run("mods2 = {{1.5, 2.0, 'drunk', 'end'}}\n"
-            "mod_actions = {{4, function() end}}", name='t')
-    assert env.mods2[0][3] == 'drunk'
-    assert callable(env.mod_actions[0][2])
-
-
-def test_stub_provides_lua50_math_mod_and_gamestate():
-    env = StubEnvironment(start_beat=0.0)
-    env.run("result = math.mod(7, 3)\n"
-            "b = GAMESTATE:GetSongBeat()", name='t')
-    assert env._host.env['result'] == 1.0
-    assert env._host.env['b'] == 0.0
-
-
-def test_stub_records_shader_flags_at_load():
-    env = StubEnvironment(start_beat=12.0)
-    env.run("GAMESTATE:SetShaderFlag(55)\n"
-            "GAMESTATE:SetShaderFlagNum(48, 2)", name='t')
-    flags = env.shader_flags
-    assert flags[0] == (12.0, 55, None)
-    assert flags[1] == (12.0, 48, 2)
-
-
-def test_stub_permissive_singleton_swallows_unknown_calls():
-    env = StubEnvironment(start_beat=0.0)
-    # An engine method we never stubbed must no-op, not fault.
-    env.run("SCREENMAN:SomethingWeNeverModeled():AndChain()\n"
-            "ok = true", name='t')
-    assert env._host.env['ok'] is True
-
-
-def test_mod_event_normalization_len_vs_end():
-    from analysis.games.notitg import modfile
-
-    env = StubEnvironment(start_beat=0.0)
-    env.run("mods = {{4, 8, 'a', 'len'}, {4, 20, 'b', 'end'}}", name='t')
-    events = modfile._normalize_mod_events(env, _seconds)
-    by_string = {e['modstring']: e for e in events}
-    assert by_string['a']['t_start'] == 4.0
-    assert by_string['a']['t_end'] == 12.0    # len: start + length
-    assert by_string['b']['t_end'] == 20.0    # end: the field itself
-
-
-# -- one-shot mod_actions replay ------------------------------------------
-
-def test_replay_fires_closures_in_beat_order_once():
-    env = StubEnvironment(start_beat=0.0)
-    env.run("order = {}\n"
-            "mod_actions = {\n"
-            "  {8, function() table.insert(order, 'b') end},\n"
-            "  {4, function() table.insert(order, 'a') end},\n"
-            "  {12, function() table.insert(order, 'c') end},\n"
-            "}", name='t')
-    fired, failed = env.replay_mod_actions()
-    assert (fired, failed) == (3, 0)
-    fired_order = env._host.env['order']
-    assert [fired_order[i] for i in (1, 2, 3)] == ['a', 'b', 'c']
-
-
-def test_replay_records_apply_game_command_as_one_shot():
-    env = StubEnvironment(start_beat=0.0)
-    env.run("mod_actions = {\n"
-            "  {8, function() GAMESTATE:ApplyGameCommand("
-            "'mod,*-1 100 drunk', 2) end},\n"
-            "}", name='t')
-    env.replay_mod_actions()
-    assert env.applied_mods == [(8.0, '*-1 100 drunk', 2)]
-
-
-def test_replay_records_shader_flag_from_closure_at_fire_beat():
-    env = StubEnvironment(start_beat=0.0)
-    env.run("mod_actions = {\n"
-            "  {32, function() GAMESTATE:SetShaderFlag(55) end},\n"
-            "}", name='t')
-    env.replay_mod_actions()
-    assert env.shader_flags == [(32.0, 55, None)]
-
-
-def test_replay_broadcasts_string_payloads_and_survives_faults():
-    env = StubEnvironment(start_beat=0.0)
-    env.run("mod_actions = {\n"
-            "  {4, 'SomeBroadcast'},\n"
-            "  {8, function() error('boom') end},\n"
-            "  {12, function() ok = true end},\n"
-            "}", name='t')
-    fired, failed = env.replay_mod_actions()
-    # String payloads are MESSAGEMAN:Broadcast triggers: they now fire
-    # (dispatching their message commands) rather than being skipped. An
-    # unregistered message name dispatches to nothing but still counts.
-    assert fired == 3 and failed == 1
-    assert env._host.env['ok'] is True
-
-
-def test_apply_game_command_ignores_non_mod_commands():
-    env = StubEnvironment(start_beat=0.0)
-    env.run("mod_actions = {\n"
-            "  {4, function() GAMESTATE:ApplyGameCommand("
-            "'screen,ScreenTitleMenu') end},\n"
-            "}", name='t')
-    env.replay_mod_actions()
-    assert env.applied_mods == []
-    assert env.swallowed == 1
-
-
-def test_applied_mods_normalize_to_zero_length_windows(tmp_path):
-    from analysis.games.notitg import modfile
-
-    env = StubEnvironment(start_beat=0.0)
-    env.run("mod_actions = {\n"
-            "  {4, function() GAMESTATE:ApplyGameCommand("
-            "'mod,*-1 100 drunk') end},\n"
-            "}", name='t')
-    env.replay_mod_actions()
-    events = modfile._normalize_applied_mods(env, _seconds)
-    assert len(events) == 1
-    e = events[0]
-    assert e['apply_type'] == 'oneshot'
-    assert e['t_start'] == e['t_end'] == 4.0
-
-
-# -- shader-flag bridge ---------------------------------------------------
 
 def test_shader_bridge_maps_pulse_to_stack_events():
     from analysis.games.notitg.shader_bridge import build_shader_events
@@ -762,41 +609,6 @@ def test_recording_actor_diffuse_and_visibility():
 
 # -- named-actor binding: XML self-assign + closure pokes -----------------
 
-def test_named_actor_binding_from_synthetic_xml_and_closure():
-    """An InitCommand self-assigns a global; a scheduled mod_actions
-    closure pokes that global at its fire beat. Both must land on one
-    recorder timeline, keyed by the global name."""
-    env = StubEnvironment(start_beat=0.0)
-    # InitCommand: hide the actor and bind it to a global (SM pattern).
-    env.run_actor_chunk("self:hidden(1); my_frame = self;", name='init')
-    # Scheduled closure fires at beat 4 (= 4s under the identity clock).
-    env.run("mod_actions = { {4, function()\n"
-            "  my_frame:linear(1); my_frame:y(30)\n"
-            "  my_frame:linear(1); my_frame:y(60)\n"
-            "end} }", name='ma')
-    fired, failed = env.replay_mod_actions()
-    assert (fired, failed) == (1, 0)
-
-    named = env.named_actor_keyframes()
-    assert set(named) == {'my_frame'}            # 'self' does not linger
-    frames = named['my_frame']
-    # InitCommand hidden(1) recorded at load (t=0) on the hidden channel
-    # (its own bit, not alpha), fire-time y pokes at 4/5.
-    assert frames['hidden'][0].values == (1.0,)
-    y = frames['y']
-    assert (y[0].t, y[0].values) == (4.0, (30.0,))
-    assert (y[1].t, y[1].values) == (5.0, (60.0,))
-
-
-def test_closure_fire_time_uses_beat_to_seconds():
-    env = StubEnvironment(start_beat=0.0, to_seconds=lambda beat: beat * 0.5)
-    env.run_actor_chunk("thing = self;", name='init')
-    env.run("mod_actions = { {8, function() thing:x(1) end} }", name='ma')
-    env.replay_mod_actions()
-    # fire beat 8 -> 4.0s through the converter.
-    assert env.named_actor_keyframes()['thing']['x'][0].t == 4.0
-
-
 def test_tree_merges_xml_command_and_recorded_pokes(tmp_path):
     """compile_element_tree binds an actor's XML command keyframes and
     the pokes its bound global recorded into ONE element timeline."""
@@ -845,7 +657,7 @@ def test_tree_wraps_nested_actorframe_as_group(tmp_path):
 def test_compile_never_raises_on_missing_lua(tmp_path):
     sm = tmp_path / 'nolua.sm'
     sm.write_text('#TITLE:x;\n#BPMS:0.000=120.000;\n')
-    assert compile_modfile(str(sm)) is None
+    assert compile_via_sim(str(sm)) is None
 
 
 def test_compile_survives_malformed_xml(tmp_path):
@@ -860,7 +672,7 @@ def test_compile_survives_malformed_xml(tmp_path):
     sm = song / 'chart.sm'
     sm.write_text('#TITLE:x;\n#OFFSET:0.000;\n#BPMS:0.000=120.000;\n'
                   '#FGCHANGES:0.000=lua=1.000=0=0=1=====,;\n')
-    result = compile_modfile(str(sm))
+    result = compile_via_sim(str(sm))
     assert result is not None
     assert isinstance(result['mod_events'], list)
     assert isinstance(result['warnings'], list)
@@ -909,6 +721,12 @@ def _make_span(kind, start, end, mag, period=1.0, offset=0.0, clock='bgm'):
     return span
 
 
+def _no_rng():
+    """An RNG for non-vibrate spans, which never draw from it."""
+    import random
+    return random.Random(0)
+
+
 def test_effect_pct_matches_engine_scale_and_wrap():
     """SM's pct = clamp(fmod(phase + offset, period) / period, 0, 1)
     (Actor.cpp:273-278). Wraps every period, honours offset, clamps."""
@@ -941,7 +759,6 @@ def test_bounce_span_synthesises_abs_sine_on_y():
 def test_bob_span_synthesises_full_sine():
     """bob: pos += mag * sin(pct*2pi) (Actor.cpp:353) - a full sine, so it
     swings both directions unlike bounce."""
-    import math
     from analysis.games.notitg.modfile import _span_keyframes
     from analysis.player.render.effects.timeline import EventTimeline
 
@@ -955,7 +772,6 @@ def test_bob_span_synthesises_full_sine():
 def test_wag_span_drives_rotation_by_z_magnitude():
     """wag: rotation += mag * sin(pct*2pi) (Actor.cpp:332). The 2D rotation
     is the z magnitude; x/y magnitudes are 3D rotations we drop."""
-    import math
     from analysis.games.notitg.modfile import _span_keyframes
     from analysis.player.render.effects.timeline import EventTimeline
 
@@ -1009,48 +825,6 @@ def test_span_returns_to_rest_after_end():
     assert y.sample(5.0)[0] == pytest.approx(0.0)
 
 
-def test_compile_oscillator_keyframes_rides_base_motion():
-    """The synthesised delta rides the actor's tweened base value: inside
-    the span the keyframe value is base(t) + delta; outside, the base
-    motion is kept untouched."""
-    from analysis.games.notitg.modfile import compile_oscillator_keyframes
-    from analysis.player.render.effects.timeline import EventTimeline, Keyframe
-
-    # Base: y held at 100 from t=0. bounce delta rides on top of it.
-    base = {'y': [Keyframe(0.0, (100.0,), 0.0, 0)]}
-    span = _make_span('bounce', 0.5, 1.0, (0.0, -50.0, 0.0))
-    merged = compile_oscillator_keyframes([span], base, _identity_osc_clock(),
-                                          _no_rng())
-    y = EventTimeline(merged['y'], rest=(0.0,))
-    # Before the span, base holds at 100.
-    assert y.sample(0.2)[0] == pytest.approx(100.0)
-    # Inside, it is 100 + (-50*sin(pct*pi)) < 100.
-    assert y.sample(0.75)[0] < 100.0
-    # After, back to the base 100 (trailing rest hands motion back).
-    assert y.sample(2.0)[0] == pytest.approx(100.0)
-
-
-def _no_rng():
-    """An RNG for non-vibrate spans, which never draw from it."""
-    import random
-    return random.Random(0)
-
-
-
-
-
-
-
-
-# -- message dispatch -----------------------------------------------------
-
-def _load(xml):
-    parsed = xml_actors.parse_actor_xml(xml)
-    env = StubEnvironment(start_beat=0.0)
-    warnings = env.load_actors(parsed.root)
-    return env, warnings
-
-
 def test_message_command_helpers_split_by_name():
     parsed = xml_actors.parse_actor_xml(
         '<LAER Type="Sprite" InitCommand="%function(self) end"'
@@ -1059,165 +833,6 @@ def test_message_command_helpers_split_by_name():
     actor = parsed.root
     assert set(actor.message_commands()) == {'SetupFUCK'}
     assert set(actor.named_commands()) == {'Hide'}
-
-
-def test_broadcast_binds_pool_actor_then_poke_records():
-    """The SetupFUCK pattern: a CODE actor defines a pool + getter, pool
-    members register themselves via a broadcast message command, and a
-    later poke through the getter lands as a keyframe on the SAME
-    recorder the message command bound."""
-    env, _w = _load(
-        '<ActorFrame><children>'
-        '<CODE Type="Quad" InitCommand="%function(self)'
-        '  pool = {}'
-        '  function pool_get() return pool[1] end'
-        'end"/>'
-        '<LAER Type="Sprite" SetUpMessageCommand="%function(self)'
-        '  table.insert(pool, self)'
-        '  self:x(100)'
-        'end"/>'
-        '</children></ActorFrame>')
-    # No pokes until the pool is built.
-    assert env._host.env['pool'] is not None
-    # Fire the broadcast: the pool actor registers and takes x=100.
-    env._dispatch_message('SetUp')
-    # A later poke through the getter reaches the same recorder.
-    env.run("member = pool_get(); member:y(50)", name='poke')
-    recorder = env._recorder_for_table(env._host.env['member'])
-    frames = recorder.keyframes()
-    assert [kf.values for kf in frames['x']] == [(100.0,)]
-    assert [kf.values for kf in frames['y']] == [(50.0,)]
-
-
-def test_playcommand_runs_named_command_on_actor():
-    env, _w = _load(
-        '<LAER Type="Sprite" InitCommand="%function(self) a = self end"'
-        ' SpawnCommand="zoom,2"/>')
-    env.run("a:playcommand('Spawn')", name='play')
-    recorder = env._recorder_for_table(env._host.env['a'])
-    frames = recorder.keyframes()
-    assert [kf.values for kf in frames['scale_x']] == [(2.0,)]
-
-
-def test_queuecommand_starts_after_pending_tween():
-    """queuecommand runs after the actor's in-flight tween, so its
-    keyframe clock is advanced by the pending tween length (SM's
-    next-frame queue, approximated by the tween duration)."""
-    env, _w = _load(
-        '<LAER Type="Sprite" InitCommand="%function(self) a = self end"'
-        ' MoveCommand="y,300"/>')
-    # Open a 2s tween, then queue Move: the queued y keyframe starts at 2s.
-    env.run("a:linear(2); a:queuecommand('Move')", name='queue')
-    recorder = env._recorder_for_table(env._host.env['a'])
-    move_kf = recorder.keyframes()['y'][-1]
-    assert move_kf.t == pytest.approx(2.0)
-
-
-def test_playcommand_starts_at_current_clock():
-    env, _w = _load(
-        '<LAER Type="Sprite" InitCommand="%function(self) a = self end"'
-        ' MoveCommand="y,300"/>')
-    env.run("a:linear(2); a:playcommand('Move')", name='play')
-    recorder = env._recorder_for_table(env._host.env['a'])
-    move_kf = recorder.keyframes()['y'][-1]
-    # playcommand does NOT wait for the tween: clock unchanged from load.
-    assert move_kf.t == pytest.approx(0.0)
-
-
-def test_queuecommand_propagates_to_frame_children():
-    """A play/queuecommand on an ActorFrame runs the named command on
-    every descendant that defines it (SM RunCommandsOnChildren), so gat's
-    `gat_bg:queuecommand('BG2')` fires the bg Layers' BG2 crossfades even
-    though the frame itself has no BG2Command."""
-    env, _w = _load(
-        '<ActorFrame InitCommand="%function(self) frame = self end"><children>'
-        '<LAER Type="Sprite" BG2Command="diffusealpha,0.5"/>'
-        '<LAER Type="Sprite" BG2Command="diffusealpha,0.25"/>'
-        '</children></ActorFrame>')
-    env.run("frame:playcommand('BG2')", name='play')
-    frame_rec = env._recorder_for_table(env._host.env['frame'])
-    child_ids = env._child_recorders[frame_rec_id(env, 'frame')]
-    alphas = [env._recorders[cid].keyframes()['alpha'][-1].values[0]
-              for cid in child_ids]
-    assert alphas == [0.5, 0.25]           # each child took its own crossfade
-    assert 'alpha' not in frame_rec.keyframes()   # the frame itself is inert
-
-
-def frame_rec_id(env, name):
-    return env._host.env[name]['__recorder_id']
-
-
-def test_bg_crossfade_compiles_from_queued_message():
-    """The gat bg pattern: a frame's queuecommand crossfades four stacked
-    bg sprites. bg.png starts shown (alpha 0.5), a BG2 message fades it out
-    while bg2.png fades in - the compiled sprites carry the evolving
-    alpha, so the background progresses instead of sitting static."""
-    xml = (
-        '<ActorFrame><children>'
-        '<ActorFrame OnCommand="%function(self) bg = self end"><children>'
-        '<LAER Type="Sprite" Texture="white"'
-        ' OnCommand="diffusealpha,0.5" BG2Command="linear,1;diffusealpha,0;"/>'
-        '<LAER Type="Sprite" Texture="white"'
-        ' OnCommand="diffusealpha,0" BG2Command="linear,1;diffusealpha,0.5;"/>'
-        '</children></ActorFrame>'
-        '</children></ActorFrame>')
-    parsed = xml_actors.parse_actor_xml(xml)
-    env = StubEnvironment(start_beat=0.0)
-    env.load_actors(parsed.root)
-    # A scheduled closure queues BG2 at beat 10 (= 10s identity clock).
-    env.run("mod_actions = { {10, function() bg:queuecommand('BG2') end} }",
-            name='ma')
-    env.replay_mod_actions()
-
-    from analysis.games.notitg import modfile
-    tree = modfile.compile_element_tree(
-        parsed.root, to_seconds=lambda b: float(b), start_beat=0.0,
-        actor_keyframes=env.actor_keyframes())
-    frame = tree[0]
-    first, second = frame.children
-    # Before the message: first shown at 0.5, second off.
-    assert first.sample('alpha', 0.0)[0] == pytest.approx(0.5)
-    assert second.sample('alpha', 0.0)[0] == pytest.approx(0.0)
-    # After the crossfade (>1s past beat 10): they have swapped.
-    assert first.sample('alpha', 12.0)[0] == pytest.approx(0.0)
-    assert second.sample('alpha', 12.0)[0] == pytest.approx(0.5)
-
-
-def test_hidden_init_gates_sprite_but_keeps_alpha_crossfade():
-    """The ShowAFTBG residual: a bg sprite with `InitCommand=hidden,1` and
-    `OnCommand=diffusealpha,0.5` must compile HIDDEN (gated off in front of
-    the notes) while retaining its 0.5 alpha, so a later `hidden,0` message
-    can reveal it without clobbering the diffusealpha."""
-    xml = (
-        '<ActorFrame><children>'
-        '<LAER Type="Sprite" Texture="white"'
-        ' InitCommand="hidden,1" OnCommand="diffusealpha,0.5"'
-        ' ShowMessageCommand="hidden,0"/>'
-        '</children></ActorFrame>')
-    parsed = xml_actors.parse_actor_xml(xml)
-    env = StubEnvironment(start_beat=0.0)
-    env.load_actors(parsed.root)
-
-    from analysis.games.notitg import modfile
-    tree = modfile.compile_element_tree(
-        parsed.root, to_seconds=lambda b: float(b), start_beat=0.0,
-        actor_keyframes=env.actor_keyframes())
-    el = tree[0]
-    assert el.sample('hidden', 0.0)[0] == pytest.approx(1.0)   # gated off
-    assert el.sample('alpha', 0.0)[0] == pytest.approx(0.5)    # alpha kept
-
-
-def test_recursive_dispatch_is_capped():
-    """A message command that re-broadcasts itself must terminate at the
-    depth cap instead of recursing forever."""
-    env, _w = _load(
-        '<LAER Type="Sprite" LoopMessageCommand="%function(self)'
-        '  self:x(1)'
-        '  MESSAGEMAN:Broadcast("Loop")'
-        'end"/>')
-    # Must return (capped), not blow the Python/Lua stack.
-    env._dispatch_message('Loop')
-    assert env._dispatch_depth == 0
 
 
 # -- asset resolution -----------------------------------------------------
