@@ -57,9 +57,6 @@ _CHANNEL_RESTS = {
 
 # The recorded player actors, in player order. P1 is player 0's real
 # NoteField (the base field capture); P2 is the dual-field sibling.
-_PLAYER_ACTORS = ('P1', 'P2')
-
-
 @lru_cache(maxsize=8)
 def _player_field_keyframes(sm_path):
     """Harvest the P1/P2 named-actor poke streams for a chart.
@@ -110,10 +107,13 @@ def _player_actor_timelines(sm_path, named, player):
     """EventTimelines for one player's 3D actor channels, or None when
     that player's actor carries no 3D poke (the common no-3D case). The
     compiler-supplied P1/P2 streams are used directly; otherwise a
-    private harvest compile is run (and cached per chart)."""
+    private harvest compile is run (and cached per chart). `player` is
+    0-based; extra proxy-source players (P3+) have no compiled
+    player-actor stream, so they resolve to None (no field-3D tilt -
+    their transform comes from the proxy's own pokes)."""
     if named is None:
         named = _player_field_keyframes(sm_path)
-    return _actor_3d_timelines(named.get(_PLAYER_ACTORS[player]))
+    return _actor_3d_timelines(named.get(f'P{player + 1}'))
 
 
 def notitg_field_3d(sm_path, base_hidden=None, player_keyframes=None,

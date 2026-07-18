@@ -236,21 +236,26 @@ class NotitgAdapter(EtternaAdapter):
                                  compiled.get('field_oscillators'),
                                  dual=dual)
 
-    def _second_field(self, replay, instances):
-        """A SecondFieldSpec (the player-2 mod consumer for the second
-        field capture) when the compiled instances include the player
-        field groups, else None.
+    def _player_fields(self, replay, instances):
+        """A PlayerFieldsSpec mapping each non-primary player a proxy
+        targets (>= 2) to its own mod consumer, so the renderer
+        re-renders that player's field into `field{N}` for its copies.
+        None when no copy needs a per-player capture.
 
-        NotITG P1/P2 are two real tournament players, each a field group
-        the chart positions and mods independently (item 43). The compile
-        step decides dual-player (player-2 mod channels or PlayerP2
-        pokes) and emits both player instances; the spec only carries
-        the second capture's mod consumer. Zero cost otherwise: no
-        player instances -> None -> single field."""
-        from analysis.games.notitg.field_instances import SecondFieldSpec
-        if not any(inst['kind'] == 'player' for inst in instances):
+        NotITG runs up to 8 players, each a field the chart mods
+        independently; player 1 is the primary 'field' capture (always
+        rendered), so it is not in the map. A proxy of player N
+        re-renders player N's note pipeline, not player 1's pixels
+        (ENGINE_ORACLE 2b). `_note_mods_for` is 0-based (player=N-1).
+        Zero cost when every copy is player 1."""
+        from analysis.games.notitg.field_instances import PlayerFieldsSpec
+        players = sorted({inst.get('player') for inst in instances
+                          if inst['kind'] in ('proxy', 'player')
+                          and (inst.get('player') or 1) > 1})
+        if not players:
             return None
-        return SecondFieldSpec(self._note_mods_for(replay, player=1))
+        return PlayerFieldsSpec(
+            {n: self._note_mods_for(replay, player=n - 1) for n in players})
 
     def scroll_multipliers(self, replay):
         from analysis.games.notitg.mod_channels import compile_scroll_multipliers
@@ -297,7 +302,7 @@ class NotitgAdapter(EtternaAdapter):
         if instances:
             effects.append(NotitgFieldInstances(
                 instances, base_hidden=base_hidden,
-                second_field=self._second_field(replay, instances)))
+                player_fields=self._player_fields(replay, instances)))
         return effects
 
     def engine_beat_px(self):

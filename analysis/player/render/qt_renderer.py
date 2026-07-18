@@ -42,10 +42,6 @@ _FILL_SCOPE = 'fill'
 # ('screen') captures deliberately stay window-sized - the engine's AFT
 # texture IS the screen, and its hard edge is chart-visible.
 _FIELD_OVERSCAN_FRAC = 0.25
-# The second, independently-modded playfield capture (dual-player NotITG).
-# A 'field2' copy blits the second field capture instead of the
-# primary; produced only when the frame carries a second_field spec.
-_FIELD2_SCOPE = 'field2'
 
 # Debug kill switch: force the pooled-QPixmap capture backend even on a
 # GL host, for A/B comparison against the FBO composite path.
@@ -165,12 +161,12 @@ class QtPlayerRenderer:
         self._gl_capture = None
         self._capture = self._raster_capture
         # Drawable handles for this frame's closed capture slots, reset
-        # by each begin. `_field2_src` is the second, independently-
-        # modded field capture for dual-player NotITG charts
-        # (EffectFrame.second_field); None on every frame without a
-        # second_field spec - the zero-cost path for every other game.
+        # by each begin. `_player_field_src` maps a `field{N}` slot to a
+        # non-primary player's independently-modded field capture (NotITG
+        # multi-player proxy copies, EffectFrame.second_field spec); empty
+        # on every frame without one - the zero-cost path for other games.
         self._field_src = None
-        self._field2_src = None
+        self._player_field_src = {}
         self._backdrop_src = None
         self._backdrop_painter = None
         # Previous frame's AFT capture (the chart area as of the node's
@@ -563,7 +559,7 @@ class QtPlayerRenderer:
         self._backdrop_painter = None
         self._screen_open = False
         self._field_src = None
-        self._field2_src = None
+        self._player_field_src = {}
         self._backdrop_src = None
         self._hud_slot_open = False
         self._hud_painter = None
@@ -599,7 +595,7 @@ class QtPlayerRenderer:
             self._capture.release(handle)
         self._aft_frozen.clear()
         self._field_src = None
-        self._field2_src = None
+        self._player_field_src = {}
         self._backdrop_src = None
         # The cached HUD target belongs to the old backend too; the
         # first-render trigger in _hud_redraw_due re-renders it.
@@ -704,21 +700,24 @@ class QtPlayerRenderer:
         self._field_src = self._capture.close('field')
 
     def _capture_second_field(self, frame, ctx, painter, visibility) -> None:
-        """Render the field layers a second time with a dual-player chart's
-        alternate (player-1) note-mod consumer, into the field2 slot, so
-        'field2'-scope copies blit an independently-modded playfield.
+        """Render the field layers once per NON-PRIMARY player, each with
+        that player's mod consumer, into slot `field{N}`, so a proxy of
+        player N blits an independently-modded re-render of player N's
+        field.
 
         Engine parity (item 43/ENGINE_ORACLE 2b): an ActorProxy of a
         DIFFERENTLY-modded Player must re-render that side's note pipeline,
-        not blit player 0's pixels. The two captures share the chart and
-        candidate set; only the sampled (mod, player) channels differ. The
-        player's `_note_mods` is swapped for the second consumer, the
-        candidate pipeline + note views are rebuilt against it, the field
-        layers draw into a fresh transparent pixmap (with the same effect
-        transform bracket the primary capture uses so field transforms
-        replicate), then player-0 state is restored for the rest of the
-        frame. Zero cost when no second_field spec is present."""
-        self._field2_src = None
+        not blit player 1's pixels. A chart can enable up to 8 players and
+        proxy any of them (the SRT charts' decorative field copies). Each
+        capture shares the chart and candidate set; only the sampled
+        (mod, player) channels differ - the player's `_note_mods` is
+        swapped for that player's consumer, the candidate pipeline + note
+        views rebuilt against it, the field layers drawn into a fresh
+        transparent pixmap (with the same effect transform bracket the
+        primary capture uses so field transforms replicate), then
+        player-1 state restored. Zero cost when no per-player spec is
+        present."""
+        self._player_field_src = {}
         spec = getattr(frame, 'second_field', None)
         if (spec is None or painter is None
                 or getattr(ctx, 'player', None) is None):
@@ -726,19 +725,21 @@ class QtPlayerRenderer:
         player = ctx.player
         primary = getattr(player, '_note_mods', None)
         mx, my = self._field_overscan
-        fp = self._capture.open('field2', painter,
-                                player.W + 2 * mx, player.H + 2 * my)
-        if fp is not None:
-            fp.translate(mx, my)
         try:
-            player._note_mods = spec.note_mods
-            self._rebuild_note_mods(ctx)
-            wrapped = self._begin_effect_transform(frame, fp, ctx)
-            self._draw_field_layers(ctx, fp, visibility)
-            if wrapped:
-                self._end_effect_transform(fp)
+            for number, note_mods in spec.note_mods.items():
+                slot = f'field{number}'
+                fp = self._capture.open(slot, painter,
+                                        player.W + 2 * mx, player.H + 2 * my)
+                if fp is not None:
+                    fp.translate(mx, my)
+                player._note_mods = note_mods
+                self._rebuild_note_mods(ctx)
+                wrapped = self._begin_effect_transform(frame, fp, ctx)
+                self._draw_field_layers(ctx, fp, visibility)
+                if wrapped:
+                    self._end_effect_transform(fp)
+                self._player_field_src[slot] = self._capture.close(slot)
         finally:
-            self._field2_src = self._capture.close('field2')
             player._note_mods = primary
             self._rebuild_note_mods(ctx)
 
@@ -839,23 +840,25 @@ class QtPlayerRenderer:
             return
         if scope == _SCREEN_PREV_SCOPE and self._prev_screen is None:
             return
-        if scope == _FIELD2_SCOPE and self._field2_src is None:
+        is_player_field = scope.startswith('field') and scope not in (
+            _DEFAULT_FIELD_SCOPE, 'full')
+        if is_player_field and self._player_field_src.get(scope) is None:
             return
         if scope == _SCREEN_SCOPE and self._screen_capture is None:
             self._take_screen_capture()
-        match scope:
-            case 'screen':
-                source = self._aft_source(extra, self._screen_capture)
-            case 'screen_prev':
-                source = self._aft_source(extra, self._prev_screen)
-            case 'field2':
-                # The second player's independently-modded field capture.
-                source = self._field2_src
-            case _:
-                if scope == 'full' and self._backdrop_src is not None:
-                    batch.blit(self._backdrop_src, transform=transform,
-                               src_box=box, opacity=opacity)
-                source = self._field_src
+        if scope == 'screen':
+            source = self._aft_source(extra, self._screen_capture)
+        elif scope == 'screen_prev':
+            source = self._aft_source(extra, self._prev_screen)
+        elif is_player_field:
+            # A non-primary player's independently-modded field capture
+            # (field2, field3, ...): the proxy re-renders THAT player.
+            source = self._player_field_src[scope]
+        else:
+            if scope == 'full' and self._backdrop_src is not None:
+                batch.blit(self._backdrop_src, transform=transform,
+                           src_box=box, opacity=opacity)
+            source = self._field_src
         if scope != _SCREEN_SCOPE and scope != _SCREEN_PREV_SCOPE:
             transform, box = self._overscan_blit(transform, box)
         batch.blit(source, transform=transform, src_box=box,

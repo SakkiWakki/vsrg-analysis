@@ -46,14 +46,24 @@ from analysis.player.render.effects.base import EffectFrame
 _DESIGN_W = 640.0
 _DESIGN_H = 480.0
 
+# The primary (player-1) field capture. Player-N proxies blit from
+# per-player captures `field{N}` (field2, field3, ...), each an
+# independently-modded re-render of that player's notefield - a chart
+# can enable up to 8 players and proxy any of them (the SRT charts'
+# decorative field copies).
 _PROXY_SCOPE = 'field'
+
+
+def _player_scope(number) -> str:
+    """The capture-slot scope for player `number`: the primary 'field'
+    for player 1, else 'field{N}' (its own per-player re-render)."""
+    return _PROXY_SCOPE if number <= 1 else f'field{number}'
+
+
 _AFT_SCOPE = 'screen'
 # Pre-node AFT samplers: drawn before their source node captures, so
 # they show the previous frame's capture (the feedback leg of trails).
 _AFT_PREV_SCOPE = 'screen_prev'
-# The second-player capture scope: instances whose source is player 2
-# blit from the independently-modded second capture.
-_FIELD2_SCOPE = 'field2'
 # An AFT-rig curtain quad blitted at its tree position (covers the
 # proxies under it; samplers above it stay visible).
 _FILL_SCOPE = 'fill'
@@ -61,19 +71,21 @@ _FILL_SCOPE = 'fill'
 _IDENTITY_H = np.eye(3)
 
 
-class SecondFieldSpec:
-    """Instruction to the renderer to render the field layers a SECOND
-    time for a dual-player NotITG chart.
+class PlayerFieldsSpec:
+    """Instruction to the renderer to render the field layers once PER
+    non-primary player, each into its own capture slot.
 
-    `note_mods` is the player-2 mod consumer: while the second capture
-    is rendered, the renderer swaps it in for the player's primary one
-    so the field's notes, receptor offsets, and reverse baseline all
-    evaluate against player 2's channels (charts apply different mods
-    per side). Everything else about the two captures is identical -
-    only the sampled (mod, player) channels diverge."""
+    `note_mods` maps a 1-based player number (>= 2) to that player's
+    mod consumer. For each, the renderer re-renders the field with that
+    consumer swapped in (so its notes, receptor offsets, and reverse
+    baseline evaluate against that player's channels - a chart mods each
+    player independently) into slot `field{N}`; a proxy of player N
+    blits from it. Everything but the sampled (mod, player) channels is
+    identical across the captures. Player 1 is the primary 'field'
+    capture, always rendered, so it is not in this map."""
 
     def __init__(self, note_mods):
-        self.note_mods = note_mods
+        self.note_mods = dict(note_mods)
 
 
 def _design_map(chart_rect):
@@ -121,10 +133,12 @@ class NotitgFieldInstances:
     zero-opacity placeholder keeps `fields` non-empty) so the second
     capture renders."""
 
-    def __init__(self, instances, base_hidden=None, second_field=None):
+    def __init__(self, instances, base_hidden=None, player_fields=None):
         self._instances = tuple(instances)
         self._base_hidden = base_hidden
-        self._second_field = second_field
+        self._player_fields_spec = player_fields
+        self._player_fields = (player_fields.note_mods
+                               if player_fields is not None else {})
 
     def __bool__(self):
         return bool(self._instances)
@@ -148,10 +162,10 @@ class NotitgFieldInstances:
                             min(1.0, alpha), self._scope(inst),
                             self._extra(inst, t)))
 
-        if self._second_field is not None:
+        if self._player_fields_spec is not None:
             return EffectFrame(
                 fields=tuple(entries or [(None, 0.0, _PROXY_SCOPE)]),
-                second_field=self._second_field)
+                second_field=self._player_fields_spec)
         return self._single_frame(base_hidden, entries)
 
     def _single_frame(self, base_hidden, entries) -> EffectFrame | None:
@@ -180,8 +194,12 @@ class NotitgFieldInstances:
         if inst['kind'] == 'aft':
             return (_AFT_PREV_SCOPE if inst.get('aft_order') == 'pre'
                     else _AFT_SCOPE)
-        if inst['player'] == 2 and self._second_field is not None:
-            return _FIELD2_SCOPE
+        # A proxy/player blits from its target player's capture: the
+        # primary 'field' for player 1, or the per-player re-render
+        # 'field{N}' the spec provides for player N > 1.
+        player = inst.get('player') or 1
+        if player > 1 and player in self._player_fields:
+            return _player_scope(player)
         return _PROXY_SCOPE
 
     @staticmethod

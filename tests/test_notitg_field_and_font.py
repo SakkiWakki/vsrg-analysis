@@ -181,9 +181,10 @@ def test_base_hidden_suppresses_identity_original():
 
 # -- dual-player fields (item 43/50/54) ----------------------------------
 
-def _spec():
-    from analysis.games.notitg.field_instances import SecondFieldSpec
-    return SecondFieldSpec(note_mods=object())
+def _spec(*players):
+    from analysis.games.notitg.field_instances import PlayerFieldsSpec
+    # Map each non-primary player to a placeholder consumer.
+    return PlayerFieldsSpec({n: object() for n in (players or (2,))})
 
 
 def _players():
@@ -198,7 +199,7 @@ def test_dual_originals_at_p1_p2_offsets_with_scopes():
     theme +-160 design px scaled by the design map (chart_rect 400x600
     -> min-fit box side 400, k = 400/640 = 0.625)."""
     spec = _spec()
-    frame = NotitgFieldInstances(_players(), second_field=spec).at(_Ctx(1.0))
+    frame = NotitgFieldInstances(_players(), player_fields=spec).at(_Ctx(1.0))
     assert frame.second_field is spec
     p1, p2 = frame.fields
     assert p1[2] == 'field' and p2[2] == 'field2'
@@ -211,7 +212,7 @@ def test_dual_originals_at_p1_p2_offsets_with_scopes():
 def test_dual_routes_p2_proxy_to_field2_p1_to_field():
     copies = [_proxy('P1p', player=1), _proxy('P2p', player=2)]
     frame = NotitgFieldInstances(_players() + copies,
-                                 second_field=_spec()).at(_Ctx(1.0))
+                                 player_fields=_spec()).at(_Ctx(1.0))
     scopes = [entry[2] for entry in frame.fields]
     # Two originals ('field','field2') then the two proxy copies.
     assert scopes.count('field2') == 2   # P2 original + P2p copy
@@ -233,7 +234,7 @@ def test_dual_hidden_base_keeps_capture_path():
     from analysis.player.render.effects.timeline import EventTimeline
     base_hidden = EventTimeline([_kf(0.0, 1.0)], rest=(1.0,))
     frame = NotitgFieldInstances(_players(), base_hidden=base_hidden,
-                                 second_field=_spec()).at(_Ctx(1.0))
+                                 player_fields=_spec()).at(_Ctx(1.0))
     assert frame.second_field is not None
     assert frame.fields  # non-empty placeholder -> renderer captures
 
