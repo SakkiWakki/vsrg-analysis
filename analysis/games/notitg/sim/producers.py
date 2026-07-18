@@ -19,6 +19,7 @@ Deliberately NOT reproduced from the harvest path:
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from analysis.games.notitg import aft_chains, field_compose, modfile
@@ -27,6 +28,25 @@ from analysis.games.notitg.sim.loop import (
 from analysis.games.notitg.sim.record import chase_events, coalesce_applied
 from analysis.player.render.effects.timeline import EventTimeline
 from analysis.player.render.mods.channels import ModChannels
+
+# Opt-in: run each chart's per-frame Update body through the AST interpreter
+# (frame_eval, no Lua) instead of lupa. Set VSRG_NOTITG_COMPILED_BODY=1 in the
+# environment to see the compiled path drive the real app. Off by default -
+# the Lua path stays the baseline until the compiled path is the default.
+_TRUE = {'1', 'true', 'yes', 'on'}
+
+
+def _compiled_body_flag() -> bool:
+    on = os.environ.get('VSRG_NOTITG_COMPILED_BODY', '').lower() in _TRUE
+    if on and not _compiled_body_flag._announced:
+        _compiled_body_flag._announced = True
+        import sys
+        print('[notitg] VSRG_NOTITG_COMPILED_BODY set: per-frame Update '
+              'bodies run through the AST interpreter (no Lua)', file=sys.stderr)
+    return on
+
+
+_compiled_body_flag._announced = False
 
 
 def compile_via_sim(sm_path, end_seconds: float | None = None) -> dict | None:
@@ -51,7 +71,8 @@ def _compile_via_sim(sm_path, end_seconds):
         end_seconds = doc.end_seconds
     result = run_declarative(doc.root, doc.to_seconds, doc.start_beat,
                              end_seconds, rng_seed=doc.rng_seed,
-                             song_dir=doc.lua_dir.parent)
+                             song_dir=doc.lua_dir.parent,
+                             use_compiled_body=_compiled_body_flag())
     env = result.env
 
     named_keyframes = env.named_actor_keyframes()
