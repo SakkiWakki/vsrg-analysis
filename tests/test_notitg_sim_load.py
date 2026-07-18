@@ -147,6 +147,18 @@ def test_lua50_nested_long_comment_blanked_to_matched_close():
     assert ' b ' not in src
 
 
+def test_lua50_zero_step_for_raises_like_50():
+    # Lua 5.0 raises "'for' step is zero" at loop entry; LuaJIT spins
+    # forever (uprooted marooned's `for i = 596, 600, 0 do`). The
+    # rewrite makes the chunk fault exactly as it does in-engine.
+    src = xml_actors._lua50_compat('for i = 596, 600, 0 do y() end')
+    assert "step is zero" in src
+    assert xml_actors._lua50_compat(
+        's = "for a=1,2,0 do"') == 's = "for a=1,2,0 do"'
+    assert xml_actors._lua50_compat(
+        'for i=1,10,2 do end') == 'for i=1,10,2 do end'
+
+
 def test_lua50_number_in_string_or_comment_untouched():
     src = xml_actors._lua50_compat("s = '485then' -- 485then")
     assert src == "s = '485then' -- 485then"

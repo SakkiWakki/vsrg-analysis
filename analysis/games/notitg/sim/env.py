@@ -66,6 +66,11 @@ _PREFERENCES = {
 # per-update drain cap and tween-overflow guard on the actor.
 _MAX_DISPATCH_DEPTH = 24
 
+# Budget of command dispatches within ONE update-body call. A normal
+# tick dispatches a handful; only a runaway self-feeding loop (a chart
+# action cursor rewound against an unmodeled clock) reaches this.
+_MAX_TICK_DISPATCHES = 20000
+
 # Engine starting positions for the real players (ScreenGameplay:
 # each enabled player at its PlayerP{n}X style metric, Y=center; the
 # classic versus split is center +-160 in the 640 design space).
@@ -147,6 +152,8 @@ class SimEnvironment:
         self._faults = 0
         self._fault_messages: list = []
         self._dispatch_depth = 0
+        self._tick_dispatches = 0
+        self._tick_budget_warned = False
         self._rng_seed = int(rng_seed)
         self._screen_id: int | None = None
         self._screen_children: dict = {}
@@ -659,6 +666,9 @@ class SimEnvironment:
     def set_time(self, t: float, beat: float) -> None:
         self._now = float(t)
         self._beat = float(beat)
+        # Each tick gets a fresh dispatch budget; only a runaway loop
+        # inside one tick exhausts it.
+        self._tick_dispatches = 0
 
     def drain(self, t: float, defer_queued: bool = True) -> None:
         """Advance every LIVE tween queue to `t`, firing queue-borne
@@ -706,6 +716,13 @@ class SimEnvironment:
 
     def _run_command_body(self, rec_id, body, name) -> None:
         if self._dispatch_depth >= _MAX_DISPATCH_DEPTH:
+            return
+        self._tick_dispatches += 1
+        if self._tick_dispatches > _MAX_TICK_DISPATCHES:
+            if not self._tick_budget_warned:
+                self._tick_budget_warned = True
+                self._warnings.append(
+                    f'tick dispatch budget exhausted at {name}')
             return
         self._dispatch_depth += 1
         try:
@@ -941,6 +958,11 @@ class SimEnvironment:
         }))
         host.expose('GAMESTATE', singleton(host.to_lua({
             'GetCurrentSong': lambda _self: song,
+            # Charts warp song time (heart's choose-your-minigame rig
+            # rewinds its action cursor after SetSongBeat); honoring the
+            # poke keeps their within-tick control flow consistent - the
+            # sweep clock re-asserts the real beat next tick.
+            'SetSongBeat': self._set_song_beat,
             'GetSongBeat': lambda _self: self._beat,
             'GetSongBeatNoOffset': lambda _self: self._beat,
             'GetSongTime': lambda _self: self._now,
@@ -1017,6 +1039,10 @@ class SimEnvironment:
         if head.strip().lower() == 'mod':
             self._applied_mods.append(
                 (self._now, self._beat, rest.strip(), _as_int(pn)))
+
+    def _set_song_beat(self, _self, beat=None, *_a) -> None:
+        if isinstance(beat, (int, float)):
+            self._beat = float(beat)
 
     def _apply_modifiers(self, _self, modstring=None, *_a) -> None:
         if isinstance(modstring, str):

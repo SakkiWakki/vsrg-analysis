@@ -151,6 +151,14 @@ def _parse_tag_attrs(tag_body: str) -> dict:
 # (real charts write `'\+$'` find-patterns).
 _LUA50_ESCAPES = frozenset("abfnrtv\\\"'\n0123456789")
 
+# A numeric `for` with a literal-zero step: Lua 5.0 RAISES "'for' step
+# is zero" at loop entry, but LuaJIT (5.1) spins forever. A buggy chart
+# (`for i = 596, 600, 0 do ... end`) relies on the engine aborting that
+# chunk. Replace the literal step with a call that raises, so the body
+# never runs and the chunk faults exactly as it does in-engine.
+_ZERO_STEP_FOR_RE = re.compile(
+    r'(\bfor\b[^\n;]*?=[^\n;]*?,[^\n;]*?,\s*)0(?:\.0*)?(\s+do\b)')
+
 
 def _lua50_compat(source: str) -> str:
     """Rewrite Lua source so LuaJIT (5.1 lexer) reads it exactly as
@@ -165,67 +173,88 @@ def _lua50_compat(source: str) -> str:
       numbers survive) up to the DEPTH-MATCHED close.
     """
     out = []
+    # A char-for-char mask of `out` where every string/comment character
+    # is blanked to a space, so the zero-step-for rewrite matches only
+    # code and never a `for ... , 0 do` sitting inside a string literal.
+    mask = []
     i, n = 0, len(source)
     while i < n:
         ch = source[i]
         if source.startswith('--[[', i):
-            out.append('--[[')
+            piece = ['--[[']
             i += 4
             depth = 1
             while i < n and depth:
                 if source.startswith('[[', i):
                     depth += 1
-                    out.append('  ')
+                    piece.append('  ')
                     i += 2
                 elif source.startswith(']]', i):
                     depth -= 1
-                    out.append(']]' if depth == 0 else '  ')
+                    piece.append(']]' if depth == 0 else '  ')
                     i += 2
                 else:
-                    out.append(source[i] if source[i] == '\n' else ' ')
+                    piece.append(source[i] if source[i] == '\n' else ' ')
                     i += 1
+            text = ''.join(piece)
+            out.append(text)
+            mask.append(' ' * len(text))
         elif source.startswith('--', i):
             stop = source.find('\n', i)
             stop = n if stop == -1 else stop
             out.append(source[i:stop])
+            mask.append(' ' * (stop - i))
             i = stop
         elif ch in '\'"':
-            out.append(ch)
+            piece = [ch]
             i += 1
             while i < n:
                 c = source[i]
                 if c == '\\':
                     escaped = source[i + 1] if i + 1 < n else ''
-                    if escaped in _LUA50_ESCAPES:
-                        out.append(source[i:i + 2])
-                    else:
-                        out.append(escaped)
+                    piece.append(source[i:i + 2] if escaped in _LUA50_ESCAPES
+                                 else escaped)
                     i += 2
                     continue
-                out.append(c)
+                piece.append(c)
                 i += 1
                 if c == ch:
                     break
+            text = ''.join(piece)
+            out.append(text)
+            mask.append(' ' * len(text))
         elif source.startswith('[[', i):
             stop = source.find(']]', i + 2)
             stop = n - 2 if stop == -1 else stop
-            out.append(source[i:stop + 2])
+            text = source[i:stop + 2]
+            out.append(text)
+            mask.append(' ' * len(text))
             i = stop + 2
         elif ch.isdigit():
             start = i
             while i < n and (source[i].isdigit() or source[i] == '.'):
                 i += 1
-            out.append(source[start:i])
+            number = source[start:i]
             begins_token = start == 0 or not (
                 source[start - 1].isalnum() or source[start - 1] in '_.')
             if (begins_token and i < n
                     and (source[i].isalpha() or source[i] == '_')
                     and source[i] not in 'eExX'):
-                out.append(' ')
+                number += ' '
+            out.append(number)
+            mask.append(number)
         else:
             out.append(ch)
+            mask.append(ch)
             i += 1
-    return ''.join(out)
+    rewritten = ''.join(out)
+    masked = ''.join(mask)
+    for match in reversed(list(_ZERO_STEP_FOR_RE.finditer(masked))):
+        s, e = match.span()
+        rewritten = (rewritten[:s] + match.group(1)
+                     + '(error("\'for\' step is zero"))'
+                     + match.group(2) + rewritten[e:])
+    return rewritten
 
 
 def _scan_start_tag(text: str, lt: int):
