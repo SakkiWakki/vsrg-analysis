@@ -62,12 +62,16 @@ still displace them and confusion still rotates them).
   `dizzy_rotation`). RotationX/Y confusion (confusionx / confusiony, with
   their *offset companions and numbered per-column variants) share that exact
   angle (`_confusion_axis_degrees`) but tilt about the horizontal / vertical
-  axis. Unlike roll/twirl these are CONSTANT tilts (no per-note y_offset
-  factor), so they reproject faithfully into 2D as foreshortening: confusionx
-  -> uniform zoom by cos(angle) (`confusionx_zoom`), confusiony -> a
-  per-column dx pulling x toward center by (cos(angle)-1) (`confusiony_dx`).
-  The pipeline has uniform zoom (no zoom_x/zoom_y) and per-note dx, so each
-  axis maps to the one it can express; documented on those functions.
+  axis. The SCALAR variants are a whole-field tilt the NotITG field
+  projection renders as true perspective (games/notitg/field_projection
+  sums them into the field model matrix); while it owns the tilt the
+  consumer zeroes them here (note_mods' double-apply guard). The 2D
+  foreshortening kernels below remain as the fallback where the
+  projection cannot render - per-column numbered variants, the
+  base-hidden deferral, instance-owned fields: confusionx -> uniform
+  zoom by cos(angle) (`confusionx_zoom`, provably the fov->0 limit of
+  the real tilt - TRANSFORM3D.md), confusiony -> a per-column dx pulling
+  x toward center by (cos(angle)-1) (`confusiony_dx`).
 
 - xmode: on a single-side field, dx = percent * y_offset - the vertical
   scroll shears into a diagonal (`xmode_x`); the doubles sign-split is not
@@ -146,11 +150,21 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from analysis.player.render.transform3d import eye_distance
+
 ARROW_SIZE = 64.0
+SCREEN_WIDTH = 640.0
 SCREEN_HEIGHT = 480.0
 CENTER_LINE_Y = 160.0
 FADE_DIST_Y = 40.0
 PI = np.pi
+
+# LoadMenuPerspective camera distance (fov 45 over the design width):
+# a +z push reads as the center-plane perspective scale d / (d - z).
+EYE_DISTANCE = eye_distance(45.0, SCREEN_WIDTH)
+# +z clamp keeping the perspective divide off the eye plane; a note
+# pushed to the camera saturates at this scale instead of exploding.
+_MAX_Z_SCALE = 32.0
 
 # ITGmania metrics.ini [ArrowEffects] defaults (the values the formulas were
 # tuned against; the engine reads them per-theme, we bake the _fallback set).
@@ -570,13 +584,25 @@ def attenuate(percent, cols, y_offset, keycount, arrow_size=ARROW_SIZE):
     return percent * r * r * (xoff / arrow_size)
 
 
+def perspective_z_scale(z_push):
+    """The center-plane perspective scale of an engine +z push:
+    d / (d - z) with d the LoadMenuPerspective eye distance (EYE_DISTANCE,
+    transform3d.eye_distance). This is the exact scale the real projection
+    gives a z-translated plane at the design center - the sanctioned
+    per-note degradation of 3D (TRANSFORM3D.md, "What each executor
+    consumes"). A push at/behind the eye saturates at _MAX_Z_SCALE
+    instead of crossing the divide."""
+    z = np.minimum(z_push, EYE_DISTANCE * (1.0 - 1.0 / _MAX_Z_SCALE))
+    return EYE_DISTANCE / (EYE_DISTANCE - z)
+
+
 def waveform_z_zoom(z_push):
     """Reproject an engine +z push (the waveform Z siblings digitalz /
-    zigzagz / sawtoothz / squarez / bouncez accumulate into fZPos) to a 2D
-    zoom multiplier, exactly as `bumpy_zoom` does: +z is toward the camera
-    => larger, mapped about 1.0 by SCREEN_HEIGHT. `z_push` is the summed
-    per-note z contribution in engine px."""
-    return 1.0 + z_push / SCREEN_HEIGHT
+    zigzagz / sawtoothz / squarez / bouncez accumulate into fZPos) to a
+    2D zoom multiplier: the center-plane perspective scale, exactly as
+    `bumpy_zoom` does. `z_push` is the summed per-note z contribution in
+    engine px."""
+    return perspective_z_scale(z_push)
 
 
 def accel_y_offset(percents: dict, y_offset: np.ndarray,
@@ -742,12 +768,11 @@ def bumpy_z(percent, y_offset, offset=0.0, period=0.0, is_tan=False):
 def bumpy_zoom(percent, y_offset, offset=0.0, period=0.0, is_tan=False):
     """GetZPos bumpy reprojected to 2D zoom.
 
-    In 3D, fZPos += percent * 40 * sin(bumpy_angle). +z is toward the camera
-    => larger. We map the z push to a scale about 1.0 by SCREEN_HEIGHT: zoom =
-    1 + z / SCREEN_HEIGHT. This is a proxy (true perspective would divide by
-    focal length); it keeps the bob visible without a 3D pipeline. offset/
-    period/is_tan carry the bumpyoffset/bumpyperiod/tanbumpy companions."""
-    return 1.0 + bumpy_z(percent, y_offset, offset, period, is_tan) / SCREEN_HEIGHT
+    In 3D, fZPos += percent * 40 * sin(bumpy_angle); +z is toward the
+    camera => larger, as the center-plane perspective scale
+    (`perspective_z_scale`). offset/period/is_tan carry the bumpyoffset/
+    bumpyperiod/tanbumpy companions."""
+    return perspective_z_scale(bumpy_z(percent, y_offset, offset, period, is_tan))
 
 
 def bumpy_x(percent, y_offset, offset=0.0, period=0.0, is_tan=False):
@@ -1308,9 +1333,13 @@ def note_offsets(percents: dict, cols: np.ndarray, y_offset: np.ndarray,
 
     The out-of-plane confusion tilts confusionx / confusiony (ReceptorGet-
     RotationX/Y, with their *offset companions and numbered per-column
-    variants) are reprojected into the 2D pipeline: confusionx as a uniform
+    variants) reproject into the 2D pipeline: confusionx as a uniform
     zoom (vertical foreshortening, `confusionx_zoom`), confusiony as a
-    per-column dx (horizontal foreshortening, `confusiony_dx`). `hallway`
+    per-column dx (horizontal foreshortening, `confusiony_dx`). The
+    SCALAR variants normally never reach here - the NotITG field
+    projection renders them as true perspective and the consumer zeroes
+    them (module header, "confusion") - so these kernels serve the
+    per-column variants and the projection's fallback cases. `hallway`
     (a notefield perspective mod, no ArrowEffects formula) is ported as a
     per-note dx that recedes columns toward the vanishing point with depth
     (`hallway_x`).

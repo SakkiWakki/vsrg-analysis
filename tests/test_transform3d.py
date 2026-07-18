@@ -209,3 +209,27 @@ def test_confusionx_is_ortho_rotationx_limit():
         px = t3.project_corners(QUAD * 100.0, H)
         y_scale = np.ptp(px[:, 1]) / 200.0  # = |cos(angle)|
         assert np.isclose(y_scale, zoom, atol=1e-9)
+
+
+# --- cross-check: perspective_z_scale == real projection of a z push --------
+
+def test_perspective_z_scale_matches_projection():
+    """The per-note z->zoom contract (arrow_effects.perspective_z_scale,
+    d/(d-z)) is EXACTLY the scale the real LoadMenuPerspective gives a
+    z-translated plane at the design center - the sanctioned center-plane
+    degradation of per-note 3D."""
+    from analysis.player.render.mods import arrow_effects as ae
+
+    d = t3.eye_distance(45.0, 640.0)
+    assert np.isclose(d, ae.EYE_DISTANCE)
+    P = t3.projection(45.0, 640.0, 480.0)
+    for z in (0.0, 50.0, -50.0, 200.0, -600.0):
+        M = t3.translate(0.0, 0.0, z)
+        H = t3.homography(M, P)
+        px = t3.project_corners(QUAD * 50.0 + (320.0, 240.0), H)
+        scale = np.ptp(px[:, 0]) / 100.0
+        assert np.isclose(scale, ae.perspective_z_scale(z), atol=1e-9)
+    # at z=0 the scale is exactly 1 (design plane maps 1:1).
+    assert ae.perspective_z_scale(0.0) == 1.0
+    # a push at/behind the eye saturates instead of exploding/flipping.
+    assert ae.perspective_z_scale(d * 2.0) == ae._MAX_Z_SCALE

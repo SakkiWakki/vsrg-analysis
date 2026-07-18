@@ -146,10 +146,12 @@ def test_movex_is_one_arrow_at_full():
 
 def test_bumpy_zoom_center_of_wave():
     # z = percent*40*sin(yoff/16); at yoff = 8*pi, sin(pi/2)... pick yoff so
-    # sin = 1: yoff/16 = pi/2 => yoff = 8*pi. zoom = 1 + 40*percent/480.
+    # sin = 1: yoff/16 = pi/2 => yoff = 8*pi. zoom = d/(d-40) (center-plane
+    # perspective scale, d = EYE_DISTANCE).
     yoff = np.array([8.0 * math.pi])
     out = ae.bumpy_zoom(1.0, yoff)
-    assert out[0] == pytest.approx(1.0 + 40.0 / 480.0)
+    d = ae.EYE_DISTANCE
+    assert out[0] == pytest.approx(d / (d - 40.0))
 
 
 def test_dizzy_rotation_wraps_to_degrees():
@@ -825,9 +827,11 @@ def test_bounce_x_period_and_offset():
 
 
 def test_waveform_z_zoom_reprojection():
-    # z push maps to 1 + z/SCREEN_HEIGHT, matching bumpy's reprojection.
+    # z push maps to the center-plane perspective scale d/(d-z), matching
+    # bumpy's reprojection.
     out = ae.waveform_z_zoom(np.array([48.0]))
-    assert out[0] == pytest.approx(1.0 + 48.0 / 480.0)
+    d = ae.EYE_DISTANCE
+    assert out[0] == pytest.approx(d / (d - 48.0))
 
 
 # --- digital family via note_offsets (channels-through smoke) --------
@@ -1121,10 +1125,11 @@ def test_beaty_matches_beat_shape_on_y():
 
 
 def test_beatz_reprojects_to_zoom():
-    # beatz pushes z; zoom = 1 + z/480. yoff=0, factor 20 => z=20 => 1+20/480.
+    # beatz pushes z; zoom = d/(d-z). yoff=0, factor 20 => z=20.
     r = note_offsets({'beatz': 1.0}, np.array([0]), np.array([0.0]),
                      t_now=0.0, beat_now=0.0, keycount=4)
-    assert r.zoom[0] == pytest.approx(1.0 + 20.0 / 480.0)
+    d = ae.EYE_DISTANCE
+    assert r.zoom[0] == pytest.approx(d / (d - 20.0))
 
 
 def test_beat_mult_companion_speeds_pulse():
@@ -1167,8 +1172,9 @@ def test_attenuate_x_y_z_route_to_axes():
                      np.array([0]), y, t_now=0.0, beat_now=0.0, keycount=4)
     assert r.dx[0] == pytest.approx(-1.5)
     assert r.dy[0] == pytest.approx(-1.5)
-    # z push -1.5 px -> zoom 1 + (-1.5)/480.
-    assert r.zoom[0] == pytest.approx(1.0 - 1.5 / 480.0)
+    # z push -1.5 px -> zoom d/(d+1.5).
+    d = ae.EYE_DISTANCE
+    assert r.zoom[0] == pytest.approx(d / (d + 1.5))
 
 
 def test_parabola_x_y_z_route_to_axes():
@@ -1177,7 +1183,8 @@ def test_parabola_x_y_z_route_to_axes():
                      np.array([0]), y, t_now=0.0, beat_now=0.0, keycount=4)
     assert r.dx[0] == pytest.approx(4.0)
     assert r.dy[0] == pytest.approx(4.0)
-    assert r.zoom[0] == pytest.approx(1.0 + 4.0 / 480.0)
+    d = ae.EYE_DISTANCE
+    assert r.zoom[0] == pytest.approx(d / (d - 4.0))
 
 
 # --- xmode / confusionoffset ----------------------------------------

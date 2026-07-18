@@ -194,3 +194,19 @@ bounds for culling.
   MVP; no homography (the rasterizer divides per fragment). The
   homography path is the QPainter specialization of the same matrices,
   so both executors are backends of one transform tree (DESIGN axis 3).
+
+## Consumers: the NotITG field projection
+
+`analysis/games/notitg/field_projection.py` is the single construction
+point for the NotITG field's use of this module: one
+`LoadMenuPerspective` (fov 45, the recorded per-player `SetVanishPoint`
+stream when compiled, else centered), one field model matrix summing
+BOTH tilt producers (recorded actor rotation pokes + the scalar
+confusionx/y mod channels), one homography out. `field_3d.NotitgField3D`
+emits it for the base field; `field_compose` imports the same centered
+projection for instance channels. The per-note z->zoom contract
+(`arrow_effects.perspective_z_scale`, d/(d-z) with d =
+`eye_distance(fov, W)`) is the exact center-plane scale of this
+projection - the confusionx ortho cross-check above generalizes: the 2D
+kernels are the degenerate limits of this one projection, kept only for
+per-column variants and the capture-deferral fallback.

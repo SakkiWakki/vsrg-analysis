@@ -36,21 +36,19 @@ from __future__ import annotations
 
 import numpy as np
 
+from analysis.games.notitg import field_projection
 from analysis.player.render import transform3d
 from analysis.player.render.effects.timeline import EventTimeline
 
-_DESIGN_W = 640.0
-_DESIGN_H = 480.0
-_CENTER_X = _DESIGN_W / 2.0
-_CENTER_Y = _DESIGN_H / 2.0
-_CORNERS = ((0.0, 0.0), (_DESIGN_W, 0.0),
-            (_DESIGN_W, _DESIGN_H), (0.0, _DESIGN_H))
+_CENTER_X = field_projection.DESIGN_CX
+_CENTER_Y = field_projection.DESIGN_CY
+_CORNERS = field_projection.PLANE_CORNERS
 _TO_CONTENT = transform3d.translate(-_CENTER_X, -_CENTER_Y)
 
-# RageDisplay LoadMenuPerspective defaults: fov 45, vanish at the screen
-# centre. (Recorded per-proxy vanish-point channels exist in the
-# compiled dict but are not consumed yet.)
-_PROJECTION = transform3d.projection(45.0, _DESIGN_W, _DESIGN_H, vanish=None)
+# The shared LoadMenuPerspective (fov 45, centered vanish). Instance
+# channels always project centered: per-proxy SetVanishPoint streams
+# feed the base-field projection (field_3d), not the copy blits.
+_PROJECTION = field_projection.design_projection()
 
 _MIN_ALPHA = 1.0 / 255.0
 _MIN_DET = 1e-9

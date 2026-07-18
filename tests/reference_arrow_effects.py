@@ -50,8 +50,25 @@ from __future__ import annotations
 import math
 
 ARROW_SIZE = 64.0
+SCREEN_WIDTH = 640.0
 SCREEN_HEIGHT = 480.0
 PI = math.pi
+
+# LoadMenuPerspective camera distance (fov 45 over the design width),
+# derived independently of production: the documented z->zoom contract is
+# the center-plane perspective scale d / (d - z), inverted by
+# z = d * (1 - 1/zoom).
+EYE_DISTANCE = (SCREEN_WIDTH / 2.0) / math.tan(math.radians(45.0) / 2.0)
+
+
+def z_zoom(z):
+    """The z->zoom contract: center-plane perspective scale of a +z push."""
+    return EYE_DISTANCE / (EYE_DISTANCE - z)
+
+
+def zoom_to_z(zoom):
+    """Exact inverse of `z_zoom`, recovering the summed z from a zoom."""
+    return EYE_DISTANCE * (1.0 - 1.0 / zoom)
 
 # metrics.ini [ArrowEffects] fallback defaults.
 BLINK_MOD_FREQUENCY = 0.3333

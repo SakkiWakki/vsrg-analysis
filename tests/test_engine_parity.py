@@ -205,18 +205,18 @@ def _ref_visible(percents, cols, yoff, keycount, t, beat):
 
 
 def _ref_zoom_proxy(percents, cols, yoff, keycount, t, beat):
-    """The reference zoom under OUR documented z->zoom proxy: engine
-    GetZoom (tiny/pulse/shrink) composed with the engine z-push through the
-    same 1 + z/480 reprojection the production port uses. This is the
-    contract item 82 formalizes; the harness verifies production matches
-    THIS, and separately flags where the proxy diverges from true
-    perspective."""
+    """The reference zoom under OUR documented z->zoom contract: engine
+    GetZoom (tiny/pulse/shrink) composed with the engine z-push through
+    the center-plane perspective scale d/(d-z) (ref.z_zoom, derived
+    independently of production). This is the contract item 82
+    formalizes; the harness verifies production matches THIS - the exact
+    scale the real projection gives a z-translated plane."""
     p = dict(percents, _t_now=t, _beat_now=beat)
     out = []
     for c, y in zip(cols, yoff):
         z = ref.get_z_pos(p, int(c), keycount, float(y), t, beat)
         base = ref.get_zoom(p, int(c), float(y))
-        out.append(base * (1.0 + z / ref.SCREEN_HEIGHT))
+        out.append(base * ref.z_zoom(z))
     return np.array(out)
 
 
@@ -349,9 +349,10 @@ def test_z_push_parity_sweep():
             3, 3000, [_Z_MODS], max_active=4):
         if _tornadoz_wide(p, keycount):
             continue
-        # No pulse/shrink/tiny/mini -> production zoom == 1 * (1 + z/480).
+        # No pulse/shrink/tiny/mini -> production zoom == z_zoom(z);
+        # invert exactly to recover the summed z-push.
         prod = _prod(p, cols, yoff, keycount, t, beat)
-        prod_z = (prod.zoom - 1.0) * ae.SCREEN_HEIGHT
+        prod_z = ref.zoom_to_z(prod.zoom)
         want = _ref_z(p, cols, yoff, keycount, t, beat)
         keep = ~_square_guard_mask(p, cols, yoff, suffix='z')
         prod_z, want = prod_z[keep], want[keep]
@@ -607,8 +608,8 @@ def test_tornadoz_window_width_ignores_dimension():
     keycount = 8  # wide field: engine z-width 3, port width 2
     cols = np.arange(keycount)
     yoff = np.full(keycount, 300.0)
-    prod_z = (ae.note_offsets({'tornadoz': 0.5}, cols, yoff, t_now=1.0,
-              beat_now=0.0, keycount=keycount).zoom - 1.0) * ae.SCREEN_HEIGHT
+    prod_z = ref.zoom_to_z(ae.note_offsets({'tornadoz': 0.5}, cols, yoff,
+                           t_now=1.0, beat_now=0.0, keycount=keycount).zoom)
     want = np.array([ref.get_z_pos({'tornadoz': 0.5}, int(c), keycount, 300.0,
                                    1.0, 0.0) for c in cols])
     np.testing.assert_allclose(prod_z, want, rtol=1e-6, atol=1e-4)

@@ -162,21 +162,57 @@ class NotitgAdapter(EtternaAdapter):
         the same axes (see note_mods and field_3d module docs)."""
         return self._note_mods_for(replay, player=0)
 
-    def _note_mods_for(self, replay, player):
-        from analysis.games.notitg.field_3d import notitg_field_3d
+    @staticmethod
+    def _mod_channels(compiled):
+        """The compiled ModChannels: the sim compiler precompiles them
+        from the exact per-frame chase (the mirin-dict pattern); harvest
+        dicts fall back to window compilation."""
         from analysis.games.notitg.mod_channels import compile_mod_channels
+        compiled = compiled or {}
+        return compiled.get('mod_channels') \
+            or compile_mod_channels(compiled.get('mod_events') or [])
+
+    @staticmethod
+    def _field_3d_for(compiled, sm_path, channels, bpms, player=0):
+        """The field-3D effect wired to its tilt producers: the recorded
+        actor pokes always, plus the scalar confusion tilt mods (with the
+        compiled SetVanishPoint stream) when `channels` is supplied.
+        None when neither drives a tilt.
+
+        Pass `channels` ONLY where this effect actually renders the mod
+        tilt: the base field (player 0, field not owned by player
+        instances). Elsewhere - the second-field consumer, dual charts
+        whose instances own the field - nothing projects a mod-driven
+        tilt, so the guard must leave it to the 2D kernels; the actor
+        source still feeds the guard there because the instance channels
+        project the SAME recorded rotations."""
+        from analysis.games.notitg.field_3d import notitg_field_3d
+        from analysis.games.notitg.note_mods import beat_at, beat_segments
+        compiled = compiled or {}
+        segments = beat_segments(bpms)
+        return notitg_field_3d(
+            sm_path, base_hidden=compiled.get('base_field_hidden'),
+            player_keyframes=compiled.get('player_field_keyframes'),
+            channels=channels, beat_at=lambda t: beat_at(segments, t),
+            field_vanish=compiled.get('field_vanish'), player=player)
+
+    def _field_owned(self, compiled) -> bool:
+        """Whether player instances own the field rendering (dual-player
+        charts): the base capture then draws only through the instance
+        transforms, so the base-field 3D effect must not also warp it."""
+        return any(inst['kind'] == 'player'
+                   for inst in self._field_instances(compiled))
+
+    def _note_mods_for(self, replay, player):
         from analysis.games.notitg.note_mods import NotitgNoteMods
         compiled = self._compiled_modfile(replay)
-        # The sim compiler precompiles channels from the exact per-frame
-        # chase (the mirin-dict pattern); harvest dicts fall back to
-        # window compilation.
-        channels = (compiled or {}).get('mod_channels') \
-            or compile_mod_channels((compiled or {}).get('mod_events') or [])
+        channels = self._mod_channels(compiled)
         sm_path, _index = split_chart_ref(replay.get('filepath', ''))
         bpms = parse_sm(sm_path)['bpms']
-        field_3d = notitg_field_3d(
-            sm_path, base_hidden=(compiled or {}).get('base_field_hidden'),
-            player_keyframes=(compiled or {}).get('player_field_keyframes'))
+        mod_source = player == 0 and not self._field_owned(compiled)
+        field_3d = self._field_3d_for(compiled, sm_path,
+                                      channels if mod_source else None,
+                                      bpms, player=player)
         tilt_active = field_3d.tilt_active if field_3d is not None else None
         return NotitgNoteMods(channels, bpms, field_tilt_active=tilt_active,
                               player=player)
@@ -225,7 +261,6 @@ class NotitgAdapter(EtternaAdapter):
         return events or None
 
     def effects(self, replay):
-        from analysis.games.notitg.field_3d import notitg_field_3d
         from analysis.games.notitg.field_instances import (
             NotitgFieldInstances, NotitgScreenCamera)
         from analysis.games.notitg.shader_bridge import notitg_shader_effects
@@ -237,17 +272,21 @@ class NotitgAdapter(EtternaAdapter):
         sm_path, _index = split_chart_ref(replay.get('filepath', ''))
         instances = self._field_instances(compiled)
         field_owned = any(inst['kind'] == 'player' for inst in instances)
-        field_3d = notitg_field_3d(
-            sm_path, base_hidden=base_hidden,
-            player_keyframes=compiled.get('player_field_keyframes'))
-        if field_3d is not None and not field_owned:
+        if not field_owned:
             # Single-field charts only: the field-3D transform warps the
-            # base playfield capture. When the player instances exist
-            # they own the whole transform (their channels project the
-            # same recorded rotations), so applying the capture warp too
-            # would double every spin/tilt/skew. Its tilt_active guard
-            # still feeds note_mods either way (_note_mods_for).
-            effects.append(field_3d)
+            # base playfield capture, with BOTH tilt producers (actor
+            # pokes + scalar confusion mods). When the player instances
+            # exist they own the whole transform (their channels project
+            # the same recorded rotations), so applying the capture warp
+            # too would double every spin/tilt/skew - and the mod source
+            # stays with the 2D kernels there (nothing else projects
+            # it). Its tilt_active guard still feeds note_mods either
+            # way (_note_mods_for).
+            bpms = parse_sm(sm_path)['bpms']
+            field_3d = self._field_3d_for(
+                compiled, sm_path, self._mod_channels(compiled), bpms)
+            if field_3d is not None:
+                effects.append(field_3d)
         screen_transform = compiled.get('screen_transform')
         if screen_transform:
             effects.append(NotitgScreenCamera(screen_transform))

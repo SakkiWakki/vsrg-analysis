@@ -48,17 +48,20 @@ Double-apply guard (field-3D vs 2D foreshortening):
 - confusionx/confusionxoffset, confusiony/confusionyoffset and hallway are
   the 2D foreshortening APPROXIMATIONS of an out-of-plane field tilt
   (arrow_effects reprojects an X/Y field rotation into per-note zoom / dx).
-  When a REAL 3D field tilt is executing (the field_3d effect consuming the
-  P1 actor rotation_x/rotation_y pokes), those same axes must not also be
-  approximated in 2D, or the tilt applies twice. `field_tilt_active(t)`, when
-  supplied, reports whether the real 3D X/Y tilt is live at t; while it is,
-  this consumer zeroes the X/Y-tilt confusion channels so the projection owns
-  the tilt. The Z-spin confusion (confusion/confusionoffset) is UNTOUCHED - it
-  is an in-plane per-note receptor spin, a distinct mechanism that legitimately
-  coexists (gat drives it t~58-74 with the actor 3D channels at rest). The
-  per-note confusion channels and the P1 ACTOR rotation are separate SOURCES
-  that gat drives in disjoint sections; the guard fires only on the rare
-  same-axis overlap (measured: a 0.5s transition), preferring the real 3D path.
+  When the REAL 3D field projection owns the tilt - the field_3d effect,
+  fed by BOTH producers: the recorded actor rotation_x/rotation_y pokes
+  AND the scalar confusionx/y mod channels themselves
+  (field_projection.FieldTilt) - those same axes must not also be
+  approximated in 2D, or the tilt applies twice. `field_tilt_active(t)`,
+  when supplied, reports whether the projection owns the X/Y tilt at t;
+  while it does, this consumer zeroes the X/Y-tilt confusion channels.
+  The 2D kernels remain live exactly where the projection cannot render:
+  per-column numbered variants (confusionx0.., per-note content), the
+  base-hidden deferral (copies own a flat capture), and fields whose
+  instances own the transform (see adapter._field_3d_for). The Z-spin
+  confusion (confusion/confusionoffset) is UNTOUCHED - it is an in-plane
+  per-note receptor spin, a distinct mechanism that legitimately coexists
+  (gat drives it t~58-74 with the actor 3D channels at rest).
 
 Tiny X-spacing (consumer-side):
 - tiny's sprite zoom (pow(0.5,tiny)) rides candidate_zoom from
@@ -128,29 +131,44 @@ _WAVEFORM_PERIODS = {
 }
 
 
+def beat_segments(bpms) -> list:
+    """(t_start, beat_start, bps) rows for the positive-bpm segments,
+    seconds-keyed; an empty/degenerate table falls back to one 120bpm
+    segment. Shared beat clock for every seconds-keyed NotITG consumer
+    (this module's kernels, field_projection's confusion tilt)."""
+    segments = [(beat_to_time(beat, bpms, 0.0), beat, bpm / 60.0)
+                for beat, bpm in sorted(bpms) if bpm > 0]
+    return segments or [(0.0, 0.0, 2.0)]
+
+
+def beat_segment_at(segments, t: float) -> tuple:
+    """The (t_start, beat_start, bps) segment governing time `t`."""
+    lo = segments[0]
+    for seg in segments:
+        if seg[0] > t:
+            break
+        lo = seg
+    return lo
+
+
+def beat_at(segments, t: float) -> float:
+    """Song beat at time `t` under `beat_segments(bpms)`."""
+    t0, beat0, bps = beat_segment_at(segments, t)
+    return beat0 + max(0.0, t - t0) * bps
+
+
 class NotitgNoteMods:
     def __init__(self, channels, bpms, field_tilt_active=None, player=0):
         self._channels = channels
         self._field_tilt_active = field_tilt_active
         self._player = int(player)
-        segments = []
-        for beat, bpm in sorted(bpms):
-            if bpm > 0:
-                segments.append((beat_to_time(beat, bpms, 0.0), beat,
-                                 bpm / 60.0))
-        self._segments = segments or [(0.0, 0.0, 2.0)]
+        self._segments = beat_segments(bpms)
 
     def _beat_at(self, t: float) -> float:
-        t0, beat0, bps = self._segment_at(t)
-        return beat0 + max(0.0, t - t0) * bps
+        return beat_at(self._segments, t)
 
     def _segment_at(self, t: float) -> tuple:
-        lo = self._segments[0]
-        for seg in self._segments:
-            if seg[0] > t:
-                break
-            lo = seg
-        return lo
+        return beat_segment_at(self._segments, t)
 
     def _px_per_engine(self, ctx, t: float, fallback: float) -> float:
         """Screen px per engine y_offset px at `t`. The engine maps
@@ -524,10 +542,12 @@ class NotitgNoteMods:
 
     def _defer_field_tilt(self, percents, t):
         """Zero the X/Y-tilt confusion channels while the real 3D field
-        tilt drives the same axes (see the module doc). No-op when no
-        field-3D predicate is wired or when it is inactive - the common
-        case, so the returned dict is the input untouched unless a tilt
-        channel is actually present AND the projection is live."""
+        projection owns the same axes - from either producer, actor pokes
+        or the scalar confusion mods themselves (see the module doc).
+        No-op when no field-3D predicate is wired or when it is inactive
+        - the common case, so the returned dict is the input untouched
+        unless a tilt channel is actually present AND the projection is
+        live."""
         if self._field_tilt_active is None or not self._field_tilt_active(t):
             return percents
         zeroed = {mod: 0.0 for mod in _FIELD_TILT_CONFUSION

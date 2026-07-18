@@ -229,6 +229,14 @@ def _viewport(width, height):
     return m
 
 
+def eye_distance(fov, width):
+    """Camera distance for LoadMenuPerspective: the eye sits this many px
+    from the z=0 plane so that `width` subtends `fov` degrees
+    (RageDisplay L707, d = (W/2)/tan(fov/2)). The center-plane
+    perspective scale of a +z push is d / (d - z)."""
+    return (width / 2.0) / np.tan((fov * DEG) / 2.0)
+
+
 def projection(fov, width, height, vanish=None):
     """world -> screen-pixel projection for (fov deg, viewport, vanish point).
 
@@ -256,8 +264,7 @@ def projection(fov, width, height, vanish=None):
         ])
         return ortho @ _viewport(W, H)
 
-    theta = (fov * DEG) / 2.0
-    d = (W / 2.0) / np.tan(theta)
+    d = eye_distance(fov, W)
 
     # SCALE(v, 0, W, W, 0) = W - v, then - W/2 (L709-713).
     vx = (W - vx_screen) - W / 2.0

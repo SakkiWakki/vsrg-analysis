@@ -18,7 +18,6 @@ _ALLOWED = {
     'games/notitg/aft_drivers.py': 'hand-ported gat driver (item 97.3)',
     # Found by this ratchet, pending item-97 triage (examples-only
     # docstring mentions are fine to keep; logic references are not):
-    'games/notitg/field_3d.py': 'triage pending',
     'games/notitg/field_instances.py': 'triage pending',
     'games/notitg/recording_actor.py': 'triage pending',
     'games/notitg/update_integrator.py': 'triage pending',
