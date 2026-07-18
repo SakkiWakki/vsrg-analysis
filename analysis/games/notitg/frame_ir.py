@@ -122,7 +122,7 @@ def _build_one(stmt: ast.Node, frame: Frame, surface: Surface) -> None:
         case ast.Local(names=names, values=values):
             _bind_local(names, values, frame)
         case ast.ExprStmt(expr=ast.Method(name=name)) if name in _SETTER_NAMES:
-            frame.children.append(_poke_update(stmt.expr))
+            frame.children.append(_poke_update(stmt))
         case ast.Assign(targets=targets):
             frame.children.append(VarUpdate(_target_name(targets), stmt))
         case _:
@@ -218,9 +218,13 @@ def _bind_local(names: Iterable[str], values: Iterable[ast.Node],
         frame.bindings[name] = values[i] if i < len(values) else None
 
 
-def _poke_update(method: ast.Method) -> VarUpdate:
-    """A setter poke `recv:prop(arg)` -> a VarUpdate named `<recv>.<prop>`."""
-    return VarUpdate(f'{_render(method.recv)}.{method.name}', method)
+def _poke_update(stmt: ast.ExprStmt) -> VarUpdate:
+    """A setter poke `recv:prop(arg)` -> a VarUpdate named `<recv>.<prop>`.
+    Stores the whole ExprStmt as `node` (like the assign/attention branches),
+    so the flattener's `_value_expr` sees the same statement shape it does for
+    every other VarUpdate."""
+    method = stmt.expr
+    return VarUpdate(f'{_render(method.recv)}.{method.name}', stmt)
 
 
 def _target_name(targets: tuple[ast.Node, ...]) -> str:
