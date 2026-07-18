@@ -72,7 +72,7 @@ def test_expression_command_captured_at_actor_load():
         '<Quad InitCommand="%function(self) ping = nil end"/>'
         '</children></ActorFrame>')
     env._broadcast(None, 'Go')
-    assert any(kf.value == 55.0 for kf in _recorded(env, 'x'))
+    assert any(55.0 in kf.values for kf in _recorded(env, 'x'))
 
 
 def test_broken_update_body_degrades_to_warning():
