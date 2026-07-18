@@ -23,11 +23,6 @@ from analysis.games.notitg.sim.env import SimEnvironment
 
 _TICK_HZ = 60.0
 
-# Sweep rate OUTSIDE the perframe driver windows: the body's
-# unconditional sections still run (positioning, housekeeping), just
-# coarsely - the simplification pass absorbs the density difference.
-_COARSE_HZ = 10.0
-
 # Anchor load a hair before beat 0 when the FGCHANGES start beat maps
 # later, so load-time keyframes strictly precede beat-0 actions (same
 # rule and rationale as the harvest path's _LOAD_LEAD_S).
@@ -176,16 +171,19 @@ def run_declarative(root, to_seconds, start_beat, end_seconds,
                     rng_seed: int = 0, tick_hz: float = _TICK_HZ,
                     song_dir=None) -> SimResult:
     """The fast compile: load the actors, fire the scheduled
-    `mod_actions`, then tick ONLY the bounded `perframe(a, b)` driver
-    windows - not the whole song.
+    `mod_actions`, and tick the `UpdateCommand` per-frame body at its own
+    re-arm cadence across the song.
 
     The declarative bulk (mods/mods2 tables, tween commands) needs no
     simulation: `producers` reads those tables straight into events. Only
     the `UpdateCommand` per-frame drivers (walker/rotator reading other
-    actors' curves) need time-stepping, and they run in bounded sections
-    the template's `perframe(a, b)` gates declare. Ticking those windows
-    only - a small fraction of a whole-song 60Hz sweep - recovers the
-    driven-actor curves at a fraction of the cost."""
+    actors' curves, mpf/mod_perframe mod painters) need time-stepping.
+    The body runs EVERY re-arm and gates ITSELF - its `perframe(a,b)` /
+    `mod_perframes` reader decides what runs each tick - so no external
+    window scan is needed; a driver a name-based scan would miss still
+    ticks at full rate. Cheap: the body is ~6k invocations over a 2-min
+    chart at its 50Hz re-arm, and drains only touch actors with live
+    queues."""
     from analysis.games.notitg import update_integrator
 
     load_s = load_anchor_seconds(start_beat, to_seconds)
@@ -209,35 +207,29 @@ def run_declarative(root, to_seconds, start_beat, end_seconds,
 
     body, body_name, update_actor = update_integrator._update_source(root)
     update_rec = getattr(update_actor, '_sim_id', None)
-    windows = update_integrator._live_windows(body) if body else ()
     if body:
         # The raw attr is `%function(self) ... end`; the runnable chunk
         # is the inner statements (`self` falls to the permissive stub,
-        # so the rig's own re-arm tail no-ops - the window sweep drives
-        # time instead).
+        # so the rig's own re-arm tail no-ops - the sweep drives time
+        # instead).
         body = _strip_lua_wrapper(body)
-    # Hybrid-rate sweep: the body runs full-rate inside the declared
-    # `perframe(a, b)` driver windows, and at a coarse rate everywhere
-    # else - the body's UNCONDITIONAL sections (player positioning, the
-    # intro block, always-on pokes) run every engine frame in-game, and
-    # skipping them outside windows loses their state entirely. Coarse
-    # ticks suffice there: the unconditional pokes are smooth
-    # positioning/housekeeping, and the collinear keyframe
-    # simplification absorbs the sampling density either way.
     # Queue drains run at FULL rate over the whole song - the engine
-    # drains every frame, and the intro's chained zero-tweens
-    # (sleep(0) links) smear if drains lag. Cheap: the queued set holds
-    # only actors with live queues. The BODY runs hybrid: full rate
-    # inside perframe driver windows, coarse outside (its unconditional
-    # positioning/housekeeping is smooth; the simplification absorbs
-    # the density).
-    window_spans = [(to_seconds(a), to_seconds(b)) for a, b in windows]
+    # drains every frame, and the intro's chained zero-tweens (sleep(0)
+    # links) smear if drains lag. Cheap: the queued set holds only actors
+    # with live queues. The BODY runs every re-arm (its own gates decide
+    # what fires each tick - see below).
     step = 1.0 / float(tick_hz)
-    coarse = 1.0 / _COARSE_HZ
-    # The body runs at the RIG'S OWN cadence, not the sweep's: its
-    # re-arm tail (`sleep(0.02); queuecommand('Update')`) is how often
-    # the engine invokes it, and its per-call integrators (dt-less
-    # Euler physics, per-call scroll adds) count invocations.
+    # The body runs at the RIG'S OWN cadence, the whole song through - its
+    # re-arm tail (`sleep(0.02); queuecommand('Update')`) is how often the
+    # engine invokes it, and its per-call integrators (dt-less Euler
+    # physics, per-call scroll adds) count invocations. It runs EVERY
+    # re-arm, not only inside regex-detected `perframe(a, b)` windows: the
+    # body's OWN reader (`mod_perframes` / `perframe(a,b)` gates) decides
+    # what fires each tick, so an mpf/mod_perframe driver a name-based
+    # window scan misses still ticks at full rate and its per-frame math
+    # (a sin(beat) alternate/invert) stays smooth instead of degrading to
+    # the old ~10Hz coarse rate. Cost is negligible - ~6k body runs over a
+    # 2-min chart at 50Hz.
     body_step = (update_integrator._body_rearm_period(body) or step) \
         if body else step
     body_step = max(body_step, step)
@@ -260,9 +252,7 @@ def run_declarative(root, to_seconds, start_beat, end_seconds,
         env.drain(t)
         if run_body:
             env.run_update_body(body, name=body_name, rec_id=update_rec)
-            in_window = any(a <= t < b for a, b in window_spans)
-            next_body_t = t + (body_step if in_window
-                               else max(coarse, body_step))
+            next_body_t = t + body_step
         ticks += 1
 
     # Self-scheduling chains (a chara Idle loop re-queueing itself) are
