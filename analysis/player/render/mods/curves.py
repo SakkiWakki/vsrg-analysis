@@ -39,12 +39,14 @@ import numpy as np
 class Ctx:
     """Per-frame scalars a curve may read, shared across all notes in the
     batch. `cols` is the per-note column index array (aligned with the
-    y_offset the curve is evaluated on); `t` song time (s), `beat` the
-    current song beat, `arrow_size` the column pitch. Extend as new mod
-    families need more -- a curve reads only what it uses."""
+    y_offset the curve is evaluated on); `note_beats` the per-note beat
+    (aligned the same way, for beat-keyed mods like dizzy); `t` song time
+    (s), `beat` the current song beat, `arrow_size` the column pitch.
+    Extend as new mod families need more -- a curve reads only what it uses."""
     t: float = 0.0
     beat: float = 0.0
     cols: np.ndarray | None = None
+    note_beats: np.ndarray | None = None
     arrow_size: float = 64.0
 
 
@@ -57,12 +59,14 @@ Curve = Callable[[np.ndarray, Ctx], np.ndarray]
 # ---------------------------------------------------------------------------
 
 def const(value) -> Curve:
-    """A curve flat in y_offset. `value` may be a scalar or a function of
-    ctx (`lambda c: ...`) for a per-frame-but-y-independent term -- the
-    confusion tilts are this: a whole-field angle broadcast to every note."""
+    """A curve flat in y_offset. `value` may be a scalar, a per-note array
+    (a mod's per-column percents / a per-column shift, one per note), or a
+    function of ctx (`lambda c: ...`) for a per-frame-but-y-independent
+    term -- the confusion tilts are this: a whole-field angle broadcast to
+    every note. Each broadcasts against the batch's y_offset shape."""
     if callable(value):
         return lambda y, c: np.broadcast_to(value(c), np.shape(y)).astype(np.float64)
-    return lambda y, c: np.full(np.shape(y), float(value), dtype=np.float64)
+    return lambda y, c: np.broadcast_to(value, np.shape(y)).astype(np.float64)
 
 
 def affine_phase(y_coeff, terms=()) -> Curve:
@@ -169,11 +173,12 @@ def quantize(kernel: Curve, levels) -> Curve:
 # ---------------------------------------------------------------------------
 
 def scale(k, curve: Curve) -> Curve:
-    """Multiply a curve by `k` (scalar or `lambda c: ...`, e.g. the mod
-    percent or an amplitude that depends on arrow_size)."""
+    """Multiply a curve by `k`: a scalar, a per-note array (a mod's
+    numbered per-column percents), or `lambda c: ...` (an amplitude read
+    from ctx). numpy broadcasts each against the curve's value array."""
     if callable(k):
         return lambda y, c: k(c) * curve(y, c)
-    return lambda y, c: float(k) * curve(y, c)
+    return lambda y, c: k * curve(y, c)
 
 
 def add(*curves: Curve) -> Curve:
@@ -185,6 +190,32 @@ def add(*curves: Curve) -> Curve:
             total = total + f(y, c)
         return total
     return curve
+
+
+def mul(*curves: Curve) -> Curve:
+    """Product of curves on a MULTIPLICATIVE axis -- the sibling of `add`
+    for axes that accumulate by multiplying (the zoom scale, an alpha
+    stack), identity a curve of ones (so an empty product is flat 1.0)."""
+    def curve(y, c):
+        total = np.ones(np.shape(y), dtype=np.float64)
+        for f in curves:
+            total = total * f(y, c)
+        return total
+    return curve
+
+
+def affine(base: Curve, mult: Curve, add_term: Curve) -> Curve:
+    """`base * mult + add_term`, kept in that grouping -- the multiply lands
+    BEFORE the add (e.g. shrink tapers the running zoom, then adds its
+    linear term). Distinct from `add(mul(base, mult), add_term)` only in
+    reading; provided so the fold order is explicit at the call site."""
+    return lambda y, c: base(y, c) * mult(y, c) + add_term(y, c)
+
+
+def clamp01(curve: Curve) -> Curve:
+    """Clip a curve to [0, 1] (a saturating visibility fraction / alpha
+    bound). The common one-sided case of a general clamp."""
+    return lambda y, c: np.clip(curve(y, c), 0.0, 1.0)
 
 
 def chain(outer, inner: Curve) -> Curve:
