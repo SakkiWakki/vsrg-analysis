@@ -173,7 +173,8 @@ def run_sim(root, to_seconds, start_beat, end_seconds,
 
 
 def run_declarative(root, to_seconds, start_beat, end_seconds,
-                    rng_seed: int = 0, tick_hz: float = _TICK_HZ) -> SimResult:
+                    rng_seed: int = 0, tick_hz: float = _TICK_HZ,
+                    song_dir=None) -> SimResult:
     """The fast compile: load the actors, fire the scheduled
     `mod_actions`, then tick ONLY the bounded `perframe(a, b)` driver
     windows - not the whole song.
@@ -189,7 +190,8 @@ def run_declarative(root, to_seconds, start_beat, end_seconds,
 
     load_s = load_anchor_seconds(start_beat, to_seconds)
     to_beats = beat_inverter(to_seconds, end_seconds)
-    env = SimEnvironment(load_s, rng_seed, to_seconds=to_seconds)
+    env = SimEnvironment(load_s, rng_seed, to_seconds=to_seconds,
+                         song_dir=song_dir)
     env.set_time(load_s, to_beats(load_s))
     warnings = env.load_actors(root)
     # ONE CLOCK: mod-actions are staged and fired at their true times

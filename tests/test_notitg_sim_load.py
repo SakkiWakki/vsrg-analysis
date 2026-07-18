@@ -83,6 +83,46 @@ def test_broken_update_body_degrades_to_warning():
     assert 't.Update' in env._warnings[0]
 
 
+def test_actorgen_self_include_loop_bounded(tmp_path):
+    # The actorgen idiom: a file includes ITSELF behind a
+    # Condition="gen.HasNext()" gate, generating one actor per
+    # iteration. Eager splicing would recurse forever; the deferred
+    # expansion loads exactly as many copies as the gate allows.
+    from analysis.games.notitg import modfile
+
+    lua = tmp_path / 'lua'
+    lua.mkdir()
+    (lua / 'default.xml').write_text(
+        '<ActorFrame InitCommand="%function(self)'
+        ' gen = {n = 3}'
+        ' function gen.HasNext() return gen.n > 0 end'
+        ' function gen.Take() gen.n = gen.n - 1 return gen.n end'
+        ' end"><children>'
+        '<Layer Condition="gen.HasNext()" File="item.xml"/>'
+        '</children></ActorFrame>')
+    (lua / 'item.xml').write_text(
+        '<ActorFrame><children>'
+        '<Quad InitCommand="%function(self) self:x(100 + gen.Take()) end"/>'
+        '<Layer Condition="gen.HasNext()" File="item.xml"/>'
+        '</children></ActorFrame>')
+    root, _chunks, _classic = modfile._load_document(lua)
+    env = SimEnvironment(0.0, 0, to_seconds=lambda b: b * 0.5)
+    env.load_actors(root)
+    taken = sorted(kf.values[0] for kf in _recorded(env, 'x'))
+    assert taken == [100.0, 101.0, 102.0]
+
+
+def test_at_attr_evaluates_at_load():
+    root = parse_actor_xml(
+        '<ActorFrame InitCommand="%function(self)'
+        ' function kind() return \'Sprite\' end end">'
+        '<children><Layer Type="@kind()" Name="Gen"/></children>'
+        '</ActorFrame>').root
+    env = SimEnvironment(0.0, 0, to_seconds=lambda b: b * 0.5)
+    env.load_actors(root)
+    assert root.children[0].attrs['Type'] == 'Sprite'
+
+
 # -- Lua 5.0 lexer compatibility ------------------------------------------
 
 def test_lua50_number_keyword_gets_space():

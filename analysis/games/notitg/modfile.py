@@ -186,7 +186,8 @@ def _load_document(lua_dir: Path, bg_stem=''):
     lua_chunks = list(root_parsed.lua_chunks)
     classic = list(root_parsed.classic_commands)
     _tag_source(root_parsed.root, entry)
-    _splice_includes(root_parsed.root, lua_dir, lua_chunks, classic, bg_stem)
+    _splice_includes(root_parsed.root, lua_dir, lua_chunks, classic, bg_stem,
+                     stack=(entry,))
     return root_parsed.root, lua_chunks, classic
 
 
@@ -200,29 +201,69 @@ def _tag_source(actor, xml_path) -> None:
         _tag_source(child, xml_path)
 
 
-def _splice_includes(actor, lua_dir, lua_chunks, classic, bg_stem='') -> None:
+def _splice_includes(actor, lua_dir, lua_chunks, classic, bg_stem='',
+                     stack=()) -> None:
     for child in list(actor.children):
         # Recurse into the child's OWN children first (captured now, so
         # an appended include subtree - already fully spliced - is not
         # re-processed under the wrong base dir).
-        _splice_includes(child, lua_dir, lua_chunks, classic, bg_stem)
-        included = _include_path(child.attrs.get('File', ''), lua_dir)
+        _splice_includes(child, lua_dir, lua_chunks, classic, bg_stem,
+                         stack)
+        include = child.attrs.get('File', '')
+        if include.startswith('@'):
+            # A dynamic include: the engine evaluates the `@expr` at
+            # actor load. The sim resolves the value then and calls the
+            # closure with it (a non-XML result is a texture, not an
+            # include).
+            child._expand_dynamic_include = _dynamic_expander(
+                child, lua_dir, lua_chunks, classic, bg_stem, stack)
+            continue
+        included = _include_path(include, lua_dir)
         if included is None:
             continue
-        sub = xml_actors.parse_actor_xml(
-            included.read_text(encoding='utf-8', errors='replace'))
-        _tag_source(sub.root, included)
-        _splice_includes(sub.root, included.parent, sub.lua_chunks,
-                         sub.classic_commands, bg_stem)
-        # An include that renders the #BACKGROUND image is a BGCHANGES-
-        # style background layer: SM draws it BEHIND the notefield (later
-        # FG actors sit in front). Tag its subtree so the compiler routes
-        # it to a below-the-notes z band.
-        if bg_stem and _subtree_draws_background(sub.root, bg_stem):
-            _tag_background_layer(sub.root)
-        child.children.append(sub.root)
-        lua_chunks[:0] = sub.lua_chunks
-        classic.extend(sub.classic_commands)
+        if included in stack:
+            # The actorgen LOOP idiom: a file includes ITSELF behind
+            # Condition="actorgen.HasNext()", generating one actor per
+            # iteration until the generator empties. Eager splicing
+            # recurses forever; the sim expands the include at LOAD
+            # TIME, after the engine's Condition gate has passed.
+            child._expand_include = _deferred_expander(
+                child, included, lua_chunks, classic, bg_stem, stack)
+            continue
+        _splice_file(child, included, lua_chunks, classic, bg_stem, stack)
+
+
+def _deferred_expander(child, included, lua_chunks, classic, bg_stem, stack):
+    def expand():
+        _splice_file(child, included, lua_chunks, classic, bg_stem, stack)
+    return expand
+
+
+def _dynamic_expander(child, lua_dir, lua_chunks, classic, bg_stem, stack):
+    def expand(resolved: str):
+        included = _include_path(resolved, lua_dir)
+        if included is not None:
+            _splice_file(child, included, lua_chunks, classic, bg_stem,
+                         stack)
+    return expand
+
+
+def _splice_file(child, included, lua_chunks, classic, bg_stem,
+                 stack=()) -> None:
+    sub = xml_actors.parse_actor_xml(
+        included.read_text(encoding='utf-8', errors='replace'))
+    _tag_source(sub.root, included)
+    _splice_includes(sub.root, included.parent, sub.lua_chunks,
+                     sub.classic_commands, bg_stem, stack + (included,))
+    # An include that renders the #BACKGROUND image is a BGCHANGES-
+    # style background layer: SM draws it BEHIND the notefield (later
+    # FG actors sit in front). Tag its subtree so the compiler routes
+    # it to a below-the-notes z band.
+    if bg_stem and _subtree_draws_background(sub.root, bg_stem):
+        _tag_background_layer(sub.root)
+    child.children.append(sub.root)
+    lua_chunks[:0] = sub.lua_chunks
+    classic.extend(sub.classic_commands)
 
 
 def _subtree_draws_background(actor, bg_stem) -> bool:

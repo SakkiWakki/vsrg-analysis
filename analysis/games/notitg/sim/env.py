@@ -22,6 +22,7 @@ survives cutover), but routed onto SimActors and ONE timeline:
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from analysis.games.notitg.lua_api import (
     COMMAND_NAMES, GETTER_NAMES, SIM_GETTER_NAMES, _as_int)
@@ -29,9 +30,14 @@ from analysis.games.notitg.mod_stubs import (
     _PERMISSIVE_BOOTSTRAP, _lua_name_set)
 from analysis.games.notitg.sim.actor import SimActor
 from analysis.games.notitg.xml_actors import (
-    _strip_lua_wrapper, is_lua_function_literal, parse_command_string)
+    _lua50_compat, _strip_lua_wrapper, is_lua_function_literal,
+    parse_command_string)
 from analysis.player.render.lua import LuaHost
 from analysis.player.render.lua.host import LuaScriptError
+
+# Bound on load-time include expansions (the actorgen self-include loop
+# generates one actor per iteration; real generators empty in tens).
+_MAX_INCLUDE_EXPANSIONS = 512
 
 # A classic-command arg that may be a Lua expression over identifiers
 # (globals, screen constants) rather than a plain number.
@@ -119,7 +125,8 @@ class SimEnvironment:
     each tick; everything else happens through the chart's own Lua."""
 
     def __init__(self, load_seconds: float, rng_seed: int = 0,
-                 to_seconds=None):
+                 to_seconds=None, song_dir=None):
+        self._song_dir = Path(song_dir) if song_dir is not None else None
         self._host = LuaHost(dialect='luajit21')
         self._host.run(_SIM_BOOTSTRAP, name='bootstrap')
         self._load_seconds = float(load_seconds)
@@ -160,6 +167,7 @@ class SimEnvironment:
         # compile). Evaluated at fire time so globals are current.
         self._arg_chunks: dict = {}
         self._queued: set = set()
+        self._include_expansions = 0
         self._install()
 
     # -- declarative tables (the classic template's event data) ----------
@@ -485,6 +493,8 @@ class SimEnvironment:
         drop real content."""
         if self._condition_falsy(actor):
             return False
+        self._resolve_at_attrs(actor)
+        self._expand_includes(actor)
         rec_id = self._register_one(actor)
         value = actor.attrs.get('InitCommand', '')
         if value.startswith('%'):
@@ -513,8 +523,56 @@ class SimEnvironment:
             result = self._host.compile(f'return ({expr})', name=name)()
         except Exception as exc:
             self._warnings.append(f'{name}: {exc}')
-            return False
+            # A faulting gate keeps a plain actor (a permissive-stub
+            # error must not drop real content) but DROPS a looped
+            # include - re-expanding on a broken condition would spin
+            # the actorgen loop forever.
+            return getattr(actor, '_expand_include', None) is not None
         return result is None or result is False
+
+    def _resolve_at_attrs(self, actor) -> None:
+        """`@expr` attribute values evaluate as Lua at actor load
+        (actorgen's `Type="@actorgen.Type()"`); the result replaces the
+        value. A faulting expression leaves the raw value."""
+        for attr, value in list(actor.attrs.items()):
+            if not value.startswith('@'):
+                continue
+            name = f'{self._actor_label(actor, "?")}.{attr}@'
+            try:
+                result = self._host.compile(
+                    f'return ({value[1:].strip()})', name=name)()
+            except Exception as exc:
+                self._warnings.append(f'{name}: {exc}')
+                continue
+            if isinstance(result, (str, int, float)):
+                actor.attrs[attr] = str(result)
+
+    def _expand_includes(self, actor) -> None:
+        """Run any deferred include expansion (the actorgen self-include
+        loop; `File="@expr"` dynamic includes) now that the actor's
+        Condition passed - the spliced subtree loads as this actor's
+        children. Bounded so a runaway generator cannot spin the load
+        forever."""
+        expand = getattr(actor, '_expand_include', None)
+        dynamic = getattr(actor, '_expand_dynamic_include', None)
+        if expand is None and dynamic is None:
+            return
+        if self._include_expansions >= _MAX_INCLUDE_EXPANSIONS:
+            if self._include_expansions == _MAX_INCLUDE_EXPANSIONS:
+                self._warnings.append('include expansion cap reached')
+                self._include_expansions += 1
+            return
+        self._include_expansions += 1
+        label = f'{self._actor_label(actor, "?")}.File'
+        try:
+            if expand is not None:
+                actor._expand_include = None
+                expand()
+            elif dynamic is not None:
+                actor._expand_dynamic_include = None
+                dynamic(actor.attrs.get('File', ''))
+        except Exception as exc:
+            self._warnings.append(f'{label}: {exc}')
 
     def _register_one(self, actor) -> int:
         rec_id = self._id_for(actor)
@@ -840,6 +898,30 @@ class SimEnvironment:
                 actor.poke('y', [240.0])
         return self._tables[rec_id]
 
+    def _loadfile(self, path=None):
+        """Sandboxed `loadfile`: charts load their template libraries
+        from the song directory (the Mirin/actorgen rigs' `xero.
+        loadscript`). Only files under the song dir resolve - anything
+        else returns nil, exactly as loadfile does for a missing file.
+        Sources pass the 5.0 lexer rewrite like every other chunk."""
+        if self._song_dir is None or not isinstance(path, str):
+            return None
+        text = path
+        root = str(self._song_dir)
+        if text.startswith(root):
+            text = text[len(root):]
+        candidate = (self._song_dir / text.lstrip('/')).resolve()
+        if not (candidate.is_relative_to(self._song_dir.resolve())
+                and candidate.is_file()):
+            return None
+        source = _lua50_compat(
+            candidate.read_text(encoding='utf-8', errors='replace'))
+        try:
+            return self._host.compile(source, name=text.lstrip('/'))
+        except Exception as exc:
+            self._warnings.append(f'loadfile {text}: {exc}')
+            return None
+
     # -- engine singletons -------------------------------------------------
 
     def _install(self) -> None:
@@ -852,7 +934,13 @@ class SimEnvironment:
         host.expose('__actor_get_child', self._actor_get_child)
         host.expose('__screen_get_child', self._screen_get_child)
 
+        host.expose('loadfile', self._loadfile)
+        song = singleton(host.to_lua({
+            'GetSongDir': lambda _self: (
+                f'{self._song_dir}/' if self._song_dir else ''),
+        }))
         host.expose('GAMESTATE', singleton(host.to_lua({
+            'GetCurrentSong': lambda _self: song,
             'GetSongBeat': lambda _self: self._beat,
             'GetSongBeatNoOffset': lambda _self: self._beat,
             'GetSongTime': lambda _self: self._now,

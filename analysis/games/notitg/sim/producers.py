@@ -50,7 +50,8 @@ def _compile_via_sim(sm_path, end_seconds):
     if end_seconds is None:
         end_seconds = doc.end_seconds
     result = run_declarative(doc.root, doc.to_seconds, doc.start_beat,
-                             end_seconds, rng_seed=doc.rng_seed)
+                             end_seconds, rng_seed=doc.rng_seed,
+                             song_dir=doc.lua_dir.parent)
     env = result.env
 
     named_keyframes = env.named_actor_keyframes()
