@@ -35,10 +35,15 @@ def test_lua_body_unwrapped_from_function_wrapper():
     assert 'mods = {}' in body
 
 
-def test_bare_percent_expression_kept():
+def test_bare_percent_expression_becomes_call_statement():
+    # `%expr` is an expression whose value is the command: the runnable
+    # chunk evaluates it and calls the result when it is a function
+    # (the XGML template's `UpdateCommand="%prefix.update"`).
     parsed = xml_actors.parse_actor_xml(
         '<Quad Condition="%FUCK_EXE"/>')
-    assert parsed.lua_chunks[0].body == 'FUCK_EXE'
+    body = parsed.lua_chunks[0].body
+    assert '(FUCK_EXE)' in body
+    assert '__cmd(self)' in body
 
 
 def test_classic_command_parsed_into_verbs():

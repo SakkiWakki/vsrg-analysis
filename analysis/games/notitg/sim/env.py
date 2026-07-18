@@ -29,7 +29,7 @@ from analysis.games.notitg.mod_stubs import (
     _PERMISSIVE_BOOTSTRAP, _lua_name_set)
 from analysis.games.notitg.sim.actor import SimActor
 from analysis.games.notitg.xml_actors import (
-    _strip_lua_wrapper, parse_command_string)
+    _strip_lua_wrapper, is_lua_function_literal, parse_command_string)
 from analysis.player.render.lua import LuaHost
 from analysis.player.render.lua.host import LuaScriptError
 
@@ -198,7 +198,8 @@ class SimEnvironment:
                 out[key] = value
         return out
 
-    def run_update_body(self, body: str, name: str = 'update-body') -> None:
+    def run_update_body(self, body: str, name: str = 'update-body',
+                        rec_id: int | None = None) -> None:
         """Run the `UpdateCommand` body once at the current sim time,
         driving its per-frame closures (a walker reading another actor's
         GetX, a rotator, the proxy grid). The body compiles ONCE (cached)
@@ -209,7 +210,16 @@ class SimEnvironment:
         inside the body no-ops (already fired in the replay pass). Faults
         are swallowed and counted."""
         if self._update_chunk is None:
-            self._update_chunk = self._host.compile(body, name=name)
+            # An expression command (`%prefix.update`) was captured as a
+            # function at actor creation; call THAT - re-evaluating the
+            # attr per tick breaks once the template's cleanup nils its
+            # globals.
+            resolved = self._named_commands.get(rec_id, {}).get('Update')
+            if callable(resolved):
+                table = self._tables[rec_id]
+                self._update_chunk = lambda: resolved(table)
+            else:
+                self._update_chunk = self._host.compile(body, name=name)
         # No eager all-actor sync: pokes and getter reads _sync lazily,
         # so only the actors the body actually touches advance per tick.
         self._host.env['mod_time'] = self._now
@@ -441,34 +451,96 @@ class SimEnvironment:
     # -- load pass ---------------------------------------------------------
 
     def load_actors(self, root) -> list:
-        """Register every actor's commands, then run load commands in
-        TWO tree-order phases, as the engine does: every InitCommand
-        (actor creation), then every OnCommand (screen start). An
-        OnCommand may therefore read a global that a LATER actor's
+        """Load the tree in engine creation order (Actor::LoadFromNode):
+        per actor, its Condition gates it, registration + InitCommand
+        fire at creation, then its children load - so a child's
+        Condition or InitCommand may read a global the parent's
+        InitCommand just bound (the XGML template's `prefix`).
+        OnCommand then runs over the loaded tree in a second tree-order
+        pass (screen start); it may read a global a LATER actor's
         InitCommand bound - the AFT rigs depend on this. The chart's
         self-scheduling Update chain arms itself here (its queuecommand
         lands on the real queue)."""
-        self._register(root)
-        self._run_load(root, 'InitCommand')
+        self._load_actor(root)
         self._run_load(root, 'OnCommand')
         return self._warnings
 
-    def _register(self, actor) -> None:
-        rec_id = self._id_for(actor)
-        self._labels[rec_id] = self._actor_label(actor, rec_id)
-        for message, body in actor.message_commands().items():
-            self._message_commands.setdefault(message, []).append(
-                (rec_id, body))
-        named = actor.named_commands()
-        if named:
-            self._named_commands[rec_id] = named
+    def _load_actor(self, actor) -> bool:
+        """Create one actor and its subtree; False when the actor's
+        Condition drops it (the caller removes the subtree, so it never
+        registers, draws, or receives dispatch). Conditions are engine
+        gates (ActorUtil skips falsy actors), and templates also use
+        them as load-time setup code (`Condition="(function() ...
+        end)()"` defining helpers the InitCommands call). A condition
+        that faults keeps its actor: a permissive-stub error must not
+        drop real content."""
+        if self._condition_falsy(actor):
+            return False
+        rec_id = self._register_one(actor)
+        value = actor.attrs.get('InitCommand', '')
+        if value.startswith('%'):
+            self._run_lua_body(rec_id, _strip_lua_wrapper(value),
+                               f'{self._label(rec_id)}.InitCommand',
+                               load=True)
+        elif value:
+            self._run_classic_body(rec_id, value)
+        for child in list(actor.children):
+            if not self._load_actor(child):
+                actor.children.remove(child)
         self._children[rec_id] = [self._id_for(c) for c in actor.children]
         for child in actor.children:
             child_name = child.attrs.get('Name', '')
             if child_name:
                 self._xml_child_names[(rec_id, child_name)] = \
                     self._id_for(child)
-            self._register(child)
+        return True
+
+    def _condition_falsy(self, actor) -> bool:
+        expr = actor.attrs.get('Condition', '').strip()
+        if not expr:
+            return False
+        name = f'{self._actor_label(actor, "?")}.Condition'
+        try:
+            result = self._host.compile(f'return ({expr})', name=name)()
+        except Exception as exc:
+            self._warnings.append(f'{name}: {exc}')
+            return False
+        return result is None or result is False
+
+    def _register_one(self, actor) -> int:
+        rec_id = self._id_for(actor)
+        self._labels[rec_id] = self._actor_label(actor, rec_id)
+        for message, body in actor.message_commands().items():
+            resolved = self._load_resolve(rec_id, f'msg:{message}', body)
+            if resolved is not None:
+                self._message_commands.setdefault(message, []).append(
+                    (rec_id, resolved))
+        named = {name: self._load_resolve(rec_id, f'cmd:{name}', body)
+                 for name, body in actor.named_commands().items()}
+        named = {name: body for name, body in named.items()
+                 if body is not None}
+        if named:
+            self._named_commands[rec_id] = named
+        return rec_id
+
+    def _load_resolve(self, rec_id, suffix, body):
+        """Command bodies stay strings, except `%expr` expression
+        commands (not function literals): the engine evaluates those
+        ONCE at actor creation and stores the result - `%prefix.update`
+        must capture the function before the template's cleanup nils
+        the `prefix` global. Returns the body string, a captured Lua
+        function, or None for a command that resolved to nothing."""
+        if not body.startswith('%') or is_lua_function_literal(body):
+            return body
+        name = f'{self._label(rec_id)}.{suffix}'
+        try:
+            result = self._host.compile(
+                f'return ({body[1:].strip()})', name=name)()
+        except Exception as exc:
+            self._warnings.append(f'{name}: {exc}')
+            return None
+        return result if callable(result) or isinstance(result, str) \
+            else None
 
     def _run_load(self, actor, attr) -> None:
         rec_id = self._id_for(actor)
@@ -570,12 +642,27 @@ class SimEnvironment:
             return
         self._dispatch_depth += 1
         try:
-            if body.startswith('%'):
+            if not isinstance(body, str):
+                self._call_command_fn(rec_id, body, name)
+            elif body.startswith('%'):
                 self._run_lua_body(rec_id, _strip_lua_wrapper(body), name)
             else:
                 self._run_classic_body(rec_id, body)
         finally:
             self._dispatch_depth -= 1
+
+    def _call_command_fn(self, rec_id, fn, name) -> None:
+        """A load-resolved `%expr` command: call the captured function
+        with the actor's recorder as `self`."""
+        self._sync(rec_id)
+        saved = self._host.env['self']
+        self._host.env['self'] = self._tables[rec_id]
+        try:
+            fn(self._tables[rec_id])
+        except Exception as exc:
+            self._record_fault(name, exc)
+        finally:
+            self._host.env['self'] = saved
 
     def _run_lua_body(self, rec_id, body, name, load=False) -> None:
         """Run a command body with `self` = the actor's recorder. Bodies

@@ -171,15 +171,28 @@ def _scan_start_tag(text: str, lt: int):
         len(text)
 
 
+def is_lua_function_literal(value: str) -> bool:
+    """True for a `%function(...) ... end` command body - the common
+    literal shape, as opposed to a `%expr` expression command."""
+    body = value[1:].strip()
+    return bool(re.match(r'function\s*\(', body)) and body.endswith('end')
+
+
 def _strip_lua_wrapper(value: str) -> str:
-    """A `%`-prefixed attribute is a Lua body. `%function(self) BODY end`
-    is unwrapped to BODY so it runs as a statement chunk; a bare
-    `%expr` keeps its expression."""
+    """A `%`-prefixed attribute is a Lua EXPRESSION whose value is the
+    command: the engine compiles `return <expr>` and calls the result
+    with the actor. `%function(self) BODY end` unwraps to BODY so it
+    runs as a statement chunk (`self` resolves through the sandbox env);
+    any other expression becomes an equivalent evaluate-and-call
+    statement - it may resolve to a function only at fire time
+    (the XGML template's `%prefix.update` reads a global its
+    InitCommand binds)."""
     body = value[1:].strip()
     header = re.match(r'function\s*\(([^)]*)\)', body)
     if header and body.endswith('end'):
         return body[header.end():-len('end')]
-    return body
+    return (f'local __cmd = ({body})\n'
+            "if type(__cmd) == 'function' then __cmd(self) end")
 
 
 def _split_top_level(text: str, sep: str) -> list:

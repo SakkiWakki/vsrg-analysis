@@ -205,7 +205,8 @@ def run_declarative(root, to_seconds, start_beat, end_seconds,
 
     from analysis.games.notitg.xml_actors import _strip_lua_wrapper
 
-    body, body_name = update_integrator._update_source(root)
+    body, body_name, update_actor = update_integrator._update_source(root)
+    update_rec = getattr(update_actor, '_sim_id', None)
     windows = update_integrator._live_windows(body) if body else ()
     if body:
         # The raw attr is `%function(self) ... end`; the runnable chunk
@@ -256,7 +257,7 @@ def run_declarative(root, to_seconds, start_beat, end_seconds,
         env.set_time(t, to_beats(t))
         env.drain(t)
         if run_body:
-            env.run_update_body(body, name=body_name)
+            env.run_update_body(body, name=body_name, rec_id=update_rec)
             in_window = any(a <= t < b for a, b in window_spans)
             next_body_t = t + (body_step if in_window
                                else max(coarse, body_step))

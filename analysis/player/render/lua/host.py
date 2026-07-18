@@ -21,6 +21,11 @@ _SAFE_BUILTINS = (
     'assert', 'error', 'ipairs', 'next', 'pairs', 'pcall', 'select',
     'tonumber', 'tostring', 'type', 'unpack', 'xpcall',
     'setmetatable', 'getmetatable', 'rawget', 'rawset', 'rawequal',
+    # 5.1 only (absent under 5.4): SM-family templates sandbox their own
+    # helper functions with it (XGML's `prefix(func)` env wrapper). A
+    # sandboxed chunk can only retarget environments it can reach, all
+    # inside the sandbox.
+    'setfenv',
 )
 _SAFE_MODULES = ('math', 'string', 'table')
 

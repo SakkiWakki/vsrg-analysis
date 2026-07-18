@@ -147,24 +147,24 @@ _INVERT_SAMPLES_PER_BEAT = 8.0
 
 
 def _update_body(root):
-    body, _label = _update_source(root)
+    body, _label, _actor = _update_source(root)
     return body
 
 
 def _update_source(root):
-    """(raw `%`-Lua UpdateCommand body, fault/chunk label) of the first
-    actor bearing one, or (None, None). The classic template has exactly
-    one such per-frame loop; the first found is authoritative. The label
-    carries the actor's source XML file and Name so a Lua error in the
-    body names its origin."""
+    """(raw `%`-Lua UpdateCommand body, fault/chunk label, actor) of the
+    first actor bearing one, or (None, None, None). The classic template
+    has exactly one such per-frame loop; the first found is
+    authoritative. The label carries the actor's source XML file and
+    Name so a Lua error in the body names its origin."""
     for actor in _iter_actors(root):
         body = actor.named_commands().get(_UPDATE_COMMAND)
         if isinstance(body, str) and body.startswith('%'):
             name = actor.attrs.get('Name') or actor.kind
             src = getattr(actor, '_src_xml', '')
             prefix = f'{src}:{name}' if src else name
-            return body, f'{prefix}.{_UPDATE_COMMAND}'
-    return None, None
+            return body, f'{prefix}.{_UPDATE_COMMAND}', actor
+    return None, None, None
 
 
 _REARM_RE = re.compile(
