@@ -336,19 +336,25 @@ def _resolve_windows(windows) -> list:
     prev = _REST_TARGET
     heap = []
     ended: set = set()
+    # Unique heap tiebreak: two windows share an `order` when one row's
+    # modstring names the same mod twice, and _Window defines no
+    # ordering. Later push wins the tie, matching the parse order
+    # (the row's later token overwrites the earlier).
+    push_seq = 0
     i, n = 0, len(marks)
     while i < n:
         t = marks[i][0]
         while i < n and marks[i][0] == t:
             _t, is_start, w = marks[i]
             if is_start:
-                heapq.heappush(heap, (-w.order, w))
+                heapq.heappush(heap, (-w.order, -push_seq, w))
+                push_seq += 1
             else:
                 ended.add(id(w))
             i += 1
-        while heap and id(heap[0][1]) in ended:
+        while heap and id(heap[0][2]) in ended:
             heapq.heappop(heap)
-        target = ((heap[0][1].value, heap[0][1].speed) if heap
+        target = ((heap[0][2].value, heap[0][2].speed) if heap
                   else _REST_TARGET)
         if target != prev:
             events.append((t, *target))
