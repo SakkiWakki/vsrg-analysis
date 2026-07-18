@@ -54,6 +54,27 @@ def _build_render_effects(player, replay) -> list:
     return [e for e in effects if e]
 
 
+def _bps_segments(bpms, sm_offset) -> list:
+    """Monotonic `(t_start, beats_per_second)` segments from an SM BPMS
+    list + offset, for the engine-rate scroll (`effective_scroll_speed`).
+    Non-positive BPMs (raw negative-BPM warps) contribute no forward
+    time, so they are skipped - the previous rate carries across the
+    jump, which is what the display does through a warp anyway."""
+    segments = []
+    t = -float(sm_offset or 0.0)
+    prev_beat = 0.0
+    bps = None
+    for beat, bpm in (bpms or []):
+        beat = float(beat)
+        if bps and beat > prev_beat:
+            t += (beat - prev_beat) / bps
+            prev_beat = beat
+        if bpm and float(bpm) > 0.0:
+            bps = float(bpm) / 60.0
+            segments.append((t, bps))
+    return segments or [(t, 2.0)]
+
+
 def _build_scroll_mult_timeline(player, replay):
     events = player._adapter.scroll_multipliers(replay)
     if not events:
@@ -89,6 +110,14 @@ class PlayerInitState:
         # an effect: it feeds the time->y mapping via
         # `effective_scroll_speed`, rescaling the whole field.
         p._scroll_mult_timeline = _build_scroll_mult_timeline(p, replay)
+        # Engine-prescribed scroll rate (design px per beat, NotITG's
+        # 64px arrow grid). When set, `effective_scroll_speed` derives
+        # px/s from the chart's BPM and xmod timeline instead of the
+        # user's scroll setting - modcharts author their speeds and
+        # appearance windows against this absolute grid.
+        p._engine_beat_px = p._adapter.engine_beat_px()
+        p._engine_bps_segments = (_bps_segments(bpms, sm_offset)
+                                  if p._engine_beat_px else None)
         # Per-note mod consumer (NotITG ArrowEffects); applied by the
         # renderer after the candidate y arrays exist each frame.
         p._note_mods = p._adapter.note_mods(replay)

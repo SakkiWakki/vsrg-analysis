@@ -39,6 +39,7 @@ explicit pn maps to pn - 1 for the future multi-field split.
 """
 from __future__ import annotations
 
+import heapq
 import re
 from bisect import bisect_right
 from collections import defaultdict
@@ -316,24 +317,40 @@ def _resolve_windows(windows) -> list:
 
     Windows are treated half-open `[start, end)`: the target reverts AT
     the window's end (the engine reverts the frame after), which is why
-    the trailing interval past the last end resets to rest."""
-    boundaries = sorted({w.start for w in windows} | {w.end for w in windows})
+    the trailing interval past the last end resets to rest.
+
+    Sweep line over the boundary events with a lazy-deletion max-heap on
+    `order`: per-frame templates re-apply every mod every frame (a
+    getfucked2-scale chart carries ~10k windows on ~90 channels), and
+    rescanning every window at every boundary is quadratic enough to
+    read as a hang."""
+    marks = []
+    for w in windows:
+        if w.end > w.start:
+            marks.append((w.start, 1, w))
+            marks.append((w.end, 0, w))
+    # Ends sort before starts at the same instant (half-open intervals).
+    marks.sort(key=lambda m: (m[0], m[1]))
+
     events = []
     prev = _REST_TARGET
-    for t in boundaries:
-        target = _active_target(windows, t)
+    heap = []
+    ended: set = set()
+    i, n = 0, len(marks)
+    while i < n:
+        t = marks[i][0]
+        while i < n and marks[i][0] == t:
+            _t, is_start, w = marks[i]
+            if is_start:
+                heapq.heappush(heap, (-w.order, w))
+            else:
+                ended.add(id(w))
+            i += 1
+        while heap and id(heap[0][1]) in ended:
+            heapq.heappop(heap)
+        target = ((heap[0][1].value, heap[0][1].speed) if heap
+                  else _REST_TARGET)
         if target != prev:
             events.append((t, *target))
             prev = target
     return events
-
-
-def _active_target(windows, t) -> tuple:
-    """The (value, speed) target on the interval starting at `t`: the
-    highest-order window covering `[t, ...)` half-open (`start <= t <
-    end`), or rest (0 at clearall speed) if none covers it."""
-    covering = [w for w in windows if w.start <= t < w.end]
-    if not covering:
-        return _REST_TARGET
-    winner = max(covering, key=lambda w: w.order)
-    return winner.value, winner.speed

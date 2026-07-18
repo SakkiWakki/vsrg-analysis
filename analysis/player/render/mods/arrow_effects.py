@@ -917,9 +917,21 @@ def blink_adjust(percent, t_now):
 def alpha_from_visible(visible):
     """GetAlpha (ArrowEffects.cpp:486-494): a hard 0/1 cutoff at 0.5. We
     return the raw visibility as a float multiplier for smooth 2D
-    compositing; call `np.where(visible > 0.5, 1.0, 0.0)` to match the
-    engine's hard cut exactly."""
+    compositing (the port-parity contract pins this smooth value);
+    `display_alpha` maps it to the engine's on-screen brightness at the
+    draw boundary."""
     return visible
+
+
+def display_alpha(visible):
+    """Perceived note brightness for one drawn part, from its raw
+    visibility. The engine draws each note twice: GetAlpha is a HARD 0/1
+    cut at visible > 0.5, and GetGlow (ArrowEffects.cpp:496-505) adds a
+    glow pass ramping to 1.3 at the boundary - a fading note reads as
+    bright glow well before its alpha flips (2.6x the raw visibility
+    below the cut). One multiplier for our single-pass composite: full
+    above the cut, the glow ramp below."""
+    return np.clip(2.6 * np.asarray(visible, dtype=np.float64), 0.0, 1.0)
 
 
 def zoom_from_mini(mini_percent):
@@ -1168,7 +1180,9 @@ def _warp_family_sum(percents, cols, y_offset, keycount, arrow_size,
     return out
 
 
-def _dy(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size):
+def _tipsy_dy(percents, cols, t_now, keycount, arrow_size=ARROW_SIZE):
+    """The tipsy family's dy alone - the only dy component GetYPos folds
+    into the visibility position (ArrowGetPercentVisible's y)."""
     dy = np.zeros(cols.shape[0], dtype=np.float64)
     if _active(percents, 'tipsy', keycount):
         dy += tipsy_y(_per_note(percents, 'tipsy', cols, keycount),
@@ -1178,6 +1192,11 @@ def _dy(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size):
         dy += tipsy_y(_get(percents, 'tantipsy'), cols, t_now, arrow_size,
                       _get(percents, 'tantipsyspeed'), _get(percents, 'tantipsyoffset'),
                       is_tan=True)
+    return dy
+
+
+def _dy(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size):
+    dy = _tipsy_dy(percents, cols, t_now, keycount, arrow_size)
     if _get(percents, 'beaty'):
         dy += beat_y(_get(percents, 'beaty'), y_offset, beat_now,
                      _get(percents, 'beatyoffset'), _get(percents, 'beatyperiod'),
@@ -1316,7 +1335,13 @@ def note_offsets(percents: dict, cols: np.ndarray, y_offset: np.ndarray,
     dy = _dy(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size)
     rotation = _rotation(percents, note_beats, beat_now, n)
     zoom = _zoom(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size, n)
-    alpha = _alpha(percents, cols, y_offset + dy, t_now)
+    # Visibility samples GetYPos(..., WithReverse=false): the raw scroll
+    # offset plus TIPSY ONLY (ArrowEffects.cpp:441-444/159-176) - the
+    # other dy mods (beaty/movey/parabola...) displace the drawn note
+    # but never move it through the hidden/sudden windows.
+    alpha = _alpha(percents, cols, y_offset + _tipsy_dy(percents, cols, t_now,
+                                                        keycount, arrow_size),
+                   t_now)
 
     return NoteOffsets(dx=dx, dy=dy, rotation_deg=rotation,
                        alpha_mult=alpha, zoom=zoom)

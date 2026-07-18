@@ -131,6 +131,16 @@ class GameAdapter:
         analysis/games/notitg/note_mods.py for the contract."""
         return None
 
+    def engine_beat_px(self):
+        """Design pixels one BEAT of scroll covers at 1x in this game's
+        engine, or None when the game has no prescribed rate (the user's
+        scroll-speed setting rules). A modchart game returns its arrow
+        spacing (NotITG: 64 - the chart's xmods are ABSOLUTE speed on
+        that grid, and appearance windows like hidden/sudden live in
+        that same y space, so the display must scroll at the chart's
+        rate for them to land where the author aimed)."""
+        return None
+
     def note_palette(self, replay):
         """Per-column note-color timeline for this replay, or None for a
         static per-column palette (the default `p.palette`). Returns an

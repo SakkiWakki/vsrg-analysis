@@ -289,16 +289,42 @@ class SvRenderController:
         return self.p._sv_engine.cumulative_at(float(t))
 
     def effective_scroll_speed(self, t) -> float:
-        """User scroll speed times the chart's eased scroll-multiplier
-        at `t` (fluXis scroll-multiply; 1.0 when the chart has none).
-        The multiplier rescales the whole on-screen field at draw time,
-        so every px-per-distance consumer must route through here."""
-        speed = float(self.p.scroll_speed)
+        """Scroll rate in px/s at `t`; every px-per-distance consumer
+        must route through here.
+
+        Games with an ENGINE-PRESCRIBED rate (`GameAdapter.
+        engine_beat_px`, NotITG's 64px-per-beat arrow grid) derive it
+        from the chart: beat_px * bps(t) * design scale - the user's
+        scroll setting never enters, because the chart's xmods are
+        absolute speed and its appearance windows (hidden/sudden) are
+        authored against that exact grid. Everything else: the user
+        scroll speed. Both take the chart's eased scroll-multiplier
+        (fluXis scroll-multiply / NotITG xmods; 1.0 when absent)."""
+        speed = self._engine_rate(t)
+        if speed is None:
+            speed = float(self.p.scroll_speed)
         timeline = getattr(self.p, '_scroll_mult_timeline', None)
         if timeline is not None:
             (mult,) = timeline.sample(float(t))
             speed *= max(0.0, mult)
         return speed
+
+    def _engine_rate(self, t) -> float | None:
+        """The engine-prescribed px/s at `t` (before the chart
+        multiplier), or None when this game has none."""
+        beat_px = getattr(self.p, '_engine_beat_px', None)
+        if not beat_px:
+            return None
+        segments = self.p._engine_bps_segments
+        bps = segments[0][1]
+        for t_start, seg_bps in segments:
+            if t_start > float(t):
+                break
+            bps = seg_bps
+        space = getattr(self.p._adapter, 'design_space', lambda: None)()
+        design_h = getattr(space, 'height', 480.0)
+        _x, _y, _w, h = self.p.chart_rect
+        return float(beat_px) * bps * (h / design_h)
 
     def render_frame_state(self, raw_t):
         p = self.p

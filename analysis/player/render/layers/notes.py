@@ -28,6 +28,7 @@ import numpy as np
 from analysis.player.notetypes import NT_TICK
 from analysis.player.render.layers import chart_extras as _extras
 from analysis.player.render.layers.note_sprites import ln_body_width
+from analysis.player.render.mods.arrow_effects import display_alpha
 from analysis.player.render.primitives import _NO_PEN
 
 if TYPE_CHECKING:
@@ -224,7 +225,8 @@ def _build(ctx, i, pos) -> _NoteView | None:
         press_y=float(ctx.candidate_press_y[pos]),
         lx=int(ctx.lane_x(col)
                + (mod_dx[pos] if mod_dx is not None else 0.0)),
-        alpha=float(mod_alpha[pos]) if mod_alpha is not None else 1.0,
+        alpha=(float(display_alpha(mod_alpha[pos]))
+               if mod_alpha is not None else 1.0),
         rotation_deg=float(mod_rot[pos]) if mod_rot is not None else 0.0,
         zoom=float(mod_zoom[pos]) if mod_zoom is not None else 1.0,
         off=off, press_t=press_t,
@@ -394,12 +396,14 @@ def _draw_ln(ctx, painter, n):
         alphas = _body_alphas(n)
         if alphas is None:
             _draw_ln_tail_sprite(ctx, painter, n)
-        elif alphas[-1] >= 1.0 / 255.0:
+        else:
             # The tail cap fades at ITS OWN y (the body's last sample).
-            painter.save()
-            painter.setOpacity(painter.opacity() * min(1.0, alphas[-1]))
-            _draw_ln_tail_sprite(ctx, painter, n)
-            painter.restore()
+            tail_alpha = float(display_alpha(alphas[-1]))
+            if tail_alpha >= 1.0 / 255.0:
+                painter.save()
+                painter.setOpacity(painter.opacity() * tail_alpha)
+                _draw_ln_tail_sprite(ctx, painter, n)
+                painter.restore()
 
     # ── release guide ──
     # Straight-lane analyzer UI: on a curved body the vertical stroke
@@ -614,7 +618,8 @@ def _alpha_runs(alphas, count):
     visibility matches. No alphas -> one opaque run."""
     if alphas is None:
         return [(0, count - 1, 1.0)]
-    seg = (np.asarray(alphas[:-1]) + np.asarray(alphas[1:])) / 2.0
+    seg = display_alpha((np.asarray(alphas[:-1]) + np.asarray(alphas[1:]))
+                        / 2.0)
     levels = np.round(seg / _BODY_ALPHA_STEP) * _BODY_ALPHA_STEP
     runs = []
     start = 0

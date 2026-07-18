@@ -257,6 +257,13 @@ class NotitgAdapter(EtternaAdapter):
                 second_field=self._second_field(replay, instances)))
         return effects
 
+    def engine_beat_px(self):
+        """One beat = one arrow = 64 design px at 1x (openitg
+        ARROW_SIZE); the chart's xmods multiply this absolute rate, so
+        the field scrolls engine-true regardless of the user's scroll
+        setting."""
+        return _ARROW_PX
+
     def design_space(self):
         """NotITG renders a fixed 640x480 design screen and STRETCHES it
         to the window - widescreen play widens the content rather than
