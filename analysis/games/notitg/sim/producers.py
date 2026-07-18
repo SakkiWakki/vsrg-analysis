@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from analysis.games.notitg import field_compose, modfile
+from analysis.games.notitg import aft_chains, field_compose, modfile
 from analysis.games.notitg.sim.loop import (
     load_chart, run_declarative, run_sim)
 from analysis.games.notitg.sim.record import chase_events, coalesce_applied
@@ -301,6 +301,7 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
     names = env.named_actor_ids()
     aft_nodes = {sim.aft_texture_name: rec_id
                  for rec_id, sim in env.actors.items() if sim.is_aft}
+    chain_graph = _aft_chain_graph(doc, env, aft_nodes, proxy_players)
 
     instances = []
     base_players = _base_players(mod_channels)
@@ -318,12 +319,18 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
         aft_order = None
         aft_live = None
         color = None
+        capture_source = None
         if sim.aft_source:
             kind, player = 'aft', 0
             node = aft_nodes.get(sim.aft_source)
             aft_order = ('pre' if node is not None and rec_id < node
                          else 'post')
             aft_live = _aft_node_visible(env, node)
+            # If the source AFT is a 2-stage chain node (it captured a
+            # single isolated upstream node, not the whole screen), the
+            # consumer blits that isolated capture; None = whole screen
+            # (the gat 1 path, byte-identical).
+            capture_source = chain_graph.capture_of(sim.aft_source)
         elif sim.proxy_target in proxy_players:
             kind, player = 'proxy', proxy_players[sim.proxy_target]
         elif getattr(actor, '_aft_fill', False):
@@ -359,11 +366,37 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
             ancestor = next((names[env.actor_id(a)] for a in chain
                              if env.actor_id(a) in names), 'copy')
             name = f'{ancestor}_{rec_id}'
-        instances.append(field_compose.instance(name, kind, player, links,
-                                                t0=t0, aft_order=aft_order,
-                                                aft_live=aft_live,
-                                                color=color))
+        inst = field_compose.instance(name, kind, player, links,
+                                      t0=t0, aft_order=aft_order,
+                                      aft_live=aft_live, color=color)
+        if capture_source is not None:
+            inst['capture_source'] = capture_source
+        instances.append(inst)
     return instances
+
+
+def _aft_chain_graph(doc, env, aft_nodes, proxy_players):
+    """The compile-time AFT render-target chain graph (aft_chains): each
+    AFT node's isolated upstream capture source (or None = whole screen)
+    resolved from engine draw order. Feeds each aft consumer's
+    `capture_source` so a 2-stage chain node's sampler blits the isolated
+    upstream content instead of the finished frame."""
+    node_by_id = {rec_id: name for name, rec_id in aft_nodes.items()}
+    blit_sources = {}
+    screen_content_ids = set()
+    draw_order = []
+    for actor in _iter_xml(doc.root):
+        rec_id = env.actor_id(actor)
+        sim = env.actors.get(rec_id)
+        if sim is None:
+            continue
+        draw_order.append(rec_id)
+        if sim.aft_source and rec_id not in node_by_id:
+            blit_sources[rec_id] = sim.aft_source
+        if sim.proxy_target in proxy_players:
+            screen_content_ids.add(rec_id)
+    return aft_chains.build_chain_graph(
+        node_by_id, blit_sources, draw_order, screen_content_ids)
 
 
 def _notefield_link(notefield_id, actor_keyframes) -> dict:

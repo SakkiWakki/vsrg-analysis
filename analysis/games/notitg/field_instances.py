@@ -29,6 +29,17 @@ toss); 'screen_prev' samplers draw BEFORE it, so they show the previous
 frame's (their own blit lands in the next capture - the feedback leg
 that accumulates echo trails).
 
+AFT chains (games/notitg/aft_chains): a 2-stage chain node captures ONE
+isolated upstream AFT (a post-processed field copy), not the whole
+screen. Its consumers carry `capture_source` (the upstream node name)
+and key their freeze on it, so all consumers of that chain node share
+its retained isolated capture. Absent a chain (gat 1, single AFT), the
+key is the sampler's own name and the capture is the whole screen -
+byte-identical. The render loop snapshotting the isolated content under
+that key (a sub-composite, not the finished frame) is DEFERRED - it
+needs the GL executor's named render targets, out of this consumer's
+compile-time reach.
+
 Design-space mapping: a sampled homography is authored in SM's 640x480
 screen space; the screen transform is the conjugation M . H . M^-1
 where M maps SM design space onto the chart region (kept in lockstep
@@ -206,7 +217,15 @@ class NotitgFieldInstances:
     def _extra(inst, t):
         """The scope's per-frame payload: a fill's sampled rgb, or an
         aft sampler's (source name, capture-live?) freeze key. None for
-        proxy/player blits."""
+        proxy/player blits.
+
+        The freeze key names the ISOLATED render target the sampler
+        blits: a 2-stage chain node's `capture_source` (the upstream AFT
+        it captured alone) when present, else the sampler's own name (the
+        whole-screen capture, the gat 1 path). Keying chain consumers on
+        the shared upstream node lets them all blit one retained isolated
+        capture - the render-loop side that snapshots that isolated
+        content under this key is the deferred piece (see module note)."""
         match inst['kind']:
             case 'fill':
                 color = inst.get('color')
@@ -214,8 +233,8 @@ class NotitgFieldInstances:
                     else (1.0, 1.0, 1.0)
             case 'aft':
                 live = inst.get('aft_live')
-                return (inst['name'],
-                        live is None or live.sample(t)[0] >= 0.5)
+                key = inst.get('capture_source') or inst['name']
+                return (key, live is None or live.sample(t)[0] >= 0.5)
         return None
 
 
