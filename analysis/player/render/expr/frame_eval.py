@@ -166,10 +166,11 @@ class Scope:
     def get(self, name: str):
         scope = self
         while scope is not None:
-            if name in scope.bindings:
-                return scope.bindings[name]
+            b = scope.bindings
+            if name in b:
+                return b[name]
+            store = scope.store       # only the root carries a store
             scope = scope.parent
-        store = self._root().store
         return store.get(name) if store is not None else UNRESOLVED
 
     def has(self, name: str) -> bool:
@@ -177,9 +178,27 @@ class Scope:
         while scope is not None:
             if name in scope.bindings:
                 return True
+            store = scope.store
             scope = scope.parent
-        store = self._root().store
         return store is not None and store.has(name)
+
+    def lookup(self, name: str):
+        """One chain walk returning `(found, value)` - collapses the
+        `has()`+`get()` double walk in the symbol hot path. `found` False means
+        neither a local nor the global store had the name (the caller then
+        asks the surface). The store IS consulted here (a store-backed global
+        is 'found')."""
+        scope = self
+        store = None
+        while scope is not None:
+            b = scope.bindings
+            if name in b:
+                return True, b[name]
+            store = scope.store
+            scope = scope.parent
+        if store is not None and store.has(name):
+            return True, store.get(name)
+        return False, UNRESOLVED
 
     def set_local(self, name: str, value) -> None:
         self.bindings[name] = value
@@ -386,45 +405,45 @@ class Interpreter:
     # -- expressions ---------------------------------------------------------
 
     def _eval(self, node: ast.Node, scope: Scope, depth: int):
-        match node:
-            case ast.Num(value=v):
-                return v
-            case ast.Str(value=v):
-                return v
-            case ast.Bool(value=v):
-                return v
-            case ast.Nil():
-                return None
-            case ast.Sym(name=name):
-                return self._eval_symbol(name, scope)
-            case ast.Index(base=base, key=key):
-                return self._eval_index(base, key, scope, depth)
-            case ast.Field(base=base, name=name):
-                b = self._eval(base, scope, depth)
-                if b is UNRESOLVED:
-                    return UNRESOLVED
-                if isinstance(b, LuaTable):
-                    return b.get(name)
-                return self._surface.index(b, name)
-            case ast.Unary(op=op, operand=operand):
-                return _unary(op, self._eval(operand, scope, depth))
-            case ast.Binary(op='and', left=l, right=r):
-                return self._eval_and(l, r, scope, depth)
-            case ast.Binary(op='or', left=l, right=r):
-                return self._eval_or(l, r, scope, depth)
-            case ast.Binary(op=op, left=l, right=r):
-                return _binary(op, self._eval(l, scope, depth),
-                               self._eval(r, scope, depth))
-            case ast.Method(recv=recv, name=name, args=args):
-                return self._eval_method(recv, name, args, scope, depth)
-            case ast.Call(fn=fn, args=args):
-                return self._eval_call(fn, args, scope, depth)
-            case ast.FuncExpr(params=params, body=body):
-                return self._make_closure(params, body, scope)
-            case ast.Table(array=array, fields=fields):
-                return self._eval_table(array, fields, scope, depth)
-            case _:
+        # Dispatch by exact type (faster than structural `match` in the hot
+        # per-tick path: 250M+ calls on a real chart). Ordered hottest-first -
+        # Sym / Index / Binary / Num dominate a driver body's expressions.
+        t = node.__class__
+        if t is ast.Sym:
+            return self._eval_symbol(node.name, scope)
+        if t is ast.Num or t is ast.Str or t is ast.Bool:
+            return node.value
+        if t is ast.Index:
+            return self._eval_index(node.base, node.key, scope, depth)
+        if t is ast.Binary:
+            op = node.op
+            if op == 'and':
+                return self._eval_and(node.left, node.right, scope, depth)
+            if op == 'or':
+                return self._eval_or(node.left, node.right, scope, depth)
+            return _binary(op, self._eval(node.left, scope, depth),
+                           self._eval(node.right, scope, depth))
+        if t is ast.Call:
+            return self._eval_call(node.fn, node.args, scope, depth)
+        if t is ast.Method:
+            return self._eval_method(node.recv, node.name, node.args,
+                                     scope, depth)
+        if t is ast.Field:
+            b = self._eval(node.base, scope, depth)
+            if b is UNRESOLVED:
                 return UNRESOLVED
+            if b.__class__ is LuaTable:
+                return b.get(node.name)
+            return self._surface.index(b, node.name)
+        if t is ast.Unary:
+            return _unary(node.op, self._eval(node.operand, scope, depth))
+        if t is ast.Nil:
+            return None
+        if t is ast.FuncExpr:
+            return self._make_closure(node.params, node.body, scope)
+        if t is ast.Table:
+            return self._eval_table(node.array, node.fields, scope, depth)
+        return UNRESOLVED
 
     def _eval_table(self, array, fields, scope, depth):
         """A `{a, b, k = v}` constructor -> a `LuaTable` (1-indexed array part +
@@ -440,27 +459,26 @@ class Interpreter:
 
     def _eval_symbol(self, name: str, scope: Scope):
         # A bound local/global shadows the surface; else the surface resolves
-        # it (a clock symbol, an actor global, a state var).
-        if scope.has(name):
-            return scope.get(name)
-        return self._surface.symbol(name)
+        # it (a clock symbol, an actor global, a state var). ONE chain walk.
+        found, value = scope.lookup(name)
+        return value if found else self._surface.symbol(name)
 
     def _eval_index(self, base, key, scope, depth):
         # `_G[k]` is a global read by computed name - route through the scope so
         # it sees globals the interpreter wrote (`_G['P'..pn] = ...`), matching
         # the assign side.
-        if isinstance(base, ast.Sym) and base.name == '_G':
+        if base.__class__ is ast.Sym and base.name == '_G':
             k = self._eval(key, scope, depth)
             if k is UNRESOLVED:
                 return UNRESOLVED
             name = str(k)
-            return scope.get(name) if scope.has(name) \
-                else self._surface.symbol(name)
+            found, value = scope.lookup(name)
+            return value if found else self._surface.symbol(name)
         b = self._eval(base, scope, depth)
         k = self._eval(key, scope, depth)
         if b is UNRESOLVED or k is UNRESOLVED:
             return UNRESOLVED
-        if isinstance(b, LuaTable):
+        if b.__class__ is LuaTable:
             return b.get(k)
         return self._surface.index(b, k)
 
@@ -483,8 +501,8 @@ class Interpreter:
         # the surface may know the free function (`perframe`), else UNRESOLVED.
         match fn:
             case ast.Sym(name=name):
-                bound = scope.get(name) if scope.has(name) else UNRESOLVED
-                if callable(bound):
+                found, bound = scope.lookup(name)
+                if found and callable(bound):
                     return self._call_closure(bound, arg_vs, depth)
                 if UNRESOLVED in arg_vs:
                     return UNRESOLVED
