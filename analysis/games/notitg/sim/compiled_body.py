@@ -62,6 +62,11 @@ class CompiledBody:
             self._surface, store=_LuaEnvStore(env._host.env))
         try:
             self._stmts, self._sink = parse_body(body)
+            # Compile the AST to nested closures ONCE (frame_compile_exec): the
+            # per-tick cost is then a direct call chain, not a tree re-walk.
+            from analysis.player.render.expr.frame_compile_exec import (
+                compile_body)
+            self._run_compiled = compile_body(self._stmts, self._interp)
             self._ok = True
         except Exception as exc:
             self._ok = False
@@ -76,9 +81,10 @@ class CompiledBody:
         # Rebind `self` to the owning actor's recorder each tick (a fresh top
         # scope keeps locals from leaking across ticks; globals persist in the
         # Lua-backed store).
-        self._interp.root.bindings.clear()
-        self._interp.root.set_local('self', table)
+        root = self._interp.root
+        root.bindings.clear()
+        root.bindings['self'] = table
         try:
-            self._interp.run(self._stmts)
+            self._run_compiled(root)
         except Exception as exc:
             self._env._record_fault(self._name, exc)
