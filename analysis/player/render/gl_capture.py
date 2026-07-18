@@ -276,6 +276,8 @@ class GLCaptureBackend:
         if batch is not None:
             self._batch = None
             if f is not None:
+                if self._vbo is not None:
+                    self._vbo.release()
                 f.glDisable(GL_SCISSOR_TEST)
                 f.glBindFramebuffer(GL_FRAMEBUFFER, batch.target_fbo)
             batch._painter.endNativePainting()
@@ -521,6 +523,14 @@ class _GLBlits:
         backend._batch = None
         if backend._vao is not None:
             backend._vao.release()
+        if backend._vbo is not None:
+            # Unbind from GL_ARRAY_BUFFER: on compatibility contexts
+            # Qt's paint engine draws with client-side vertex arrays,
+            # and a foreign buffer left bound turns its vertex pointers
+            # into offsets INTO OUR QUAD - the engine's next pixmap
+            # blit (the HUD) renders with this batch's last instance
+            # geometry (the compressed-sidebar-in-field artifact).
+            backend._vbo.release()
         f.glDisable(GL_SCISSOR_TEST)
         f.glBindTexture(GL_TEXTURE_2D, 0)
         f.glBindFramebuffer(GL_FRAMEBUFFER, self.target_fbo)

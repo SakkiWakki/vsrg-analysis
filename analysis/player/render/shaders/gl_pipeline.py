@@ -353,6 +353,11 @@ class ShaderGLPipeline:
             src, dst = dst, 3 - dst
 
         self._vao.release()
+        # Unbind the quad VBO from GL_ARRAY_BUFFER: Qt's paint engine
+        # may draw with client-side vertex arrays (compatibility
+        # contexts), and a foreign buffer left bound corrupts its
+        # vertex pointers when the host painter resumes.
+        self._vbo.release()
         return True
 
     def _prepare_runnable(self, f, passes):

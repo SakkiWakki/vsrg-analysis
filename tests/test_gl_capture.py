@@ -361,6 +361,27 @@ def test_gl_draw_recovers_after_layer_exception(gl):
     assert _probe(image, 80, 75) == (10, 200, 30)
 
 
+def test_gl_batch_leaves_no_buffer_bound(gl):
+    """After a blits batch, our quad VBO must not stay bound to
+    GL_ARRAY_BUFFER: Qt's paint engine may specify vertex pointers
+    against whatever buffer is bound (client arrays on compatibility
+    contexts), and a leftover foreign VBO makes its next pixmap blit
+    (the HUD) render with our last instance quad's geometry."""
+    GL_ARRAY_BUFFER_BINDING = 0x8894
+    host = _GlHost()
+    backend = gl_capture.GLCaptureBackend()
+    handle = _paint_field(backend, host)
+    with backend.blits(host.painter, CHART) as batch:
+        batch.blit(handle)
+        batch.fill((1.0, 0.0, 0.0), 0.5)
+    host.painter.beginNativePainting()
+    f = gl.extraFunctions()
+    bound = int(f.glGetIntegerv(GL_ARRAY_BUFFER_BINDING))
+    host.painter.endNativePainting()
+    host.finish()
+    assert bound == 0
+
+
 def test_gl_ln_ribbon_survives_mod_slam_coordinates(gl):
     """Mod-slam spine samples (x ~ 1e5) used to overflow the GL paint
     engine's +/-32767 concave-fill limit: the visible ribbon vanished
