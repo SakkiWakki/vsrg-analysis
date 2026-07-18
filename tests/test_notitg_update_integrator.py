@@ -35,6 +35,33 @@ def test_live_windows_ignore_commented_drivers():
     assert update_integrator._live_windows(body) == [(10.0, 20.0)]
 
 
+def test_live_windows_from_raw_beat_guards():
+    # gat 2's Update body dispatches sections with `if beat > a and beat < b`
+    # guards and ZERO perframe() calls; the window set must come from the
+    # guards or the whole body never integrates.
+    body = ('%function(self) '
+            'if beat > 0 and beat < 127 then intro(beat) end '
+            'if beat>127 and beat<352 then revolt(beat) end '
+            'if beat > 601 and beat < 760 then afthell(beat) end end')
+    # 0-127 and 127-352 are adjacent -> merged.
+    assert update_integrator._live_windows(body) == [(0.0, 352.0),
+                                                     (601.0, 760.0)]
+
+
+def test_beat_guard_over_a_variable_is_not_a_window():
+    # a guard whose bound is a Lua variable cannot resolve statically; it is
+    # skipped, not guessed (no phantom window).
+    body = '%function(self) if beat > a and beat < b then x() end end'
+    assert update_integrator._live_windows(body) == []
+
+
+def test_perframe_and_beat_guards_union():
+    body = ('%function(self) if perframe(10,20) then end '
+            'if beat > 40 and beat < 60 then end end')
+    assert update_integrator._live_windows(body) == [(10.0, 20.0),
+                                                     (40.0, 60.0)]
+
+
 def test_beat_inverter_round_trips_a_linear_clock():
     # to_seconds beat -> time at a constant 2 s/beat; the inverter should
     # recover the beat from the time.

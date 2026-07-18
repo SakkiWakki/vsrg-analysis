@@ -84,6 +84,17 @@ _PERFRAME_RE = re.compile(
     r'perframe\s*\(\s*([0-9][0-9.+\-*/ ()]*?)\s*'
     r'(?:,\s*([0-9][0-9.+\-*/ ()]*?)\s*)?\)')
 
+# Raw beat-guard windows: `if beat > A and beat < B`. Charts that predate
+# (or skip) the perframe() helper gate their per-frame sections with a bare
+# comparison instead - gat 2's Update body is a dispatcher of
+# `if beat > A and beat < B then gf2_update_<section>(beat) end` blocks with
+# ZERO perframe() calls, so without this the window set is empty and the
+# whole body never integrates. Bounds are numeric arithmetic (same as the
+# perframe args); a guard over a Lua variable stays unresolved and skipped.
+_BEAT_GUARD_RE = re.compile(
+    r'beat\s*>\s*([0-9][0-9.+\-*/ ()]*?)\s*and\s+'
+    r'beat\s*<\s*([0-9][0-9.+\-*/ ()]*?)\s*(?:then|\))')
+
 # Tables the body reads that other passes own; emptied during integration
 # so the window reader and action loop inside Update no-op.
 _ISOLATED_TABLES = ('mods', 'mods2', 'mod_actions')
@@ -190,17 +201,24 @@ def _body_rearm_period(body: str) -> float | None:
 
 def _live_windows(body: str):
     """Sorted, merged (start_beat, end_beat) windows for every live
-    `perframe(a, b)` in the body. `perframe(a)` (no end) is a one-beat
-    window [a, a+1], matching the helper's `endBeat = beat+1` default.
-    Overlapping/adjacent windows merge so the tick grid is contiguous
-    across a run of drivers."""
+    per-frame driver in the body, from EITHER form: a `perframe(a, b)`
+    helper call (`perframe(a)` with no end is a one-beat window [a, a+1],
+    matching the helper's `endBeat = beat+1` default) OR a raw
+    `if beat > a and beat < b` guard. Overlapping/adjacent windows merge so
+    the tick grid is contiguous across a run of drivers."""
+    stripped = _strip_comments(body)
     spans = []
-    for match in _PERFRAME_RE.finditer(_strip_comments(body)):
+    for match in _PERFRAME_RE.finditer(stripped):
         start = _beat_arg(match.group(1))
         if start is None:
             continue
         end = _beat_arg(match.group(2)) if match.group(2) else start + 1.0
         if end is not None and end > start:
+            spans.append((start, end))
+    for match in _BEAT_GUARD_RE.finditer(stripped):
+        start = _beat_arg(match.group(1))
+        end = _beat_arg(match.group(2))
+        if start is not None and end is not None and end > start:
             spans.append((start, end))
     return _merge_spans(sorted(spans))
 
