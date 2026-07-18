@@ -205,6 +205,19 @@ class NotitgGuardSurface:
             return None
         return self._env._table_rec_id(recv)
 
+    def iter_table(self, table: Resolution) -> list | None:
+        """`(key, value)` pairs for a lupa table a load pass created (`local
+        prefix_plr = {}` then `table.insert` in the Update body), so a
+        generic-for iterates it. An actor recorder is a Lua table too but is
+        NOT a data container to iterate - exclude it (rec_id set). None for a
+        non-lupa value (the interpreter's own LuaTable iterates itself)."""
+        if not _is_lua_table(table) or self._rec_id(table) is not None:
+            return None
+        try:
+            return list(table.items())
+        except (AttributeError, TypeError):
+            return None
+
     def clock_reader(self, name: str) -> Callable[[float], float] | None:
         match name:
             case 'beat':

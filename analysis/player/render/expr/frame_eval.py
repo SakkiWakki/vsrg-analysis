@@ -357,7 +357,11 @@ class Interpreter:
 
     def _iter_pairs(self, exprs, scope, depth):
         """The (key, value) sequence a generic-for iterates, or None when the
-        iterator is not a recognised ipairs/pairs over a LuaTable."""
+        iterator is not a recognised ipairs/pairs over a table. Iterates the
+        interpreter's own LuaTable directly, and falls back to the surface for
+        a HOST table (a lupa table a load pass created), so a chart mixing
+        both - `local t = {}` at load, `table.insert(t, ...)` in Update - still
+        loops."""
         if not exprs:
             return None
         match exprs[0]:
@@ -367,6 +371,8 @@ class Interpreter:
                 if isinstance(table, LuaTable):
                     return (list(table.ipairs()) if kind == 'ipairs'
                             else table.pairs())
+                if table is not UNRESOLVED:
+                    return self._surface.iter_table(table)
         return None
 
     def _exec_while(self, node: ast.While, scope, depth) -> None:

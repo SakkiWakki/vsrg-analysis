@@ -82,6 +82,13 @@ class Surface(Protocol):
         already-resolved; an UNRESOLVED recv is dropped."""
         ...
 
+    def iter_table(self, table: Resolution) -> list | None:
+        """`(key, value)` pairs for a HOST table (a lupa table a load pass
+        built), so a generic-for can iterate a table the interpreter did not
+        create. None when `table` is not a host table the surface owns (the
+        interpreter's own tables iterate themselves)."""
+        ...
+
     def clock_reader(self, name: str) -> Callable[[float], float] | None:
         """A `seconds -> value` reader for driver symbol `name` (compile
         path), or None when `name` is not a clock-backed driver."""
@@ -122,6 +129,9 @@ class ConstSurface:
         return UNRESOLVED
 
     def poke(self, recv: Resolution, name: str, args: list) -> None:
+        return None
+
+    def iter_table(self, table: Resolution) -> list | None:
         return None
 
     def clock_reader(self, name: str) -> Callable[[float], float] | None:
