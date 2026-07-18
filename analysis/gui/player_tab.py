@@ -117,18 +117,21 @@ class PlayerTab(QWidget):
         self._dur_text = None
         self._legacy_hz = self._legacy_render_hz()
 
+        # With audio, hold at t_min until the engine is fully built so
+        # playback never starts silent and has audio join mid-run; the
+        # audio worker's done/failed callbacks start playback. Cleared
+        # by _toggle so a user who starts/pauses manually during the
+        # load isn't overridden when the engine arrives. Set before
+        # _build_audio because a prebuilt engine adopts synchronously
+        # and its callback reads this flag to decide whether to start.
+        self._autostart_pending = bool(audio_path)
+
         self._build_ui()
         self._build_frame_loop()
         self._build_audio(audio_path, prebuilt=prebuilt_audio)
         self._connect_player_events()
         self._build_input_router()
 
-        # With audio, hold at t_min until the engine is fully built so
-        # playback never starts silent and has audio join mid-run; the
-        # audio worker's done/failed callbacks start playback. Cleared
-        # by _toggle so a user who starts/pauses manually during the
-        # load isn't overridden when the engine arrives.
-        self._autostart_pending = bool(audio_path)
         if not self._autostart_pending:
             self._start_playing()
 
