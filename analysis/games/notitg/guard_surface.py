@@ -39,30 +39,16 @@ def _is_lua_table(value) -> bool:
         value, (str, bytes))
 
 
-class _LuaIndexable:
-    """A 1-indexed read view over a lupa table, so `index` can resolve
-    `t[k]` lazily without eagerly converting the whole table. Wraps only the
-    Lua table itself; element reads return the raw Lua value (a nested table
-    becomes another `_LuaIndexable` when re-indexed)."""
-
-    def __init__(self, table):
-        self._table = table
-
-    def at(self, key) -> Resolution:
-        try:
-            value = self._table[key]
-        except (KeyError, TypeError):
-            return UNRESOLVED
-        if value is None:
-            return UNRESOLVED
-        if callable(value):
-            # A Lua library function (math.sin, table.insert): return it as a
-            # callable so the interpreter's call path can invoke it. Not wrapped
-            # (a function is not an indexable).
-            return value
-        if _is_lua_table(value):
-            return _LuaIndexable(value)
-        return value
+def _lua_index(table, key) -> Resolution:
+    """Read `table[key]` from a raw lupa table, returning the RAW Lua value
+    (a nested table stays a raw table, a function stays callable) so it round-
+    trips back into Lua calls without becoming `userdata`. nil/missing ->
+    UNRESOLVED."""
+    try:
+        value = table[key]
+    except (KeyError, TypeError):
+        return UNRESOLVED
+    return UNRESOLVED if value is None else value
 
 
 class NotitgGuardSurface:
@@ -102,22 +88,23 @@ class NotitgGuardSurface:
         if isinstance(value, bool) or isinstance(value, (int, float)):
             return value
         if _is_lua_table(value):
-            return _LuaIndexable(value)
+            # Return the RAW lupa table, not a wrapper: `index` handles a raw
+            # table, and - crucially - a raw table round-trips back into a Lua
+            # call (`table.insert(t, x)`) as a real table, where a Python
+            # wrapper would arrive as `userdata` and fault the builtin.
+            return value
         return UNRESOLVED
 
     def index(self, base: Resolution, key: Resolution) -> Resolution:
         if base is UNRESOLVED or key is UNRESOLVED:
             return UNRESOLVED
         try:
-            if isinstance(base, _LuaIndexable):
-                # String key = field access (`math.sin`); numeric = element.
-                return base.at(key if isinstance(key, str) else int(key))
             if _is_lua_table(base):
-                # A raw lupa table reached the surface unwrapped (a store-
-                # backed global like `math`); wrap and defer to the same field/
-                # element read.
-                return _LuaIndexable(base).at(
-                    key if isinstance(key, str) else int(key))
+                # A raw lupa table: string key = field access (`math.sin`),
+                # numeric = element. Lua indexes both the same; lupa keeps its
+                # own 1-based array keys, so pass the key through unchanged.
+                return _lua_index(base, key if isinstance(key, str)
+                                  else int(key))
             if isinstance(base, (list, tuple)):
                 return base[int(key) - 1]      # Lua tables are 1-indexed
             if isinstance(base, dict):

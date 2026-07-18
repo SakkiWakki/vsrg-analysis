@@ -117,3 +117,66 @@ def test_unparsed_node_is_skipped_not_fatal():
 
 def test_arithmetic_with_unresolved_operand_is_unresolved():
     assert _run('r = mystery + 1').get('r') is UNRESOLVED
+
+
+# -- LuaTable: constructor, stdlib, iteration --------------------------------
+
+def test_table_constructor_and_named_field_access():
+    root = _run('t = {x = 5, y = 9}\nr = t.x + t.y')
+    assert root.get('r') == 14.0
+
+
+def test_table_array_index_is_one_based():
+    root = _run("t = {'a', 'b', 'c'}\nr = t[2]")
+    assert root.get('r') == 'b'
+
+
+def test_table_insert_and_getn():
+    root = _run("t = {'a'}\ntable.insert(t, 'b')\ntable.insert(t, 'c')\n"
+                'n = table.getn(t)')
+    assert root.get('n') == 3.0
+
+
+def test_table_insert_at_position():
+    root = _run("t = {'a', 'c'}\ntable.insert(t, 2, 'b')\nr = t[2]\n"
+                'n = table.getn(t)')
+    assert root.get('r') == 'b' and root.get('n') == 3.0
+
+
+def test_table_remove_returns_and_shrinks():
+    root = _run("t = {'a', 'b', 'c'}\ngone = table.remove(t)\n"
+                'n = table.getn(t)')
+    assert root.get('gone') == 'c' and root.get('n') == 2.0
+
+
+def test_ipairs_iterates_the_array_part_in_order():
+    root = _run("t = {'a', 'b', 'c'}\nout = ''\n"
+                'for i, v in ipairs(t) do out = out .. v end')
+    assert root.get('out') == 'abc'
+
+
+def test_pairs_iterates_all_entries():
+    root = _run('t = {10, 20}\ntotal = 0\n'
+                'for k, v in pairs(t) do total = total + v end')
+    assert root.get('total') == 30.0
+
+
+def test_generic_for_over_non_table_is_skipped_not_fatal():
+    # An unrecognised iterator (not ipairs/pairs over a LuaTable) is skipped;
+    # statements after it still run.
+    root = _run('for x in some_iter() do y = 1 end\nafter = 2')
+    assert root.get('after') == 2.0
+
+
+# -- _G global-table idiom ---------------------------------------------------
+
+def test_g_table_computed_global_write_and_read():
+    # `_G['P'..n] = v` writes a global by computed name; `_G['P'..n]` reads it.
+    root = _run("n = 1\n_G['P'..n] = 42\nr = _G['P'..n]")
+    assert root.get('r') == 42.0
+    assert root.get('P1') == 42.0        # and it is a real global
+
+
+def test_index_assignment_into_a_table():
+    root = _run('t = {}\nt.foo = 7\nt[1] = 9\na = t.foo\nb = t[1]')
+    assert root.get('a') == 7.0 and root.get('b') == 9.0

@@ -67,6 +67,57 @@ class _Return(Exception):
         self.values = values
 
 
+class LuaTable:
+    """The interpreter's own table type - Lua semantics without a host
+    dependency, so a `{...}` constructor round-trips through `table.insert`,
+    `ipairs`, and index reads in pure Python (no lupa). One store for both
+    parts: 1-based integer keys are the array part, everything else the hash
+    part. This is what keeps table-building charts running with no Lua table."""
+
+    __slots__ = ('_data',)
+
+    def __init__(self):
+        self._data: dict = {}
+
+    def append(self, value) -> None:
+        self._data[self.length() + 1] = value
+
+    def set(self, key, value) -> None:
+        # Lua: `t[k] = nil` removes the key (so length() stays contiguous).
+        k = _norm_key(key)
+        if value is None or value is UNRESOLVED:
+            self._data.pop(k, None)
+        else:
+            self._data[k] = value
+
+    def get(self, key):
+        return self._data.get(_norm_key(key), UNRESOLVED)
+
+    def length(self) -> int:
+        # Lua `#t` / table.getn: the border of the 1..n contiguous array run.
+        n = 0
+        while (n + 1) in self._data:
+            n += 1
+        return n
+
+    def ipairs(self):
+        i = 1
+        while i in self._data:
+            yield i, self._data[i]
+            i += 1
+
+    def pairs(self):
+        return list(self._data.items())
+
+
+def _norm_key(key):
+    # Lua has no int/float distinction for keys: 1 and 1.0 are the same key, so
+    # normalise a whole float to int to keep array keys contiguous.
+    if isinstance(key, float) and key.is_integer():
+        return int(key)
+    return key
+
+
 class GlobalStore:
     """The interpreter's global namespace, so a body's globals live in ONE
     place a guard/other body can also read. The default is a private dict (the
@@ -215,13 +266,31 @@ class Interpreter:
             self._assign_target(target, value, scope, depth)
 
     def _assign_target(self, target, value, scope, depth) -> None:
-        # Only a bare-name target binds a frame variable; a field/index target
-        # (`t.x = `, `t[i] = `) is not a modeled frame variable - skipped.
+        # A bare name binds a frame variable/global; `t[k] = v` / `t.f = v`
+        # write into a LuaTable, and `_G[k] = v` is a GLOBAL write (the Lua
+        # global-table idiom for a computed name, `_G['P'..pn] = ...`).
         match target:
             case ast.Sym(name=name):
                 scope.assign(name, value)
+            case ast.Index(base=ast.Sym(name='_G'), key=key):
+                k = self._eval(key, scope, depth)
+                if k is not UNRESOLVED:
+                    scope.assign(str(k), value)
+            case ast.Index(base=base, key=key):
+                self._assign_element(base, key, value, scope, depth)
+            case ast.Field(base=base, name=name):
+                self._assign_element(base, ast.Str(name), value, scope, depth)
             case _:
                 self._emit_trace('skip-target', target)
+
+    def _assign_element(self, base, key, value, scope, depth) -> None:
+        table = self._eval(base, scope, depth)
+        k = key.value if isinstance(key, ast.Str) \
+            else self._eval(key, scope, depth)
+        if isinstance(table, LuaTable) and k is not UNRESOLVED:
+            table.set(k, value)
+        else:
+            self._emit_trace('skip-target', base)
 
     def _exec_expr_stmt(self, expr, scope, depth) -> None:
         # A method statement is an EFFECT (`self:zoom(x)`); a plain call is a
@@ -271,11 +340,34 @@ class Interpreter:
             count += 1
 
     def _exec_generic_for(self, node: ast.GenericFor, scope, depth) -> None:
-        # `for k, v in ipairs(t) do`: the iteration source is opaque to the
-        # Surface (no live-collection protocol), so the body is not iterated.
-        # Skipped, traced - never a fault. A future Surface iteration verb
-        # would light this up without touching the interpreter's shape.
-        self._emit_trace('generic-for-skip', node)
+        # `for k, v in ipairs(t) do` / `for k, v in pairs(t) do` over the
+        # interpreter's own LuaTable. The iterator expression names ipairs or
+        # pairs on a table; each (k, v) binds the loop names in a fresh scope.
+        # Anything else (a custom iterator, a live host collection) is skipped
+        # and traced - never a fault.
+        pairs = self._iter_pairs(node.exprs, scope, depth)
+        if pairs is None:
+            self._emit_trace('generic-for-skip', node)
+            return
+        for kv in pairs:
+            body_scope = Scope(scope)
+            for i, name in enumerate(node.names):
+                body_scope.set_local(name, kv[i] if i < len(kv) else UNRESOLVED)
+            self._exec_block(node.body, body_scope, depth + 1)
+
+    def _iter_pairs(self, exprs, scope, depth):
+        """The (key, value) sequence a generic-for iterates, or None when the
+        iterator is not a recognised ipairs/pairs over a LuaTable."""
+        if not exprs:
+            return None
+        match exprs[0]:
+            case ast.Call(fn=ast.Sym(name='ipairs' | 'pairs' as kind),
+                          args=(arg, *_)):
+                table = self._eval(arg, scope, depth)
+                if isinstance(table, LuaTable):
+                    return (list(table.ipairs()) if kind == 'ipairs'
+                            else table.pairs())
+        return None
 
     def _exec_while(self, node: ast.While, scope, depth) -> None:
         count = 0
@@ -303,8 +395,11 @@ class Interpreter:
                 return self._eval_index(base, key, scope, depth)
             case ast.Field(base=base, name=name):
                 b = self._eval(base, scope, depth)
-                return (UNRESOLVED if b is UNRESOLVED
-                        else self._surface.index(b, name))
+                if b is UNRESOLVED:
+                    return UNRESOLVED
+                if isinstance(b, LuaTable):
+                    return b.get(name)
+                return self._surface.index(b, name)
             case ast.Unary(op=op, operand=operand):
                 return _unary(op, self._eval(operand, scope, depth))
             case ast.Binary(op='and', left=l, right=r):
@@ -320,10 +415,22 @@ class Interpreter:
                 return self._eval_call(fn, args, scope, depth)
             case ast.FuncExpr(params=params, body=body):
                 return self._make_closure(params, body, scope)
-            case ast.Table():
-                return UNRESOLVED
+            case ast.Table(array=array, fields=fields):
+                return self._eval_table(array, fields, scope, depth)
             case _:
                 return UNRESOLVED
+
+    def _eval_table(self, array, fields, scope, depth):
+        """A `{a, b, k = v}` constructor -> a `LuaTable` (1-indexed array part +
+        named part), the interpreter's own table type so it round-trips through
+        `table.insert`/`ipairs`/index without a host dependency. An UNRESOLVED
+        entry is stored as-is (a hole), mirroring Lua's sparse tolerance."""
+        table = LuaTable()
+        for item in array:
+            table.append(self._eval(item, scope, depth))
+        for key, value in fields:
+            table.set(key, self._eval(value, scope, depth))
+        return table
 
     def _eval_symbol(self, name: str, scope: Scope):
         # A bound local/global shadows the surface; else the surface resolves
@@ -333,10 +440,22 @@ class Interpreter:
         return self._surface.symbol(name)
 
     def _eval_index(self, base, key, scope, depth):
+        # `_G[k]` is a global read by computed name - route through the scope so
+        # it sees globals the interpreter wrote (`_G['P'..pn] = ...`), matching
+        # the assign side.
+        if isinstance(base, ast.Sym) and base.name == '_G':
+            k = self._eval(key, scope, depth)
+            if k is UNRESOLVED:
+                return UNRESOLVED
+            name = str(k)
+            return scope.get(name) if scope.has(name) \
+                else self._surface.symbol(name)
         b = self._eval(base, scope, depth)
         k = self._eval(key, scope, depth)
         if b is UNRESOLVED or k is UNRESOLVED:
             return UNRESOLVED
+        if isinstance(b, LuaTable):
+            return b.get(k)
         return self._surface.index(b, k)
 
     def _eval_method(self, recv, name, args, scope, depth):
@@ -349,6 +468,11 @@ class Interpreter:
 
     def _eval_call(self, fn, args, scope, depth):
         arg_vs = [self._eval(a, scope, depth) for a in args]
+        # Lua stdlib over the interpreter's own LuaTable (table.insert, ipairs,
+        # ...): handled here so a table-building chart never needs a host table.
+        builtin = _builtin_call(fn, arg_vs)
+        if builtin is not _NO_BUILTIN:
+            return builtin
         # A call to an in-scope closure re-enters the interpreter; otherwise
         # the surface may know the free function (`perframe`), else UNRESOLVED.
         match fn:
@@ -427,6 +551,56 @@ def _closure_depth_guard(interp) -> int:
     # self-calling closure still terminates; the per-call _MAX_DEPTH check in
     # `_call_closure` is the real ceiling.
     return 1
+
+
+# Sentinel: this call is not a stdlib builtin (distinct from a builtin that
+# legitimately returns None/UNRESOLVED).
+_NO_BUILTIN = object()
+
+
+def _builtin_call(fn, args):
+    """The Lua stdlib functions the interpreter services over its own
+    `LuaTable` - `table.insert/remove/getn`, `#`-style length. Returns
+    `_NO_BUILTIN` when `fn` is not one of them (so the caller falls through to
+    closures/the surface). A call whose table arg is not a LuaTable is not a
+    builtin here either - it flows on (a host table handles its own)."""
+    if not isinstance(fn, ast.Field) or not isinstance(fn.base, ast.Sym):
+        return _NO_BUILTIN
+    if fn.base.name != 'table' or not args or not isinstance(args[0], LuaTable):
+        return _NO_BUILTIN
+    table = args[0]
+    match fn.name:
+        case 'insert':
+            _table_insert(table, args[1:])
+            return None
+        case 'remove':
+            return _table_remove(table, args[1:])
+        case 'getn':
+            return float(table.length())
+    return _NO_BUILTIN
+
+
+def _table_insert(table: LuaTable, rest) -> None:
+    # table.insert(t, v) appends; table.insert(t, pos, v) inserts at pos.
+    if len(rest) >= 2 and isinstance(rest[0], (int, float)):
+        pos = int(rest[0])
+        for i in range(table.length(), pos - 1, -1):
+            table.set(i + 1, table.get(i))
+        table.set(pos, rest[1])
+    elif rest:
+        table.append(rest[0])
+
+
+def _table_remove(table: LuaTable, rest):
+    n = table.length()
+    if n == 0:
+        return None
+    pos = int(rest[0]) if rest and isinstance(rest[0], (int, float)) else n
+    value = table.get(pos)
+    for i in range(pos, n):
+        table.set(i, table.get(i + 1))
+    table.set(n, None)
+    return value
 
 
 def _truthy(value) -> bool:
