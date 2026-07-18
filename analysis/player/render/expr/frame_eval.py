@@ -67,16 +67,50 @@ class _Return(Exception):
         self.values = values
 
 
+class GlobalStore:
+    """The interpreter's global namespace, so a body's globals live in ONE
+    place a guard/other body can also read. The default is a private dict (the
+    pure-logic path); a game backs it with its own shared store (e.g. bound to
+    a live host env, so a load-populated global and a per-frame accumulator
+    share a namespace, and a guard reading a body-written global sees the value
+    the body just wrote). `get` returns UNRESOLVED for an absent name."""
+
+    __slots__ = ('_d',)
+
+    def __init__(self):
+        self._d: dict = {}
+
+    def has(self, name: str) -> bool:
+        return name in self._d
+
+    def get(self, name: str):
+        return self._d.get(name, UNRESOLVED)
+
+    def set(self, name: str, value) -> None:
+        self._d[name] = value
+
+
 class Scope:
     """A lexical scope: local bindings plus a parent link. Name resolution
     walks up the chain; a bare assignment to an unbound name is a GLOBAL (Lua
-    default), stored at the root so sibling scopes see it."""
+    default), stored in the root's `store` so sibling scopes and guards see it.
+    Only the ROOT scope carries a `store`; child scopes reach it up the chain."""
 
-    __slots__ = ('bindings', 'parent')
+    __slots__ = ('bindings', 'parent', 'store')
 
-    def __init__(self, parent: 'Scope | None' = None):
+    def __init__(self, parent: 'Scope | None' = None,
+                 store: GlobalStore | None = None):
         self.bindings: dict = {}
         self.parent = parent
+        # The root owns the global store; a child inherits None and defers to
+        # the root's via the chain walk.
+        self.store = store if parent is None else None
+
+    def _root(self) -> 'Scope':
+        scope = self
+        while scope.parent is not None:
+            scope = scope.parent
+        return scope
 
     def get(self, name: str):
         scope = self
@@ -84,7 +118,8 @@ class Scope:
             if name in scope.bindings:
                 return scope.bindings[name]
             scope = scope.parent
-        return UNRESOLVED
+        store = self._root().store
+        return store.get(name) if store is not None else UNRESOLVED
 
     def has(self, name: str) -> bool:
         scope = self
@@ -92,23 +127,27 @@ class Scope:
             if name in scope.bindings:
                 return True
             scope = scope.parent
-        return False
+        store = self._root().store
+        return store is not None and store.has(name)
 
     def set_local(self, name: str, value) -> None:
         self.bindings[name] = value
 
     def assign(self, name: str, value) -> None:
-        """`name = value`: rebind the nearest enclosing local, else define a
-        global at the root (Lua's implicit-global rule)."""
+        """`name = value`: rebind the nearest enclosing local; else it is a
+        GLOBAL (Lua's implicit-global rule) - written to the root's store when
+        one backs it, otherwise the root's own bindings."""
         scope = self
         while scope is not None:
             if name in scope.bindings:
                 scope.bindings[name] = value
                 return
-            if scope.parent is None:
-                scope.bindings[name] = value
-                return
             scope = scope.parent
+        root = self._root()
+        if root.store is not None:
+            root.store.set(name, value)
+        else:
+            root.bindings[name] = value
 
 
 class Interpreter:
@@ -118,10 +157,11 @@ class Interpreter:
     engine's persistent Lua globals do."""
 
     def __init__(self, surface: Surface,
-                 trace: Callable | None = None):
+                 trace: Callable | None = None,
+                 store: GlobalStore | None = None):
         self._surface = surface
         self._trace = trace
-        self.root = Scope()
+        self.root = Scope(store=store)
 
     def run(self, stmts, scope: Scope | None = None) -> None:
         """Execute a statement sequence in `scope` (the root when omitted)."""

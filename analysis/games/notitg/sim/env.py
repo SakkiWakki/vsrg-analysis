@@ -187,6 +187,12 @@ class SimEnvironment:
         self._arg_chunks: dict = {}
         self._queued: set = set()
         self._include_expansions = 0
+        # Phase 3 opt-in: run the per-frame Update body through the AST
+        # interpreter (frame_eval) instead of Lua. Off by default so the Lua
+        # path stays the baseline until the compiled path passes the same
+        # tests; `run_declarative` flips it via `use_compiled_body`.
+        self.use_compiled_body = False
+        self._compiled_body = None
         self._install()
 
     # -- declarative tables (the classic template's event data) ----------
@@ -236,6 +242,9 @@ class SimEnvironment:
         `mod_time`/`GetSongBeat` see this tick. The mod_actions cursor
         inside the body no-ops (already fired in the replay pass). Faults
         are swallowed and counted."""
+        if self.use_compiled_body:
+            self._run_update_body_compiled(body, name, rec_id)
+            return
         if self._update_chunk is False:
             return
         if self._update_chunk is None:
@@ -263,6 +272,18 @@ class SimEnvironment:
             self._update_chunk()
         except Exception as exc:
             self._record_fault(name, exc)
+
+    def _run_update_body_compiled(self, body, name, rec_id) -> None:
+        """The interpreter-driven Update body (frame_eval, no Lua). Builds one
+        persistent CompiledBody the first tick and re-runs it thereafter, so a
+        body's accumulator globals carry across ticks. `mod_time` is set like
+        the Lua path so a body reading it sees this tick."""
+        from analysis.games.notitg.sim.compiled_body import CompiledBody
+
+        if self._compiled_body is None:
+            self._compiled_body = CompiledBody(self, body, rec_id, name)
+        self._host.env['mod_time'] = self._now
+        self._compiled_body.run()
 
     def replay_mod_actions(self):
         """Fire every `mod_actions` entry once in beat order, each at its

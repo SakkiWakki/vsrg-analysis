@@ -169,7 +169,7 @@ def run_sim(root, to_seconds, start_beat, end_seconds,
 
 def run_declarative(root, to_seconds, start_beat, end_seconds,
                     rng_seed: int = 0, tick_hz: float = _TICK_HZ,
-                    song_dir=None) -> SimResult:
+                    song_dir=None, use_compiled_body: bool = False) -> SimResult:
     """The fast compile: load the actors, fire the scheduled
     `mod_actions`, and tick the `UpdateCommand` per-frame body at its own
     re-arm cadence across the song.
@@ -192,6 +192,10 @@ def run_declarative(root, to_seconds, start_beat, end_seconds,
                          song_dir=song_dir)
     env.set_time(load_s, to_beats(load_s))
     warnings = env.load_actors(root)
+    # Opt-in: drive the per-frame Update body through the AST interpreter
+    # (frame_eval) instead of Lua. Set AFTER load (the load pass still runs as
+    # Lua); only the per-tick body sweep below is affected.
+    env.use_compiled_body = use_compiled_body
     # ONE CLOCK: mod-actions are staged and fired at their true times
     # INSIDE the sweep below, so tween-queue state evolves
     # contemporaneously with the update body's reads (a driver sampling
