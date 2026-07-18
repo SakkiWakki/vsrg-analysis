@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import traceback
+
 from analysis.core import game as game_mod
 from analysis.core import manifest as manifest_mod
 from analysis.gui.player_tab import PlayerTab
@@ -16,7 +18,9 @@ class PlayReplayAction(EntryActionBase):
         default_ms = self.default_scroll_ms()
         get_settings().setValue('library/default_scroll_ms', default_ms)
 
-        scroll_mode = load_player_settings(entry['game'])['scroll_mode']
+        player_settings = load_player_settings(entry['game'])
+        scroll_mode = player_settings['scroll_mode']
+        pitch_correct = player_settings['pitch_correct']
         title_song = self.title_song(entry)
 
         def job(progress):
@@ -29,7 +33,20 @@ class PlayReplayAction(EntryActionBase):
                 entry=entry,
                 progress=progress,
             )
-            return loaded, bpms, sm_off, audio
+
+            audio_engine = None
+            if audio:
+                progress('loading audio…')
+                from analysis.player.audio import AudioEngine
+                try:
+                    audio_engine = AudioEngine(audio, pitch_correct=pitch_correct)
+                except Exception:
+                    # Audio is non-essential; fall through to a silent
+                    # player rather than failing the whole load. PlayerTab
+                    # loads it on its own worker when prebuilt is None.
+                    traceback.print_exc()
+
+            return loaded, bpms, sm_off, audio, audio_engine
 
         self.tab.jobs.run_dialog_job(
             title='Replay',
@@ -53,7 +70,7 @@ class PlayReplayAction(EntryActionBase):
         default_ms: float,
         scroll_mode: str,
     ) -> None:
-        replay, bpms, sm_off, audio = payload
+        replay, bpms, sm_off, audio, audio_engine = payload
         self.maybe_backfill_entry(entry, replay)
 
         rate = float(entry.get('rate') or 1.0)
@@ -71,6 +88,7 @@ class PlayReplayAction(EntryActionBase):
             scroll_ms=default_ms,
             scroll_mode=scroll_mode,
             play_rate=rate,
+            prebuilt_audio=audio_engine,
             **extra,
         )
 

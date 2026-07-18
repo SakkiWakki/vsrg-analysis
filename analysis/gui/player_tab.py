@@ -80,6 +80,7 @@ class PlayerTab(QWidget):
         osu_speed=20,
         xml_judgments=None,
         keycount=None,
+        prebuilt_audio=None,
     ):
         super().__init__()
 
@@ -118,7 +119,7 @@ class PlayerTab(QWidget):
 
         self._build_ui()
         self._build_frame_loop()
-        self._build_audio(audio_path)
+        self._build_audio(audio_path, prebuilt=prebuilt_audio)
         self._connect_player_events()
         self._build_input_router()
 
@@ -267,8 +268,15 @@ class PlayerTab(QWidget):
         self.timer.timeout.connect(self.view.update)
         self.timer.start()
 
-    def _build_audio(self, audio_path) -> None:
+    def _build_audio(self, audio_path, *, prebuilt=None) -> None:
         if not audio_path:
+            return
+
+        # Audio was already decoded and its stream opened during the
+        # load dialog (see build_audio_engine); adopt it synchronously
+        # so playback never starts before audio is ready.
+        if prebuilt is not None:
+            self._on_audio_built(prebuilt)
             return
 
         prefs = load_player_settings(self.player.game)
