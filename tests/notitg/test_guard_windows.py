@@ -5,12 +5,70 @@ reproduce the legacy regex output float-for-float on synthetic bodies and
 (when the pilot charts are present) on gat 1's and gat 2's real Update
 bodies. gat 1 parity is the byte-identical requirement.
 """
+import re
 from pathlib import Path
 
 import pytest
 
 from analysis.games.notitg import guard_windows
-from analysis.games.notitg.update_integrator import _live_windows_regex
+
+
+# Frozen copy of the retired regex window extractor - the parity ORACLE the
+# AST path is checked against. Production no longer carries this; the AST is
+# a proven superset across the local modfile corpus.
+_PERFRAME_RE = re.compile(
+    r'perframe\s*\(\s*([0-9][0-9.+\-*/ ()]*?)\s*'
+    r'(?:,\s*([0-9][0-9.+\-*/ ()]*?)\s*)?\)')
+_BEAT_GUARD_RE = re.compile(
+    r'beat\s*>\s*([0-9][0-9.+\-*/ ()]*?)\s*and\s+'
+    r'beat\s*<\s*([0-9][0-9.+\-*/ ()]*?)\s*(?:then|\))')
+_BEAT_ARITH_RE = re.compile(r'(?!.*\*\*)[0-9.+\-*/ ()]+$')
+
+
+def _beat_arg(text):
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        pass
+    if isinstance(text, str) and _BEAT_ARITH_RE.fullmatch(text.strip()):
+        try:
+            return float(eval(text, {'__builtins__': None}, {}))
+        except (SyntaxError, ZeroDivisionError, TypeError, ValueError):
+            return None
+    return None
+
+
+def _strip_comments(body):
+    without_blocks = re.sub(r'--\[\[.*?\]\]', '', body, flags=re.DOTALL)
+    return re.sub(r'--[^\n]*', '', without_blocks)
+
+
+def _merge_spans(spans):
+    merged = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _live_windows_regex(body):
+    stripped = _strip_comments(body)
+    spans = []
+    for match in _PERFRAME_RE.finditer(stripped):
+        start = _beat_arg(match.group(1))
+        if start is None:
+            continue
+        end = _beat_arg(match.group(2)) if match.group(2) else start + 1.0
+        if end is not None and end > start:
+            spans.append((start, end))
+    for match in _BEAT_GUARD_RE.finditer(stripped):
+        start = _beat_arg(match.group(1))
+        end = _beat_arg(match.group(2))
+        if start is not None and end is not None and end > start:
+            spans.append((start, end))
+    return _merge_spans(sorted(spans))
 
 
 # -- synthetic bodies: AST == regex, both forms ------------------------------
@@ -73,3 +131,44 @@ def test_gat2_window_parity():
     body = _update_body_of(_GAT2)
     assert body is not None
     assert guard_windows.windows_from_body(body) == _live_windows_regex(body)
+
+
+# -- rearm period (self:sleep + self:queuecommand) ---------------------------
+
+@pytest.mark.parametrize('body,expected', [
+    ("%function(self) self:sleep(0.02); self:queuecommand('Update') end", 0.02),
+    ("%function(self) self:sleep(0.05) self:queuecommand('Update') end", 0.05),
+    ("%function(self) a() end", None),                       # no re-arm
+    ("%function(self) self:sleep(0.02) end", None),          # sleep, no queue
+    ("%function(self) self:queuecommand('Update') end", None),  # queue, no sleep
+])
+def test_rearm_period(body, expected):
+    assert guard_windows.rearm_period(body) == expected
+
+
+# -- guards survive intervening unmodeled constructs -------------------------
+
+def test_guard_found_after_generic_for():
+    # a generic-for (for k,v in ipairs) must parse so a later guard is still
+    # found - the regression that motivated adding GenericFor to the grammar.
+    body = ('%function(self) '
+            'for i,v in ipairs(t) do x(v) end '
+            'if beat > 88 and beat < 90 then a() end end')
+    assert guard_windows.windows_from_body(body) == [(88.0, 90.0)]
+
+
+def test_perframe_wrapper_names_are_recognized():
+    # chart wrappers like floral_perframe(a,b) are perframe-family.
+    body = '%function(self) if floral_perframe(104, 164) then a() end end'
+    assert guard_windows.windows_from_body(body) == [(104.0, 164.0)]
+
+
+# -- bound global name (NAME = self) -----------------------------------------
+
+@pytest.mark.parametrize('body,expected', [
+    ('%function(self) my_actor = self end', 'my_actor'),
+    ('%function(self) x = self:GetShader() end', None),   # not a bare self
+    ('%function(self) a() end', None),
+])
+def test_bound_global_name(body, expected):
+    assert guard_windows.bound_global_name(body) == expected

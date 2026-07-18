@@ -159,6 +159,15 @@ class NumericFor(Node):
 
 
 @dataclass(frozen=True)
+class GenericFor(Node):
+    """`for names in exprs do body end` (`for i, v in ipairs(t) do`). The
+    iteration is opaque to windowing, but its body is walked for guards."""
+    names: tuple[str, ...]
+    exprs: tuple[Node, ...]
+    body: tuple[Node, ...]
+
+
+@dataclass(frozen=True)
 class While(Node):
     cond: Node
     body: tuple[Node, ...]

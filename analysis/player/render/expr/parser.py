@@ -324,11 +324,18 @@ class _Parser:
         start = self._next().span[0]        # 'for'
         if self._peek().kind is not Tok.NAME:
             return self._recover(('end',), start)
-        var = self._next().text
-        # Only numeric `for v = a, b[, c]` is modeled; generic-for
-        # (`for k in pairs`) falls back to Unparsed.
-        if not self._eat_op('='):
-            return self._recover(('end',), start)
+        names = [self._next().text]
+        while self._eat_op(','):
+            if self._peek().kind is not Tok.NAME:
+                break
+            names.append(self._next().text)
+        if self._eat_op('='):
+            return self._parse_numeric_for(names[0], start)
+        if self._eat_kw('in'):
+            return self._parse_generic_for(names, start)
+        return self._recover(('end',), start)
+
+    def _parse_numeric_for(self, var: str, start: int) -> ast.Node | None:
         bounds = self._parse_expr_list()
         if not self._eat_kw('do') or len(bounds) < 2:
             return self._recover(('end',), start)
@@ -337,6 +344,17 @@ class _Parser:
         self._eat_kw('end')
         step = bounds[2] if len(bounds) > 2 else None
         return ast.NumericFor(var, bounds[0], bounds[1], step, body,
+                              span=(start, end))
+
+    def _parse_generic_for(self, names: list[str],
+                           start: int) -> ast.Node | None:
+        exprs = self._parse_expr_list()
+        if not self._eat_kw('do'):
+            return self._recover(('end',), start)
+        body = self.parse_body(('end',))
+        end = self._peek().span[1]
+        self._eat_kw('end')
+        return ast.GenericFor(tuple(names), tuple(exprs), body,
                               span=(start, end))
 
     def _parse_while(self) -> ast.Node | None:

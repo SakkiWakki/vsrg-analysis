@@ -33,14 +33,70 @@ _UPPER_OPS = frozenset({'<', '<='})     # driver < bound  -> end   = bound
 
 def guard_window(node: ast.Node,
                  const_surface: Surface) -> tuple[float, float] | None:
-    """The beat window a guard is live over, or None when it is not a
-    resolvable driver range."""
-    if isinstance(node, ast.Call) and _call_name(node) == 'perframe':
-        return _perframe_window(node, const_surface)
-    start, end = _range_bounds(node, const_surface)
-    if start is None or end is None or end <= start:
-        return None
-    return (start, end)
+    """The single beat window a guard is live over, or None. A guard that is
+    a DISJUNCTION of ranges has more than one window - use `guard_windows`
+    for those; this returns the first (kept for single-range callers)."""
+    windows = guard_windows(node, const_surface)
+    return windows[0] if windows else None
+
+
+def guard_windows(node: ast.Node,
+                  const_surface: Surface) -> list[tuple[float, float]]:
+    """Every beat window a guard is live over. The guard is put in
+    disjunctive normal form (a disjunction of conjunct-clause sets), so a
+    section live in either of two ranges - even nested, like
+    `gate and ((beat>A and beat<B) or (beat>C and beat<D))` - yields one
+    window per range. Each DNF term reduces to a driver range or a
+    `perframe` call; a term that resolves to neither is skipped."""
+    windows = []
+    for clauses in _to_dnf(node):
+        window = _clauses_window(clauses, const_surface)
+        if window is not None:
+            windows.append(window)
+    return windows
+
+
+def _to_dnf(node: ast.Node) -> list[list[ast.Node]]:
+    """Disjunctive normal form as a list of clause-lists (each inner list is
+    an AND of clauses; the outer list is the OR). Distributes `and` over
+    `or`: `and(x, or(a,b))` -> `[[x,a],[x,b]]`."""
+    if isinstance(node, ast.Binary) and node.op == 'or':
+        return _cap(_to_dnf(node.left) + _to_dnf(node.right))
+    if isinstance(node, ast.Binary) and node.op == 'and':
+        left = _to_dnf(node.left)
+        right = _to_dnf(node.right)
+        return _cap([lc + rc for lc in left for rc in right])
+    return [[node]]
+
+
+# DNF distribution can blow up on a pathological guard (deeply nested
+# and/or); cap the term count so window extraction stays bounded. A guard
+# past the cap keeps its first terms - the integrator over-ticks a hair
+# rather than spins, and real chart guards are far under it.
+_MAX_DNF_TERMS = 256
+
+
+def _cap(terms: list) -> list:
+    return terms[:_MAX_DNF_TERMS]
+
+
+def _clauses_window(clauses: list[ast.Node],
+                    const_surface: Surface) -> tuple[float, float] | None:
+    """A conjunction of clauses -> its window: a `perframe(a,b)` clause, or
+    the driver range formed by the resolvable `driver OP bound` clauses
+    (others ignored). None when no window resolves."""
+    for clause in clauses:
+        if isinstance(clause, ast.Call) and _call_name(clause) == 'perframe':
+            return _perframe_window(clause, const_surface)
+    start: float | None = None
+    end: float | None = None
+    for clause in clauses:
+        cs, ce = _resolve_clause(clause, const_surface)
+        start = _pick(start, cs, max)
+        end = _pick(end, ce, min)
+    if start is not None and end is not None and end > start:
+        return (start, end)
+    return None
 
 
 def _perframe_window(node: ast.Call,
@@ -60,23 +116,14 @@ def _perframe_window(node: ast.Call,
     return (float(a), float(b)) if b > a else None
 
 
-def _range_bounds(node: ast.Node,
-                  const_surface: Surface) -> tuple[float | None, float | None]:
-    """Reduce a guard to (start, end) driver bounds. Recurses through `and`
-    (both sides contribute), drops a proven-true non-driver conjunct, and
-    returns (None, None) when a conjunct is unresolved or not a driver
-    range."""
-    match node:
-        case ast.Binary(op='and', left=left, right=right):
-            ls, le = _range_bounds(left, const_surface)
-            rs, re_ = _range_bounds(right, const_surface)
-            if (ls, le) == (None, None) and _is_true(left, const_surface):
-                return rs, re_
-            if (rs, re_) == (None, None) and _is_true(right, const_surface):
-                return ls, le
-            return (_pick(ls, rs, max), _pick(le, re_, min))
-        case ast.Binary(op=op, left=left, right=right) if op in _LOWER_OPS | _UPPER_OPS:
-            return _clause_bound(op, left, right, const_surface)
+def _resolve_clause(node: ast.Node,
+                    const_surface: Surface) -> tuple[float | None, float | None]:
+    """A single conjunct -> a (start, end) contribution. A resolvable
+    `driver OP bound` gives one side; anything else (a state guard, a driver
+    clause over a live bound, a nested form) contributes nothing."""
+    if (isinstance(node, ast.Binary)
+            and node.op in _LOWER_OPS | _UPPER_OPS):
+        return _clause_bound(node.op, node.left, node.right, const_surface)
     return (None, None)
 
 
@@ -102,13 +149,6 @@ def _clause_bound(op: str, left: ast.Node, right: ast.Node,
 
 def _is_driver(node: ast.Node) -> bool:
     return isinstance(node, ast.Sym) and node.name in _DRIVERS
-
-
-def _is_true(node: ast.Node, const_surface: Surface) -> bool:
-    """A non-driver conjunct that provably holds (a resolved-true state
-    guard like `fgcurcommand == 2` when fgcurcommand is compiled)."""
-    value = tree_eval(node, const_surface)
-    return value is not UNRESOLVED and bool(value)
 
 
 def _pick(a: float | None, b: float | None, combine):

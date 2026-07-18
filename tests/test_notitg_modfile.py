@@ -413,6 +413,44 @@ def test_parse_speed_mods_reads_xmod_and_cmod():
     assert parse_speed_mods('50 drunk') == []
 
 
+def test_scroll_base_inferred_from_widest_xmod_window():
+    """The persistent baseline is the chart's own, not a fixed 2x: a chart
+    whose widest xmod window is 2.5x rests the field at the user's speed
+    (mult 1.0) and scales bursts relative to 2.5, not to a hardcoded 2.0
+    (which would rest 25% too fast). The approach-prefixed `*2 2.1x` baseline
+    form is read too."""
+    from analysis.games.notitg.mod_channels import (
+        _infer_base_xmod, compile_scroll_multipliers)
+    from analysis.player.render.effects.timeline import (
+        EventTimeline, keyframes_from_events)
+
+    events = [
+        {'t_start': 0.0, 't_end': 9999.0, 'modstring': '*2 2.5x, *-1 overhead',
+         'player': None},
+        {'t_start': 30.0, 't_end': 34.0, 'modstring': '5x', 'player': None},
+    ]
+    assert _infer_base_xmod(events) == pytest.approx(2.5)
+    sc, _skipped = compile_scroll_multipliers(events)
+    tl = EventTimeline(keyframes_from_events(sc, ('multiplier',), (1.0,)),
+                       rest=(1.0,))
+    # baseline holds at rest (1.0); the 5x burst is 5/2.5 = 2.0.
+    assert tl.sample(10.0)[0] == pytest.approx(1.0)
+    assert tl.sample(32.0)[0] == pytest.approx(2.0)
+
+
+def test_scroll_base_falls_back_to_engine_default_without_xmod():
+    """A chart that authors no xmod window resolves against the engine
+    default (1x), not a phantom 2x base: a bare `drunk` window and an empty
+    chart both infer base 1.0, so any later burst is a genuine multiple of
+    the user's speed rather than being halved."""
+    from analysis.games.notitg.mod_channels import _infer_base_xmod
+
+    assert _infer_base_xmod([]) == pytest.approx(1.0)
+    no_xmod = [{'t_start': 5.0, 't_end': 9.0, 'modstring': 'drunk',
+                'player': None}]
+    assert _infer_base_xmod(no_xmod) == pytest.approx(1.0)
+
+
 def test_scroll_multipliers_relative_to_base_and_snap_holds():
     from analysis.games.notitg.mod_channels import compile_scroll_multipliers
     from analysis.player.render.effects.timeline import (
@@ -441,9 +479,12 @@ def test_scroll_multipliers_persistent_window_holds_flat_over_bursts():
     from analysis.player.render.effects.timeline import (
         EventTimeline, keyframes_from_events)
 
-    events = [{'t_start': 0.0, 't_end': 100.0, 'modstring': '*-1 2.5x',
+    # The chart's baseline (widest window) is 2x; the persistent burst the
+    # reader re-applies every ~0.1s is 2.5x, so the held rate is 2.5/2.
+    events = [{'t_start': 0.0, 't_end': 9000.0, 'modstring': '2x',
+               'player': None},
+              {'t_start': 0.0, 't_end': 100.0, 'modstring': '*-1 2.5x',
                'player': None}]
-    # The reader re-applies the same 2.5x every ~0.1s inside the span.
     t = 0.1
     while t < 5.0:
         events.append({'t_start': t, 't_end': t + 0.017,

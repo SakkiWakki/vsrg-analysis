@@ -57,8 +57,6 @@ with no change to their shape.
 """
 from __future__ import annotations
 
-import re
-
 from analysis.games.notitg import guard_windows
 
 # Song-time tick rate. ~60Hz tracks the source quad eases finely and, per
@@ -74,28 +72,6 @@ _MAX_TICKS = 60000
 # The named command the per-frame loop lives under (`UpdateCommand`), as
 # exposed by Actor.named_commands (the `Command` suffix stripped).
 _UPDATE_COMMAND = 'Update'
-
-# Live `perframe(a, b)` and `perframe(a)` windows in the body bound the
-# tick range. Comment-stripped first so `--[[ perframe(..) ]]` blocks and
-# `-- if perframe(..)` lines do not widen the range with dead drivers.
-# Args are numeric ARITHMETIC, not just literals: charts write window
-# ends as expressions (`perframe(1240,1240+128)`), and a literal-only
-# match would silently degrade the window to its one-beat default (the
-# driver then ticks at the coarse rate - a visibly broken walker).
-_PERFRAME_RE = re.compile(
-    r'perframe\s*\(\s*([0-9][0-9.+\-*/ ()]*?)\s*'
-    r'(?:,\s*([0-9][0-9.+\-*/ ()]*?)\s*)?\)')
-
-# Raw beat-guard windows: `if beat > A and beat < B`. Charts that predate
-# (or skip) the perframe() helper gate their per-frame sections with a bare
-# comparison instead - gat 2's Update body is a dispatcher of
-# `if beat > A and beat < B then gf2_update_<section>(beat) end` blocks with
-# ZERO perframe() calls, so without this the window set is empty and the
-# whole body never integrates. Bounds are numeric arithmetic (same as the
-# perframe args); a guard over a Lua variable stays unresolved and skipped.
-_BEAT_GUARD_RE = re.compile(
-    r'beat\s*>\s*([0-9][0-9.+\-*/ ()]*?)\s*and\s+'
-    r'beat\s*<\s*([0-9][0-9.+\-*/ ()]*?)\s*(?:then|\))')
 
 # Tables the body reads that other passes own; emptied during integration
 # so the window reader and action loop inside Update no-op.
@@ -180,11 +156,6 @@ def _update_source(root):
     return None, None, None
 
 
-_REARM_RE = re.compile(
-    r"sleep\s*\(\s*([0-9.]+)\s*\)\s*;?\s*self\s*:\s*queuecommand\s*\(\s*"
-    r"['\"]" + _UPDATE_COMMAND + r"['\"]", re.IGNORECASE)
-
-
 def _body_rearm_period(body: str) -> float | None:
     """Seconds between update-body invocations, from the rig's own
     re-arm tail (`self:sleep(X); self:queuecommand('Update')`), or None
@@ -194,90 +165,17 @@ def _body_rearm_period(body: str) -> float | None:
     scroll add) carry no dt - running them at the sweep's tick rate
     instead integrates visibly fast (60/50 = 20% at the template's
     0.02s re-arm)."""
-    match = _REARM_RE.search(_strip_comments(body))
-    if not match:
-        return None
-    period = float(match.group(1))
-    return period if period > 0.0 else None
+    return guard_windows.rearm_period(body, _UPDATE_COMMAND)
 
 
 def _live_windows(body: str):
-    """Sorted, merged (start_beat, end_beat) windows for every live
-    per-frame driver in the body, from EITHER form: a `perframe(a, b)`
-    helper call (`perframe(a)` with no end is a one-beat window [a, a+1],
-    matching the helper's `endBeat = beat+1` default) OR a raw
-    `if beat > a and beat < b` guard. Overlapping/adjacent windows merge so
-    the tick grid is contiguous across a run of drivers.
-
-    The AST front-end (`guard_windows.windows_from_body`) is authoritative;
-    the legacy regex extractor stays as a differential oracle. When they
-    disagree we take the UNION (so the AST never drops a window the regex
-    found during the migration) and record it - a parity break is a bug to
-    fix, not a silent regression."""
-    ast_spans = guard_windows.windows_from_body(body)
-    regex_spans = _live_windows_regex(body)
-    if ast_spans == regex_spans:
-        return ast_spans
-    return _merge_spans(sorted(set(ast_spans) | set(regex_spans)))
-
-
-def _live_windows_regex(body: str):
-    """The legacy regex window extractor, frozen as the parity oracle for
-    `_live_windows`. Removed once the AST path is proven on the corpus."""
-    stripped = _strip_comments(body)
-    spans = []
-    for match in _PERFRAME_RE.finditer(stripped):
-        start = _beat_arg(match.group(1))
-        if start is None:
-            continue
-        end = _beat_arg(match.group(2)) if match.group(2) else start + 1.0
-        if end is not None and end > start:
-            spans.append((start, end))
-    for match in _BEAT_GUARD_RE.finditer(stripped):
-        start = _beat_arg(match.group(1))
-        end = _beat_arg(match.group(2))
-        if start is not None and end is not None and end > start:
-            spans.append((start, end))
-    return _merge_spans(sorted(spans))
-
-
-_BEAT_ARITH_RE = re.compile(r'(?!.*\*\*)[0-9.+\-*/ ()]+$')
-
-
-def _beat_arg(text) -> float | None:
-    """A perframe arg as a beat number: a literal, or purely numeric
-    arithmetic evaluated (`1240+128`). None when it is neither (an arg
-    over Lua variables cannot be resolved statically; the window is
-    skipped rather than guessed)."""
-    try:
-        return float(text)
-    except (TypeError, ValueError):
-        pass
-    if isinstance(text, str) and _BEAT_ARITH_RE.fullmatch(text.strip()):
-        try:
-            return float(eval(text, {'__builtins__': None}, {}))
-        except (SyntaxError, ZeroDivisionError, TypeError, ValueError):
-            return None
-    return None
-
-
-def _merge_spans(spans):
-    merged = []
-    for start, end in spans:
-        if merged and start <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-        else:
-            merged.append((start, end))
-    return merged
-
-
-def _strip_comments(body: str) -> str:
-    """Body with Lua comments removed so a commented-out perframe driver
-    (`--[[ if perframe(..) ]]`, `-- if perframe(..)`) does not widen the
-    tick range. Block comments first (they may span lines), then line
-    comments."""
-    without_blocks = re.sub(r'--\[\[.*?\]\]', '', body, flags=re.DOTALL)
-    return re.sub(r'--[^\n]*', '', without_blocks)
+    """Sorted, merged (start_beat, end_beat) windows for every live per-frame
+    driver in the body - a `perframe(a, b)` call or a `beat`/`mod_time` range
+    guard - via the Lua AST front-end (`guard_windows.windows_from_body`),
+    which puts each guard in DNF so nested/disjoint ranges each get a window
+    and resolves table/arithmetic bounds. Overlapping/adjacent windows merge
+    so the tick grid is contiguous across a run of drivers."""
+    return guard_windows.windows_from_body(body)
 
 
 def _iter_actors(actor):

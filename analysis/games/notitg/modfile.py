@@ -54,7 +54,7 @@ from pathlib import Path
 
 from analysis.games.etterna import sm_chart
 from analysis.games.notitg import (
-    aft_drivers, sprite_sheet, update_integrator, xml_actors)
+    aft_drivers, guard_windows, sprite_sheet, update_integrator, xml_actors)
 from analysis.games.notitg.mod_stubs import StubEnvironment
 from analysis.games.notitg.paths import find_notitg_dirs
 from analysis.games.notitg.recording_actor import RecordingActor
@@ -342,9 +342,6 @@ def _chart_rng_seed(lua_dir) -> int:
     return int.from_bytes(digest[:4], 'big')
 
 
-_BIND_RE = re.compile(r'\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*self\b')
-
-
 def _bound_global_name(actor):
     """The Lua global an actor's InitCommand/OnCommand self-assigns
     (`gat_g_rot_intro = self`), or None. This is the name the scheduled
@@ -352,9 +349,9 @@ def _bound_global_name(actor):
     for attr in _LOAD_TIME_ATTRS:
         value = actor.attrs.get(attr, '')
         if value.startswith('%'):
-            match = _BIND_RE.search(value)
-            if match and match.group(1) != 'self':
-                return match.group(1)
+            name = guard_windows.bound_global_name(value)
+            if name is not None:
+                return name
     return None
 
 

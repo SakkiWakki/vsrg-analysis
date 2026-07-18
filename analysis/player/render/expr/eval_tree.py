@@ -23,7 +23,28 @@ from __future__ import annotations
 import operator
 
 from analysis.player.render.expr import ast
-from analysis.player.render.expr.surface import UNRESOLVED, Surface
+from analysis.player.render.expr.parser import parse_guard
+from analysis.player.render.expr.surface import UNRESOLVED, ConstSurface, Surface
+
+
+def eval_expr(source: str, surface: Surface | None = None):
+    """Parse and evaluate a single Lua expression string against `surface`
+    (literals-only by default). Returns the value or UNRESOLVED - the AST
+    replacement for the various `eval(numeric_string)` regex-gated helpers.
+    A string that does not parse to an expression is UNRESOLVED."""
+    node = parse_guard(source)
+    if node is None:
+        return UNRESOLVED
+    return tree_eval(node, surface or ConstSurface())
+
+
+def eval_number(source: str, surface: Surface | None = None) -> float | None:
+    """`eval_expr` coerced to a float, or None when unresolved / not numeric
+    (the `_beat_arg` / `_arg_float`-arithmetic contract)."""
+    value = eval_expr(source, surface)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
 
 _CMP = {
     '<': operator.lt, '<=': operator.le, '>': operator.gt, '>=': operator.ge,

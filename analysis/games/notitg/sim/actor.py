@@ -61,6 +61,7 @@ from analysis.games.notitg.lua_api import (
 from analysis.games.notitg.recording_actor import KIND_DEFAULTS
 from analysis.games.notitg.sim import verb_surface
 from analysis.player.render import transform3d
+from analysis.player.render.expr.eval_tree import eval_number
 from analysis.player.render.effects.easing import (
     EASE_SM_BOUNCE_BEGIN, EASE_SM_BOUNCE_END, EASE_SM_SPRING, ease)
 from analysis.player.render.effects.timeline import (Keyframe,
@@ -209,22 +210,13 @@ def _rest(prop):
 
 
 # NotITG evaluates arithmetic in classic command args: charts write beat
-# durations as expressions (`accelerate,60/205` = one beat at 205bpm,
-# gat default.xml:5113). Purely numeric arithmetic only; `**` is
-# excluded (not a Lua operator, and unbounded under eval).
-_ARITH_EXPR_RE = re.compile(r'^(?!.*\*\*)[\d.+\-*/() ]+$')
-
 
 def _arg_float(value, default=None):
     """`_as_float` plus classic-arg arithmetic (`60/205`,
     `128*(60/205)`). The harvest path's coercion stays untouched."""
     result = _as_float(value)
-    if result is None and isinstance(value, str) \
-            and _ARITH_EXPR_RE.match(value.strip()):
-        try:
-            result = float(eval(value, {'__builtins__': None}, {}))
-        except (SyntaxError, ZeroDivisionError, TypeError, ValueError):
-            result = None
+    if result is None and isinstance(value, str):
+        result = eval_number(value)
     return result if result is not None else default
 
 

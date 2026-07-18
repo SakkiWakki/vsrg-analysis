@@ -74,11 +74,13 @@ _DEFAULT_SPEED = 1.0
 # independent of the ended window's own `*S`.
 _CLEARALL_SPEED = 1.0
 
-# gat's persistent baseline scroll (the always-on `{0,9000,'2x,...'}`
-# window). Dynamic xmod changes are expressed as multipliers RELATIVE to
-# this base, so at rest the field scrolls at the user's chosen speed and
-# only the modchart's bursts/slows rescale it.
-_DEFAULT_BASE_XMOD = 2.0
+# The engine default when a chart authors no persistent xmod window: an
+# unmodified field scrolls at 1x (one beat = one ARROW_SIZE). Dynamic xmod
+# changes are expressed as multipliers RELATIVE to the chart's baseline, so
+# at rest the field scrolls at the user's chosen speed and only the
+# modchart's bursts/slows rescale it. Charts that DO author an always-on
+# baseline (gat's `{0,9000,'2x,...'}`) override this via _infer_base_xmod.
+_DEFAULT_BASE_XMOD = 1.0
 
 
 def parse_modstring(modstring: str) -> list:
@@ -132,14 +134,47 @@ def parse_speed_mods(modstring: str) -> list:
     return out
 
 
-def compile_scroll_multipliers(mod_events, base_xmod=_DEFAULT_BASE_XMOD):
+def _infer_base_xmod(mod_events):
+    """The chart's persistent baseline xmod - the always-on window every
+    dynamic change is relative to.
+
+    A modchart pins its resting scroll with one wide window (gat's
+    `{0, 9000, '2x'}`): the burst/slow windows over it are meant as
+    multiples of THAT rate, not of a fixed engine default, so the base
+    must come from the chart. We take the player-0 xmod window with the
+    widest span (ties broken by earliest start, so a `t=0` baseline wins
+    over an equally-long later one). Charts with no xmod window at all
+    fall back to the engine default (1x) - an unmodified field."""
+    best_span = -1.0
+    best_start = float('inf')
+    base = _DEFAULT_BASE_XMOD
+    for row in mod_events:
+        if _row_player(row) != 0:
+            continue
+        start = float(row['t_start'])
+        span = float(row['t_end']) - start
+        if span <= 0.0:
+            continue
+        for speed, kind, value in parse_speed_mods(row['modstring']):
+            if kind != 'x':
+                continue
+            if span > best_span or (span == best_span and start < best_start):
+                best_span, best_start, base = span, start, value
+    return base
+
+
+def compile_scroll_multipliers(mod_events, base_xmod=None):
     """Windowed xmod changes -> ffx-shaped scroll-multiplier events
     (`{time, duration, multiplier, ease}`, ms-keyed) for
     `GameAdapter.scroll_multipliers`.
 
-    Each xmod window drives the field's scroll to `xmod / base_xmod`
-    over its span (chasing at the `*S` approach speed); where no window
-    is active the scroll rests at base (1.0), reverting at clearall speed
+    `base_xmod` is the chart's persistent baseline; passing None infers it
+    from the widest always-on xmod window (see `_infer_base_xmod`), so a
+    chart whose baseline is `3x` rests at the user's speed rather than
+    1.5x too fast. Each xmod window drives the field's scroll to
+    `xmod / base_xmod` over its span (chasing at the `*S` approach speed);
+    where no window is active the scroll rests at base (1.0), reverting at
+    clearall speed
     (the float, so a `*100000` burst eases back over ~1s, it does not
     snap). Overlapping windows resolve exactly like the per-note mod
     channels through `_resolve_windows`: the highest-order active window
@@ -150,6 +185,9 @@ def compile_scroll_multipliers(mod_events, base_xmod=_DEFAULT_BASE_XMOD):
     consumer. C/M-mods pin an absolute rate our user-scroll model cannot
     express; they are skipped (their count is returned for the caller to
     log)."""
+    if base_xmod is None:
+        base_xmod = _infer_base_xmod(mod_events)
+
     windows = []
     skipped_cm = 0
     for order, row in enumerate(mod_events):

@@ -125,6 +125,61 @@ def test_guard_window_skips_unbounded(guard, constants):
     assert guard_window(parse_guard(guard), ConstSurface(constants)) is None
 
 
+# -- multi-window / DNF ------------------------------------------------------
+
+def test_disjunction_of_ranges_yields_multiple_windows():
+    from analysis.player.render.expr.windows import guard_windows
+    node = parse_guard('(beat > 10 and beat < 20) or (beat > 40 and beat < 60)')
+    assert guard_windows(node, ConstSurface()) == [(10.0, 20.0), (40.0, 60.0)]
+
+
+def test_dnf_distributes_and_over_or():
+    # gate and (range1 or range2) -> both ranges live when the gate holds.
+    from analysis.player.render.expr.windows import guard_windows
+    node = parse_guard(
+        'gate and ((beat > 10 and beat < 20) or (beat > 40 and beat < 60))')
+    windows = guard_windows(node, ConstSurface({'gate': True}))
+    assert windows == [(10.0, 20.0), (40.0, 60.0)]
+
+
+def test_disjunction_of_perframe_calls():
+    from analysis.player.render.expr.windows import guard_windows
+    node = parse_guard('perframe(10, 20) or perframe(40, 60)')
+    assert guard_windows(node, ConstSurface()) == [(10.0, 20.0), (40.0, 60.0)]
+
+
+def test_extra_conjunct_over_live_var_is_ignored():
+    # `beat > live and beat > 118 and beat < 236` -> (118, 236); the
+    # unresolvable `beat > live` conjunct narrows the start we cannot see
+    # but must not drop the window.
+    node = parse_guard('beat > live and beat > 118 and beat < 236')
+    assert guard_window(node, ConstSurface()) == (118.0, 236.0)
+
+
+# -- compile backend ---------------------------------------------------------
+
+def test_compiled_guard_matches_tree_walk_on_a_grid():
+    from analysis.player.render.expr.compile_sched import compile_guard
+
+    class ClockSurface(ConstSurface):
+        def clock_reader(self, name):
+            return (lambda t: t * 2.0) if name == 'beat' else None
+
+    node = parse_guard('beat > 10 and beat < 50')
+    channel = compile_guard(node, ClockSurface())
+    assert channel is not None
+    for i in range(60):
+        t = i * 0.5
+        oracle = tree_eval(node, ConstSurface({'beat': t * 2.0}))
+        assert bool(channel.at(t)) == bool(oracle)
+
+
+def test_uncompilable_guard_returns_none():
+    from analysis.player.render.expr.compile_sched import compile_guard
+    # a live local with no clock reader cannot compile.
+    assert compile_guard(parse_guard('beat > a'), ConstSurface()) is None
+
+
 # -- diagnostics -------------------------------------------------------------
 
 def test_unmodeled_body_records_warning_not_error():

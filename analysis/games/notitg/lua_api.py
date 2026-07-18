@@ -42,6 +42,11 @@ import re
 
 from dataclasses import dataclass
 
+from analysis.player.render.expr import ast as _expr_ast
+from analysis.player.render.expr import eval_tree as _expr_eval
+from analysis.player.render.expr import parser as _expr_parser
+from analysis.player.render.expr import surface as _expr_surface
+
 # Tween verb -> easing id (osu.Framework Easing enum shared by the
 # storyboard timelines). SM's accelerate = ease-in quad, decelerate =
 # ease-out quad, smooth = in-out cubic; linear/tween are linear.
@@ -171,38 +176,42 @@ def _as_float(value, default=None):
     return default
 
 
-# A classic-command arg that is a screen constant, optionally negated and
-# scaled/offset by a literal (`-SCREEN_WIDTH/2`, `SCREEN_HEIGHT*0.55`,
-# `112*(SCREEN_HEIGHT/480)`). The proxy-grid frames center themselves with
-# these, so resolving them places the grid where the engine does.
-_SCREEN_EXPR_RE = re.compile(
-    r'^(?P<lead>-?)\s*(?:(?P<pre>[0-9.]+)\s*\*\s*)?'
-    r'\(?\s*(?P<name>[A-Za-z_]+)\s*(?:(?P<op>[*/])\s*(?P<num>[0-9.]+))?\s*\)?$')
+_SCREEN_SURFACE = _expr_surface.ConstSurface(_SCREEN_CONSTANTS)
 
 
 def _resolve_screen_expr(text: str):
-    """A screen constant with an optional literal multiply/divide and a
-    leading minus (`SCREEN_CENTER_X`, `-SCREEN_WIDTH/2`,
-    `112*(SCREEN_HEIGHT/480)`), or None when `text` is not that shape."""
+    """A screen constant with literal arithmetic around it
+    (`SCREEN_CENTER_X`, `-SCREEN_WIDTH/2`, `112*(SCREEN_HEIGHT/480)`), or
+    None when `text` neither is nor references a screen constant. Parses the
+    arg once and evaluates it over the screen-constant surface; a bare number
+    or a non-screen expression returns None so the caller falls through to
+    plain float parsing."""
     constant = _SCREEN_CONSTANTS.get(text)
     if constant is not None:
         return constant
-    match = _SCREEN_EXPR_RE.match(text)
-    if match is None:
+    node = _expr_parser.parse_guard(text)
+    if node is None or not _references_screen(node):
         return None
-    base = _SCREEN_CONSTANTS.get(match['name'])
-    if base is None:
-        return None
-    value = base
-    if match['op'] == '/':
-        value /= float(match['num'])
-    elif match['op'] == '*':
-        value *= float(match['num'])
-    if match['pre']:
-        value *= float(match['pre'])
-    if match['lead'] == '-':
-        value = -value
-    return value
+    value = _expr_eval.tree_eval(node, _SCREEN_SURFACE)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
+
+
+def _references_screen(node) -> bool:
+    """True when the expression names at least one screen constant - the
+    gate that keeps a plain literal from resolving here (it must fall
+    through to float parsing)."""
+    match node:
+        case _expr_ast.Sym(name=name):
+            return name in _SCREEN_CONSTANTS
+        case _expr_ast.Unary(operand=operand):
+            return _references_screen(operand)
+        case _expr_ast.Binary(left=left, right=right):
+            return _references_screen(left) or _references_screen(right)
+        case _expr_ast.Index(base=base, key=key):
+            return _references_screen(base) or _references_screen(key)
+    return False
 
 
 def _as_int(value, default=None):
