@@ -123,6 +123,18 @@ def test_at_attr_evaluates_at_load():
     assert root.children[0].attrs['Type'] == 'Sprite'
 
 
+def test_queued_command_stopping_own_tweens_survives_drain():
+    # A queue-carried command may call stoptweening on ITS OWN actor
+    # mid-drain, clearing the queue while update_to still holds the old
+    # head (Misfits in the Prairie / lin crashed here with pop from
+    # empty list).
+    env, _w = _load(
+        '<ActorFrame OnCommand="sleep,0.1;queuecommand,Kill"'
+        ' KillCommand="stoptweening"/>')
+    env.set_time(1.0, 1.0)
+    env.drain(1.0)
+
+
 # -- Lua 5.0 lexer compatibility ------------------------------------------
 
 def test_lua50_number_keyword_gets_space():

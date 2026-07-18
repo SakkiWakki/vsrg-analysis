@@ -298,6 +298,11 @@ class SimActor:
                 head = self._tweens[0]
                 if not head.started:
                     self._begin_head(head, run_command)
+                    if not self._tweens or self._tweens[0] is not head:
+                        # The carried command rebuilt the queue
+                        # (stoptweening from inside a queued command);
+                        # the stale head is gone - work on the new one.
+                        continue
                 step = min(head.left, remaining)
                 head.left -= step
                 remaining -= step
@@ -329,7 +334,8 @@ class SimActor:
         # fields (hidden, vanish, frame) live outside SM's TweenState
         # and must survive a completion.
         self._current.update(head.state)
-        self._tweens.pop(0)
+        if self._tweens and self._tweens[0] is head:
+            self._tweens.pop(0)
 
     # -- reads -----------------------------------------------------------
 
