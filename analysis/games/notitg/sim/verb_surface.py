@@ -115,6 +115,19 @@ BULK_ADD_SETTERS: dict = {
     'addrotationxyz': (_ROT['x'], _ROT['y'], _ROT['z']),
 }
 
+# Crop composites: convenience forms that fan one call across the four
+# scalar crop edges (already implemented as croptop/cropbottom/cropleft/
+# cropright above, and the storyboard renderer already insets by them).
+# `crop(l,t,r,b)` sets all four in openitg's left/top/right/bottom order;
+# `croph(l,r)` is the horizontal pair, `cropv(t,b)` the vertical pair. Each
+# entry lists its target crop props in positional argument order, so the
+# expansion is the same positional zip the bulk setters use.
+CROP_COMPOSITES: dict = {
+    'crop': ('crop_left', 'crop_top', 'crop_right', 'crop_bottom'),
+    'croph': ('crop_left', 'crop_right'),
+    'cropv': ('crop_top', 'crop_bottom'),
+}
+
 
 # -- mechanism 1b: absolute-size setters -------------------------------------
 # zoomto(w, h) / zoomtowidth(w) / zoomtoheight(h) set the on-screen size in
@@ -292,21 +305,14 @@ DEFERRED: dict = {
     'fadebottom': 'bottom edge fade - fade gradients not composited',
     'fadeh': 'horizontal edge fade - fade gradients not composited',
     'fadev': 'vertical edge fade - fade gradients not composited',
-    # crop convenience forms (both-axis / paired); the four scalar crop
-    # edges are implemented, these composites need the same fold plumbing.
-    'crop': 'crop(l,t,r,b) all-edges convenience - the four scalar crop '
-            'edges are implemented; the composite is not yet expanded',
-    'croph': 'horizontal crop pair - see crop',
-    'cropv': 'vertical crop pair - see crop',
     # primitives + live tiers already deferred in lua_api.
     'luaeffect': 'arbitrary per-frame Lua effect (SetEffectLua) - live '
                  'channel tier, chart Lua owns it',
     'tween': 'tween with a custom Lua easing function - live channel tier',
-    'floorwag': 'fork wag variant - recorded as an oscillator span; '
-                'synthesis pending a rotation-oscillator channel',
-    'pulse': 'zoom oscillator - recorded as a span; zoom-oscillator '
-             'synthesis pending',
-    'pulseramp': 'zoom oscillator ramp - see pulse',
+    'floorwag': 'fork wag variant (Effect not in openitg; Actor.clean.c '
+                'apply-math is COMDAT-folded so its offset/floor behavior '
+                'cannot be pinned) - recorded as an oscillator span, '
+                'synthesis left deferred until a source fixes it',
     'rainbow': 'color oscillator - recorded as a span; color-oscillator '
                'synthesis pending',
     'diffuseshift': 'color oscillator - see rainbow',
@@ -357,6 +363,9 @@ HANDLED_BY_NAME: dict = {
     # mechanism 7: effect span kinds + params
     'vibrate': 'effect-span', 'wag': 'effect-span', 'bob': 'effect-span',
     'bounce': 'effect-span', 'spin': 'effect-span', 'stopeffect': 'effect-span',
+    # zoom oscillators: recorded as effect spans, synthesized into a
+    # scale_x/scale_y keyframe stream (mirrors the position oscillators).
+    'pulse': 'effect-span', 'pulseramp': 'effect-span',
     'effectmagnitude': 'effect-span', 'effectperiod': 'effect-span',
     'effectclock': 'effect-span', 'effectdelay': 'effect-span',
     'effectcolor1': 'effect-span', 'effectcolor2': 'effect-span',
@@ -394,6 +403,8 @@ def all_targets() -> dict:
         out[name] = ('bulk-setter', props)
     for name, props in BULK_ADD_SETTERS.items():
         out[name] = ('bulk-add-setter', props)
+    for name, props in CROP_COMPOSITES.items():
+        out[name] = ('crop-composite', props)
     for name, props in SIZE_PAIR_SETTERS.items():
         out[name] = ('size-setter', props)
     for name, prop in SIZE_AXIS_SETTERS.items():

@@ -391,3 +391,46 @@ def test_driven_spans_merge_ticks_and_split_sections():
     assert spans[0][0] == pytest.approx(0.0)
     assert spans[0][1] == pytest.approx(9 / 60.0)
     assert spans[1] == (pytest.approx(5.0), pytest.approx(5.0))
+
+
+# -- crop composites (fan one call across the four scalar crop edges) --------
+
+def test_crop_all_edges_sets_four_scalar_channels():
+    """crop(l,t,r,b) writes the four scalar crop edges positionally, in
+    openitg's left/top/right/bottom order."""
+    a = SimActor()
+    a.poke('crop', [0.1, 0.2, 0.3, 0.4])
+    assert a.get('crop_left') == pytest.approx(0.1)
+    assert a.get('crop_top') == pytest.approx(0.2)
+    assert a.get('crop_right') == pytest.approx(0.3)
+    assert a.get('crop_bottom') == pytest.approx(0.4)
+
+
+def test_croph_and_cropv_are_the_edge_pairs():
+    a = SimActor()
+    a.poke('croph', [0.25, 0.75])
+    assert a.get('crop_left') == pytest.approx(0.25)
+    assert a.get('crop_right') == pytest.approx(0.75)
+    assert a.get('crop_top') == 0.0 and a.get('crop_bottom') == 0.0
+
+    b = SimActor()
+    b.poke('cropv', [0.2, 0.6])
+    assert b.get('crop_top') == pytest.approx(0.2)
+    assert b.get('crop_bottom') == pytest.approx(0.6)
+    assert b.get('crop_left') == 0.0 and b.get('crop_right') == 0.0
+
+
+def test_crop_composite_matches_scalar_edge_setters():
+    """The composite is pure plumbing: it lands identically to poking the
+    four scalar edge setters."""
+    composite = SimActor()
+    composite.poke('crop', [0.1, 0.2, 0.3, 0.4])
+
+    scalars = SimActor()
+    scalars.poke('cropleft', [0.1])
+    scalars.poke('croptop', [0.2])
+    scalars.poke('cropright', [0.3])
+    scalars.poke('cropbottom', [0.4])
+
+    for edge in ('crop_left', 'crop_top', 'crop_right', 'crop_bottom'):
+        assert composite.get(edge) == scalars.get(edge)

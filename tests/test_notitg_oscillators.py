@@ -100,3 +100,69 @@ def test_delta_channels_map_kinds_to_props():
     assert modfile.oscillator_delta_channels(
         [_span('rainbow', 0.0, 1.0, (0.0, 0.0, 0.0))], _context(),
         seed=7) is None
+
+
+def _bake(span, base_keyframes=None, end_seconds=None):
+    """Bake one span into keyframes via the compile path (the synthesis
+    the pulse/pulseramp zoom oscillators use), returning the merged dict."""
+    return modfile.compile_oscillator_keyframes(
+        [span], dict(base_keyframes or {}), _clock(), rng=None,
+        end_seconds=end_seconds)
+
+
+def _sample(keyframes, prop, t, rest):
+    from analysis.player.render.effects.timeline import EventTimeline
+    return EventTimeline(keyframes.get(prop, []), rest=(rest,)).sample(t)[0]
+
+
+def test_pulse_zoom_factor_matches_engine_scale():
+    """pulse multiplies scale by SCALE(sin(pct*pi), 0,1, min, max)
+    (Actor.cpp:360-366). With no base zoom the baked scale IS that factor."""
+    span = _span('pulse', 0.0, 4.0, (0.5, 1.0, 0.0), period=2.0)
+    kf = _bake(span)
+    assert set(kf) == {'scale_x', 'scale_y'}
+    for t in (0.5, 1.0, 1.7):
+        frac = math.sin((t % 2.0) / 2.0 * math.pi)
+        expected = 0.5 + (1.0 - 0.5) * frac
+        assert _sample(kf, 'scale_x', t, 1.0) == pytest.approx(expected)
+        assert _sample(kf, 'scale_y', t, 1.0) == pytest.approx(expected)
+
+
+def test_pulse_multiplies_the_tweened_base_zoom():
+    """The factor rides the actor's base scale (scale *= factor), not
+    replaces it: a base zoom of 2.0 doubles every pulse sample."""
+    from analysis.player.render.effects.timeline import Keyframe
+    base = {'scale_x': [Keyframe(0.0, (2.0,), 0.0, 0)]}
+    span = _span('pulse', 0.0, 4.0, (0.5, 1.0, 0.0), period=2.0)
+    kf = _bake(span, base)
+    t = 1.0   # sin(pi/2)=1 -> factor 1.0; base 2.0 -> 2.0
+    frac = math.sin((t % 2.0) / 2.0 * math.pi)
+    assert _sample(kf, 'scale_x', t, 1.0) == pytest.approx(2.0 * (0.5 + 0.5 * frac))
+
+
+def test_pulseramp_is_the_sawtooth_sibling():
+    """pulseramp feeds the raw percent-through (a sawtooth) into SCALE,
+    not the abs-sine, mirroring diffuse_ramp vs diffuse_shift."""
+    span = _span('pulseramp', 0.0, 4.0, (0.5, 1.0, 0.0), period=2.0)
+    kf = _bake(span)
+    for t in (0.5, 1.0, 1.9):
+        pct = (t % 2.0) / 2.0
+        expected = 0.5 + (1.0 - 0.5) * pct
+        assert _sample(kf, 'scale_x', t, 1.0) == pytest.approx(expected)
+
+
+def test_pulse_rests_at_identity_after_the_span():
+    """The trailing rest returns scale to 1.0 (multiplicative identity),
+    not 0.0, so a stopped pulse hands zoom back to the base untouched."""
+    span = _span('pulse', 0.0, 2.0, (0.5, 1.0, 0.0), period=2.0)
+    kf = _bake(span)
+    assert _sample(kf, 'scale_x', 5.0, 1.0) == pytest.approx(1.0)
+
+
+def test_pulse_absent_from_the_additive_field_channel():
+    """The live field-instance channel sums additive deltas; a zoom
+    oscillator does not belong to it, so a pulse-only actor yields no
+    live channel (its synthesis is the bake path only)."""
+    assert modfile.oscillator_delta_channels(
+        [_span('pulse', 0.0, 1.0, (0.5, 1.0, 0.0))], _context(),
+        seed=7) is None

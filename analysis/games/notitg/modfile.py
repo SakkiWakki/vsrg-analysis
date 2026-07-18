@@ -709,18 +709,49 @@ _OSC_MAX_SAMPLES = 6000
 _TWO_PI = 2.0 * math.pi
 
 
-def _osc_deltas(kind, pct, mag, elapsed, rng):
-    """The 2D-property deltas one oscillator kind contributes at a sample.
+# Zoom-oscillator props multiply their base (scale *= factor) instead of
+# adding to it, so their identity/rest is 1.0. Every other 2D property adds
+# (identity 0.0). `_combine_base` and the rest/no-span defaults key off this
+# set so both the bake and the live-channel paths compose identically.
+_MULTIPLICATIVE_PROPS = frozenset({'scale_x', 'scale_y'})
 
+
+def _osc_identity(prop) -> float:
+    """The contribution that leaves `prop` untouched: 1.0 for a
+    multiplicative zoom prop, 0.0 for an additive pos/rotation prop."""
+    return 1.0 if prop in _MULTIPLICATIVE_PROPS else 0.0
+
+
+def _combine_base(prop, base, contribution) -> float:
+    """Fold one oscillator sample's contribution onto the actor's tweened
+    base value: multiply for a zoom prop (scale *= factor, Actor.cpp:366),
+    add for pos/rotation."""
+    if prop in _MULTIPLICATIVE_PROPS:
+        return base * contribution
+    return base + contribution
+
+
+def _osc_deltas(kind, pct, mag, elapsed, rng):
+    """The 2D-property contributions one oscillator kind makes at a sample.
+
+    Additive kinds (delta added onto the base):
     - bob: pos += mag * sin(pct*2pi)          (Actor.cpp:353)
     - bounce: pos += mag * sin(pct*pi)        (Actor.cpp:344, abs-sine)
     - wag: rotation += mag.z * sin(pct*2pi)   (Actor.cpp:332; z drives 2D)
     - spin: rotation += mag.z * elapsed        (Actor.cpp:599, continuous)
     - vibrate: pos += mag * randomf(-1,1)      (Actor.cpp:338, seeded RNG)
 
-    Only the x/y position and z rotation have 2D-storyboard analogues; the
-    z-position and x/y-rotation components of bob/bounce/vibrate are 3D and
-    dropped (same as the recorder's 3D-channel handling)."""
+    Multiplicative zoom kinds (factor the base scale, Actor.cpp:360-372):
+    - pulse: scale *= SCALE(sin(pct*pi), 0,1, minZoom, maxZoom); the
+      magnitude carries (minZoom, maxZoom) in mag[0]/mag[1].
+    - pulseramp: the sawtooth sibling - fPercentOffset is the raw fraction
+      through the effect (pct) rather than the abs-sine, mirroring how
+      diffuse_ramp/glow_ramp use fPercentThroughEffect where their _shift
+      twins use a wave (Actor.cpp:307-320). Same (minZoom, maxZoom) source.
+
+    Only the x/y position, z rotation, and x/y scale have 2D-storyboard
+    analogues; the z-position and x/y-rotation components of
+    bob/bounce/vibrate are 3D and dropped (as the recorder does)."""
     match kind:
         case 'bob':
             s = math.sin(pct * _TWO_PI)
@@ -735,7 +766,22 @@ def _osc_deltas(kind, pct, mag, elapsed, rng):
         case 'vibrate':
             return {'x': mag[0] * rng.uniform(-1.0, 1.0),
                     'y': mag[1] * rng.uniform(-1.0, 1.0)}
+        case 'pulse':
+            factor = _pulse_zoom(math.sin(pct * math.pi), mag)
+            return {'scale_x': factor, 'scale_y': factor}
+        case 'pulseramp':
+            factor = _pulse_zoom(pct, mag)
+            return {'scale_x': factor, 'scale_y': factor}
     return {}
+
+
+def _pulse_zoom(fraction, mag) -> float:
+    """SCALE(fraction, 0,1, minZoom, maxZoom): the zoom factor a pulse
+    applies at a sample. `fraction` is 0..1 (the abs-sine for pulse, the
+    raw percent-through for pulseramp); mag[0]/mag[1] are min/max zoom.
+    With min==max it is a constant zoom, matching the engine's SCALE."""
+    lo, hi = mag[0], mag[1]
+    return lo + (hi - lo) * fraction
 
 
 class _OscillatorClock:
@@ -851,13 +897,14 @@ def _effect_pct(phase, period, offset) -> float:
 
 
 def _append_rest(per_prop, end) -> None:
-    """A trailing rest (delta 0) a hair past the span end, so the
-    oscillator delta returns to zero when the effect stops rather than
-    holding its last sample forever (the renderer holds the last keyframe
-    otherwise)."""
-    for frames in per_prop.values():
-        frames.append(Keyframe(end + _OSC_SAMPLE_STEP_S, (0.0,), 0.0,
-                               _STEP_EASE))
+    """A trailing rest at each prop's identity a hair past the span end, so
+    the oscillator contribution returns to no-op when the effect stops
+    rather than holding its last sample forever (the renderer holds the
+    last keyframe otherwise). Additive props rest at 0, multiplicative zoom
+    props at 1."""
+    for prop, frames in per_prop.items():
+        frames.append(Keyframe(end + _OSC_SAMPLE_STEP_S,
+                               (_osc_identity(prop),), 0.0, _STEP_EASE))
 
 
 def compile_oscillator_keyframes(spans, base_keyframes, osc_clock, rng,
@@ -878,21 +925,25 @@ def compile_oscillator_keyframes(spans, base_keyframes, osc_clock, rng,
         end = _effective_end(span, end_seconds)
         deltas = _span_keyframes(span, osc_clock, rng, end)
         for prop, delta_frames in deltas.items():
-            # x, y and rotation all rest at 0, so the base sits at 0 before
-            # its first keyframe - the delta rides whatever base motion is
+            # Additive props (x/y/rotation) rest at 0, multiplicative zoom
+            # props at 1, so the base sits at its identity before its first
+            # keyframe - the oscillator rides whatever base motion is
             # tweened in.
-            base_tl = EventTimeline(base_keyframes.get(prop, []), rest=(0.0,))
-            merged = [_add_base(kf, base_tl) for kf in delta_frames]
+            rest = (_osc_identity(prop),)
+            base_tl = EventTimeline(base_keyframes.get(prop, []), rest=rest)
+            merged = [_add_base(prop, kf, base_tl) for kf in delta_frames]
             base_keyframes[prop] = _merge_base_outside(
                 base_keyframes.get(prop, []), merged, span.start, end)
     return base_keyframes
 
 
-def _add_base(delta_kf, base_tl):
-    """A delta keyframe rebased onto the actor's tweened value at its time:
-    keyframe value = base(t) + delta, so the shake rides the base motion."""
+def _add_base(prop, delta_kf, base_tl):
+    """An oscillator keyframe rebased onto the actor's tweened value at its
+    time: keyframe value = combine(base(t), contribution), so the effect
+    rides the base motion (add for pos/rotation, multiply for zoom)."""
     base = base_tl.sample(delta_kf.t)[0]
-    return replace(delta_kf, values=(base + delta_kf.values[0],))
+    return replace(delta_kf,
+                   values=(_combine_base(prop, base, delta_kf.values[0]),))
 
 
 def _merge_base_outside(base_frames, synth_frames, start, end):

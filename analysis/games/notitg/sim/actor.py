@@ -132,6 +132,7 @@ _SIM_SCALAR_SETTERS = verb_surface.SCALAR_SETTERS
 _SIM_ADD_SETTERS = verb_surface.ADD_SETTERS
 _SIM_BULK_SETTERS = verb_surface.BULK_SETTERS
 _SIM_BULK_ADD_SETTERS = verb_surface.BULK_ADD_SETTERS
+_SIM_CROP_COMPOSITES = verb_surface.CROP_COMPOSITES
 
 
 def _rest(prop):
@@ -545,6 +546,14 @@ class SimActor:
             self._set_scalar('size_x', _arg_float(args[0] if args else None))
             self._set_scalar('size_y',
                              _arg_float(args[1] if len(args) > 1 else None))
+            return True
+        crop_props = _SIM_CROP_COMPOSITES.get(verb)
+        if crop_props is not None:
+            # crop / croph / cropv fan one call across the scalar crop
+            # edges, one positional arg per edge (same zip the bulk setters
+            # use); the storyboard renderer already insets by those edges.
+            for prop, arg in zip(crop_props, args):
+                self._set_scalar(prop, _arg_float(arg))
             return True
         if verb in _SIZE_AXIS_SETTERS:
             self._set_scalar(_SIZE_AXIS_SETTERS[verb],

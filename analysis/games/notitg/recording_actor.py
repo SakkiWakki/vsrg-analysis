@@ -95,6 +95,12 @@ KIND_DEFAULTS = {
     'wag': (2.0, (0.0, 0.0, 20.0)),
     'bob': (2.0, (0.0, 0.0, 20.0)),
     'bounce': (2.0, (0.0, 0.0, 20.0)),
+    # pulse is a ZOOM oscillator: the magnitude carries (minZoom, maxZoom)
+    # not (x, y, z) - a bare pulse() breathes zoom 0.5<->1.0 over a 2s
+    # period (openitg SetEffectPulse defaults, Actor.h:295). pulseramp
+    # shares the amplitude defaults; its verb stores only the period.
+    'pulse': (2.0, (0.5, 1.0, 0.0)),
+    'pulseramp': (2.0, (0.5, 1.0, 0.0)),
 }
 
 
