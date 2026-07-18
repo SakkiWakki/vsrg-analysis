@@ -1049,13 +1049,24 @@ def receptor_alpha_from_dark(dark_percent):
 
 @dataclass(frozen=True)
 class NoteOffsets:
-    """Summed per-note contributions. dx/dy in pixels, rotation in
-    degrees, alpha/zoom are multipliers (arrays aligned with `cols`)."""
+    """Summed per-note contributions (arrays aligned with `cols`).
+
+    dx/dy in pixels, rotation_deg the in-plane Z spin, alpha/zoom
+    multipliers. The 3D fields carry the real per-note depth + out-of-
+    plane tilt for the perspective note path: `z` the engine +z push
+    (GetZPos - bumpy/digitalz/beatz...), `rot_x`/`rot_y` the roll/twirl
+    tilts (degrees). They rest at 0, so a note with no depth/tilt keeps
+    the flat 2D dx/dy/zoom/rotation draw. `zoom` holds only the
+    genuinely-2D scale mods (mini/tiny/pulse/shrink) - the z push is no
+    longer folded into it here (the projection does that)."""
     dx: np.ndarray
     dy: np.ndarray
     rotation_deg: np.ndarray
     alpha_mult: np.ndarray
     zoom: np.ndarray
+    z: np.ndarray = None
+    rot_x: np.ndarray = None
+    rot_y: np.ndarray = None
 
 
 def _get(p, name):
@@ -1286,7 +1297,8 @@ def _z_push(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size):
     return z
 
 
-def _zoom(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size, n):
+def _zoom(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size, n,
+          z_push=None):
     base = zoom_from_mini(_get(percents, 'mini')) * tiny_zoom(_get(percents, 'tiny'))
     zoom = np.full(n, base, dtype=np.float64)
 
@@ -1300,15 +1312,34 @@ def _zoom(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size, n):
                                           y_offset, arrow_size)
     zoom = zoom * shrink_mult + shrink_add
 
-    z_push = _z_push(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size)
-    if np.any(z_push):
-        zoom = zoom * waveform_z_zoom(z_push)
+    # The engine +z push scales a note by the perspective divide. The
+    # projected note path applies that through the camera (real depth),
+    # so it passes z_push=<the array> and we DON'T also fake it as zoom.
+    # `z_push=None` is the 2D fallback: reproject to zoom as before.
+    if z_push is None:
+        z_push = _z_push(percents, cols, y_offset, t_now, beat_now,
+                         keycount, arrow_size)
+        if np.any(z_push):
+            zoom = zoom * waveform_z_zoom(z_push)
 
     if (_get(percents, 'confusionx') or _get(percents, 'confusionxoffset')
             or _active(percents, 'confusionx', keycount)):
         offset = _confusion_offset(percents, 'confusionx', cols, keycount)
         zoom = zoom * confusionx_zoom(_get(percents, 'confusionx'), beat_now, offset)
     return zoom
+
+
+def _note_tilt(percents, y_offset, n):
+    """(rot_x, rot_y) per-note out-of-plane tilt in degrees: roll ->
+    RotationX, twirl -> RotationY (ArrowEffects GetRotationX/Y = effect *
+    yOffset/2). These need the projected note path; a flat draw drops
+    them (a 2D sprite cannot tilt out of plane). Rest 0 -> no tilt."""
+    roll = _get(percents, 'roll')
+    twirl = _get(percents, 'twirl')
+    rot_x = roll * y_offset / 2.0 if roll else np.zeros(n)
+    rot_y = twirl * y_offset / 2.0 if twirl else np.zeros(n)
+    return (np.broadcast_to(rot_x, (n,)).astype(np.float64),
+            np.broadcast_to(rot_y, (n,)).astype(np.float64))
 
 
 def _alpha(percents, cols, y_pos, t_now):
@@ -1324,7 +1355,7 @@ def note_offsets(percents: dict, cols: np.ndarray, y_offset: np.ndarray,
                  t_now: float, beat_now: float, keycount: int,
                  note_beats: np.ndarray | None = None,
                  bps: float = 2.0, arrow_size: float = ARROW_SIZE,
-                 rand_seed: int = 0) -> NoteOffsets:
+                 rand_seed: int = 0, project_3d: bool = False) -> NoteOffsets:
     """Sum every implemented note-position mod into a `NoteOffsets`.
 
     `percents` maps mod name -> value (fraction); numbered per-column
@@ -1375,7 +1406,17 @@ def note_offsets(percents: dict, cols: np.ndarray, y_offset: np.ndarray,
     dx = _dx(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size)
     dy = _dy(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size)
     rotation = _rotation(percents, note_beats, beat_now, n)
-    zoom = _zoom(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size, n)
+    # The projected note path takes real per-note depth (z) + out-of-
+    # plane tilt (roll/twirl) and lets the camera do the perspective; the
+    # 2D path reprojects z to zoom and drops the tilts (a flat sprite).
+    z = rot_x = rot_y = None
+    if project_3d:
+        z = _z_push(percents, cols, y_offset, t_now, beat_now, keycount,
+                    arrow_size)
+        z = np.broadcast_to(z, (n,)).astype(np.float64)
+        rot_x, rot_y = _note_tilt(percents, y_offset, n)
+    zoom = _zoom(percents, cols, y_offset, t_now, beat_now, keycount,
+                 arrow_size, n, z_push=z)
     # Visibility samples GetYPos(..., WithReverse=false): the raw scroll
     # offset plus TIPSY ONLY (ArrowEffects.cpp:441-444/159-176) - the
     # other dy mods (beaty/movey/parabola...) displace the drawn note
@@ -1385,7 +1426,8 @@ def note_offsets(percents: dict, cols: np.ndarray, y_offset: np.ndarray,
                    t_now)
 
     return NoteOffsets(dx=dx, dy=dy, rotation_deg=rotation,
-                       alpha_mult=alpha, zoom=zoom)
+                       alpha_mult=alpha, zoom=zoom, z=z, rot_x=rot_x,
+                       rot_y=rot_y)
 
 
 def receptor_offsets(percents: dict, cols: np.ndarray, t_now: float,

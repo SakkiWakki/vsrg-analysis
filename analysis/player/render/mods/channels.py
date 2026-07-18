@@ -180,56 +180,20 @@ def _compile_channel(events: list) -> _Segments:
     return seg
 
 
-class _BeatCurve:
-    """A per-frame mod recorded as a beat-keyed curve: parallel
-    `beats`/`values`, linear-interpolated at the current song beat.
-    OUTSIDE the fired span (before the first fire, after the last) the
-    mod RESTS at 0 - the driver only paints its own `perframe` window,
-    and the engine's clearall reverts the mod to rest elsewhere. (Holding
-    the endpoints flat instead would leave a z-push / zoom mod fully on
-    for the whole song before its window, exploding note size.) Sampled
-    at beat rather than time so it plays smooth at any refresh, bypassing
-    the time-keyed approach chase that distorts a dense snap-fired
-    curve."""
-
-    __slots__ = ('beats', 'values')
-
-    def __init__(self, beats, values):
-        self.beats = np.asarray(beats, dtype=np.float64)
-        self.values = np.asarray(values, dtype=np.float64)
-
-    def sample(self, beat: float) -> float:
-        return float(np.interp(beat, self.beats, self.values,
-                               left=DEFAULT_REST, right=DEFAULT_REST))
-
-    def sample_array(self, beats: np.ndarray) -> np.ndarray:
-        return np.interp(beats, self.beats, self.values,
-                         left=DEFAULT_REST, right=DEFAULT_REST)
-
-
 class ModChannels:
-    """Compiled (mod, player) -> value curve.
+    """Compiled (mod, player) -> piecewise-linear value curve.
 
-    Most mods are `(mod, player) -> piecewise-linear TIME curve` (the
-    approach chase). Per-frame drivers that paint a beat-keyed curve are
-    held separately as `_BeatCurve`s sampled at the song BEAT - a
-    `beat_now` the caller supplies (note_mods already computes it). A mod
-    is in exactly one of the two maps.
+    Build with `ModChannels.compile(events, beat_to_time=...)`; the
+    caller-supplied `beat_to_time` maps event beats to seconds (identity
+    if events are already time-keyed). Query with `value(mod, t)` for one
+    channel or `values_at(t)` for every active mod at once."""
 
-    Build with `ModChannels.compile(events, beat_to_time=..., beat_curves=
-    ...)`; the caller-supplied `beat_to_time` maps event beats to seconds
-    (identity if events are already time-keyed). Query with `value(mod,
-    t)` for one channel or `values_at(t)` for every active mod at once,
-    passing `beat_now` when any beat curve is present."""
-
-    def __init__(self, channels: dict, players: tuple, beat_curves=None):
+    def __init__(self, channels: dict, players: tuple):
         self._channels = channels
-        self._beat_curves = beat_curves or {}
         self._players = players
 
     @classmethod
-    def compile(cls, events, beat_to_time: Callable[[float], float] | None = None,
-                beat_curves=None):
+    def compile(cls, events, beat_to_time: Callable[[float], float] | None = None):
         to_time = beat_to_time if beat_to_time is not None else (lambda b: b)
         grouped = defaultdict(list)
         players = set()
@@ -238,72 +202,40 @@ class ModChannels:
             timed = ModEvent(to_time(ev.beat), ev.value, ev.speed, ev.mod, ev.player)
             grouped[(ev.mod, ev.player)].append(timed)
         channels = {key: _compile_channel(evs) for key, evs in grouped.items()}
-        curves = {}
-        for (mod, player), (beats, values) in (beat_curves or {}).items():
-            players.add(player)
-            curves[(mod, player)] = _BeatCurve(beats, values)
-        return cls(channels, tuple(sorted(players)), beat_curves=curves)
+        return cls(channels, tuple(sorted(players)))
 
     @property
     def players(self) -> tuple:
         return self._players
 
     def mods(self, player: int = 0) -> tuple:
-        keys = set(self._channels) | set(self._beat_curves)
-        return tuple(sorted(mod for (mod, pn) in keys if pn == player))
+        return tuple(sorted(mod for (mod, pn) in self._channels if pn == player))
 
-    def value(self, mod: str, t: float, player: int = 0,
-              beat_now: float | None = None) -> float:
-        """Current percentage of one (mod, player). A beat curve samples
-        at `beat_now`; a chase channel samples at time `t`. Rest (0) for a
-        mod with no events."""
-        curve = self._beat_curves.get((mod, player))
-        if curve is not None:
-            return curve.sample(self._beat(t, beat_now))
+    def value(self, mod: str, t: float, player: int = 0) -> float:
+        """Current percentage of one (mod, player) at time `t` (seconds).
+        Returns the rest value (0) for a mod that has no events."""
         seg = self._channels.get((mod, player))
         return DEFAULT_REST if seg is None else seg._sample(float(t))
 
-    def values_at(self, t: float, player: int = 0,
-                  beat_now: float | None = None) -> dict:
-        """Every mod's current percentage for `player`, as `{mod: value}`.
-        Beat curves sample at `beat_now`, chase channels at time `t`. Only
-        mods with events appear; a consumer treats a missing mod as rest
-        (0)."""
+    def values_at(self, t: float, player: int = 0) -> dict:
+        """Every mod's current percentage for `player` at time `t`, as
+        `{mod: value}`. Only mods with events appear; a consumer treats a
+        missing mod as rest (0)."""
         t = float(t)
-        out = {mod: seg._sample(t)
-               for (mod, pn), seg in self._channels.items() if pn == player}
-        if self._beat_curves:
-            beat = self._beat(t, beat_now)
-            for (mod, pn), curve in self._beat_curves.items():
-                if pn == player:
-                    out[mod] = curve.sample(beat)
-        return out
+        return {mod: seg._sample(t)
+                for (mod, pn), seg in self._channels.items() if pn == player}
 
-    def values_over(self, ts, player: int = 0, beats=None) -> dict:
+    def values_over(self, ts, player: int = 0) -> dict:
         """Vectorized `values_at` over a time array: `{mod: ndarray}` with
-        one sampled value per t in `ts`. Beat curves sample over `beats`
-        (per-t song beats; defaults to `ts` when the curves are already
-        beat==time, e.g. a test harness). Convenience for batch
-        prepasses."""
+        one sampled value per t in `ts`. Convenience for batch prepasses;
+        each channel is sampled with numpy interpolation."""
         ts = np.asarray(ts, dtype=np.float64)
         out = {}
         for (mod, pn), seg in self._channels.items():
             if pn != player:
                 continue
             out[mod] = _sample_array(seg, ts)
-        if self._beat_curves:
-            bs = ts if beats is None else np.asarray(beats, dtype=np.float64)
-            for (mod, pn), curve in self._beat_curves.items():
-                if pn == player:
-                    out[mod] = curve.sample_array(bs)
         return out
-
-    @staticmethod
-    def _beat(t: float, beat_now: float | None) -> float:
-        """The beat to sample a beat curve at: the caller's `beat_now`, or
-        `t` itself when unsupplied (a beat==time test harness / a caller
-        with no tempo map). A real player always passes `beat_now`."""
-        return float(t) if beat_now is None else float(beat_now)
 
 
 def _sample_array(seg: _Segments, ts: np.ndarray) -> np.ndarray:

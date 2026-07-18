@@ -154,103 +154,20 @@ def coalesce_applied(applied) -> list:
     return out
 
 
-# A per-frame driver re-fires its mod densely, its per-frame value
-# tracking a function of the song beat: the fire SEQUENCE is the intended
-# continuous value (whether each fire snaps or eases is irrelevant once
-# we sample the fires directly - the approach speed only mattered to the
-# chase we are bypassing). A curve needs enough closely-spaced fires that
-# resampling it beats the chase; a handful of sparse windows are a step
-# sequence the chase already renders exactly.
-_CURVE_MIN_FIRES = 16
-# The stream must be DENSE: at least this fraction of consecutive fires
-# sit within `_CURVE_DENSE_GAP` beats. A mod with a few dense runs buried
-# in sparse declarative windows is not a per-frame curve.
-_CURVE_DENSE_GAP = 0.5
-_CURVE_DENSE_FRAC = 0.75
-# Two fires within this beat epsilon are the "same" beat: if their values
-# disagree the stream depends on frame history (an accumulator), not beat
-# alone, so it cannot be a beat-keyed curve.
-_CURVE_SAME_BEAT = 1e-4
-
-
-def _fires_by_channel(applied) -> dict:
-    """{(name, index): [(beat, value), ...]} of the per-frame resolved
-    fires, in time order, excluding the speed pseudo-channels. The
-    approach speed is dropped: a beat curve samples the fire values
-    directly, it does not chase them."""
-    out: dict = {}
-    for name, index, _t, beat, value, _speed in _frame_resolved(applied):
-        if name in _SPEED_TOKENS:
-            continue
-        out.setdefault((name, index), []).append((beat, value))
-    return out
-
-
-def _pure_in_beat(fires) -> bool:
-    """Whether the fires are a well-defined function of beat: no two
-    same-beat fires carry different values. An accumulator (value depends
-    on frame history, not beat alone) fails this and keeps the chase."""
-    return all(not (b1 - b0 <= _CURVE_SAME_BEAT and v0 != v1)
-               for (b0, v0), (b1, v1) in zip(fires, fires[1:]))
-
-
-def _is_perframe_curve(fires) -> bool:
-    """Whether a channel's fires are a per-frame driver painting a
-    beat-keyed curve: many fires, densely spaced for most of the run,
-    with changing values, and pure in beat."""
-    if len(fires) < _CURVE_MIN_FIRES:
-        return False
-    beats = [b for b, _v in fires]
-    dense = sum(1 for b0, b1 in zip(beats, beats[1:])
-                if b1 - b0 <= _CURVE_DENSE_GAP)
-    if dense < _CURVE_DENSE_FRAC * (len(beats) - 1):
-        return False
-    values = [v for _b, v in fires]
-    if max(values) == min(values):
-        return False
-    return _pure_in_beat(fires)
-
-
-def perframe_curves(applied) -> dict:
-    """{(name, index): (beats, values)} for the channels whose fires are
-    a per-frame beat-keyed curve (see `_is_perframe_curve`). These sample
-    at beat_at(t) live instead of compiling through the time-keyed
-    fapproach chase, which distorts a dense fire sequence into a jagged
-    staircase. Consecutive duplicate-beat fires collapse to the last
-    value so the beat axis is strictly increasing for interpolation."""
-    curves: dict = {}
-    for key, fires in _fires_by_channel(applied).items():
-        if not _is_perframe_curve(fires):
-            continue
-        beats: list = []
-        values: list = []
-        for beat, value in fires:
-            if beats and beat - beats[-1] <= _CURVE_SAME_BEAT:
-                values[-1] = value
-                continue
-            beats.append(beat)
-            values.append(value)
-        curves[key] = (beats, values)
-    return curves
-
-
-def chase_events(applied, skip=None) -> list:
+def chase_events(applied) -> list:
     """Frame-resolved targets -> ModEvent retargets for
     `ModChannels.compile`, which runs the exact fapproach chase
     (RageUtil.cpp:51: value moves linearly toward the target at
     speed/sec, snapping on arrival - PlayerOptions::Approach applies it
     per mod with dt * approach speed). One event per (mod, player)
     target-or-speed CHANGE; a raw player of 1/2 maps to channel index
-    0/1, None applies to both. `skip` is the set of (name, index) keys
-    handled as beat curves (`perframe_curves`), which must not ALSO
-    chase - each mod lives in exactly one representation."""
+    0/1, None applies to both."""
     from analysis.player.render.mods.channels import ModEvent
 
-    skip = skip or set()
     last: dict = {}
     events: list = []
     for name, index, t, _beat, value, speed in _frame_resolved(applied):
-        if name in _SPEED_TOKENS or (name, index) in skip:
+        if name in _SPEED_TOKENS:
             continue
         key = (name, index)
         if last.get(key) == (value, speed):

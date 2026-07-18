@@ -274,17 +274,10 @@ def _breakpoints_to_scroll_events(breakpoints):
     return out
 
 
-def compile_mod_channels(mod_events, beat_curves=None) -> ModChannels:
+def compile_mod_channels(mod_events) -> ModChannels:
     """Compile `compile_modfile`'s normalized mod-window dicts
     (`t_start`/`t_end` seconds, `modstring`, `player`) into sampled
-    channels.
-
-    `beat_curves` ({(mod, player): (beats, values)}) are per-frame
-    beat-keyed curves (sim.record.perframe_curves) sampled live at beat
-    instead of through the time-keyed approach chase; the (mod, player)
-    keys they cover are dropped from the chased windows so each mod lives
-    in exactly one representation."""
-    covered = set(beat_curves or ())
+    channels."""
     windows = defaultdict(list)
     for order, row in enumerate(mod_events):
         start = float(row['t_start'])
@@ -299,8 +292,6 @@ def compile_mod_channels(mod_events, beat_curves=None) -> ModChannels:
                    else (max(0, int(raw_player) - 1),))
         for percent, speed, name in parse_modstring(row['modstring']):
             for player in players:
-                if (name, player) in covered:
-                    continue
                 windows[(name, player)].append(
                     _Window(start, end, percent, speed, order))
 
@@ -308,7 +299,7 @@ def compile_mod_channels(mod_events, beat_curves=None) -> ModChannels:
     for (name, player), chan_windows in windows.items():
         for beat, value, speed in _resolve_windows(chan_windows):
             events.append(ModEvent(beat, value, speed, name, player))
-    return ModChannels.compile(events, beat_curves=beat_curves)
+    return ModChannels.compile(events)
 
 
 @dataclass(frozen=True)

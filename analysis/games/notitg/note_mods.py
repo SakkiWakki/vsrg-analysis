@@ -195,8 +195,7 @@ class NotitgNoteMods:
     def apply(self, ctx) -> None:
         t = float(ctx.t_now)
         percents = self._with_expand_phase(
-            self._channels.values_at(t, self._player,
-                                     beat_now=self._beat_at(t)), t)
+            self._channels.values_at(t, self._player), t)
         percents = self._defer_field_tilt(percents, t)
         scale = ctx.lane_w / ARROW_SIZE
         judge_y = float(ctx.judge_y)
