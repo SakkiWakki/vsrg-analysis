@@ -185,15 +185,19 @@ def _load_document(lua_dir: Path, bg_stem=''):
 
     lua_chunks = list(root_parsed.lua_chunks)
     classic = list(root_parsed.classic_commands)
-    _tag_base_dir(root_parsed.root, lua_dir)
+    _tag_source(root_parsed.root, entry)
     _splice_includes(root_parsed.root, lua_dir, lua_chunks, classic, bg_stem)
     return root_parsed.root, lua_chunks, classic
 
 
-def _tag_base_dir(actor, base_dir) -> None:
-    actor._base_dir = base_dir
+def _tag_source(actor, xml_path) -> None:
+    """Annotate a subtree with where its XML lives: `_base_dir` for
+    asset resolution, `_src_xml` (dir/file, e.g. `chara/default.xml`)
+    for fault and Lua-chunk naming."""
+    actor._base_dir = xml_path.parent
+    actor._src_xml = '/'.join(xml_path.parts[-2:])
     for child in actor.children:
-        _tag_base_dir(child, base_dir)
+        _tag_source(child, xml_path)
 
 
 def _splice_includes(actor, lua_dir, lua_chunks, classic, bg_stem='') -> None:
@@ -207,7 +211,7 @@ def _splice_includes(actor, lua_dir, lua_chunks, classic, bg_stem='') -> None:
             continue
         sub = xml_actors.parse_actor_xml(
             included.read_text(encoding='utf-8', errors='replace'))
-        _tag_base_dir(sub.root, included.parent)
+        _tag_source(sub.root, included)
         _splice_includes(sub.root, included.parent, sub.lua_chunks,
                          sub.classic_commands, bg_stem)
         # An include that renders the #BACKGROUND image is a BGCHANGES-

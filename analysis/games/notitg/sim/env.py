@@ -130,6 +130,7 @@ class SimEnvironment:
         self._tables: dict = {}
         self._named_commands: dict = {}
         self._message_commands: dict = {}
+        self._labels: dict = {}
         self._children: dict = {}
         self._next_id = 0
         self._active: list = []
@@ -197,7 +198,7 @@ class SimEnvironment:
                 out[key] = value
         return out
 
-    def run_update_body(self, body: str) -> None:
+    def run_update_body(self, body: str, name: str = 'update-body') -> None:
         """Run the `UpdateCommand` body once at the current sim time,
         driving its per-frame closures (a walker reading another actor's
         GetX, a rotator, the proxy grid). The body compiles ONCE (cached)
@@ -208,14 +209,14 @@ class SimEnvironment:
         inside the body no-ops (already fired in the replay pass). Faults
         are swallowed and counted."""
         if self._update_chunk is None:
-            self._update_chunk = self._host.compile(body, name='update-body')
+            self._update_chunk = self._host.compile(body, name=name)
         # No eager all-actor sync: pokes and getter reads _sync lazily,
         # so only the actors the body actually touches advance per tick.
         self._host.env['mod_time'] = self._now
         try:
             self._update_chunk()
         except Exception as exc:
-            self._record_fault('update-body', exc)
+            self._record_fault(name, exc)
 
     def replay_mod_actions(self):
         """Fire every `mod_actions` entry once in beat order, each at its
@@ -454,6 +455,7 @@ class SimEnvironment:
 
     def _register(self, actor) -> None:
         rec_id = self._id_for(actor)
+        self._labels[rec_id] = self._actor_label(actor, rec_id)
         for message, body in actor.message_commands().items():
             self._message_commands.setdefault(message, []).append(
                 (rec_id, body))
@@ -473,11 +475,23 @@ class SimEnvironment:
         value = actor.attrs.get(attr, '')
         if value.startswith('%'):
             self._run_lua_body(rec_id, _strip_lua_wrapper(value),
-                               f'{actor.kind}.{attr}', load=True)
+                               f'{self._label(rec_id)}.{attr}', load=True)
         elif value:
             self._run_classic_body(rec_id, value)
         for child in actor.children:
             self._run_load(child, attr)
+
+    @staticmethod
+    def _actor_label(actor, rec_id) -> str:
+        """Fault/chunk label carrying the actor's source XML file and its
+        Name (kind#rec-id when anonymous), so a fault or Lua syntax error
+        says WHICH actor in WHICH file it came from."""
+        name = actor.attrs.get('Name') or f'{actor.kind}#{rec_id}'
+        src = getattr(actor, '_src_xml', '')
+        return f'{src}:{name}' if src else name
+
+    def _label(self, rec_id) -> str:
+        return self._labels.get(rec_id, f'actor#{rec_id}')
 
     def _id_for(self, actor) -> int:
         existing = getattr(actor, '_sim_id', None)
@@ -544,7 +558,8 @@ class SimEnvironment:
             elif name not in self.suppressed_queued_commands:
                 body = self._named_commands.get(rec_id, {}).get(name)
                 if body is not None:
-                    self._run_command_body(rec_id, body, f'cmd:{name}')
+                    self._run_command_body(
+                        rec_id, body, f'{self._label(rec_id)}.cmd:{name}')
         except Exception as exc:
             self._record_fault(f'fire:{name}', exc)
 
@@ -635,7 +650,8 @@ class SimEnvironment:
         if not isinstance(name, str):
             return
         for rec_id, body in self._message_commands.get(name, ()):
-            self._run_command_body(rec_id, body, f'msg:{name}')
+            self._run_command_body(
+                rec_id, body, f'{self._label(rec_id)}.msg:{name}')
 
     def _actor_command(self, rec_id, verb, name=None) -> None:
         """playcommand runs <name>Command NOW on the actor and its whole
@@ -653,7 +669,9 @@ class SimEnvironment:
                 self._sync(rec_id)
                 self._actors[rec_id].queue_command(name)
             else:
-                self._run_command_body(rec_id, commands[name], f'cmd:{name}')
+                self._run_command_body(
+                    rec_id, commands[name],
+                    f'{self._label(rec_id)}.cmd:{name}')
         for child_id in self._children.get(rec_id, ()):
             self._command_subtree(child_id, verb, name)
 
