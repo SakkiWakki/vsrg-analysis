@@ -45,21 +45,22 @@ _CENTER_Y = field_projection.DESIGN_CY
 _CORNERS = field_projection.PLANE_CORNERS
 _TO_CONTENT = transform3d.translate(-_CENTER_X, -_CENTER_Y)
 
-# The shared LoadMenuPerspective (fov 45, centered vanish). Instance
-# channels always project centered: per-proxy SetVanishPoint streams
-# feed the base-field projection (field_3d), not the copy blits.
-_PROJECTION = field_projection.design_projection()
-
 _MIN_ALPHA = 1.0 / 255.0
 _MIN_DET = 1e-9
+_REST_EPS = 1e-4
 
-# Transform properties every link carries, with SM rest values.
+# Transform properties every link carries, with SM rest values. `fov`
+# is the frame camera's field of view (deg): not a transform matrix
+# term (`_local` never reads it) but a perspective-projection parameter
+# an ActorFrame sets for its whole subtree - its rest is the
+# LoadMenuPerspective default the shared projection uses.
 _LINK_RESTS = {
     'x': 0.0, 'y': 0.0,
     'rotation': 0.0, 'rotation_x': 0.0, 'rotation_y': 0.0, 'skew_x': 0.0,
     'scale_x': 1.0, 'scale_y': 1.0,
     'base_scale_x': 1.0, 'base_scale_y': 1.0,
     'alpha': 1.0, 'hidden': 0.0,
+    'fov': field_projection.FOV,
 }
 
 # Player-field rest seats in design space: StepMania places the two
@@ -136,18 +137,27 @@ class TransformChannel:
             t = max(float(t), self._t0)
         alpha = 1.0
         world = None
+        fov = field_projection.FOV
         leaf = len(self._links) - 1
         for i, link in enumerate(self._links):
             if link['hidden'].sample(t)[0] >= 0.5:
                 return None
             alpha *= link['alpha'].sample(t)[0]
+            # A frame's fov projects its whole subtree; the innermost
+            # frame that set one wins (its LoadMenuPerspective replaces
+            # the outer). Links are root-first, so the last non-default
+            # fov in the chain is the effective camera.
+            link_fov = link['fov'].sample(t)[0]
+            if abs(link_fov - field_projection.FOV) > _REST_EPS:
+                fov = link_fov
             local = self._local(link, t, self._flip_base_y and i == leaf)
             world = local if world is None else transform3d.compose(world,
                                                                     local)
         if alpha < _MIN_ALPHA:
             return None
+        projection = field_projection.design_projection(fov=fov)
         verdict, H, _clip = transform3d.project_with_verdict(
-            _TO_CONTENT @ world, _PROJECTION, _CORNERS)
+            _TO_CONTENT @ world, projection, _CORNERS)
         if verdict == 'gone' or abs(np.linalg.det(H)) < _MIN_DET:
             return None
         return H, alpha

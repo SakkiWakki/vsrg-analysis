@@ -80,6 +80,7 @@ GetEffectMagnitude
 
 # -- vanish / perspective (GAP #1) --
 SetVanishPoint
+fov
 GetRandomVanishTransform
 space
 distant

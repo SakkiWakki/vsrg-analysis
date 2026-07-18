@@ -378,6 +378,16 @@ VERB_REGISTRY['luaeffect'] = Verb(
 VERB_REGISTRY['SetVanishPoint'] = Verb(
     'SetVanishPoint', VANISH, IMPLEMENTED, ('vanish_x', 'vanish_y'),
     'fov vanish center; default 320,240', 'ActorFrame.cpp:172')
+# Field of view: an ActorFrame's `fov(deg)` sets a perspective camera
+# (RageDisplay LoadMenuPerspective) that projects the frame AND ALL ITS
+# CHILDREN; fov 0 = orthographic. Recorded onto the `fov` channel; the
+# scene projection reads it (cascading to child instances) instead of
+# the hardcoded 45 default. 602 charts use it; the 3D-heavy ones
+# override 45 (fov 60/80).
+VERB_REGISTRY['fov'] = Verb(
+    'fov', VANISH, IMPLEMENTED, ('fov',),
+    'perspective camera field of view (deg); projects the frame subtree',
+    'ActorFrame.cpp / RageDisplay LoadMenuPerspective')
 VERB_REGISTRY['GetRandomVanishTransform'] = Verb(
     'GetRandomVanishTransform', VANISH, DEFERRED, None,
     'randomized fov/vanish transform - scene projection frontier',

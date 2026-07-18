@@ -540,6 +540,11 @@ class SimActor:
             self._set_immediate(
                 'vanish_y', _arg_float(args[1] if len(args) > 1 else None))
             return True
+        if verb == 'fov':
+            # A frame's perspective camera fov (deg); projects its whole
+            # subtree. Immediate, like vanish - it is not tween state.
+            self._set_immediate('fov', _arg_float(args[0] if args else None))
+            return True
         return False
 
     def _poke_channel(self, verb, arg0) -> bool:

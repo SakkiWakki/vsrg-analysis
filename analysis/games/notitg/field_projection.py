@@ -30,6 +30,8 @@ center-plane 2D degradation for per-note 3D.
 """
 from __future__ import annotations
 
+from functools import lru_cache
+
 from analysis.player.render import transform3d
 from analysis.player.render.mods.arrow_effects import _confusion_axis_degrees
 
@@ -61,17 +63,27 @@ _MOD_TILT = (('confusionx', 'confusionxoffset'),
              ('confusiony', 'confusionyoffset'))
 
 
-def design_projection(vanish=None):
-    """world -> design-pixel projection for a vanish point (design px).
+@lru_cache(maxsize=64)
+def _projection(fov, vanish):
+    return transform3d.projection(fov, DESIGN_W, DESIGN_H, vanish=vanish)
 
-    None or the design centre return the shared centered matrix - the
-    at-rest case every frame of an unmodded chart hits."""
-    if vanish is None:
+
+def design_projection(vanish=None, fov=FOV):
+    """world -> design-pixel projection for a (vanish, fov) camera in
+    design px.
+
+    The default fov + centered vanish returns the shared centered matrix
+    - the at-rest case every frame of an unmodded chart hits. An
+    ActorFrame's `fov(deg)` (default 45) sets the perspective for its
+    whole subtree; a 3D chart overrides it (fov 60/80). Distinct
+    (fov, vanish) matrices are cached (a chart uses a handful)."""
+    centered = (vanish is None
+                or (abs(vanish[0] - DESIGN_CX) < _REST_EPS
+                    and abs(vanish[1] - DESIGN_CY) < _REST_EPS))
+    if centered and abs(fov - FOV) < _REST_EPS:
         return _CENTERED
-    vx, vy = vanish
-    if abs(vx - DESIGN_CX) < _REST_EPS and abs(vy - DESIGN_CY) < _REST_EPS:
-        return _CENTERED
-    return transform3d.projection(FOV, DESIGN_W, DESIGN_H, vanish=(vx, vy))
+    return _projection(round(float(fov), 4),
+                       None if centered else (vanish[0], vanish[1]))
 
 
 def field_model(rx, ry, rz, skewx):
