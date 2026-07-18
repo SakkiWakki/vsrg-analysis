@@ -852,6 +852,15 @@ class StubEnvironment:
         except Exception:
             self._integration_faults += 1
 
+    def _song_time(self) -> float:
+        """Song time in seconds for `GAMESTATE:GetSongTime()`. During
+        integration this tracks the tick clock; otherwise it is the stable
+        pre-song load time. A frame-throttle body (`if time > gf2_lasttime`)
+        needs a numeric time or it faults comparing nil every tick."""
+        if self._integration_clock is not None:
+            return self._integration_clock[0]
+        return self._load_seconds
+
     def _detach_isolated_tables(self) -> dict:
         """Empty the mods/mods2/mod_actions globals (other passes own
         them) for the integration, keeping the originals to restore."""
@@ -902,6 +911,7 @@ class StubEnvironment:
         gamestate = singleton(host.to_lua({
             'GetSongBeat': lambda _self: self._clock_beat,
             'GetSongBeatNoOffset': lambda _self: self._clock_beat,
+            'GetSongTime': lambda _self: self._song_time(),
             'SetShaderFlag': self._set_shader_flag,
             'SetShaderFlagNum': self._set_shader_flag_num,
             'ApplyGameCommand': self._apply_game_command,
