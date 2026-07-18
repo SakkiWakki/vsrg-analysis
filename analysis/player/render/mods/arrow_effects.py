@@ -1463,41 +1463,17 @@ def note_offsets(percents: dict, cols: np.ndarray, y_offset: np.ndarray,
     source) and spiralholds (a hold-render variant) are deferred rather than
     guessed; sawtooth's offset companion is unread in the ported engine formula
     (see `sawtooth_x`)."""
-    cols = np.asarray(cols)
-    y_offset = np.asarray(y_offset, dtype=np.float64)
-    n = cols.shape[0]
-    if note_beats is None:
-        note_beats = np.full(n, beat_now, dtype=np.float64)
-    else:
-        note_beats = np.asarray(note_beats, dtype=np.float64)
-
-    dx = _dx(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size)
-    dy = _dy(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size)
-    rotation = _rotation(percents, note_beats, beat_now, n)
-    # The projected note path takes real per-note depth (z) + out-of-
-    # plane tilt (roll/twirl) and lets the camera do the perspective; the
-    # 2D path reprojects z to zoom and drops the tilts (a flat sprite).
-    z = rot_x = rot_y = None
-    if project_3d:
-        z = _z_push(percents, cols, y_offset, t_now, beat_now, keycount,
-                    arrow_size)
-        z = np.broadcast_to(z, (n,)).astype(np.float64)
-        rot_x, rot_y = _note_tilt(percents, y_offset, n)
-    zoom = _zoom(percents, cols, y_offset, t_now, beat_now, keycount,
-                 arrow_size, n, z_push=z)
-    # Visibility samples GetYPos(..., WithReverse=false): the raw scroll
-    # offset plus TIPSY ONLY (ArrowEffects.cpp:441-444/159-176) - the
-    # other dy mods (beaty/movey/parabola...) displace the drawn note
-    # but never move it through the hidden/sudden windows.
-    vis_y = y_offset + _tipsy_dy(percents, cols, t_now, keycount, arrow_size)
-    alpha = _alpha(percents, cols, vis_y, t_now)
-    glow = None
-    if _get(percents, 'stealthglow'):
-        glow = stealthglow_amount(_get(percents, 'stealthglow'), vis_y)
-
-    return NoteOffsets(dx=dx, dy=dy, rotation_deg=rotation,
-                       alpha_mult=alpha, zoom=zoom, z=z, rot_x=rot_x,
-                       rot_y=rot_y, glow=glow)
+    # The position + rotation axes (dx/dy/z/rotation/roll/twirl) are now
+    # assembled from composable spatial curves (note_curves); the zoom /
+    # alpha / glow / perspective families this function still owns are
+    # delegated back by the assembler. Imported lazily to break the cycle
+    # (note_curves imports this module for those delegated helpers). Byte-
+    # equal to the former kernel-summing body (tests/test_note_curves.py).
+    from analysis.player.render.mods import note_curves
+    return note_curves.assemble(
+        percents, cols, y_offset, t_now, beat_now, keycount,
+        note_beats=note_beats, bps=bps, arrow_size=arrow_size,
+        rand_seed=rand_seed, project_3d=project_3d)
 
 
 def receptor_offsets(percents: dict, cols: np.ndarray, t_now: float,
