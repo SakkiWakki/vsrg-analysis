@@ -525,6 +525,22 @@ class SimActor:
         self._tweens[-1].command = '!' + str(name)
 
     def _poke_multi_arg(self, verb, args) -> bool:
+        if verb == 'stretchto':
+            # StretchTo(x1, y1, x2, y2): fill that rect (SM
+            # Actor::StretchTo). Our compiled actors have a CENTER origin
+            # (0.5, 0.5), so position at the rect CENTER and set the
+            # absolute size to the rect extent - the actor then covers the
+            # rect. The chart's full-screen backdrops use
+            # stretchto,0,0,SCREEN_WIDTH,SCREEN_HEIGHT.
+            if len(args) >= 4:
+                x1 = _arg_float(args[0]); y1 = _arg_float(args[1])
+                x2 = _arg_float(args[2]); y2 = _arg_float(args[3])
+                if None not in (x1, y1, x2, y2):
+                    self._set_scalar('x', (x1 + x2) / 2.0)
+                    self._set_scalar('y', (y1 + y2) / 2.0)
+                    self._set_scalar('size_x', abs(x2 - x1))
+                    self._set_scalar('size_y', abs(y2 - y1))
+            return True
         if verb in _SIZE_PAIR_SETTERS:
             self._set_scalar('size_x', _arg_float(args[0] if args else None))
             self._set_scalar('size_y',
