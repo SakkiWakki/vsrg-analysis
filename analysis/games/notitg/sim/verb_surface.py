@@ -246,8 +246,6 @@ _SECOND_SLOT = ("fork second-value slot ('<prop>2'): a second transform "
                 "is COMDAT-folded to Screen*::TweenOffScreen and openitg has "
                 "no analogue; no *2-using chart has a reference frame to "
                 "validate against (see second_slot_findings.md)")
-_ROT_ORDER = ('order-dependent 3D rotation compose; needs a rotation-order '
-              'model the 2D storyboard does not have (scene-projection tier)')
 DEFERRED: dict = {
     # '*2' second-value slots (position/zoom/rotation/skew).
     'x2': _SECOND_SLOT, 'y2': _SECOND_SLOT, 'z2': _SECOND_SLOT,
@@ -264,20 +262,6 @@ DEFERRED: dict = {
     'GetRotationZ2': _SECOND_SLOT, 'GetRotation2': _SECOND_SLOT,
     'GetSkewX2': _SECOND_SLOT, 'GetSkewY2': _SECOND_SLOT,
     'getrotation2': _SECOND_SLOT,
-    # rotation order + spherical heading/pitch/roll.
-    'SetRotationOrder': _ROT_ORDER, 'GetRotationOrder': _ROT_ORDER,
-    'heading': 'AddRotationH - spherical heading add, ' + _ROT_ORDER,
-    'pitch': 'AddRotationP - spherical pitch add, ' + _ROT_ORDER,
-    'roll': 'AddRotationR - spherical roll add, ' + _ROT_ORDER,
-    # skew-before-vs-after-rotation is a transform-order control.
-    'skewx_before_rotation': 'fork skew-order flag; needs the transform-order '
-                             'model the storyboard lacks',
-    'skewy_before_rotation': 'fork skew-order flag; needs the transform-order '
-                             'model the storyboard lacks',
-    'skewto': 'fork skew convenience (both axes over a rect); the skew-order '
-              'semantics are unresolved - see skewx_before_rotation',
-    'GetSkewXBeforeRotation': 'skew-order readback - see skewx_before_rotation',
-    'GetSkewYBeforeRotation': 'skew-order readback - see skewx_before_rotation',
     # spline / fit position + zoom setters whose target geometry needs the
     # actor's natural size the sim does not carry.
     'position': 'SetPosition - spline path time, not an x/y write '
@@ -325,15 +309,24 @@ DEFERRED: dict = {
                     'the position/rotation synthesis does not read it yet',
     # effect readback getters: the effect draw-time contribution the sim
     # deliberately excludes from GetX (Actor.cpp:248 - effects apply to the
-    # draw temp, not m_current), so there is nothing to read back yet.
-    'GetEffectDelta': 'effect phase delta readback - effect draw-time state '
-                      'the sim excludes from reads (Actor.cpp:248)',
-    'GetEffectX': 'effect x contribution readback - see GetEffectDelta',
-    'GetEffectY': 'effect y contribution readback - see GetEffectDelta',
-    'GetEffectZ': 'effect z contribution readback - see GetEffectDelta',
-    'GetEffectRotationX': 'effect rotation readback - see GetEffectDelta',
-    'GetEffectRotationY': 'effect rotation readback - see GetEffectDelta',
-    'GetEffectRotationZ': 'effect rotation readback - see GetEffectDelta',
+    # draw temp, not m_current). GetEffectDelta = m_fEffectDelta, the
+    # per-Update effect-clock delta (Actor.cpp:568-589): a frame-rate-bound
+    # value with no analogue in the frame-independent compiled document, so
+    # reproducing it would be a guess. GetEffectX/Y/Z/RotationX/Y/Z want the
+    # oscillator's CURRENT draw-time offset; the sim records oscillators as
+    # analytic OscSpans but does not yet synthesize their per-kind draw-time
+    # function (spin integrates, vibrate is RandomFloat, bob is sin), so
+    # there is no current-offset value to return until that synthesis lands.
+    'GetEffectDelta': 'per-Update effect-clock delta (m_fEffectDelta, '
+                      'Actor.cpp:568) - frame-rate-bound, no frame-independent '
+                      'analogue in the compiled document',
+    'GetEffectX': 'effect x draw-time offset - OscSpan is recorded but its '
+                  'per-kind draw-time function is not synthesized to sample',
+    'GetEffectY': 'effect y draw-time offset - see GetEffectX',
+    'GetEffectZ': 'effect z draw-time offset - see GetEffectX',
+    'GetEffectRotationX': 'effect rotation-x draw-time offset - see GetEffectX',
+    'GetEffectRotationY': 'effect rotation-y draw-time offset - see GetEffectX',
+    'GetEffectRotationZ': 'effect rotation-z draw-time offset - see GetEffectX',
     # shader per-actor binds - the GL executor owns these.
     'SetShader': 'per-actor shader program bind - GL executor',
     'GetShader': 'per-actor shader program handle - GL executor',
@@ -386,6 +379,19 @@ HANDLED_BY_NAME: dict = {
     'playcommand': 'command', 'queuecommand': 'command',
     'queuemessage': 'command', 'addcommand': 'command',
     'removecommand': 'command', 'hascommand': 'command', 'cmd': 'command',
+    # fork transform-order + spherical rotation (SimActor.poke handles each
+    # by name; field_compose._local honors the recorded channels). The
+    # rotation order (SetRotationOrder), the pre/post-rotation skew gates
+    # (skewx/y_before_rotation), and the spherical adds (heading/pitch/roll,
+    # AddRotationH/P/R -> a dest quaternion) all rest at the engine default
+    # so an untouched actor composes byte-identically to the pre-order path.
+    'SetRotationOrder': 'transform-order', 'GetRotationOrder': 'transform-order',
+    'skewx_before_rotation': 'transform-order',
+    'skewy_before_rotation': 'transform-order',
+    'GetSkewXBeforeRotation': 'transform-order',
+    'GetSkewYBeforeRotation': 'transform-order',
+    'skewto': 'skew-order',
+    'heading': 'spherical', 'pitch': 'spherical', 'roll': 'spherical',
 }
 
 

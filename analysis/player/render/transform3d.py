@@ -136,6 +136,87 @@ def rotate_xyz(rx, ry, rz):
     return m
 
 
+# NotITG's fork adds SetRotationOrder: the actor picks which axis-rotation
+# order composes its Euler rotation, instead of the stock fixed X*Y*Z.
+# The engine builds it with RageMatrixMultiply(out, x, y, z, order) - the
+# same per-axis rotations, multiplied in the token's order (Actor.clean.c
+# BeginDraw @ 004a4320; the SetRotationOrder token->enum swizzle @
+# 004abd70). 'xyz' is the stock order and MUST equal rotate_xyz exactly.
+# The fork accepts exactly these swizzle tokens (SetRotationOrder @ 004abd70);
+# an unknown string logs 'Invalid Rotation mode' and leaves the order be.
+_ROTATION_ORDERS = ('xyz', 'xzy', 'yzx', 'zxy', 'zyx')
+_AXIS_ROT = {'x': rotate_x, 'y': rotate_y, 'z': rotate_z}
+
+
+def rotate_ordered(rx, ry, rz, order='xyz'):
+    """Euler rotation composed in `order` (a permutation of 'xyz'), the
+    fork's SetRotationOrder (Actor::BeginDraw @ 004a4320). The order names
+    the axis applied FIRST to a row content point: 'xyz' rotates about X,
+    then Y, then Z, identical to rotate_xyz (the stock RageMatrixRotationXYZ
+    default). A row point v @ result applies order[0] first, so in numpy
+    matmul the matrices multiply in reverse: R(order[2]) @ R(order[1]) @
+    R(order[0]). Batched over broadcast rx/ry/rz."""
+    if order == 'xyz':
+        return rotate_xyz(rx, ry, rz)
+    angles = {'x': rx, 'y': ry, 'z': rz}
+    first, second, third = order
+    return (_AXIS_ROT[third](angles[third])
+            @ _AXIS_ROT[second](angles[second])
+            @ _AXIS_ROT[first](angles[first]))
+
+
+def matrix_from_quat(quat):
+    """RageMatrixFromQuat (RageMath.cpp:395): a unit quaternion (x, y, z, w)
+    to a row-vector 4x4 rotation. The fork's spherical adds (AddRotationH/P/R
+    = heading/pitch/roll) accumulate onto this quat channel and the engine
+    MultMatrixes it after the Euler rotation (Actor.cpp BeginDraw:424-429).
+    Row-major param order = the transpose of the OpenGL layout, matching our
+    row-vector convention. Identity quat (0,0,0,1) -> identity matrix."""
+    x, y, z, w = (float(c) for c in quat)
+    xx, xy, xz = x * (x + x), x * (y + y), x * (z + z)
+    wx, wy, wz = w * (x + x), w * (y + y), w * (z + z)
+    yy, yz = y * (y + y), y * (z + z)
+    zz = z * (z + z)
+    return np.array([
+        [1 - (yy + zz), xy + wz, xz - wy, 0.0],
+        [xy - wz, 1 - (xx + zz), yz + wx, 0.0],
+        [xz + wy, yz - wx, 1 - (xx + yy), 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
+
+
+def quat_from_axis(axis, deg):
+    """Unit quaternion for the fork's single-axis spherical adds:
+    RageQuatFromH (y-axis / heading), RageQuatFromP (x-axis / pitch),
+    RageQuatFromR (z-axis / roll) (RageMath.cpp:311-341). Each halves and
+    NEGATES the angle before the sin/cos, so the quat spins the content the
+    same visual direction the Euler rotations do."""
+    theta = -float(deg) * DEG / 2.0
+    c, s = np.cos(theta), np.sin(theta)
+    match axis:
+        case 'x':   # pitch (P)
+            return (s, 0.0, 0.0, c)
+        case 'y':   # heading (H)
+            return (0.0, s, 0.0, c)
+        case 'z':   # roll (R)
+            return (0.0, 0.0, s, c)
+
+
+def quat_multiply(a, b):
+    """Hamilton product a*b of two (x,y,z,w) quats, normalized
+    (RageQuatMultiply, RageMath.cpp:287). The fork accumulates spherical
+    adds as DestQuat = DestQuat * QuatFromAxis(angle)."""
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    x = aw * bx + ax * bw + ay * bz - az * by
+    y = aw * by + ay * bw + az * bx - ax * bz
+    z = aw * bz + az * bw + ax * by - ay * bx
+    w = aw * bw - ax * bx - ay * by - az * bz
+    norm = (x * x + y * y + z * z + w * w) ** 0.5
+    inv = 1.0 / norm if norm > 0.0 else 1.0
+    return (x * inv, y * inv, z * inv, w * inv)
+
+
 def skew_x(amount):
     """SkewX: x' = x + amount*y  (RageMatrixSkewX, m10 = amount, RageMath L312)."""
     a = np.asarray(amount, np.float64)

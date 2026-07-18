@@ -147,3 +147,65 @@ def test_harvest_copies_and_players_share_the_contract():
     assert kinds == [('proxy', 2), ('aft', 0), ('player', 1), ('player', 2)]
     H, _alpha = instances[0]['transform'].at(1.0)
     assert H[2, 0] == pytest.approx(200.0 - 320.0)
+
+
+# -- fork transform-order / spherical rotation / skew-order (parity + effect) -
+
+def _instant_kf(t, value_tuple):
+    """A whole-tuple instant keyframe (rotation_order string / quat 4-tuple)."""
+    return Keyframe(t, value_tuple, 0.0, 0)
+
+
+def test_rest_link_ignores_new_order_channels_byte_identical():
+    """An untouched link (default order, identity quat, skew-after) composes
+    to exactly the pre-order matrix - the parity anchor for every flat
+    chart and gat."""
+    from analysis.player.render import transform3d as t3
+    keyframes = {'x': [_kf(0.0, 320.0)], 'y': [_kf(0.0, 240.0)],
+                 'rotation': [_kf(0.0, 30.0)], 'rotation_x': [_kf(0.0, 20.0)],
+                 'scale_x': [_kf(0.0, 1.5)], 'skew_x': [_kf(0.0, 0.2)]}
+    with_channels, _a = _channel(keyframes).at(1.0)
+    m = t3.rotate_xyz(20.0, 0.0, 30.0)
+    m = m @ t3.scale(1.5, 1.0, 1.0)
+    m = m @ t3.translate(320.0, 240.0, 0.0)
+    m = t3.skew_x(0.2) @ m
+    expected = t3.homography(field_compose._TO_CONTENT @ m,
+                             field_compose.field_projection.design_projection())
+    assert np.allclose(with_channels, t3.normalize_h(expected))
+
+
+def test_rotation_order_channel_changes_the_map():
+    base = {'x': [_kf(0.0, 320.0)], 'y': [_kf(0.0, 240.0)],
+            'rotation_x': [_kf(0.0, 40.0)], 'rotation_y': [_kf(0.0, 60.0)]}
+    H_xyz, _ = _channel(base).at(1.0)
+    reordered = {**base, 'rotation_order': [_instant_kf(0.0, ('zyx',))]}
+    H_zyx, _ = _channel(reordered).at(1.0)
+    assert not np.allclose(H_xyz, H_zyx)
+
+
+def test_identity_quat_channel_is_a_no_op():
+    base = {'x': [_kf(0.0, 320.0)], 'y': [_kf(0.0, 240.0)],
+            'rotation': [_kf(0.0, 45.0)]}
+    H_no_quat, _ = _channel(base).at(1.0)
+    with_ident = {**base, 'quat': [_instant_kf(0.0, (0.0, 0.0, 0.0, 1.0))]}
+    H_ident, _ = _channel(with_ident).at(1.0)
+    assert np.allclose(H_no_quat, H_ident)
+
+
+def test_spherical_quat_channel_tilts_the_field():
+    from analysis.player.render import transform3d as t3
+    base = {'x': [_kf(0.0, 320.0)], 'y': [_kf(0.0, 240.0)]}
+    H_flat, _ = _channel(base).at(1.0)
+    q = t3.quat_from_axis('y', 45.0)
+    tilted = {**base, 'quat': [_instant_kf(0.0, q)]}
+    H_tilt, _ = _channel(tilted).at(1.0)
+    assert not np.allclose(H_flat, H_tilt)
+
+
+def test_skew_before_flag_flips_the_compose_side():
+    base = {'x': [_kf(0.0, 320.0)], 'y': [_kf(0.0, 240.0)],
+            'rotation': [_kf(0.0, 30.0)], 'skew_x': [_kf(0.0, 0.4)]}
+    H_after, _ = _channel(base).at(1.0)
+    before = {**base, 'skew_x_before': [_kf(0.0, 1.0)]}
+    H_before, _ = _channel(before).at(1.0)
+    assert not np.allclose(H_after, H_before)

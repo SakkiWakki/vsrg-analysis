@@ -70,15 +70,92 @@ def test_getter_read_kinds_are_valid():
 
 
 def test_trap_families_are_deferred_not_guessed():
-    """The known traps - the '*2' second-slot family, rotation-order verbs,
-    skew-before-rotation - must be DEFERRED (Actor.clean.c is COMDAT-folded;
-    their semantics cannot be pinned), never mapped to a scalar write."""
-    for name in ('x2', 'zoom2', 'rotationz2', 'GetX2', 'skewx2',
-                 'SetRotationOrder', 'heading', 'pitch', 'roll',
-                 'skewx_before_rotation'):
+    """The '*2' second-slot family stays DEFERRED (Actor.clean.c is
+    COMDAT-folded and openitg has no analogue, so its dual-transform role
+    cannot be pinned), never mapped to a scalar write. The rotation-order,
+    skew-order, and spherical families are NO LONGER traps - the fork's
+    SetRotationOrder swizzle, the pre/post-rotation skew gates, and the
+    RageQuat* spherical adds are all pinned from Actor.clean.c BeginDraw +
+    openitg RageMath (see test_transform_order_family below)."""
+    for name in ('x2', 'zoom2', 'rotationz2', 'GetX2', 'skewx2'):
         assert name in vs.DEFERRED, name
         for setter in (vs.SCALAR_SETTERS, vs.ADD_SETTERS, vs.BULK_SETTERS):
             assert name not in setter, f'{name} was mapped to a write'
+
+
+# -- fork transform-order / spherical rotation / skew-order ------------------
+
+def test_transform_order_family_is_no_longer_deferred():
+    """The rotation-order, skew-order, and spherical verbs moved out of
+    DEFERRED into the handled-by-name surface."""
+    for name in ('SetRotationOrder', 'GetRotationOrder', 'skewto',
+                 'skewx_before_rotation', 'skewy_before_rotation',
+                 'GetSkewXBeforeRotation', 'GetSkewYBeforeRotation',
+                 'heading', 'pitch', 'roll'):
+        assert name not in vs.DEFERRED, name
+        assert name in vs.HANDLED_BY_NAME, name
+
+
+def test_set_rotation_order_records_and_reads_back():
+    a = SimActor()
+    assert a.read('GetRotationOrder') == 'xyz'  # engine default
+    a.poke('SetRotationOrder', ['zyx'])
+    assert a.read('GetRotationOrder') == 'zyx'
+    # An unknown token logs-and-ignores (engine 'Invalid Rotation mode').
+    a.poke('SetRotationOrder', ['bogus'])
+    assert a.read('GetRotationOrder') == 'zyx'
+
+
+def test_rotation_order_changes_the_composed_matrix():
+    # rotate_ordered('xyz') == rotate_xyz; a non-xyz order differs when two
+    # axes are non-zero, but the default order MUST stay byte-identical.
+    from analysis.player.render import transform3d as t3
+    import numpy as np
+    m_default = t3.rotate_ordered(20.0, 40.0, 0.0, 'xyz')
+    assert np.array_equal(m_default, t3.rotate_xyz(20.0, 40.0, 0.0))
+    m_zyx = t3.rotate_ordered(20.0, 40.0, 0.0, 'zyx')
+    assert not np.allclose(m_default, m_zyx)
+
+
+def test_skewto_sets_both_skew_axes():
+    a = SimActor()
+    a.poke('skewto', [0.3, -0.2])
+    assert a.get('skew_x') == pytest.approx(0.3)
+    assert a.get('skew_y') == pytest.approx(-0.2)
+
+
+def test_skew_before_rotation_flag_records_and_reads():
+    a = SimActor()
+    assert a.read('GetSkewXBeforeRotation') == 0.0  # skew-after default
+    a.poke('skewx_before_rotation', [1])
+    assert a.read('GetSkewXBeforeRotation') == 1.0
+    a.poke('skewy_before_rotation', [1])
+    assert a.read('GetSkewYBeforeRotation') == 1.0
+
+
+def test_spherical_adds_accumulate_a_quaternion():
+    # A single roll(90) about z should match the z-axis quat; a rest actor
+    # holds the identity quat.
+    from analysis.player.render import transform3d as t3
+    a = SimActor()
+    assert a._current.get('quat') is None  # untouched -> identity at compose
+    a.poke('roll', [90.0])
+    q = a._current['quat']
+    expected = t3.quat_from_axis('z', 90.0)
+    assert q == pytest.approx(expected)
+
+
+def test_spherical_add_is_a_true_rotation_matrix():
+    # matrix_from_quat of a heading(90) quat is a proper rotation (det 1,
+    # orthonormal), and identity quat -> identity matrix (parity anchor).
+    from analysis.player.render import transform3d as t3
+    import numpy as np
+    ident = t3.matrix_from_quat((0.0, 0.0, 0.0, 1.0))
+    assert np.allclose(ident, np.eye(4))
+    q = t3.quat_from_axis('y', 90.0)
+    m = t3.matrix_from_quat(q)
+    assert np.linalg.det(m) == pytest.approx(1.0)
+    assert np.allclose(m @ m.T, np.eye(4), atol=1e-9)
 
 
 # -- mechanism 1: dest-state scalar write ------------------------------------

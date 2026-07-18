@@ -62,6 +62,23 @@ _LINK_RESTS = {
     'base_scale_x': 1.0, 'base_scale_y': 1.0, 'base_scale_z': 1.0,
     'alpha': 1.0, 'hidden': 0.0,
     'fov': field_projection.FOV,
+    # Fork transform-order state (NotITG SetRotationOrder + skew-before
+    # gates): 'skew_*_before' rest at 0 (skew applies AFTER rotation, the
+    # engine default), so an untouched link keeps the stock compose.
+    'skew_x_before': 0.0, 'skew_y_before': 0.0,
+}
+
+# Non-scalar link channels sampled as whole tuples, not per-component
+# curves: the rotation-order token ('xyz'..) and the accumulated spherical
+# quaternion (x, y, z, w). Both write as immediate keyframes, so the
+# EventTimeline holds the last value with no interpolation, and both rest
+# at the engine default (stock order, identity quat) - an untouched link
+# composes byte-identically to the pre-order path.
+_STOCK_ROTATION_ORDER = transform3d._ROTATION_ORDERS[0]
+_IDENTITY_QUAT = (0.0, 0.0, 0.0, 1.0)
+_TUPLE_LINK_RESTS = {
+    'rotation_order': (_STOCK_ROTATION_ORDER,),
+    'quat': _IDENTITY_QUAT,
 }
 
 # Player-field rest seats in design space: StepMania places the two
@@ -87,8 +104,11 @@ def link_timelines(keyframes, rests=None) -> dict:
     per-property rest values, e.g. the player seats)."""
     merged = {**_LINK_RESTS, **(rests or {})}
     keyframes = keyframes or {}
-    return {prop: EventTimeline(keyframes.get(prop, []), rest=(rest,))
-            for prop, rest in merged.items()}
+    timelines = {prop: EventTimeline(keyframes.get(prop, []), rest=(rest,))
+                 for prop, rest in merged.items()}
+    for prop, rest in _TUPLE_LINK_RESTS.items():
+        timelines[prop] = EventTimeline(keyframes.get(prop, []), rest=rest)
+    return timelines
 
 
 class _SumTimeline:
@@ -178,19 +198,38 @@ class TransformChannel:
         skew = v('skew_x')
         skewy = v('skew_y')
         z = v('z')
-        if (not (rx or ry or rz or skew or skewy or z)
+        quat = link['quat'].sample(t)
+        has_quat = quat != _IDENTITY_QUAT
+        if (not (rx or ry or rz or skew or skewy or z or has_quat)
                 and sx == 1.0 and sy == 1.0 and sz == 1.0):
             # The overwhelmingly common link state (a plain positioned
             # frame): one translation matrix instead of three matmuls,
             # sampled for every instance link every frame.
             return transform3d.translate(v('x'), v('y'))
-        m = transform3d.rotate_xyz(rx, ry, rz)
+        (order,) = link['rotation_order'].sample(t)
+        m = transform3d.rotate_ordered(rx, ry, rz, order)
+        if has_quat:
+            # Spherical adds (heading/pitch/roll) ride a quaternion the
+            # engine composes just after the Euler rotation (Actor.cpp
+            # BeginDraw:424-429): content rotates, then the quat spins it.
+            m = m @ transform3d.matrix_from_quat(quat)
         m = m @ transform3d.scale(sx, sy, sz)
         m = m @ transform3d.translate(v('x'), v('y'), z)
+        # skew_*_before_rotation toggles which side of the rotation the
+        # skew composes on (fork BeginDraw skew-order gate). Flag 0 is the
+        # stock placement this module has always used (skew applied to
+        # content before the rotate/scale block); the flag flips it to the
+        # far side, so an untouched link is byte-identical to before.
         if skew:
-            m = transform3d.skew_x(skew) @ m
+            if v('skew_x_before') >= 0.5:
+                m = m @ transform3d.skew_x(skew)
+            else:
+                m = transform3d.skew_x(skew) @ m
         if skewy:
-            m = transform3d.skew_y(skewy) @ m
+            if v('skew_y_before') >= 0.5:
+                m = m @ transform3d.skew_y(skewy)
+            else:
+                m = transform3d.skew_y(skewy) @ m
         return m
 
 

@@ -60,6 +60,7 @@ from analysis.games.notitg.lua_api import (
     _as_float, _as_int)
 from analysis.games.notitg.recording_actor import KIND_DEFAULTS
 from analysis.games.notitg.sim import verb_surface
+from analysis.player.render import transform3d
 from analysis.player.render.effects.easing import (
     EASE_SM_BOUNCE_BEGIN, EASE_SM_BOUNCE_END, EASE_SM_SPRING, ease)
 from analysis.player.render.effects.timeline import (Keyframe,
@@ -117,6 +118,16 @@ _SELF_EVIDENT_KINDS = frozenset({
 _DEFAULT_EFFECT_PERIOD = 1.0
 _DEFAULT_EFFECT_MAGNITUDE = (0.0, 0.0, 10.0)
 _DEFAULT_EFFECT_OFFSET = 0.0
+
+# Fork transform-order defaults (Actor::BeginDraw @ 004a4320). The stock
+# rotation order is 'xyz' (RageMatrixRotationXYZ), and the dest quaternion
+# rests at identity so a never-touched actor composes exactly as before.
+_DEFAULT_ROTATION_ORDER = 'xyz'
+_IDENTITY_QUAT = (0.0, 0.0, 0.0, 1.0)
+# Spherical single-axis adds -> the quat axis they spin about (RageQuatFromH
+# = heading/y, RageQuatFromP = pitch/x, RageQuatFromR = roll/z,
+# RageMath.cpp:311-341).
+_SPHERICAL_AXIS = {'heading': 'y', 'pitch': 'x', 'roll': 'z'}
 
 # Gap under which two driven-poke times merge into one span (seconds);
 # per-frame ticks are 1/60 apart, real gaps between sections are long.
@@ -269,6 +280,16 @@ class SimActor:
         self._driven = False
         self._driven_spans: list = []
         self._in_update = False
+        # Fork transform-order state (Actor::BeginDraw @ 004a4320): the
+        # Euler rotation order (SetRotationOrder) and whether each skew axis
+        # applies BEFORE the rotation (skewx/y_before_rotation). These are
+        # discrete modes, not tween state, so they write as immediate
+        # keyframes on their own channels and rest at the engine default
+        # ('xyz' order, skew-after). The spherical adds (heading/pitch/roll)
+        # accumulate onto a dest quaternion (RageQuatMultiply, Actor.cpp:894)
+        # recorded as an immediate 4-tuple resting at identity.
+        self._rotation_order = _DEFAULT_ROTATION_ORDER
+        self._quat = _IDENTITY_QUAT
         # keyframes() memo, invalidated on emit: the harvest surfaces
         # (named/actor/player keyframes, copies) each re-read every
         # actor, and re-simplifying per read is quadratic in practice.
@@ -399,6 +420,12 @@ class SimActor:
                 return self._current.get('aux', 0.0)
             case 'GetTweenTimeLeft':
                 return sum(t.left for t in self._tweens)
+            case 'GetRotationOrder':
+                return self._rotation_order
+            case 'GetSkewXBeforeRotation':
+                return self._current.get('skew_x_before', 0.0)
+            case 'GetSkewYBeforeRotation':
+                return self._current.get('skew_y_before', 0.0)
             case _:
                 return None
 
@@ -511,6 +538,16 @@ class SimActor:
                         'aux', self._current.get('aux', 0.0) + delta)
             case 'animate':
                 self._animate(_arg_float(arg0, 1.0) != 0.0)
+            case 'heading' | 'pitch' | 'roll':
+                self._add_spherical(_SPHERICAL_AXIS[verb], _arg_float(arg0))
+            case 'SetRotationOrder':
+                self._set_rotation_order(arg0)
+            case 'skewx_before_rotation':
+                self._set_skew_before('skew_x_before', arg0)
+            case 'skewy_before_rotation':
+                self._set_skew_before('skew_y_before', arg0)
+            case 'skewto':
+                self._skewto(args)
             # Any other verb pokes actor state we do not model; ignore it.
 
     def queue_command(self, name: str) -> None:
@@ -762,6 +799,49 @@ class SimActor:
             return
         current = self._current.get('frame', 0.0)
         self._set_immediate('frame', current)
+
+    def _add_spherical(self, axis, deg) -> None:
+        """A spherical rotation add (heading/pitch/roll): accumulate the
+        axis quaternion onto the dest quat (RageQuatMultiply, Actor.cpp:894).
+        Recorded as an immediate 4-tuple on the `quat` channel - the common
+        usage sets it with no tween in flight; a slerped quat tween (rare)
+        would need a dedicated channel and is not synthesized here."""
+        if deg is None:
+            return
+        self._quat = transform3d.quat_multiply(
+            self._quat, transform3d.quat_from_axis(axis, deg))
+        self._set_immediate('quat', self._quat)
+
+    def _set_rotation_order(self, token) -> None:
+        """SetRotationOrder(token): pick the Euler compose order (fork
+        SetRotationOrder @ 004abd70). An unknown token leaves the order be,
+        matching the engine's 'Invalid Rotation mode' log-and-ignore. The
+        4-char 'xyza' alias collapses to the stock 'xyz'."""
+        if not isinstance(token, str):
+            return
+        order = token.strip().lower()
+        if order == 'xyza':
+            order = 'xyz'
+        if order in transform3d._ROTATION_ORDERS:
+            self._rotation_order = order
+            self._set_immediate('rotation_order', order)
+
+    def _set_skew_before(self, prop, arg) -> None:
+        """skewx/y_before_rotation(flag): whether the skew axis applies
+        before the Euler rotation in the compose (fork BeginDraw skew-order
+        gate). Immediate mode state resting at 0 (skew-after)."""
+        flag = _arg_float(arg)
+        if flag is not None:
+            self._set_immediate(prop, 1.0 if flag != 0.0 else 0.0)
+
+    def _skewto(self, args) -> None:
+        """skewto(x, y): both-axis skew convenience -> skew_x + skew_y
+        (fork skewto, no openitg analogue - the fold gives no rect/duration
+        arg, so it maps to the two dest skew writes)."""
+        sx = _arg_float(args[0]) if args else None
+        sy = _arg_float(args[1]) if len(args) > 1 else None
+        self._set_scalar('skew_x', sx)
+        self._set_scalar('skew_y', sy)
 
     def _texture(self, verb, arg) -> None:
         if not isinstance(arg, str):
