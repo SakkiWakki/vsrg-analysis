@@ -162,6 +162,11 @@ class QtPlayerRenderer:
         self._hud_pixmap = None
         self._hud_rendered_at = 0.0
         self._hud_snapshot = None
+        # The GL backend's cached HUD target: the 'hud' capture slot's
+        # handle (None on the raster path, which uses `_hud_pixmap`).
+        self._hud_src = None
+        self._hud_slot_open = False
+        self._hud_painter = None
         # Offscreen capture slots + blit/snapshot ops. Raster (pooled
         # QPixmaps, capture.py) by default; frames painting on a GL
         # context route to the FBO-backed backend (gl_capture.py). Both
@@ -289,9 +294,8 @@ class QtPlayerRenderer:
         self.plugins.draw(Stage.PRE_FRAME, ctx)
         visibility = self._layer_visibility(ctx)
         try:
-            hud_painter = self._draw_chart(ctx, painter, effect_frame,
-                                           visibility, hud_due,
-                                           cache_enabled)
+            self._draw_chart(ctx, painter, effect_frame, visibility,
+                             cache_enabled)
         except Exception:
             # A mid-frame exception would otherwise leave capture
             # painters and native-painting brackets open, and every
@@ -301,10 +305,13 @@ class QtPlayerRenderer:
             # the exception surface to name the real culprit.
             self._abort_frame_captures()
             raise
-        if hud_painter is not None:
-            hud_painter.end()
-        if cache_enabled and self._hud_pixmap is not None:
-            painter.drawPixmap(0, 0, self._hud_pixmap)
+        # The HUD renders at the frame tail, after every capture
+        # bracket has closed: on the GL host it targets its own capture
+        # slot, which needs the host painter free to bracket.
+        if cache_enabled and hud_due:
+            self._render_hud(ctx, painter, visibility)
+        if cache_enabled:
+            self._blit_hud(painter)
             if _CAPTURE_DEBUG:
                 self._debug_verify_hud_target(ctx, painter)
         if _CAPTURE_DEBUG >= 2:
@@ -323,14 +330,13 @@ class QtPlayerRenderer:
             pass
 
 
-    def _draw_chart(self, ctx, painter, effect_frame, visibility, hud_due,
+    def _draw_chart(self, ctx, painter, effect_frame, visibility,
                     cache_enabled):
         """The capture-active middle of `draw`: chart layers, field
         instance composite, screen composite, and the shader stage.
         Split out so `draw` can unwind the capture brackets when any
-        layer or plugin throws mid-frame. Returns the open HUD pixmap
-        painter (or None) for the caller to finish."""
-        hud_painter = None
+        layer or plugin throws mid-frame. HUD layers are skipped here
+        (rendered at the frame tail by `_render_hud`)."""
         # Shader passes post-process the chart as a whole: capture
         # background + field layers into the GL pipeline's FBO and let
         # it blit the shaded result back before the HUD (which never
@@ -425,17 +431,13 @@ class QtPlayerRenderer:
                 chart_wrapped = self._begin_effect_transform(
                     effect_frame, field_painter or chart_painter, ctx)
             if is_hud:
-                # HUD layers render into a cached pixmap at most
-                # _HUD_REDRAW_HZ; chart layers stay per-frame. On dense
-                # charts the sidebar's measure+draw passes cost more
-                # than the notes, and its content changes far slower
-                # than the 500 Hz frame cadence.
-                if not hud_due:
-                    continue
-                if hud_painter is None:
-                    hud_painter = self._begin_hud_pixmap(ctx, painter)
-                target = hud_painter
-            elif captured:
+                # HUD layers render into a cached offscreen target at
+                # most _HUD_REDRAW_HZ, at the frame TAIL (`_render_hud`)
+                # once every capture bracket has closed - on the GL host
+                # the target is a capture slot that must bracket the
+                # host painter. Skipped entirely here.
+                continue
+            if captured:
                 # Captured layers draw into whichever offscreen buffer is
                 # open: the field pixmap for the field layers, or (for the
                 # background layer under a 'full' copy) the backdrop pixmap.
@@ -471,7 +473,6 @@ class QtPlayerRenderer:
             chart_painter = underlying_chart_painter
         if capturing:
             self._end_shader_capture(effect_frame, ctx)
-        return hud_painter
 
     def _composite_effects(self, player, ctx):
         effects = getattr(player, '_render_effects', None) if player else None
@@ -638,6 +639,8 @@ class QtPlayerRenderer:
         self._field_src = None
         self._field2_src = None
         self._backdrop_src = None
+        self._hud_slot_open = False
+        self._hud_painter = None
         self._capture.release(self._screen_capture)
         self._screen_capture = None
 
@@ -672,6 +675,10 @@ class QtPlayerRenderer:
         self._field_src = None
         self._field2_src = None
         self._backdrop_src = None
+        # The cached HUD target belongs to the old backend too; the
+        # first-render trigger in _hud_redraw_due re-renders it.
+        self._hud_src = None
+        self._hud_pixmap = None
 
     def _sync_prev_screen(self, ctx) -> None:
         """Drop the retained previous-frame AFT capture on a seek
@@ -1020,7 +1027,7 @@ class QtPlayerRenderer:
         changed faster than the steady cadence: interaction state
         (edit mode, drag, flyout, wheel scroll), geometry, or layer
         visibility. Otherwise at most every 1/_HUD_REDRAW_HZ."""
-        if self._hud_pixmap is None:
+        if self._hud_pixmap is None and self._hud_src is None:
             return True
         p = ctx.player
         interacting = hud is not None and (
@@ -1041,20 +1048,78 @@ class QtPlayerRenderer:
             return True
         return False
 
-    def _begin_hud_pixmap(self, ctx, painter):
-        """Fresh transparent pixmap covering the window; HUD layers and
-        their plugin stages paint into it, then it blits per frame."""
-        from PySide6.QtGui import QPixmap
+    def _render_hud(self, ctx, painter, visibility) -> None:
+        """Render the HUD layers (+ their plugin stages) into the
+        cached HUD target: a capture slot on the GL backend, a pooled
+        transparent pixmap otherwise.
+
+        On the GL host the HUD must NOT be a QPixmap: blitting a
+        window-sized pixmap routes through Qt's shared pixmap-texture
+        cache, and re-uploading ~12MB at the HUD redraw cadence
+        thrashes that cache past its eviction limit - entries cross and
+        drawPixmap starts serving the WRONG texture (the HUD appearing
+        compressed inside sprite rects while its own region goes
+        empty). A capture slot keeps the HUD on the GPU with no cache
+        involvement. Runs at the frame tail so the slot's native
+        bracket has the host painter free."""
+        hud_painter = self._begin_hud_target(ctx, painter)
+        try:
+            for name, fn, stage in self._layers:
+                if name not in _HUD_LAYERS:
+                    continue
+                if visibility.get(name, True) and fn is not None:
+                    self._draw_layer(fn, ctx, hud_painter, name,
+                                     is_hud=True)
+                if stage is not None:
+                    prev_painter = getattr(ctx, 'painter', None)
+                    ctx.painter = hud_painter
+                    self.plugins.draw(stage, ctx)
+                    ctx.painter = prev_painter
+        finally:
+            self._end_hud_target()
+
+    def _begin_hud_target(self, ctx, painter):
         p = ctx.player
-        dpr = float(painter.device().devicePixelRatioF())
-        pm = QPixmap(int(p.W * dpr), int(p.H * dpr))
-        pm.setDevicePixelRatio(dpr)
-        pm.fill(Qt.GlobalColor.transparent)
-        self._hud_pixmap = pm
-        hud_painter = QPainter(pm)
+        if isinstance(self._capture, gl_capture.GLCaptureBackend):
+            self._hud_pixmap = None
+            hud_painter = self._capture.open('hud', painter, p.W, p.H)
+            self._hud_slot_open = True
+        else:
+            from PySide6.QtGui import QPixmap
+            self._hud_src = None
+            self._hud_slot_open = False
+            dpr = float(painter.device().devicePixelRatioF())
+            size = (int(p.W * dpr), int(p.H * dpr))
+            pm = self._hud_pixmap
+            if pm is None or (pm.width(), pm.height()) != size:
+                pm = QPixmap(*size)
+            pm.setDevicePixelRatio(dpr)
+            pm.fill(Qt.GlobalColor.transparent)
+            self._hud_pixmap = pm
+            hud_painter = QPainter(pm)
         hud_painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         hud_painter.setFont(self.font)
+        self._hud_painter = hud_painter
         return hud_painter
+
+    def _end_hud_target(self) -> None:
+        if self._hud_slot_open:
+            self._hud_slot_open = False
+            self._hud_src = self._capture.close('hud')
+        elif self._hud_painter is not None:
+            self._hud_painter.end()
+        self._hud_painter = None
+
+    def _blit_hud(self, painter) -> None:
+        """Composite the cached HUD target over the frame: the slot
+        handle as a textured quad on the GL backend, the pooled pixmap
+        otherwise."""
+        if self._hud_src is not None:
+            handle = self._hud_src
+            self._capture.blit(painter, handle,
+                               QRectF(0, 0, handle.w, handle.h))
+        elif self._hud_pixmap is not None:
+            painter.drawPixmap(0, 0, self._hud_pixmap)
 
     def _layer_draw_fns(self):
         # Only layers whose `draw` is a string lookup (plugin manifest

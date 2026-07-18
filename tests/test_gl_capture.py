@@ -361,6 +361,42 @@ def test_gl_draw_recovers_after_layer_exception(gl):
     assert _probe(image, 80, 75) == (10, 200, 30)
 
 
+def test_gl_hud_target_renders_via_capture_slot(gl):
+    """On the GL host the HUD renders into the 'hud' capture slot and
+    blits as a texture - never through Qt's pixmap-texture cache (the
+    window-sized-pixmap churn crossed its entries under load). The
+    cached handle survives frames without redraw."""
+    host = _GlHost()
+    r = _gl_renderer(host)
+    ctx = _ctx(7.0)
+    hp = r._begin_hud_target(ctx, host.painter)
+    hp.fillRect(160, 0, 40, 150, QColor(90, 90, 95))
+    r._end_hud_target()
+    assert r._hud_src is not None and r._hud_pixmap is None
+    r._blit_hud(host.painter)
+    r._blit_hud(host.painter)  # cached handle blits again without redraw
+    image = host.finish()
+    assert _probe(image, 180, 75) == (90, 90, 95)
+    assert _probe(image, 80, 75) == (0, 0, 0)  # transparent chart area
+
+
+def test_raster_hud_target_pools_pixmap():
+    host = _RasterHost()
+    r = QtPlayerRenderer(plugin_manager=SimpleNamespace())
+    ctx = _ctx(7.0)
+    hp = r._begin_hud_target(ctx, host.painter)
+    hp.fillRect(160, 0, 40, 150, QColor(90, 90, 95))
+    r._end_hud_target()
+    first = r._hud_pixmap
+    assert first is not None and r._hud_src is None
+    r._blit_hud(host.painter)
+    hp = r._begin_hud_target(ctx, host.painter)
+    r._end_hud_target()
+    assert r._hud_pixmap is first  # pooled, not reallocated
+    image = host.finish()
+    assert _probe(image, 180, 75) == (90, 90, 95)
+
+
 def test_gl_batch_leaves_no_buffer_bound(gl):
     """After a blits batch, our quad VBO must not stay bound to
     GL_ARRAY_BUFFER: Qt's paint engine may specify vertex pointers
