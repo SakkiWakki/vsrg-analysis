@@ -312,6 +312,39 @@ def test_gl_unified_stage_blits_unshaded_when_nothing_runnable(gl):
     assert _probe(image, 80, 75) == (20, 220, 40)
 
 
+def test_gl_ln_ribbon_survives_mod_slam_coordinates(gl):
+    """Mod-slam spine samples (x ~ 1e5) used to overflow the GL paint
+    engine's +/-32767 concave-fill limit: the visible ribbon vanished
+    for the slam frame with a 'Painter path exceeds' warning. The
+    sample clamp keeps the in-view ribbon drawn and the engine quiet."""
+    from PySide6.QtCore import qInstallMessageHandler
+
+    import numpy as np
+
+    from analysis.player.render.layers.notes import _draw_ln_body_stroke
+
+    warnings = []
+    qInstallMessageHandler(lambda _mode, _ctx, msg: warnings.append(msg))
+    try:
+        host = _GlHost()
+        pm = QPixmap(20, 20)
+        pm.fill(QColor(200, 30, 200))
+        ctx = SimpleNamespace(
+            player=SimpleNamespace(W=W, H=H, skin='bar'),
+            sprite_cache=SimpleNamespace(get=lambda *a, **k: pm),
+            lane_width=lambda _col: 20)
+        n = SimpleNamespace(
+            body_path=(np.array([100.0, 100000.0]),
+                       np.array([10.0, 140.0])),
+            col=0, is_roll=False)
+        _draw_ln_body_stroke(ctx, host.painter, n, 0.0, 150.0, 'normal')
+        image = host.finish()
+    finally:
+        qInstallMessageHandler(None)
+    assert not [w for w in warnings if '32767' in w]
+    assert _probe(image, 150, 11) == (200, 30, 200)
+
+
 def test_gl_snapshot_freelist_recycles_released_textures(gl):
     host = _GlHost()
     backend = gl_capture.GLCaptureBackend()

@@ -541,6 +541,13 @@ def _body_fill_color(pm):
     return color
 
 
+# How far outside the window a clamped body sample may sit. Big enough
+# that clamping never changes in-view geometry perceptibly, small enough
+# that window + pad stays well under the GL paint engine's +/-32767
+# device-coordinate limit even at high device pixel ratios.
+_BODY_COORD_PAD = 8000.0
+
+
 def _draw_ln_body_stroke(ctx, painter, n, top, bot, state):
     """Draw a hold body as a constant-width ribbon stroked along its path
     (`n.body_path`). This is the ONE body renderer for every non-straight
@@ -555,6 +562,21 @@ def _draw_ln_body_stroke(ctx, painter, n, top, bot, state):
         return
     xs, ys = clipped[0], clipped[1]
     alphas = clipped[2] if len(clipped) > 2 else None
+
+    # Mod slams (`*10000 500 beat`-style pokes) throw samples arbitrarily
+    # far offscreen, and the GL paint engine DROPS concave path fills
+    # whose device bounds leave +/-32767 px (the raster engine had no
+    # such limit) - the whole visible ribbon vanishes for the slam
+    # frame, with a "Painter path exceeds +/-32767 pixels" warning.
+    # Clamp samples into a generously offscreen box: a clamped point is
+    # still thousands of px outside the window in the same direction, so
+    # the in-view ribbon keeps its shape while the path stays inside the
+    # engine's range at any plausible device pixel ratio.
+    p = ctx.player
+    xs = np.clip(xs, -_BODY_COORD_PAD,
+                 getattr(p, 'W', 0) + _BODY_COORD_PAD)
+    ys = np.clip(ys, -_BODY_COORD_PAD,
+                 getattr(p, 'H', 0) + _BODY_COORD_PAD)
 
     pm = ctx.sprite_cache.get('ln_body', ctx,
                               col=n.col, state=state, is_roll=n.is_roll)
