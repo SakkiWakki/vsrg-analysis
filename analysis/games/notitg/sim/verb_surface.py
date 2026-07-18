@@ -252,8 +252,6 @@ DEFERRED: dict = {
     # actor's natural size the sim does not carry.
     'position': 'SetPosition - spline path time, not an x/y write '
                 '(Actor.h:494); no spline model',
-    'stretchto': 'StretchTo(rect) - resize to a rect using natural size '
-                 '(Actor.h:497); size math not carried',
     'scaletocover': 'ScaleToCover(rect) - fit-covering scale from natural '
                     'size (Actor.h:553); size math not carried',
     'scaletofit': 'ScaleToFitInside(rect) - fit-inside scale from natural '
@@ -346,6 +344,9 @@ HANDLED_BY_NAME: dict = {
     'effectclock': 'effect-span', 'effectdelay': 'effect-span',
     'effectcolor1': 'effect-span', 'effectcolor2': 'effect-span',
     'GetSecsIntoEffect': 'effect-span', 'GetTweenTimeLeft': 'effect-span',
+    # StretchTo(rect): position at rect center + absolute size to fill it
+    # (SimActor._poke_multi_arg does the center/extent math).
+    'stretchto': 'size-fill',
     # mechanism 8: immediate bit / hint writes SimActor models
     'hidden': 'visibility', 'visible': 'visibility',
     'blend': 'blend', 'additiveblend': 'blend',
