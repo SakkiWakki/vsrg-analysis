@@ -291,10 +291,18 @@ def _scan_start_tag(text: str, lt: int):
         len(text)
 
 
+def _lua_expr_body(value: str) -> str:
+    """The Lua expression after the `%`, with trailing semicolons
+    dropped - charts write `%function(self) ... end;` and the engine's
+    `return <body>` compile absorbs the `;` as a statement terminator,
+    which our `(<expr>)` wrappers cannot."""
+    return re.sub(r'[;\s]+$', '', value[1:].strip())
+
+
 def is_lua_function_literal(value: str) -> bool:
     """True for a `%function(...) ... end` command body - the common
     literal shape, as opposed to a `%expr` expression command."""
-    body = value[1:].strip()
+    body = _lua_expr_body(value)
     return bool(re.match(r'function\s*\(', body)) and body.endswith('end')
 
 
@@ -307,7 +315,7 @@ def _strip_lua_wrapper(value: str) -> str:
     statement - it may resolve to a function only at fire time
     (the XGML template's `%prefix.update` reads a global its
     InitCommand binds)."""
-    body = value[1:].strip()
+    body = _lua_expr_body(value)
     header = re.match(r'function\s*\(([^)]*)\)', body)
     if header and body.endswith('end'):
         return body[header.end():-len('end')]

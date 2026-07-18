@@ -123,6 +123,15 @@ def test_at_attr_evaluates_at_load():
     assert root.children[0].attrs['Type'] == 'Sprite'
 
 
+def test_function_literal_with_trailing_semicolon():
+    # mawaru9 writes InitCommand="%function(self) ... end;" - the
+    # engine's `return <body>` compile absorbs the semicolon; the
+    # literal detector and stripper must too.
+    value = '%function(self) bound = self end;'
+    assert xml_actors.is_lua_function_literal(value)
+    assert xml_actors._strip_lua_wrapper(value) == ' bound = self '
+
+
 def test_queued_command_stopping_own_tweens_survives_drain():
     # A queue-carried command may call stoptweening on ITS OWN actor
     # mid-drain, clearing the queue while update_to still holds the old

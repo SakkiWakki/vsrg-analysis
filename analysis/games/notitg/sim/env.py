@@ -30,8 +30,8 @@ from analysis.games.notitg.mod_stubs import (
     _PERMISSIVE_BOOTSTRAP, _lua_name_set)
 from analysis.games.notitg.sim.actor import SimActor
 from analysis.games.notitg.xml_actors import (
-    _lua50_compat, _strip_lua_wrapper, is_lua_function_literal,
-    parse_command_string)
+    _lua50_compat, _lua_expr_body, _strip_lua_wrapper,
+    is_lua_function_literal, parse_command_string)
 from analysis.player.render.lua import LuaHost
 from analysis.player.render.lua.host import LuaScriptError
 
@@ -631,7 +631,7 @@ class SimEnvironment:
         name = f'{self._label(rec_id)}.{suffix}'
         try:
             result = self._host.compile(
-                f'return ({body[1:].strip()})', name=name)()
+                f'return ({_lua_expr_body(body)})', name=name)()
         except Exception as exc:
             self._warnings.append(f'{name}: {exc}')
             return None
