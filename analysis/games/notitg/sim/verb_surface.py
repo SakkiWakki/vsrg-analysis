@@ -270,12 +270,8 @@ DEFERRED: dict = {
     # actor's natural size the sim does not carry.
     'position': 'SetPosition - spline path time, not an x/y write '
                 '(Actor.h:494); no spline model',
-    'scaletocover': 'ScaleToCover(rect) - fit-covering scale from natural '
-                    'size (Actor.h:553); size math not carried',
-    'scaletofit': 'ScaleToFitInside(rect) - fit-inside scale from natural '
-                  'size (Actor.h:554); size math not carried',
-    # (diffuse gradients / glow / edge fades, and crop composites now
-    # implemented - see HANDLED_BY_NAME / CROP_COMPOSITES.)
+    # (scaletocover/scaletofit, diffuse gradients / glow / edge fades, and
+    # crop composites now implemented - see HANDLED_BY_NAME / CROP_COMPOSITES.)
     # primitives + live tiers already deferred in lua_api.
     'luaeffect': 'arbitrary per-frame Lua effect (SetEffectLua) - live '
                  'channel tier, chart Lua owns it',
@@ -310,11 +306,7 @@ DEFERRED: dict = {
     'SetShader': 'per-actor shader program bind - GL executor',
     'GetShader': 'per-actor shader program handle - GL executor',
     'ClearShader': 'per-actor shader clear - GL executor',
-    # meta / tree readback returning sizes the sim does not carry.
-    'GetWidth': 'natural width - the sim does not carry actor pixel size',
-    'GetHeight': 'natural height - see GetWidth',
-    'SetWidth': 'overrides natural width - size math not carried',
-    'SetHeight': 'overrides natural height - size math not carried',
+    # meta / tree readback the sim does not model.
     'GetParent': 'actor-tree parent - env registry owns tree navigation',
 }
 
@@ -345,6 +337,14 @@ HANDLED_BY_NAME: dict = {
     # StretchTo(rect): position at rect center + absolute size to fill it
     # (SimActor._poke_multi_arg does the center/extent math).
     'stretchto': 'size-fill',
+    # ScaleToCover/ScaleToFitInside(rect): center + a UNIFORM zoom of the
+    # natural size (SimActor._scale_to records the rect + mode onto the
+    # fit_* channels; the renderer, which knows the true natural size,
+    # resolves the fitted size). SetWidth/SetHeight override the natural
+    # (unzoomed) size the fit and GetWidth/GetHeight read (Actor.h:124-129).
+    'scaletocover': 'size-fit', 'scaletofit': 'size-fit',
+    'SetWidth': 'natural-size', 'SetHeight': 'natural-size',
+    'GetWidth': 'natural-size', 'GetHeight': 'natural-size',
     # mechanism 8: immediate bit / hint writes SimActor models
     'hidden': 'visibility', 'visible': 'visibility',
     'blend': 'blend', 'additiveblend': 'blend',

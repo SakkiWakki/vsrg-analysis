@@ -1353,6 +1353,9 @@ _DRAWABLE_PROPS = frozenset({
     # the unset/no-effect sentinels -> a flat actor draws identically).
     'color_ul', 'color_ur', 'color_ll', 'color_lr', 'glow',
     'fade_left', 'fade_right', 'fade_top', 'fade_bottom',
+    # ScaleToCover/ScaleToFitInside rect + mode (rest fit_mode 0 -> the
+    # renderer resolves the fitted size only when a fit was recorded).
+    'fit_mode', 'fit_left', 'fit_top', 'fit_right', 'fit_bottom',
 })
 
 

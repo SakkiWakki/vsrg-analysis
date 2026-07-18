@@ -84,6 +84,14 @@ _SCALAR_RESTS = {
     # full at the fade distance (Sprite.cpp:560). Rest 0 = no fade, so an
     # element never poked with a fade verb draws with hard edges.
     'fade_left': 0.0, 'fade_right': 0.0, 'fade_top': 0.0, 'fade_bottom': 0.0,
+    # ScaleToCover/ScaleToFitInside(rect): the target rect plus a mode
+    # sentinel (0 none, 1 cover, 2 fit-inside). The setter needs the
+    # actor's true natural size to pick the uniform zoom, and that size is
+    # a render-time fact for a sprite, so the sim records the rect + mode
+    # here and the renderer resolves the fitted size. Rest fit_mode 0 =
+    # no fit, so an actor never fit draws through natural*scale unchanged.
+    'fit_mode': 0.0,
+    'fit_left': 0.0, 'fit_top': 0.0, 'fit_right': 0.0, 'fit_bottom': 0.0,
 }
 
 # Tuple-valued color rests, merged alongside 'color' in build_timelines.

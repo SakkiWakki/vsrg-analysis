@@ -77,11 +77,37 @@ def _draw_size(el, t, natural) -> tuple:
     zoom after zoomto. A group carries no size timelines, so it passes
     through untouched."""
     nat_w, nat_h = natural
+    fit_mode = el.sample('fit_mode', t)[0] if 'fit_mode' in el.timelines \
+        else 0.0
+    if fit_mode >= 0.5:
+        return _fit_size(el, t, nat_w, nat_h, fit_mode)
     (size_x,) = el.sample('size_x', t)
     (size_y,) = el.sample('size_y', t)
     w = size_x if size_x >= 0.0 else nat_w
     h = size_y if size_y >= 0.0 else nat_h
     return (w, h)
+
+
+_FIT_COVER = 1.0
+
+
+def _fit_size(el, t, nat_w, nat_h, mode) -> tuple:
+    """Natural size scaled by the UNIFORM zoom ScaleToCover/ScaleToFitInside
+    picks for the recorded rect (Actor.cpp:685-698): the per-axis ratios
+    rect/natural, then the LARGER (cover, fills the rect) or SMALLER
+    (fit-inside, letterboxes) of the two, applied to both axes. Returns the
+    fitted UNZOOMED size; `scale_x/y` still multiplies on top, exactly as
+    the engine applies zoom after SetZoom. Natural (1,1) - a sprite whose
+    texture size the sim could not carry - degrades to filling the rect."""
+    left = el.sample('fit_left', t)[0]
+    top = el.sample('fit_top', t)[0]
+    right = el.sample('fit_right', t)[0]
+    bottom = el.sample('fit_bottom', t)[0]
+    ratio_x = abs((right - left) / nat_w) if nat_w else 0.0
+    ratio_y = abs((bottom - top) / nat_h) if nat_h else 0.0
+    zoom = max(ratio_x, ratio_y) if mode == _FIT_COVER \
+        else min(ratio_x, ratio_y)
+    return (nat_w * zoom, nat_h * zoom)
 
 
 _CROP_PROPS = ('crop_left', 'crop_top', 'crop_right', 'crop_bottom')

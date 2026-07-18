@@ -112,6 +112,24 @@ _FADE_VERBS = {
     'fade': ('fade_left', 'fade_right', 'fade_top', 'fade_bottom'),
 }
 
+# Actor natural (unzoomed) pixel size, openitg Actor.cpp:82 - `m_size` is
+# born (1, 1) and a Sprite overwrites it with its texture dimensions.
+# SetWidth/SetHeight (Actor.h:128-129) override it directly; GetWidth/
+# GetHeight (GetUnzoomedWidth/Height, Actor.h:124-125) read it back. The
+# sim never loads pixels, so a plain sprite's true natural size is only
+# resolvable at render time - this default is the engine's starting m_size
+# and the basis SetWidth/SetHeight, GetWidth/GetHeight, and a `(1,1)`-natural
+# fit operate against.
+_DEFAULT_NATURAL_SIZE = (1.0, 1.0)
+
+# ScaleToCover/ScaleToFitInside modes (Actor.h:226 StretchType). Recorded
+# onto the `fit_mode` channel so the renderer - which knows the true natural
+# size - picks the uniform zoom (larger ratio covers, smaller fits inside,
+# Actor.cpp:690-698). Rest 0 = no fit, so an actor never fit draws through
+# the natural*scale path unchanged.
+_FIT_COVER = 1.0
+_FIT_INSIDE = 2.0
+
 # Custom shader-uniform upload verbs (`GetShader():uniform1f(name, v)`).
 # All carry the GLSL uniform name first and its value(s) after; only the
 # first scalar component is recorded onto `uniform:<name>` (the
@@ -313,6 +331,12 @@ class SimActor:
         self._ease_start: dict = {}
         self._head_begin_t = 0.0
         self._frames: dict = {}
+        # Natural (unzoomed) size, m_size (openitg Actor.cpp:82). Only
+        # SetWidth/SetHeight move it in the sim (a real sprite's texture
+        # size is a render-time fact); GetWidth/GetHeight and the fit verbs
+        # read it. Kept off the keyframe channels - it is actor state, not
+        # a per-frame draw value, so recording it never perturbs output.
+        self._natural = list(_DEFAULT_NATURAL_SIZE)
         self._aft_source: str | None = None
         self._aft_texture_name: str | None = None
         self._osc_spans: list = []
@@ -458,6 +482,10 @@ class SimActor:
                 return str(self._current.get('text', ''))
             case 'getaux':
                 return self._current.get('aux', 0.0)
+            case 'GetWidth':
+                return self._natural[0]
+            case 'GetHeight':
+                return self._natural[1]
             case 'GetTweenTimeLeft':
                 return sum(t.left for t in self._tweens)
             case 'GetRotationOrder':
@@ -603,6 +631,10 @@ class SimActor:
                 self._set_skew_before('skew_y_before', arg0)
             case 'skewto':
                 self._skewto(args)
+            case 'SetWidth':
+                self._set_natural(0, _arg_float(arg0))
+            case 'SetHeight':
+                self._set_natural(1, _arg_float(arg0))
             # Any other verb pokes actor state we do not model; ignore it.
 
     def queue_command(self, name: str) -> None:
@@ -633,6 +665,12 @@ class SimActor:
                     self._set_scalar('y', (y1 + y2) / 2.0)
                     self._set_scalar('size_x', abs(x2 - x1))
                     self._set_scalar('size_y', abs(y2 - y1))
+            return True
+        if verb == 'scaletocover':
+            self._scale_to(args, _FIT_COVER)
+            return True
+        if verb == 'scaletofit':
+            self._scale_to(args, _FIT_INSIDE)
             return True
         if verb in _SIZE_PAIR_SETTERS:
             self._set_scalar('size_x', _arg_float(args[0] if args else None))
@@ -721,6 +759,40 @@ class SimActor:
         (Actor.h:117)."""
         if delta is not None:
             self._write_dest(prop, self.get_dest(prop) + delta)
+
+    def _set_natural(self, axis, value) -> None:
+        """SetWidth/SetHeight: override the natural (unzoomed) size on one
+        axis (m_size, Actor.h:128-129). Actor state, not a keyframe channel
+        - GetWidth/GetHeight and the fit verbs read it, nothing draws it."""
+        if value is not None:
+            self._natural[axis] = float(value)
+
+    def _scale_to(self, args, mode) -> None:
+        """ScaleToCover/ScaleToFitInside(rect): center on the rect and pick
+        a UNIFORM zoom from the actor's natural size (Actor.cpp:672-702).
+        The center is natural-independent, so the sim writes x/y now; the
+        zoom depends on the true natural size (a render-time fact for a
+        sprite), so the sim records the rect + mode onto the `fit_*`
+        channels and the renderer resolves the zoom. A negative rect
+        dimension flips the actor 180deg about that axis, exactly as the
+        engine does before taking |ratio|."""
+        if len(args) < 4:
+            return
+        left, top, right, bottom = (_arg_float(a) for a in args[:4])
+        if None in (left, top, right, bottom):
+            return
+        width, height = right - left, bottom - top
+        if width < 0:
+            self._set_scalar('rotation_y', 180.0)
+        if height < 0:
+            self._set_scalar('rotation_x', 180.0)
+        self._set_scalar('x', (left + right) / 2.0)
+        self._set_scalar('y', (top + bottom) / 2.0)
+        self._set_scalar('fit_left', left)
+        self._set_scalar('fit_top', top)
+        self._set_scalar('fit_right', right)
+        self._set_scalar('fit_bottom', bottom)
+        self._set_scalar('fit_mode', mode)
 
     def _poke_tween(self, verb, arg0) -> bool:
         match verb:

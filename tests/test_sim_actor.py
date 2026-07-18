@@ -434,3 +434,135 @@ def test_crop_composite_matches_scalar_edge_setters():
 
     for edge in ('crop_left', 'crop_top', 'crop_right', 'crop_bottom'):
         assert composite.get(edge) == scalars.get(edge)
+
+
+# -- natural size: SetWidth/SetHeight <-> GetWidth/GetHeight ------------------
+# m_size is born (1, 1) (Actor.cpp:82); SetWidth/SetHeight override it
+# (Actor.h:128-129) and GetWidth/GetHeight read it back (GetUnzoomedWidth/
+# Height, Actor.h:124-125).
+
+def test_natural_size_defaults_to_engine_m_size():
+    a = SimActor()
+    assert a.read('GetWidth') == 1.0
+    assert a.read('GetHeight') == 1.0
+
+
+def test_setwidth_setheight_readback():
+    a = SimActor()
+    a.poke('SetWidth', [640.0])
+    a.poke('SetHeight', [480.0])
+    assert a.read('GetWidth') == 640.0
+    assert a.read('GetHeight') == 480.0
+
+
+def test_setwidth_is_actor_state_not_a_keyframe_channel():
+    # SetWidth moves the natural basis, not a drawn value: it must not emit
+    # any keyframe, so a gat AFT that only SetWidth/SetHeight stays inert.
+    a = SimActor()
+    a.poke('SetWidth', [1920.0])
+    a.poke('SetHeight', [1080.0])
+    assert a.keyframes() == {}
+
+
+# -- scaletocover / scaletofit: center now, fit_* recorded for the renderer --
+# ScaleTo centers on the rect (SetXY) and records the rect + mode; the
+# renderer resolves the uniform zoom from the true natural size
+# (Actor.cpp:672-702).
+
+def test_scaletofit_centers_and_records_rect_and_mode():
+    a = SimActor()
+    a.poke('scaletofit', [0.0, 0.0, 640.0, 480.0])
+    assert a.get('x') == 320.0
+    assert a.get('y') == 240.0
+    assert a.get('fit_left') == 0.0
+    assert a.get('fit_top') == 0.0
+    assert a.get('fit_right') == 640.0
+    assert a.get('fit_bottom') == 480.0
+    assert a.get('fit_mode') == 2.0
+
+
+def test_scaletocover_records_cover_mode():
+    a = SimActor()
+    a.poke('scaletocover', [100.0, 50.0, 300.0, 250.0])
+    assert a.get('x') == 200.0
+    assert a.get('y') == 150.0
+    assert a.get('fit_mode') == 1.0
+
+
+def test_scaleto_negative_rect_flips_rotation():
+    # rect_width < 0 -> SetRotationY(180); rect_height < 0 -> SetRotationX
+    # (Actor.cpp:678-679).
+    a = SimActor()
+    a.poke('scaletofit', [640.0, 480.0, 0.0, 0.0])
+    assert a.get('rotation_y') == 180.0
+    assert a.get('rotation_x') == 180.0
+
+
+def test_scaleto_short_arglist_is_a_noop():
+    a = SimActor()
+    a.poke('scaletofit', [0.0, 0.0])
+    assert a.keyframes() == {}
+
+
+# -- renderer fit resolution: uniform zoom of the natural size ---------------
+
+def test_fit_size_cover_uses_larger_ratio():
+    from types import SimpleNamespace
+
+    from analysis.player.render.effects.timeline import EventTimeline, Keyframe
+    from analysis.player.render.storyboard.render import _draw_size
+    rect = {'fit_left': 0.0, 'fit_top': 0.0, 'fit_right': 640.0,
+            'fit_bottom': 480.0, 'fit_mode': 1.0}
+    tl = {p: EventTimeline([Keyframe(0.0, (v,), 0.0, 0)], rest=(0.0,))
+          for p, v in rect.items()}
+    el = SimpleNamespace(timelines=tl, sample=lambda p, t: tl[p].sample(t))
+    # natural 200x200: ratios 3.2 and 2.4; cover picks 3.2 -> 640x640.
+    assert _draw_size(el, 0.0, (200.0, 200.0)) == (640.0, 640.0)
+
+
+def test_fit_size_inside_uses_smaller_ratio():
+    from types import SimpleNamespace
+
+    from analysis.player.render.effects.timeline import EventTimeline, Keyframe
+    from analysis.player.render.storyboard.render import _draw_size
+    rect = {'fit_left': 0.0, 'fit_top': 0.0, 'fit_right': 640.0,
+            'fit_bottom': 480.0, 'fit_mode': 2.0}
+    tl = {p: EventTimeline([Keyframe(0.0, (v,), 0.0, 0)], rest=(0.0,))
+          for p, v in rect.items()}
+    el = SimpleNamespace(timelines=tl, sample=lambda p, t: tl[p].sample(t))
+    # natural 200x200: fit picks 2.4 -> 480x480 (letterboxed inside 640x480).
+    assert _draw_size(el, 0.0, (200.0, 200.0)) == (480.0, 480.0)
+
+
+def test_no_fit_channel_draws_natural_unchanged():
+    # Parity: an element never fit falls through to the natural*scale path.
+    from types import SimpleNamespace
+
+    from analysis.player.render.effects.timeline import EventTimeline
+    from analysis.player.render.storyboard.render import _draw_size
+    tl = {'size_x': EventTimeline([], rest=(-1.0,)),
+          'size_y': EventTimeline([], rest=(-1.0,))}
+    el = SimpleNamespace(timelines=tl, sample=lambda p, t: tl[p].sample(t))
+    assert _draw_size(el, 0.0, (128.0, 256.0)) == (128.0, 256.0)
+
+
+# -- end to end: scaletofit flows through the env to recorded fit channels ---
+
+def test_scaletofit_records_fit_channels_through_env():
+    import pytest as _pytest
+    _pytest.importorskip('lupa')
+    from analysis.games.notitg.sim.env import SimEnvironment
+    from analysis.games.notitg.xml_actors import parse_actor_xml
+    env = SimEnvironment(0.0, 0, to_seconds=lambda b: b * 0.5)
+    env.load_actors(parse_actor_xml(
+        '<ActorFrame><children>'
+        '<Sprite Texture="bg" OnCommand="scaletofit,0,0,640,480;diffusealpha,1"/>'
+        '</children></ActorFrame>').root)
+    fit = next(frames for frames in env.actor_keyframes().values()
+               if 'fit_mode' in frames)
+    assert fit['fit_mode'][0].values == (2.0,)
+    assert fit['fit_right'][0].values == (640.0,)
+    assert fit['fit_bottom'][0].values == (480.0,)
+    # centered on the rect (SetXY in ScaleTo).
+    assert fit['x'][0].values == (320.0,)
+    assert fit['y'][0].values == (240.0,)
