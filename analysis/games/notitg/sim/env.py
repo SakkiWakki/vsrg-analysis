@@ -690,6 +690,19 @@ class SimEnvironment:
 
     # -- time --------------------------------------------------------------
 
+    # The clock CONTRACT a guard/interpreter Surface reads (guard_surface.py,
+    # frame_eval). Named apart from the private `_beat`/`_now` fields so the
+    # value surface has a stable seam that does not reach into internals: a
+    # guard reading `beat` or `mod_time` resolves through these, seeing the
+    # exact tick clock the chart's own Update body sees (one source of truth).
+
+    @property
+    def _clock_beat(self) -> float:
+        return self._beat
+
+    def _song_time(self) -> float:
+        return self._now
+
     def set_time(self, t: float, beat: float) -> None:
         self._now = float(t)
         self._beat = float(beat)

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+from analysis.games.notitg.lua_api import COMMAND_NAMES
 from analysis.player.render.expr.surface import UNRESOLVED, Resolution
 
 
@@ -25,6 +26,10 @@ from analysis.player.render.expr.surface import UNRESOLVED, Resolution
 _SECONDS_SYMBOLS = ('mod_time', 'time', 'curtime')
 
 _BEATS_PER_MEASURE = 4.0
+
+# The method verbs that SCHEDULE rather than poke (queuecommand/playcommand),
+# from the one authority; a `poke` effect routes these to _actor_command.
+_COMMAND_VERBS = frozenset(COMMAND_NAMES)
 
 
 def _is_lua_table(value) -> bool:
@@ -115,6 +120,47 @@ class NotitgGuardSurface:
             return start <= self._beat() < end
         except TypeError:
             return UNRESOLVED
+
+    def method(self, recv: Resolution, name: str, args: list) -> Resolution:
+        """`recv:name(args)` in VALUE position - a getter read against the live
+        actor (`self:GetX()`, `SCREENMAN:GetTopScreen()`... - though singleton
+        methods route through `_read_global`, so `recv` here is an actor
+        recorder). Routes to the SAME executor entry the Lua bridge uses, so a
+        getter read by the interpreter sees exactly what the Lua path would.
+        A non-actor recv, or a getter that yields nil, is UNRESOLVED."""
+        rec_id = self._rec_id(recv)
+        if rec_id is None:
+            return UNRESOLVED
+        if name == 'GetChild':
+            child = self._env._actor_get_child(
+                rec_id, args[0] if args else None)
+            return child if child is not None else UNRESOLVED
+        value = self._env._actor_get(rec_id, name)
+        return UNRESOLVED if value is None else value
+
+    def poke(self, recv: Resolution, name: str, args: list) -> None:
+        """`recv:name(args)` in EFFECT position - apply the setter/command to
+        the live actor through the executor. `queuecommand`/`playcommand`
+        schedule; every other verb is an actor poke (position, rotation,
+        ApplyModifiers pass-throughs land on the same sinks the Lua path
+        uses). An UNRESOLVED recv or a non-actor recv is dropped (the engine
+        no-ops a poke on a nil actor too)."""
+        rec_id = self._rec_id(recv)
+        if rec_id is None:
+            return
+        clean = [a for a in args if a is not UNRESOLVED]
+        if name in _COMMAND_VERBS:
+            self._env._actor_command(rec_id, name,
+                                     clean[0] if clean else None)
+        else:
+            self._env._actor_poke(rec_id, name, *clean)
+
+    def _rec_id(self, recv: Resolution):
+        """The recorder id behind an actor recv (a Lua recorder table), or
+        None when `recv` is not a live actor (a singleton, a nil, a number)."""
+        if recv is UNRESOLVED or recv is None:
+            return None
+        return self._env._table_rec_id(recv)
 
     def clock_reader(self, name: str) -> Callable[[float], float] | None:
         match name:

@@ -147,8 +147,19 @@ class _Parser:
             return inner
         if self._at_op('{'):
             return self._parse_table()
+        if self._at_kw('function'):
+            return self._parse_func_expr()
         self._sink.warn('syntax', f'unexpected {tok.text!r}', tok.span)
         return None
+
+    def _parse_func_expr(self) -> ast.Node | None:
+        """Anonymous `function(params) body end` in expression position."""
+        start = self._next().span[0]        # 'function'
+        params = self._parse_params()
+        body = self.parse_body(('end',))
+        end = self._peek().span[1]
+        self._eat_kw('end')
+        return ast.FuncExpr(params, body, span=(start, end))
 
     def _parse_postfix(self, node: ast.Node) -> ast.Node:
         while True:
@@ -377,6 +388,16 @@ class _Parser:
             if not (self._eat_op('.') or self._eat_op(':')):
                 break
         name = '.'.join(name_parts)
+        params = self._parse_params()
+        body = self.parse_body(('end',))
+        end = self._peek().span[1]
+        self._eat_kw('end')
+        return ast.FuncDef(name, params, body, is_local,
+                           span=(start, end))
+
+    def _parse_params(self) -> tuple[str, ...]:
+        """The `(a, b, ...)` parameter list of a function def/expr; the
+        vararg `...` is accepted and dropped (no name binds it)."""
         params: list[str] = []
         if self._eat_op('('):
             while self._peek().kind is Tok.NAME:
@@ -385,11 +406,7 @@ class _Parser:
                     break
             self._eat_op('...')
             self._eat_op(')')
-        body = self.parse_body(('end',))
-        end = self._peek().span[1]
-        self._eat_kw('end')
-        return ast.FuncDef(name, tuple(params), body, is_local,
-                           span=(start, end))
+        return tuple(params)
 
     def _parse_return(self) -> ast.Node | None:
         start = self._next().span[0]        # 'return'

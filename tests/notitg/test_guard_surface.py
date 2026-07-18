@@ -121,3 +121,110 @@ def test_clock_reader_non_driver_is_none():
     surface = _surface(to_beat=lambda s: s)
     assert surface.clock_reader('measure') is None
     assert surface.clock_reader('fgcurcommand') is None
+
+
+# -- over a REAL SimEnvironment (the production seam, not the fake) -----------
+#
+# _FakeEnv above unit-tests the surface in isolation; these pin that the
+# surface's clock contract (`_clock_beat` / `_song_time`) actually matches
+# what SimEnvironment exposes, so `NotitgGuardSurface(real_env)` resolves the
+# same live clock the chart's Update body sees. This is the seam that only the
+# fake env ever exercised before Phase 0.
+
+from analysis.games.notitg.sim.env import SimEnvironment
+
+
+def _real_env(beat=40.0, seconds=12.0):
+    env = SimEnvironment(0.0, 0, to_seconds=lambda b: b * 0.5)
+    env.set_time(seconds, beat)
+    return env
+
+
+def test_real_env_beat_and_seconds_resolve_off_the_live_clock():
+    env = _real_env(beat=40.0, seconds=12.0)
+    surface = NotitgGuardSurface(env)
+    assert surface.symbol('beat') == 40.0
+    assert surface.symbol('mod_time') == 12.0
+    assert surface.symbol('measure') == 10.0
+
+
+def test_real_env_reflects_a_clock_advance():
+    # The surface reads live: advancing the env's clock changes what a guard
+    # sees, exactly as the chart's own beat gate would re-evaluate per tick.
+    env = _real_env(beat=10.0, seconds=5.0)
+    surface = NotitgGuardSurface(env)
+    assert surface.call('perframe', [20.0, 30.0]) is False
+    env.set_time(12.0, 25.0)
+    assert surface.call('perframe', [20.0, 30.0]) is True
+
+
+def test_real_env_global_resolves_and_missing_is_unresolved():
+    env = _real_env()
+    env._host.env['fgcurcommand'] = 2.0
+    surface = NotitgGuardSurface(env)
+    assert surface.symbol('fgcurcommand') == 2.0
+    assert surface.symbol('never_set') is UNRESOLVED
+
+
+def test_real_env_clock_reader_binds_the_beat_inverter():
+    env = _real_env()
+    surface = NotitgGuardSurface(env, to_beat=lambda s: s * 2.0)
+    reader = surface.clock_reader('beat')
+    assert reader is not None and reader(15.0) == 30.0
+
+
+# -- method (getter read) / poke (effect) route to the sim executor ----------
+
+from analysis.games.notitg.xml_actors import parse_actor_xml
+
+
+def _env_with_actor():
+    env = SimEnvironment(0.0, 0, to_seconds=lambda b: b * 0.5)
+    env.load_actors(parse_actor_xml(
+        '<ActorFrame><children><Quad Name="Q"/></children></ActorFrame>').root)
+    env.set_time(1.0, 2.0)
+    rec_id = next(iter(env.actors))
+    return env, env._tables[rec_id], rec_id
+
+
+def test_poke_then_method_roundtrips_through_the_executor():
+    env, recv, rec_id = _env_with_actor()
+    surface = NotitgGuardSurface(env)
+    surface.poke(recv, 'x', [123.0])
+    assert surface.method(recv, 'GetX', []) == 123.0
+    # and it landed on the SAME recording sink the Lua path uses
+    assert env.actor_keyframes()[rec_id]['x'][0].values == (123.0,)
+
+
+def test_poke_command_verb_schedules_not_pokes():
+    # queuecommand is a scheduling verb, routed to _actor_command; it must not
+    # land as an 'x'/'zoom'-style poke keyframe.
+    env, recv, rec_id = _env_with_actor()
+    surface = NotitgGuardSurface(env)
+    surface.poke(recv, 'queuecommand', ['SomeCmd'])
+    assert 'queuecommand' not in env.actor_keyframes().get(rec_id, {})
+
+
+def test_poke_on_non_actor_recv_is_dropped():
+    env, _recv, _rec = _env_with_actor()
+    surface = NotitgGuardSurface(env)
+    assert surface.poke(None, 'x', [5.0]) is None
+    assert surface.poke(UNRESOLVED, 'x', [5.0]) is None
+    assert surface.poke(7.0, 'x', [5.0]) is None
+
+
+def test_method_on_non_actor_recv_is_unresolved():
+    env, _recv, _rec = _env_with_actor()
+    surface = NotitgGuardSurface(env)
+    assert surface.method(UNRESOLVED, 'GetX', []) is UNRESOLVED
+    assert surface.method(5.0, 'GetX', []) is UNRESOLVED
+
+
+def test_poke_drops_unresolved_args():
+    # A setter arg that failed to resolve must not reach the actor as a poison
+    # value; it is filtered before the executor call.
+    env, recv, rec_id = _env_with_actor()
+    surface = NotitgGuardSurface(env)
+    surface.poke(recv, 'x', [UNRESOLVED])
+    # no numeric arg -> the poke records nothing meaningful (no x keyframe)
+    assert 'x' not in env.actor_keyframes().get(rec_id, {})

@@ -132,6 +132,8 @@ def _walk_one(node):
             yield from _walk(body)
         case ast.FuncDef(body=body):
             yield from _walk(body)
+        case ast.FuncExpr(body=body):
+            yield from _walk(body)
         case ast.Assign(values=values):
             yield from _walk(values)
         case ast.Local(values=values):
@@ -156,6 +158,10 @@ def _walk_one(node):
             yield from _walk_one(key)
         case ast.Field(base=base):
             yield from _walk_one(base)
+        case ast.Table(array=array, fields=fields):
+            yield from _walk(array)
+            for _key, value in fields:
+                yield from _walk_one(value)
 
 
 def _merge_spans(spans):

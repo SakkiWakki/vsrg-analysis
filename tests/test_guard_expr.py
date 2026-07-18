@@ -67,6 +67,43 @@ def test_body_parses_statements_and_records_unparsed():
     assert not sink.has_errors
 
 
+def test_anonymous_function_expression_in_assignment():
+    # `Plr = function(pn) return ... end` - the dominant corpus unparsed
+    # shape. The value must parse to a FuncExpr, not fall to Unparsed.
+    stmts, sink = parse_body('Plr = function(pn) return pn end')
+    assign = stmts[0]
+    assert isinstance(assign, ast.Assign)
+    fn = assign.values[0]
+    assert isinstance(fn, ast.FuncExpr)
+    assert fn.params == ('pn',)
+    assert isinstance(fn.body[0], ast.Return)
+    assert not any(isinstance(s, ast.Unparsed) for s in stmts)
+
+
+def test_anonymous_function_expression_as_call_argument():
+    # `mm(beat, function(self) ... end)` - the scheduled-callback shape.
+    stmts, _sink = parse_body("mm(beat, function(self) self:x(5) end)")
+    call = stmts[0].expr
+    assert isinstance(call, ast.Call)
+    assert isinstance(call.args[1], ast.FuncExpr)
+
+
+def test_anonymous_function_expression_in_table_entry():
+    # `{5, function() ... end}` - the {beat, closure} action-table shape.
+    stmts, _sink = parse_body('t = { 5, function() x() end }')
+    table = stmts[0].values[0]
+    assert isinstance(table, ast.Table)
+    assert isinstance(table.array[1], ast.FuncExpr)
+
+
+def test_funcexpr_evaluates_to_unresolved_not_a_crash():
+    # A closure is not a numeric value; the tree-walk backend returns
+    # UNRESOLVED for it rather than raising (the opaque-body contract).
+    stmts, _sink = parse_body('x = function() return 1 end')
+    fn = stmts[0].values[0]
+    assert tree_eval(fn, ConstSurface()) is UNRESOLVED
+
+
 # -- tree-walk + UNRESOLVED --------------------------------------------------
 
 def test_resolved_comparison_and_conjunction():

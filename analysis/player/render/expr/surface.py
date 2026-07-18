@@ -69,6 +69,19 @@ class Surface(Protocol):
         are already-resolved (a caller passes UNRESOLVED through)."""
         ...
 
+    def method(self, recv: Resolution, name: str, args: list) -> Resolution:
+        """`recv:name(args)` in VALUE position -> the getter's value, else
+        UNRESOLVED. A read (`self:GetX()`), never an effect: a surface must
+        not mutate here. `recv`/`args` are already-resolved."""
+        ...
+
+    def poke(self, recv: Resolution, name: str, args: list) -> None:
+        """`recv:name(args)` in EFFECT position (statement) - apply the setter
+        to `recv` (`self:zoom(x)`). Returns nothing; a surface with no live
+        world to mutate (window extraction) is a no-op. `recv`/`args` are
+        already-resolved; an UNRESOLVED recv is dropped."""
+        ...
+
     def clock_reader(self, name: str) -> Callable[[float], float] | None:
         """A `seconds -> value` reader for driver symbol `name` (compile
         path), or None when `name` is not a clock-backed driver."""
@@ -102,6 +115,14 @@ class ConstSurface:
 
     def call(self, name: str, args: list) -> Resolution:
         return UNRESOLVED
+
+    def method(self, recv: Resolution, name: str, args: list) -> Resolution:
+        # No live world: a getter has no value and an effect no target. Window
+        # extraction reads only constants, so both are inert here.
+        return UNRESOLVED
+
+    def poke(self, recv: Resolution, name: str, args: list) -> None:
+        return None
 
     def clock_reader(self, name: str) -> Callable[[float], float] | None:
         return None

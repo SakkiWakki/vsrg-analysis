@@ -163,6 +163,23 @@ def test_perframe_wrapper_names_are_recognized():
     assert guard_windows.windows_from_body(body) == [(104.0, 164.0)]
 
 
+def test_guard_inside_closure_call_arg_is_found():
+    # A scheduled callback `mm(0, function(self) if perframe(a,b) ... end)`:
+    # the guard lives inside a FuncExpr passed as a call arg. The walker must
+    # descend into the closure body to find its window.
+    body = ('%function(self) mm(0, function(self) '
+            'if perframe(10, 20) then self:x(1) end end) end')
+    assert guard_windows.windows_from_body(body) == [(10.0, 20.0)]
+
+
+def test_guard_inside_closure_in_action_table_is_found():
+    # The {beat, closure} action-table shape: a guard inside a FuncExpr that
+    # is a table entry. The walker must descend into table values too.
+    body = ('%function(self) actions = { {5, function() '
+            'if perframe(50, 60) then x() end end}, {7, true} } end')
+    assert guard_windows.windows_from_body(body) == [(50.0, 60.0)]
+
+
 # -- bound global name (NAME = self) -----------------------------------------
 
 @pytest.mark.parametrize('body,expected', [

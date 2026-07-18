@@ -119,6 +119,20 @@ class Table(Node):
     fields: tuple[tuple[str, Node], ...] = ()
 
 
+@dataclass(frozen=True)
+class FuncExpr(Node):
+    """Anonymous function VALUE `function(params) body end` - a closure used
+    in expression position (`mm(beat, function(self) ... end)`, a `Plr =
+    function(pn) ... end` helper-table entry). Distinct from `FuncDef`, which
+    is the NAMED statement form (`function foo() ... end`); this carries no
+    name because it is a value the surrounding expression binds or passes.
+    The 221 verbs never take a closure, so the sim treats a FuncExpr as an
+    opaque deferred body - the scheduler runs it when its registrar fires,
+    which is the interpreter's job, not the parser's."""
+    params: tuple[str, ...]
+    body: tuple[Node, ...]
+
+
 # -- statements --------------------------------------------------------------
 
 @dataclass(frozen=True)
