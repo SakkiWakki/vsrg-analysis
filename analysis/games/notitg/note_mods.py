@@ -321,6 +321,7 @@ class NotitgNoteMods:
         ctx.candidate_z = offs.z
         ctx.candidate_rot_x = offs.rot_x
         ctx.candidate_rot_y = offs.rot_y
+        ctx.candidate_glow = offs.glow
 
         self._stash_hold_body_samples(ctx, percents, cols, idx, head_off,
                                       tail_off, scale, ppe, t)

@@ -41,16 +41,21 @@ still displace them and confusion still rotates them).
       a scale about 1.0. Documented in `bumpy_zoom`. (The alternative,
       dropping bumpy, loses a mod the pilot chart uses 12x.)
     * GetRotationX (roll) and GetRotationY (twirl) are rotations about the
-      horizontal / vertical axes - a 2D sprite can't tilt out of plane, so
-      these are DEFERRED (return no contribution) and flagged in
-      `note_offsets`'s docstring. GetRotationZ (dizzy/confusion) is an
-      in-plane spin and IS implemented.
+      horizontal / vertical axes. A flat 2D sprite can't tilt out of plane,
+      but the project_3d note path renders them as real per-note tilt about
+      the note center (see `_note_tilt`), so both ARE implemented there; the
+      2D fallback drops them. GetRotationZ (dizzy/confusion) is an in-plane
+      spin and IS implemented on both paths.
 
 # NotITG extensions vs OpenITG
 
-- movex / movey (per-column playfield translation): 100% = one ARROW_SIZE
-  (64 px), verified against the NotITG modifiers docs. Not in OpenITG
-  ArrowEffects; added as `movex_x` / `movey_y`. Per-column numbered
+- movex / movey / movez (per-column playfield translation): 100% = one
+  ARROW_SIZE (64 px) along that axis, verified against the NotITG modifiers
+  docs. Not in OpenITG ArrowEffects; added as `movex_x` / `movey_y` /
+  `movez_z`. movez feeds the engine +z channel (`_z_push`), so the
+  project_3d path renders it as real depth and the 2D fallback reprojects it
+  to zoom - the same z pipeline as bumpy/movez's waveform siblings. Per-column
+  numbered
   variants (movex0..movexN, drunk0.., etc.) are handled by the channel
   layer passing a per-column percent array; every mod function here
   already takes per-note percents, so a numbered variant is just a
@@ -119,10 +124,28 @@ still displace them and confusion still rotates them).
   half (engine peak/past-peak + culling, which we do not model) is expressed
   as an alpha fade past the fold (`boomerang_visibility`). See those two.
 
+- stealthglow (NotITG appearance): hides the note FILL exactly like stealth
+  (both subtract from the visibility adjust, ArrowEffects.cpp:468-469) but
+  keeps the note rendering as pure glow, tinted by the stealthglowred/green/
+  blue color-diff companions (GetRedDiff/GreenDiff/BlueDiff). Implemented as a
+  `stealthglow_amount` glow multiplier riding the new NoteOffsets.glow field;
+  the alpha path folds it into the stealth subtraction. Rest 0 = no glow.
+
   DEFERRED: `grain` / `granulate` (a hold-body step-size multiplier, not a
   per-note position offset - it changes how many segments a hold is rendered
   with, a hold-render concern outside this module) and `dizzyholds` (a
-  hold-render-specific spin). Both documented, not silently dropped.
+  hold-render-specific spin). `spiral` / `spiralx` / `spiraly` / `spiralz`
+  (+ their offset/period companions and tanspiral siblings) are a NotITG
+  helix that rotates the whole note POSITION vector around the scroll axis by
+  an angle proportional to y_offset. It is absent from OpenITG / ITGmania /
+  Etterna ArrowEffects.cpp (NotITG-only) and does not appear in the readable
+  GetXPos / GetYPos / GetZPos of the COMDAT-folded NotITG decompile - it is
+  applied at the notefield-actor transform level (like the perspective mods
+  hallway/distant), which the decompiled ArrowEffects does not cover. With no
+  ground-truth formula in any available source, spiral is deferred rather than
+  guessed (sources-are-ground-truth). `spiralholds` is additionally a
+  hold-render variant (a per-body spiral of the hold segments), a hold-render
+  concern outside this per-note module. All documented, not silently dropped.
 
 # PORT BOUNDARY
 
@@ -749,6 +772,15 @@ def movey_y(percent, arrow_size=ARROW_SIZE):
     return percent * arrow_size
 
 
+def movez_z(percent, arrow_size=ARROW_SIZE):
+    """NotITG movez: 100% = one arrow width (64 engine px) along +z, the exact
+    shape of movex/movey on their axes. `percent` is a per-note array
+    (per-column variants handled upstream). It feeds the engine +z channel
+    (GetZPos), which the project_3d path renders as real depth and the 2D
+    fallback reprojects to zoom via `waveform_z_zoom`. Rest 0 = no push."""
+    return percent * arrow_size
+
+
 def _bumpy_angle(y_offset, offset, period):
     """CalculateBumpyAngle (ArrowEffects.cpp:251-253): (yoff + 100*offset) /
     ((period*16)+16). offset/period are the bumpyoffset/bumpyperiod (or
@@ -907,7 +939,10 @@ def percent_visible(percents, cols, y_pos):
     by the caller passing t_now into the blink term via `percents`."""
     hidden = percents.get('hidden', 0.0)
     sudden = percents.get('sudden', 0.0)
-    stealth = percents.get('stealth', 0.0)
+    # stealthglow hides the note FILL exactly like stealth (both subtract
+    # from the visibility adjust, ArrowEffects.cpp:468-469); stealthglow
+    # additionally keeps a glow pass (see `stealthglow_amount`).
+    stealth = percents.get('stealth', 0.0) + percents.get('stealthglow', 0.0)
     hidden_off = percents.get('hiddenoffset', 0.0)
     sudden_off = percents.get('suddenoffset', 0.0)
     blink_adjust = percents.get('_blink_adjust', 0.0)
@@ -949,6 +984,28 @@ def blink_adjust(percent, t_now):
     f = np.sin(t_now * 10.0)
     f = _quantize(f, 0.3333)
     return percent * _scale(f, 0, 1, -1.0, 0.0)
+
+
+def stealthglow_amount(percent, y_pos):
+    """NotITG stealthglow appearance amount, per note.
+
+    stealth (ArrowEffects.cpp:468-469) subtracts its percent from the
+    visibility adjust, so the note's FILL fades out (GetAlpha's hard 0.5
+    cut then blanks it). stealthglow is the NotITG sibling that hides the
+    fill the SAME way but keeps the note rendering as pure GLOW: the engine
+    exposes stealthglowred/green/blue color-diff companions
+    (GetRedDiff/GreenDiff/BlueDiff, ArrowEffects.cpp:004eba60..) that tint
+    that glow pass. So stealthglow drives the glow channel to `percent`
+    instead of dropping the note.
+
+    Like every appearance term, past-receptor notes (y_pos < 0) are exempt
+    (ArrowGetPercentVisible early-out, ArrowEffects.cpp:447-448). Returns a
+    per-note glow multiplier in [0, 1]; rest (percent 0) = 0 = no glow."""
+    if percent == 0.0:
+        return np.zeros(np.asarray(y_pos).shape, dtype=np.float64)
+    glow = np.full(np.asarray(y_pos).shape, float(np.clip(percent, 0.0, 1.0)),
+                   dtype=np.float64)
+    return np.where(np.asarray(y_pos, dtype=np.float64) < 0.0, 0.0, glow)
 
 
 def alpha_from_visible(visible):
@@ -1067,6 +1124,10 @@ class NoteOffsets:
     z: np.ndarray = None
     rot_x: np.ndarray = None
     rot_y: np.ndarray = None
+    # Per-note glow strength in [0, 1] (stealthglow: fill hidden, note
+    # rendered as glow). None = no glow (unmodded notes pay nothing and the
+    # consumer keeps its plain draw).
+    glow: np.ndarray = None
 
 
 def _get(p, name):
@@ -1294,6 +1355,8 @@ def _z_push(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size):
         z += parabola(_get(percents, 'parabolaz'), y_offset, arrow_size)
     if _get(percents, 'attenuatez'):
         z += attenuate(_get(percents, 'attenuatez'), cols, y_offset, keycount, arrow_size)
+    if _active(percents, 'movez', keycount):
+        z += movez_z(_per_note(percents, 'movez', cols, keycount), arrow_size)
     return z
 
 
@@ -1387,14 +1450,19 @@ def note_offsets(percents: dict, cols: np.ndarray, y_offset: np.ndarray,
     per-note dx that recedes columns toward the vanishing point with depth
     (`hallway_x`).
 
-    DEFERRED (2D limitation, documented in the module header): roll
-    (RotationX) and twirl (RotationY) are out-of-plane tilts a 2D sprite
-    can't express, so they contribute nothing here (confusionx/y differ:
-    they are constant tilts, faithfully reprojectable as foreshortening,
-    while roll/twirl scale their tilt with y_offset per note). `grain` /
-    `granulate` (hold step-size) and dizzyholds (hold-render-specific) stay
-    deferred; sawtooth's offset companion is unread in the ported engine
-    formula (see `sawtooth_x`)."""
+    roll (RotationX) and twirl (RotationY) are out-of-plane tilts that scale
+    with y_offset per note; the project_3d note path renders them as real
+    per-note tilt (`_note_tilt`, rest 0), and the 2D fallback drops them (a
+    flat sprite cannot tilt out of plane). movez feeds the +z channel like
+    movex/movey feed dx/dy (`movez_z`). stealthglow hides the note fill like
+    stealth and rides the glow output (`stealthglow_amount`, NoteOffsets.glow).
+
+    DEFERRED (documented in the module header): `grain` / `granulate` (hold
+    step-size) and dizzyholds (hold-render-specific) stay deferred; spiral*
+    (NotITG notefield-transform helix, no ArrowEffects formula in any available
+    source) and spiralholds (a hold-render variant) are deferred rather than
+    guessed; sawtooth's offset companion is unread in the ported engine formula
+    (see `sawtooth_x`)."""
     cols = np.asarray(cols)
     y_offset = np.asarray(y_offset, dtype=np.float64)
     n = cols.shape[0]
@@ -1421,13 +1489,15 @@ def note_offsets(percents: dict, cols: np.ndarray, y_offset: np.ndarray,
     # offset plus TIPSY ONLY (ArrowEffects.cpp:441-444/159-176) - the
     # other dy mods (beaty/movey/parabola...) displace the drawn note
     # but never move it through the hidden/sudden windows.
-    alpha = _alpha(percents, cols, y_offset + _tipsy_dy(percents, cols, t_now,
-                                                        keycount, arrow_size),
-                   t_now)
+    vis_y = y_offset + _tipsy_dy(percents, cols, t_now, keycount, arrow_size)
+    alpha = _alpha(percents, cols, vis_y, t_now)
+    glow = None
+    if _get(percents, 'stealthglow'):
+        glow = stealthglow_amount(_get(percents, 'stealthglow'), vis_y)
 
     return NoteOffsets(dx=dx, dy=dy, rotation_deg=rotation,
                        alpha_mult=alpha, zoom=zoom, z=z, rot_x=rot_x,
-                       rot_y=rot_y)
+                       rot_y=rot_y, glow=glow)
 
 
 def receptor_offsets(percents: dict, cols: np.ndarray, t_now: float,

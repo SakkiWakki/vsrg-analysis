@@ -16,7 +16,7 @@ Public API:
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import (QBrush, QPainterPath, QPainterPathStroker,
+from PySide6.QtGui import (QBrush, QPainter, QPainterPath, QPainterPathStroker,
                            QTransform)
 
 import math
@@ -74,6 +74,10 @@ class _NoteView:
     is_tick: bool = False
     # Per-note mod alpha (NotITG stealth/hidden family); 1 = opaque.
     alpha: float = 1.0
+    # Per-note glow (NotITG stealthglow): the fill is hidden (alpha->0) but
+    # the note still renders as an additive glow at this strength. 0 = no
+    # glow (unmodded notes keep their plain draw).
+    glow: float = 0.0
     # Per-note mod rotation (deg) / zoom (multiplier), applied about the
     # head center. Defaults are the identity so unmodded notes pay
     # nothing; LN bodies/tails keep their position (only the head sprite
@@ -240,6 +244,7 @@ def _build(ctx, i, pos) -> _NoteView | None:
     mod_z = getattr(ctx, 'candidate_z', None)
     mod_rx = getattr(ctx, 'candidate_rot_x', None)
     mod_ry = getattr(ctx, 'candidate_rot_y', None)
+    mod_glow = getattr(ctx, 'candidate_glow', None)
     return _NoteView(
         i=i, col=col,
         y=head_y, y_end=y_end,
@@ -248,6 +253,8 @@ def _build(ctx, i, pos) -> _NoteView | None:
                + (mod_dx[pos] if mod_dx is not None else 0.0)),
         alpha=(float(display_alpha(mod_alpha[pos]))
                if mod_alpha is not None else 1.0),
+        glow=(float(mod_glow[pos])
+              if mod_glow is not None else 0.0),
         rotation_deg=float(mod_rot[pos]) if mod_rot is not None else 0.0,
         zoom=float(mod_zoom[pos]) if mod_zoom is not None else 1.0,
         z=float(mod_z[pos]) if mod_z is not None else 0.0,
@@ -312,17 +319,16 @@ def _draw_view(ctx, painter, n, draw_fn) -> None:
     -- an accepted simplification (per-note LN-body deformation would
     need the body to be rebuilt in the rotated frame)."""
     faded = n.alpha < 1.0
+    glowing = n.glow > 0.0
     is_3d = n.z != 0.0 or n.rot_x != 0.0 or n.rot_y != 0.0
     transformed = n.rotation_deg or n.zoom != 1.0 or is_3d
-    if not faded and not transformed:
+    if not faded and not transformed and not glowing:
         draw_fn(ctx, painter, n)
         return
-    if faded and n.alpha < 1.0 / 255.0:
+    if faded and not glowing and n.alpha < 1.0 / 255.0:
         return
 
     painter.save()
-    if faded:
-        painter.setOpacity(painter.opacity() * n.alpha)
     if transformed:
         cx = n.lx + _lane_width(ctx, n.col) / 2.0
         cy = float(n.y)
@@ -336,7 +342,17 @@ def _draw_view(ctx, painter, n, draw_fn) -> None:
             if n.zoom != 1.0:
                 painter.scale(n.zoom, n.zoom)
             painter.translate(-cx, -cy)
-    draw_fn(ctx, painter, n)
+    base_opacity = painter.opacity()
+    if n.alpha >= 1.0 / 255.0:
+        painter.setOpacity(base_opacity * n.alpha)
+        draw_fn(ctx, painter, n)
+    # stealthglow: the fill is hidden (alpha->0) but an additive glow pass
+    # keeps the note visible as light. Rest (glow 0) never reaches here, so
+    # an unmodded note is unchanged.
+    if glowing:
+        painter.setOpacity(base_opacity * n.glow)
+        painter.setCompositionMode(QPainter.CompositionMode_Plus)
+        draw_fn(ctx, painter, n)
     painter.restore()
 
 
