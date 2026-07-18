@@ -102,6 +102,13 @@ class _NoteView:
     # plain vertical unmodded hold -- `None`, which selects the rect
     # fast-path (byte-identical to the historical straight blit).
     body_path: object = None
+    # Per-sample depth foreshortening for the body ribbon (aligned with
+    # body_path's samples), or None for an in-plane body. When present, the
+    # stroke lays each cross-section's width perpendicular to the spine and
+    # scales it by this d/(d-z) factor, so a body pushed into z narrows -
+    # the 3D ribbon. Rides alongside body_path (the spine still drives
+    # clipping / tail / alpha); only the fill geometry changes.
+    body_scale: object = None
 
 
 def _sv_fold_path(ctx, i, pos, p, head_y, tail_y):
@@ -232,11 +239,13 @@ def _build(ctx, i, pos) -> _NoteView | None:
 
     mod_dx = getattr(ctx, 'candidate_dx', None)
     body_path = _ln_body_path(ctx, i, pos, p, head_y, y_end) if is_ln else None
+    body_scale = None
     if body_path is not None:
         # The tail cap seats on the path's LAST sample (deepest point of a
         # fold, the bent end of a mod body); keep `y_end` in sync so the
         # on-screen / release-guide anchoring reads the same point.
         y_end = float(body_path[1][-1])
+        body_scale = _ln_body_scale(ctx, pos, body_path)
 
     mod_alpha = getattr(ctx, 'candidate_alpha', None)
     mod_rot = getattr(ctx, 'candidate_rot_deg', None)
@@ -271,6 +280,7 @@ def _build(ctx, i, pos) -> _NoteView | None:
         note_color=p.palette[col],
         jcolor=p.judge_colors[p.note_judges[i]],
         body_path=body_path,
+        body_scale=body_scale,
     )
 
 
@@ -382,6 +392,35 @@ def _note_projection(ctx, n, cx, cy):
     to_center = QTransform.fromTranslate(-cx, -cy)
     from_center = QTransform.fromTranslate(cx, cy)
     return to_center * t3d.qtransform_from_h(H) * from_center
+
+
+def _ln_body_scale(ctx, pos, body_path):
+    """Per-sample depth foreshortening for the hold body, aligned with
+    `body_path`'s samples, or None when the body is in-plane.
+
+    When the body carries a per-sample +z push (`ctx.hold_body_z[pos]`),
+    each cross-section's width scales by the head's d/(d-z)
+    (`perspective_z_scale`), so a bumpy body dives toward/away from the
+    camera and its ribbon narrows. Returned as a raw array (not projected
+    edges) so it rides the SAME clip machinery as the per-sample alphas;
+    the stroke builds the perpendicular edges after clipping. None keeps
+    the flat constant-width stroke exact for an in-plane body."""
+    z_by_pos = getattr(ctx, 'hold_body_z', None)
+    if z_by_pos is None:
+        return None
+    z = z_by_pos.get(pos)
+    if z is None:
+        return None
+    from analysis.player.render.mods.arrow_effects import perspective_z_scale
+
+    scale = np.asarray(perspective_z_scale(np.asarray(z, dtype=np.float64)),
+                       dtype=np.float64)
+    # Align defensively: body_path samples and z come from the same
+    # subdivision, but a mismatch (future SV-fold + z overlap) falls back
+    # to no foreshortening rather than misindexing.
+    if scale.shape[0] != len(body_path[1]):
+        return None
+    return scale
 
 
 @lru_cache(maxsize=1)
@@ -644,6 +683,10 @@ def _draw_ln_body_stroke(ctx, painter, n, top, bot, state):
     producer differs, the stroke is identical. The strip is a filled
     ribbon of lane width centered on the polyline, tiled with the same
     body sprite as a brush (vertical tiling matches the rect path)."""
+    if n.body_scale is not None:
+        _draw_ln_body_ribbon(ctx, painter, n, top, bot, state)
+        return
+
     xs, ys = n.body_path[0], n.body_path[1]
     alphas = _body_alphas(n)
     clipped = _clip_body_samples(xs, ys, top, bot, alphas)
@@ -715,6 +758,61 @@ def _draw_ln_body_stroke(ctx, painter, n, top, bot, state):
                 spine.lineTo(float(center[i]), float(ys[i]))
             painter.setOpacity(base_opacity * min(1.0, level))
             painter.drawPath(stroker.createStroke(spine))
+    painter.restore()
+
+
+def _draw_ln_body_ribbon(ctx, painter, n, top, bot, state):
+    """Draw a hold body whose depth push tilts it out of the receptor
+    plane: a filled ribbon between the two perpendicular edges, each
+    cross-section's half-width scaled by the per-sample d/(d-z)
+    (`n.body_scale`), so the ribbon foreshortens with depth. Unlike the
+    constant-width center stroke, the width here is not axis-aligned - it
+    follows the spine's screen tangent - so a strong bend does not bowtie.
+    Shares the clip / alpha-run / offscreen-clamp machinery with the flat
+    stroke; only the fill geometry differs."""
+    from analysis.player.render.mods import body_sweep
+
+    xs, ys = n.body_path[0], n.body_path[1]
+    w = ctx.lane_width(n.col)
+    width = float(ln_body_width(getattr(ctx.player, 'skin', 'bar'), w))
+    center = np.stack([np.asarray(xs, dtype=np.float64) + w / 2.0,
+                       np.asarray(ys, dtype=np.float64)], axis=1)
+    left, right = body_sweep.project_screen_ribbon(center, n.body_scale, width)
+
+    alphas = _body_alphas(n)
+    lc = _clip_body_samples(left[:, 0], left[:, 1], top, bot, alphas)
+    rc = _clip_body_samples(right[:, 0], right[:, 1], top, bot, alphas)
+    if lc is None or rc is None or len(lc[1]) != len(rc[1]):
+        return
+
+    p = ctx.player
+    pad = _BODY_COORD_PAD
+    lx = np.clip(lc[0], -pad, getattr(p, 'W', 0) + pad)
+    ly = np.clip(lc[1], -pad, getattr(p, 'H', 0) + pad)
+    rx = np.clip(rc[0], -pad, getattr(p, 'W', 0) + pad)
+    ry = np.clip(rc[1], -pad, getattr(p, 'H', 0) + pad)
+    if len(ly) < 2:
+        return
+    ribbon_alphas = lc[2] if len(lc) > 2 else None
+
+    pm = ctx.sprite_cache.get('ln_body', ctx,
+                              col=n.col, state=state, is_roll=n.is_roll)
+    painter.save()
+    painter.setPen(_NO_PEN)
+    painter.setBrush(_body_fill_color(pm))
+    base_opacity = painter.opacity()
+    for lo, hi, level in _alpha_runs(ribbon_alphas, len(ly)):
+        if level < 1.0 / 255.0:
+            continue
+        poly = QPainterPath()
+        poly.moveTo(float(lx[lo]), float(ly[lo]))
+        for k in range(lo + 1, hi + 1):
+            poly.lineTo(float(lx[k]), float(ly[k]))
+        for k in range(hi, lo - 1, -1):
+            poly.lineTo(float(rx[k]), float(ry[k]))
+        poly.closeSubpath()
+        painter.setOpacity(base_opacity * min(1.0, level))
+        painter.drawPath(poly)
     painter.restore()
 
 

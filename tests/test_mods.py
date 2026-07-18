@@ -1307,6 +1307,34 @@ def test_hold_body_passes_through_head_and_tail():
     assert xs[0] == pytest.approx(head_x, abs=0.1)
 
 
+def test_hold_body_z_absent_for_in_plane_body():
+    # drunk bends the body in-plane (x only, no z push): hold_body_z stays
+    # absent, so the ribbon renderer never engages and the flat
+    # constant-width stroke fast-path (byte-identical) still runs.
+    player = _LnPlayer([1], 4, [5.0])
+    ctx = _LnCtx(player, [50.0], [400.0], judge_y=300, chart_h=600)
+    _mods([ModEvent(0.0, 1.0, -1, 'reverse'),
+           ModEvent(0.0, 1.2, -1, 'drunk')]).apply(ctx)
+    assert ctx.hold_body_samples is not None  # body bends (drunk)
+    assert getattr(ctx, 'hold_body_z', None) is None  # but no depth push
+
+
+def test_hold_body_z_present_and_varies_under_bumpy():
+    # bumpy pushes the body into +z along its length: hold_body_z carries a
+    # per-sample depth that VARIES (so the ribbon foreshortens), aligned
+    # 1:1 with the body_path samples.
+    player = _LnPlayer([2], 4, [6.0])
+    ctx = _LnCtx(player, [40.0], [500.0], judge_y=300, chart_h=600)
+    _mods([ModEvent(0.0, 1.0, -1, 'reverse'),
+           ModEvent(0.0, 1.5, -1, 'bumpy')]).apply(ctx)
+    zmap = getattr(ctx, 'hold_body_z', None)
+    assert zmap is not None and 0 in zmap
+    z = zmap[0]
+    assert np.ptp(z) > 1e-3  # depth varies along the body
+    xs, _ys, _alpha = ctx.hold_body_samples[0]
+    assert len(z) == len(xs)  # aligned with the spine samples
+
+
 def test_hold_body_bends_under_drunk():
     # A straight rect would keep xs constant; drunk warps the body so at
     # least one interior sample's x differs from the endpoints' x.

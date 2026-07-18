@@ -416,7 +416,8 @@ class NotitgNoteMods:
         sample = note_offsets(
             self._band_limited(percents), segments['cols'],
             segments['offs'], t_now=t, beat_now=self._beat_at(t),
-            keycount=p.keycount, note_beats=segments['beats'])
+            keycount=p.keycount, note_beats=segments['beats'],
+            project_3d=True)
 
         # A body only needs the polyline when something actually VARIES
         # along it: a bending dx (drunk/wave/digital ...) or a per-strip
@@ -428,18 +429,34 @@ class NotitgNoteMods:
         spacing = tiny_spacing(float(percents.get('tiny', 0.0)))
         column_px = column_offsets(p.keycount) * scale
         samples = {}
+        z_all = sample.z if sample.z is not None else np.zeros_like(sample.dx)
+        body_z = {}
         for pos, screen_ys, start, count in segments['holds']:
             window = slice(start, start + count * _BODY_BOX_FILTER)
             dx = sample.dx[window].reshape(count, _BODY_BOX_FILTER).mean(axis=1)
             alpha = sample.alpha_mult[window].reshape(
                 count, _BODY_BOX_FILTER).mean(axis=1)
-            if np.ptp(dx) < _ACTIVE_EPS and np.ptp(alpha) < _ACTIVE_EPS:
+            z = z_all[window].reshape(count, _BODY_BOX_FILTER).mean(axis=1)
+            # The body needs its own polyline only when something VARIES
+            # along it: a bending dx, a per-strip visibility gradient, or a
+            # depth push (z) that tilts the body out of the receptor plane.
+            # A flat-dx, fully-visible, in-plane body stays on the straight
+            # rect fast-path (byte-identical blit).
+            if (np.ptp(dx) < _ACTIVE_EPS and np.ptp(alpha) < _ACTIVE_EPS
+                    and np.ptp(z) < _ACTIVE_EPS):
                 continue
             body_x = (lane_x_fn(int(cols[pos])) + spacing * dx * scale
                       + (spacing - 1.0) * column_px[int(cols[pos])])
             samples[pos] = (body_x, screen_ys, alpha)
+            # z rides a parallel dict, NOT the body_path tuple, so every
+            # existing (xs, ys[, alpha]) consumer is untouched; the ribbon
+            # renderer opts in by reading hold_body_z[pos].
+            if np.ptp(z) >= _ACTIVE_EPS:
+                body_z[pos] = z
         if samples:
             ctx.hold_body_samples = samples
+        if body_z:
+            ctx.hold_body_z = body_z
 
     def _build_body_segments(self, ln_positions, cols, head_off, tail_off,
                              head_y, tail_y, note_beats, ppe,
