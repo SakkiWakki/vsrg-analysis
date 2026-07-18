@@ -279,6 +279,39 @@ def test_gl_field_capture_nests_inside_screen_composite(gl):
     assert _probe(image, 10, 10) == (0, 0, 0)
 
 
+def test_gl_unified_shader_stage_runs_passes_over_post_slot(gl):
+    """With the GL backend active the shader capture is the 'post'
+    slot and the passes run straight over its FBO into the host - no
+    second capture painter."""
+    from analysis.player.render.shaders.gl_pipeline import ShaderGLPipeline
+    host = _GlHost()
+    r = _gl_renderer(host)
+    r.shader_pipeline = ShaderGLPipeline()
+    ctx = _ctx(3.0)
+    frame = EffectFrame(
+        shaders=(('invert', {'u_strength': (1.0, 0.0, 0.0)}),))
+    cp = r._begin_shader_capture(frame, ctx, host.painter)
+    assert cp is not None and cp is not host.painter
+    cp.fillRect(0, 0, W, H, QColor(255, 0, 0))
+    r._end_shader_capture(frame, ctx)
+    image = host.finish()
+    assert _probe(image, 80, 75) == (0, 255, 255)  # inverted red
+
+
+def test_gl_unified_stage_blits_unshaded_when_nothing_runnable(gl):
+    from analysis.player.render.shaders.gl_pipeline import ShaderGLPipeline
+    host = _GlHost()
+    r = _gl_renderer(host)
+    r.shader_pipeline = ShaderGLPipeline()
+    ctx = _ctx(3.0)
+    frame = EffectFrame(shaders=(('no_such_shader', {}),))
+    cp = r._begin_shader_capture(frame, ctx, host.painter)
+    cp.fillRect(0, 0, W, H, QColor(20, 220, 40))
+    r._end_shader_capture(frame, ctx)
+    image = host.finish()
+    assert _probe(image, 80, 75) == (20, 220, 40)
+
+
 def test_gl_snapshot_freelist_recycles_released_textures(gl):
     host = _GlHost()
     backend = gl_capture.GLCaptureBackend()

@@ -643,7 +643,7 @@ def _draw_tail_on_curve(ctx, painter, n, pm) -> bool:
     segment runs opposite the head, so the tangent already flips the cap).
     Returns False when the path is degenerate (caller falls back to the
     straight blit)."""
-    xs, ys = n.body_path
+    xs, ys = n.body_path[0], n.body_path[1]
     if len(ys) < 2:
         return False
 

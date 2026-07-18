@@ -141,6 +141,9 @@ class ShaderGLPipeline:
         # passes can re-read the original frame); slots 1 and 2 ping-pong
         # the intermediates without ever clobbering the capture.
         self._fbos = [None, None, None]
+        # An externally-captured frame standing in for slot 0 while
+        # `run_over` executes (the GL capture backend's post slot).
+        self._external = None
         self._size = (0, 0)
         self._vao = None
         self._vbo = None
@@ -218,6 +221,34 @@ class ShaderGLPipeline:
             f.glBindFramebuffer(GL_FRAMEBUFFER, self._host_fbo)
             self._host_painter.endNativePainting()
             self._host_painter = None
+
+    def run_over(self, host_painter, capture_fbo, passes, t_now: float,
+                 pw: int, ph: int) -> None:
+        """Run `passes` over an externally-captured frame (the GL
+        capture backend's post slot), the last pass rendering into
+        `host_painter`'s target - the unified chain's shader stage,
+        replacing the begin/end capture pair when captures already live
+        on FBOs. When nothing is runnable the capture is blitted across
+        unshaded."""
+        host_painter.beginNativePainting()
+        f = QOpenGLContext.currentContext().extraFunctions()
+        self._host_fbo = int(f.glGetIntegerv(GL_FRAMEBUFFER_BINDING))
+        if self._size != (pw, ph):
+            self._fbos = [None, None, None]
+            self._size = (pw, ph)
+        self._external = capture_fbo
+        try:
+            if not self._run_passes(f, passes, t_now):
+                f.glBindFramebuffer(GL_READ_FRAMEBUFFER,
+                                    capture_fbo.handle())
+                f.glBindFramebuffer(GL_DRAW_FRAMEBUFFER, self._host_fbo)
+                f.glBlitFramebuffer(0, 0, pw, ph, 0, 0, pw, ph,
+                                    GL_COLOR_BUFFER_BIT, GL_NEAREST)
+        finally:
+            self._external = None
+            f.glBindTexture(GL_TEXTURE_2D, 0)
+            f.glBindFramebuffer(GL_FRAMEBUFFER, self._host_fbo)
+            host_painter.endNativePainting()
 
     def _mark_broken(self, why: str) -> None:
         self._broken = True
@@ -351,10 +382,18 @@ class ShaderGLPipeline:
         single-texture default lands correctly."""
         if locs[_SECOND_SAMPLER] != -1:
             f.glActiveTexture(GL_TEXTURE0 + _CAPTURE_UNIT)
-            f.glBindTexture(GL_TEXTURE_2D, self._fbos[0].texture())
+            f.glBindTexture(GL_TEXTURE_2D, self._slot_texture(0))
             f.glUniform1i(locs[_SECOND_SAMPLER], _CAPTURE_UNIT)
         f.glActiveTexture(GL_TEXTURE0)
-        f.glBindTexture(GL_TEXTURE_2D, self._fbos[src].texture())
+        f.glBindTexture(GL_TEXTURE_2D, self._slot_texture(src))
+
+    def _slot_texture(self, index) -> int:
+        """Slot `index`'s texture; slot 0 is the external capture when
+        `run_over` supplied one (unified chain), else the pipeline's
+        own capture FBO."""
+        if index == 0 and self._external is not None:
+            return self._external.texture()
+        return self._fbos[index].texture()
 
     def _bind_quad(self, f):
         if self._vao is not None:

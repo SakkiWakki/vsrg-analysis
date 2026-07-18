@@ -171,6 +171,9 @@ class QtPlayerRenderer:
         # This frame's node-point capture, taken lazily during the
         # instance blits and promoted to `_prev_screen` at composite end.
         self._screen_capture = None
+        # The host painter bracketed by an open 'post' capture slot
+        # (the unified GL shader stage); None outside that window.
+        self._post_host = None
         # Preserve-texture freezes: the last capture each AFT source
         # blitted while its node was visible, held across hidden frames.
         self._aft_frozen: dict = {}
@@ -404,7 +407,7 @@ class QtPlayerRenderer:
             self._end_screen_composite(underlying_chart_painter, ctx)
             chart_painter = underlying_chart_painter
         if capturing:
-            self.shader_pipeline.end_capture(effect_frame.shaders, ctx.t_now)
+            self._end_shader_capture(effect_frame, ctx)
         if hud_painter is not None:
             hud_painter.end()
         if cache_enabled and self._hud_pixmap is not None:
@@ -431,15 +434,44 @@ class QtPlayerRenderer:
         return None if frame.is_identity else frame
 
     def _begin_shader_capture(self, effect_frame, ctx, painter):
-        """Start routing chart painting into the shader pipeline when
-        this frame carries shader passes. Returns the capture painter,
-        or None to paint direct (no passes, raster host, GL failure)."""
+        """Start routing chart painting into the shader stage when this
+        frame carries shader passes. Returns the capture painter, or
+        None to paint direct (no passes, raster host, GL failure).
+
+        With the GL capture backend active the capture is just another
+        slot ('post') - the unified chain field FBOs -> instance
+        composite -> shader passes -> screen; the pipeline's own
+        capture pair serves the forced-raster fallback."""
+        self._post_host = None
         if (effect_frame is None or not effect_frame.shaders
                 or self.shader_pipeline is None or painter is None
                 or getattr(ctx, 'player', None) is None):
             return None
         p = ctx.player
+        if isinstance(self._capture, gl_capture.GLCaptureBackend):
+            self._post_host = painter
+            return self._capture.open('post', painter, p.W, p.H)
         return self.shader_pipeline.begin_capture(painter, p.W, p.H)
+
+    def _end_shader_capture(self, effect_frame, ctx) -> None:
+        """Close the shader stage opened by `_begin_shader_capture`:
+        run the frame's passes over the capture, last pass into the
+        real target."""
+        if self._post_host is None:
+            self.shader_pipeline.end_capture(effect_frame.shaders,
+                                             ctx.t_now)
+            return
+        host = self._post_host
+        self._post_host = None
+        handle = self._capture.close('post')
+        if isinstance(handle, gl_capture._GLHandle):
+            self.shader_pipeline.run_over(
+                host, handle.fbo, effect_frame.shaders, ctx.t_now,
+                handle.fbo.width(), handle.fbo.height())
+        elif handle is not None:
+            # Mid-frame GL breakage handed the slot to the raster
+            # fallback: present the capture unshaded.
+            host.drawPixmap(0, 0, handle)
 
     @staticmethod
     def _begin_effect_transform(frame, painter, ctx) -> bool:
