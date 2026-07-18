@@ -170,6 +170,9 @@ class GLCaptureBackend:
         self._context = None
         self._gen = 0
         self._batch = None
+        # Slots currently open, in open order, so an exception unwind
+        # can close the nested brackets innermost-first.
+        self._open_order: list[str] = []
         self.broken = False
 
     # -- context lifecycle -------------------------------------------------
@@ -239,6 +242,7 @@ class GLCaptureBackend:
         state.device = device
         state.painter = painter
         state.host_painter = host_painter
+        self._open_order.append(slot)
         return painter
 
     def close(self, slot: str):
@@ -255,7 +259,42 @@ class GLCaptureBackend:
         f.glBindFramebuffer(GL_FRAMEBUFFER, state.prev_fbo)
         state.host_painter.endNativePainting()
         state.host_painter = None
+        if slot in self._open_order:
+            self._open_order.remove(slot)
         return _GLHandle(state.fbo, state.w, state.h, state.dpr, self._gen)
+
+    def abort(self) -> None:
+        """Unwind every open slot (innermost first) and any active
+        blits batch after a mid-frame exception: end the slot painters,
+        restore each enclosing render target, and close its native
+        bracket. Without this, one throwing frame leaves an active
+        painter + stale framebuffer binding behind and every later
+        frame paints against them."""
+        glctx = QOpenGLContext.currentContext()
+        f = glctx.extraFunctions() if glctx is not None else None
+        batch = self._batch
+        if batch is not None:
+            self._batch = None
+            if f is not None:
+                f.glDisable(GL_SCISSOR_TEST)
+                f.glBindFramebuffer(GL_FRAMEBUFFER, batch.target_fbo)
+            batch._painter.endNativePainting()
+        while self._open_order:
+            state = self._slots.get(self._open_order.pop())
+            if state is None or state.painter is None:
+                continue
+            if state.painter.isActive():
+                state.painter.end()
+            state.painter = None
+            state.device = None
+            if f is not None:
+                f.glBindFramebuffer(GL_FRAMEBUFFER, state.prev_fbo)
+            if state.host_painter is not None:
+                state.host_painter.endNativePainting()
+                state.host_painter = None
+        fallback = getattr(self, '_fallback', None)
+        if fallback is not None:
+            fallback.abort()
 
     def _ensure_slot_fbo(self, f, state, pw, ph):
         """The slot's FBO at the current size. Combined depth+stencil so

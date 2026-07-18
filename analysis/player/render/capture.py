@@ -67,6 +67,14 @@ class RasterCaptureBackend:
             painter.end()
         return self._pool.get(slot)
 
+    def abort(self) -> None:
+        """End every open slot painter after a mid-frame exception, so
+        the next frame starts from clean paint state."""
+        for painter in self._painters.values():
+            if painter.isActive():
+                painter.end()
+        self._painters.clear()
+
     def snapshot(self, slot: str):
         """An immutable copy of the slot's current pixels. Legal
         mid-paint; the GL backend additionally requires an open blits

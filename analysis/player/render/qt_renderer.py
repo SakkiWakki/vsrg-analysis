@@ -279,6 +279,44 @@ class QtPlayerRenderer:
             hud.clear_hitboxes()
         self.plugins.draw(Stage.PRE_FRAME, ctx)
         visibility = self._layer_visibility(ctx)
+        try:
+            hud_painter = self._draw_chart(ctx, painter, effect_frame,
+                                           visibility, hud_due,
+                                           cache_enabled)
+        except Exception:
+            # A mid-frame exception would otherwise leave capture
+            # painters and native-painting brackets open, and every
+            # later frame then paints against a corrupted target/state
+            # (HUD content flashing into the chart area). Unwind
+            # everything so only the throwing frame is lost, then let
+            # the exception surface to name the real culprit.
+            self._abort_frame_captures()
+            raise
+        if hud_painter is not None:
+            hud_painter.end()
+        if cache_enabled and self._hud_pixmap is not None:
+            painter.drawPixmap(0, 0, self._hud_pixmap)
+        # Drag affordances: ghost + blue insertion line. Drawn last so
+        # they sit above both the HUD and the free-region panels.
+        if hud is not None and hud.edit_mode and hud.drag_key is not None:
+            self._draw_drag_overlay(ctx, painter)
+        self.plugins.draw(Stage.POST_FRAME, ctx)
+        # Record per-frame metrics if profiling is enabled. Cheap when
+        # disabled (single attribute check + early return).
+        try:
+            from analysis.gui import paint_profiler
+            paint_profiler.record_frame(ctx)
+        except ImportError:
+            pass
+
+
+    def _draw_chart(self, ctx, painter, effect_frame, visibility, hud_due,
+                    cache_enabled):
+        """The capture-active middle of `draw`: chart layers, field
+        instance composite, screen composite, and the shader stage.
+        Split out so `draw` can unwind the capture brackets when any
+        layer or plugin throws mid-frame. Returns the open HUD pixmap
+        painter (or None) for the caller to finish."""
         hud_painter = None
         # Shader passes post-process the chart as a whole: capture
         # background + field layers into the GL pipeline's FBO and let
@@ -420,22 +458,7 @@ class QtPlayerRenderer:
             chart_painter = underlying_chart_painter
         if capturing:
             self._end_shader_capture(effect_frame, ctx)
-        if hud_painter is not None:
-            hud_painter.end()
-        if cache_enabled and self._hud_pixmap is not None:
-            painter.drawPixmap(0, 0, self._hud_pixmap)
-        # Drag affordances: ghost + blue insertion line. Drawn last so
-        # they sit above both the HUD and the free-region panels.
-        if hud is not None and hud.edit_mode and hud.drag_key is not None:
-            self._draw_drag_overlay(ctx, painter)
-        self.plugins.draw(Stage.POST_FRAME, ctx)
-        # Record per-frame metrics if profiling is enabled. Cheap when
-        # disabled (single attribute check + early return).
-        try:
-            from analysis.gui import paint_profiler
-            paint_profiler.record_frame(ctx)
-        except ImportError:
-            pass
+        return hud_painter
 
     def _composite_effects(self, player, ctx):
         effects = getattr(player, '_render_effects', None) if player else None
@@ -525,6 +548,25 @@ class QtPlayerRenderer:
             return False
         return any(_field_scope(entry) in (_SCREEN_SCOPE, _SCREEN_PREV_SCOPE)
                    for entry in frame.fields)
+
+    def _abort_frame_captures(self) -> None:
+        """Unwind every capture opened this frame after a mid-frame
+        exception: end slot painters, restore render targets, close
+        native brackets, and drop this frame's handles. Retained
+        cross-frame captures re-prime afterwards, as after a seek."""
+        self._capture.abort()
+        if self._post_host is None and self.shader_pipeline is not None:
+            abort = getattr(self.shader_pipeline, 'abort_capture', None)
+            if abort is not None:
+                abort()
+        self._post_host = None
+        self._backdrop_painter = None
+        self._screen_open = False
+        self._field_src = None
+        self._field2_src = None
+        self._backdrop_src = None
+        self._capture.release(self._screen_capture)
+        self._screen_capture = None
 
     def _select_capture_backend(self, painter) -> None:
         """Route this frame's capture slots to the FBO backend when the

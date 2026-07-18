@@ -312,6 +312,55 @@ def test_gl_unified_stage_blits_unshaded_when_nothing_runnable(gl):
     assert _probe(image, 80, 75) == (20, 220, 40)
 
 
+def test_gl_abort_unwinds_nested_open_captures(gl):
+    """A mid-frame exception with the screen + field slots open must
+    not leave painters or framebuffer bindings behind: after the
+    unwind, painting on the host lands on the host."""
+    host = _GlHost()
+    r = _gl_renderer(host)
+    ctx = _ctx(5.0)
+    frame = EffectFrame(fields=((None, 1.0, 'field'),
+                                (None, 1.0, 'screen')))
+    r._sync_prev_screen(ctx)
+    target = r._begin_screen_composite(frame, ctx, host.painter)
+    fp = r._begin_field_capture(frame, ctx, target)
+    assert fp is not None and fp.isActive()
+    r._abort_frame_captures()
+    assert not fp.isActive()
+    host.painter.fillRect(0, 0, W, H, QColor(30, 120, 240))
+    image = host.finish()
+    assert _probe(image, 80, 75) == (30, 120, 240)
+    assert _probe(image, 190, 140) == (30, 120, 240)
+
+
+def test_gl_draw_recovers_after_layer_exception(gl):
+    """A layer throwing mid-frame surfaces the exception AND the next
+    frame renders cleanly (no dangling capture corrupting the host)."""
+    host = _GlHost()
+    r = _gl_renderer(host)
+    ctx = _ctx(6.0)
+    frame = _screen_frame('screen')
+    r._sync_prev_screen(ctx)
+    target = r._begin_screen_composite(frame, ctx, host.painter)
+    fp = r._begin_field_capture(frame, ctx, target)
+    try:
+        raise RuntimeError('layer blew up')
+    except RuntimeError:
+        r._abort_frame_captures()
+
+    # Next frame: the normal lifecycle runs end to end on the same
+    # renderer and host, and the composite reaches the host intact.
+    ctx2 = _ctx(6.008)
+    r._sync_prev_screen(ctx2)
+    target2 = r._begin_screen_composite(frame, ctx2, host.painter)
+    assert target2 is not None
+    target2.fillRect(0, 0, 160, 150, QColor(10, 200, 30))
+    r._blit_field_instances(frame, ctx2, target2)
+    r._end_screen_composite(host.painter, ctx2)
+    image = host.finish()
+    assert _probe(image, 80, 75) == (10, 200, 30)
+
+
 def test_gl_ln_ribbon_survives_mod_slam_coordinates(gl):
     """Mod-slam spine samples (x ~ 1e5) used to overflow the GL paint
     engine's +/-32767 concave-fill limit: the visible ribbon vanished

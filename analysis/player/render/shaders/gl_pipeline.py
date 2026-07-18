@@ -222,6 +222,25 @@ class ShaderGLPipeline:
             self._host_painter.endNativePainting()
             self._host_painter = None
 
+    def abort_capture(self) -> None:
+        """Unwind an interrupted begin_capture (mid-frame exception
+        between begin and end): end the capture painter, restore the
+        host framebuffer, and close the native bracket, so the next
+        frame starts from clean paint state."""
+        if self._capture_painter is None:
+            return
+        if self._capture_painter.isActive():
+            self._capture_painter.end()
+        self._capture_painter = None
+        self._capture_device = None
+        glctx = QOpenGLContext.currentContext()
+        if glctx is not None:
+            glctx.extraFunctions().glBindFramebuffer(
+                GL_FRAMEBUFFER, self._host_fbo)
+        if self._host_painter is not None:
+            self._host_painter.endNativePainting()
+            self._host_painter = None
+
     def run_over(self, host_painter, capture_fbo, passes, t_now: float,
                  pw: int, ph: int) -> None:
         """Run `passes` over an externally-captured frame (the GL
