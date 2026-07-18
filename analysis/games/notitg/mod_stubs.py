@@ -259,8 +259,17 @@ class StubEnvironment:
         command bodies, before any load command runs. The actor tree's
         parent->child recorder links are recorded too, so a play/queue
         command on an ActorFrame propagates to its subtree (SM's
-        RunCommandsOnChildren)."""
+        RunCommandsOnChildren).
+
+        NotITG's `Var=` extension binds the actor to a Lua global at load
+        (`<Aux Var="gf2_r_rotspd"/>` then `gf2_r_rotspd:GetX()` from a
+        per-frame driver; 4400+ uses corpus-wide). Bound here in the
+        register pass so the global exists before ANY command runs - an
+        aux var a driver reads is never nil for lack of binding."""
         rec_id = self._recorder_id_for(actor)
+        var = actor.attrs.get('Var', '')
+        if var:
+            self._host.env[var] = self._recorder_tables.get(rec_id)
         for message, body in actor.message_commands().items():
             self._message_commands.setdefault(message, []).append(
                 (rec_id, body))
