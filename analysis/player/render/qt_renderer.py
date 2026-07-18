@@ -50,6 +50,11 @@ _FIELD2_SCOPE = 'field2'
 # Debug kill switch: force the pooled-QPixmap capture backend even on a
 # GL host, for A/B comparison against the FBO composite path.
 _FORCE_RASTER_CAPTURE = os.environ.get('VSRG_CAPTURE_BACKEND') == 'raster'
+# Debug tripwire for the wrong-render-target artifact (HUD flashing
+# into the chart area): after each frame's HUD blit, read one pixel
+# back from the actual GL target and compare against the HUD pixmap;
+# on mismatch, print bindings/open-slot/painter state for that frame.
+_CAPTURE_DEBUG = os.environ.get('VSRG_CAPTURE_DEBUG') == '1'
 
 # A chart-time advance larger than this (or any backward step) between
 # rendered frames reads as a seek, not smooth playback: the retained
@@ -296,6 +301,8 @@ class QtPlayerRenderer:
             hud_painter.end()
         if cache_enabled and self._hud_pixmap is not None:
             painter.drawPixmap(0, 0, self._hud_pixmap)
+            if _CAPTURE_DEBUG:
+                self._debug_verify_hud_target(ctx, painter)
         # Drag affordances: ghost + blue insertion line. Drawn last so
         # they sit above both the HUD and the free-region panels.
         if hud is not None and hud.edit_mode and hud.drag_key is not None:
@@ -548,6 +555,44 @@ class QtPlayerRenderer:
             return False
         return any(_field_scope(entry) in (_SCREEN_SCOPE, _SCREEN_PREV_SCOPE)
                    for entry in frame.fields)
+
+    def _debug_verify_hud_target(self, ctx, painter) -> None:
+        """VSRG_CAPTURE_DEBUG=1 tripwire, called right after the HUD
+        blit: `beginNativePainting` flushes the queued blit, so the
+        framebuffer binding read inside the bracket is the target the
+        HUD pixels actually landed on. The backing target's id is
+        stable frame to frame, so any change marks a corrupted frame;
+        painter/backend state is printed alongside to attribute it."""
+        problems = []
+        if not painter.transform().isIdentity():
+            problems.append(f'transform={painter.transform()}')
+        if painter.opacity() < 1.0:
+            problems.append(f'opacity={painter.opacity()}')
+        open_slots = getattr(self._capture, '_open_order', None)
+        if open_slots:
+            problems.append(f'slots still open={open_slots}')
+        if getattr(self._capture, '_batch', None) is not None:
+            problems.append('blits batch still active')
+
+        bound = None
+        if isinstance(painter, QPainter) and gl_capture.usable(painter):
+            from PySide6.QtGui import QOpenGLContext
+            painter.beginNativePainting()
+            f = QOpenGLContext.currentContext().extraFunctions()
+            bound = int(f.glGetIntegerv(0x8CA6))  # GL_FRAMEBUFFER_BINDING
+            painter.endNativePainting()
+        last = getattr(self, '_debug_hud_fbo', None)
+        if last is None and bound is not None:
+            dpr = float(painter.device().devicePixelRatioF())
+            print(f'[capture-debug] armed: hud target fbo={bound} '
+                  f'dpr={dpr} backend={type(self._capture).__name__}')
+        elif bound != last:
+            problems.append(f'hud target fbo changed {last} -> {bound}')
+        self._debug_hud_fbo = bound
+
+        if problems:
+            print(f'[capture-debug] t={float(ctx.t_now):.3f} '
+                  + '; '.join(problems))
 
     def _abort_frame_captures(self) -> None:
         """Unwind every capture opened this frame after a mid-frame
