@@ -213,9 +213,26 @@ IGNORED: dict = {
 # (trust string keys, not callee names), so their semantics cannot be
 # pinned from the decompile, and openitg has no analogue to copy. They are
 # deferred, never guessed.
-_SECOND_SLOT = ("fork second-value slot ('<prop>2'); its role (secondary "
-                "tween target / dual-transform) is not fixed by the sources "
-                "- Actor.clean.c is COMDAT-folded and openitg has no analogue")
+# The `*2` slot IS a second independent transform channel composed on top
+# of the base one, resting at identity (pos/rot/skew 0, zoom 1) - proven
+# by chart usage (Puuro "Poison Cupcake" sets xy AND xy2(0,0) on one
+# actor, oscillates rotationx2/x2 about a held base pos). What is NOT
+# recoverable is the COMPOSE ORDER: Actor::BeginDraw (@004a531c) builds
+# the matrix but its body is COMDAT-folded to Screen*::TweenOffScreen
+# (Actor.clean.c cheat-sheet, lines 33-73), so the base translate/rotate/
+# zoom/skew push order and where the `2` block plugs in are gone; the
+# object-layout map does not enumerate the `2` sub-fields. openitg has no
+# analogue (Actor.h TweenState has ONE pos/rotation/scale, no `2`), and
+# no `*2`-using chart has a reference frame (gat 1/gat 2 use zero `*2`
+# verbs), so a guessed compose could not be parity-validated. Unblock via
+# raw disasm of BeginDraw @004a531c or a captured Poison-Cupcake frame.
+# Full dig: scratchpad/second_slot_findings.md.
+_SECOND_SLOT = ("fork second-value slot ('<prop>2'): a second transform "
+                "channel composed on the base (rest = identity), but the "
+                "compose ORDER is unrecoverable - Actor::BeginDraw @004a531c "
+                "is COMDAT-folded to Screen*::TweenOffScreen and openitg has "
+                "no analogue; no *2-using chart has a reference frame to "
+                "validate against (see second_slot_findings.md)")
 _ROT_ORDER = ('order-dependent 3D rotation compose; needs a rotation-order '
               'model the 2D storyboard does not have (scene-projection tier)')
 DEFERRED: dict = {
