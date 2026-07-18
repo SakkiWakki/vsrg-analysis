@@ -50,11 +50,15 @@ _FIELD2_SCOPE = 'field2'
 # Debug kill switch: force the pooled-QPixmap capture backend even on a
 # GL host, for A/B comparison against the FBO composite path.
 _FORCE_RASTER_CAPTURE = os.environ.get('VSRG_CAPTURE_BACKEND') == 'raster'
-# Debug tripwire for the wrong-render-target artifact (HUD flashing
-# into the chart area): after each frame's HUD blit, read one pixel
-# back from the actual GL target and compare against the HUD pixmap;
-# on mismatch, print bindings/open-slot/painter state for that frame.
-_CAPTURE_DEBUG = os.environ.get('VSRG_CAPTURE_DEBUG') == '1'
+# Debug tripwires for the wrong-render-target artifact (HUD flashing
+# into the chart area). Level 1: after each frame's HUD blit, verify
+# the actual GL target/painter state and print on anomalies. Level 2:
+# additionally dump every capture slot + retained texture + the HUD
+# pixmap to _CAPTURE_DEBUG_DIR twice a second, so the texture holding
+# the artifact can be identified while it is on screen.
+_CAPTURE_DEBUG = int(os.environ.get('VSRG_CAPTURE_DEBUG') or 0)
+_CAPTURE_DEBUG_DIR = '/tmp/vsrg_capture_debug'
+_CAPTURE_DEBUG_DUMP_S = 0.5
 
 # A chart-time advance larger than this (or any backward step) between
 # rendered frames reads as a seek, not smooth playback: the retained
@@ -303,6 +307,8 @@ class QtPlayerRenderer:
             painter.drawPixmap(0, 0, self._hud_pixmap)
             if _CAPTURE_DEBUG:
                 self._debug_verify_hud_target(ctx, painter)
+        if _CAPTURE_DEBUG >= 2:
+            self._debug_dump_captures(painter)
         # Drag affordances: ghost + blue insertion line. Drawn last so
         # they sit above both the HUD and the free-region panels.
         if hud is not None and hud.edit_mode and hud.drag_key is not None:
@@ -593,6 +599,28 @@ class QtPlayerRenderer:
         if problems:
             print(f'[capture-debug] t={float(ctx.t_now):.3f} '
                   + '; '.join(problems))
+
+    def _debug_dump_captures(self, painter) -> None:
+        """VSRG_CAPTURE_DEBUG=2: periodically dump the capture slots,
+        retained textures, and HUD pixmap to _CAPTURE_DEBUG_DIR while
+        the session runs; the file holding the artifact names the
+        texture (and thus the writer) responsible."""
+        now = time.monotonic()
+        last = getattr(self, '_debug_dumped_at', 0.0)
+        if now - last < _CAPTURE_DEBUG_DUMP_S:
+            return
+        self._debug_dumped_at = now
+        if not isinstance(self._capture, gl_capture.GLCaptureBackend):
+            return
+        painter.beginNativePainting()
+        try:
+            self._capture.debug_dump(_CAPTURE_DEBUG_DIR,
+                                     frozen=self._aft_frozen,
+                                     prev=self._prev_screen)
+        finally:
+            painter.endNativePainting()
+        if self._hud_pixmap is not None:
+            self._hud_pixmap.save(f'{_CAPTURE_DEBUG_DIR}/hud_pixmap.png')
 
     def _abort_frame_captures(self) -> None:
         """Unwind every capture opened this frame after a mid-frame

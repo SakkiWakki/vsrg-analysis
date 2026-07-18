@@ -263,6 +263,23 @@ class GLCaptureBackend:
             self._open_order.remove(slot)
         return _GLHandle(state.fbo, state.w, state.h, state.dpr, self._gen)
 
+    def debug_dump(self, directory, frozen=None, prev=None) -> None:
+        """Write every slot FBO and retained capture texture to
+        `directory` as PNGs (overwriting), so a live session's artifact
+        can be attributed to the one texture that holds it. Debug only;
+        requires the GL context current."""
+        import os
+        os.makedirs(directory, exist_ok=True)
+        for name, state in self._slots.items():
+            if state.fbo is not None:
+                state.fbo.toImage().save(f'{directory}/slot_{name}.png')
+        for name, handle in (frozen or {}).items():
+            if isinstance(handle, _GLHandle):
+                safe = ''.join(c if c.isalnum() else '_' for c in str(name))
+                handle.fbo.toImage().save(f'{directory}/frozen_{safe}.png')
+        if isinstance(prev, _GLHandle):
+            prev.fbo.toImage().save(f'{directory}/prev_screen.png')
+
     def abort(self) -> None:
         """Unwind every open slot (innermost first) and any active
         blits batch after a mid-frame exception: end the slot painters,
