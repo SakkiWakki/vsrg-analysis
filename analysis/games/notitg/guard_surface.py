@@ -114,11 +114,18 @@ class NotitgGuardSurface:
     def index(self, base: Resolution, key: Resolution) -> Resolution:
         if base is UNRESOLVED or key is UNRESOLVED:
             return UNRESOLVED
+        # Hot path inlined: a lupa table of the learned type reads directly
+        # (the per-tick index dominates; avoid the _is_lua_table + _lua_index
+        # call hops). String key = field; numeric = element (key unchanged -
+        # lupa keeps its own 1-based array keys).
+        if type(base) is _LUA_TABLE_TYPE:
+            try:
+                value = base[key if isinstance(key, str) else int(key)]
+            except (KeyError, TypeError, ValueError):
+                return UNRESOLVED
+            return UNRESOLVED if value is None else value
         try:
             if _is_lua_table(base):
-                # A raw lupa table: string key = field access (`math.sin`),
-                # numeric = element. Lua indexes both the same; lupa keeps its
-                # own 1-based array keys, so pass the key through unchanged.
                 return _lua_index(base, key if isinstance(key, str)
                                   else int(key))
             if isinstance(base, (list, tuple)):
