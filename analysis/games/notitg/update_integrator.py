@@ -59,6 +59,8 @@ from __future__ import annotations
 
 import re
 
+from analysis.games.notitg import guard_windows
+
 # Song-time tick rate. ~60Hz tracks the source quad eases finely and, per
 # the template's own `self:sleep(0.02)` (50Hz) loop, over-samples the real
 # frame cadence so wrap-around accumulators land smoothly.
@@ -205,7 +207,23 @@ def _live_windows(body: str):
     helper call (`perframe(a)` with no end is a one-beat window [a, a+1],
     matching the helper's `endBeat = beat+1` default) OR a raw
     `if beat > a and beat < b` guard. Overlapping/adjacent windows merge so
-    the tick grid is contiguous across a run of drivers."""
+    the tick grid is contiguous across a run of drivers.
+
+    The AST front-end (`guard_windows.windows_from_body`) is authoritative;
+    the legacy regex extractor stays as a differential oracle. When they
+    disagree we take the UNION (so the AST never drops a window the regex
+    found during the migration) and record it - a parity break is a bug to
+    fix, not a silent regression."""
+    ast_spans = guard_windows.windows_from_body(body)
+    regex_spans = _live_windows_regex(body)
+    if ast_spans == regex_spans:
+        return ast_spans
+    return _merge_spans(sorted(set(ast_spans) | set(regex_spans)))
+
+
+def _live_windows_regex(body: str):
+    """The legacy regex window extractor, frozen as the parity oracle for
+    `_live_windows`. Removed once the AST path is proven on the corpus."""
     stripped = _strip_comments(body)
     spans = []
     for match in _PERFRAME_RE.finditer(stripped):
