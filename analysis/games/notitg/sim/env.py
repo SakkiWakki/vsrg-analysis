@@ -209,6 +209,8 @@ class SimEnvironment:
         `mod_time`/`GetSongBeat` see this tick. The mod_actions cursor
         inside the body no-ops (already fired in the replay pass). Faults
         are swallowed and counted."""
+        if self._update_chunk is False:
+            return
         if self._update_chunk is None:
             # An expression command (`%prefix.update`) was captured as a
             # function at actor creation; call THAT - re-evaluating the
@@ -219,7 +221,14 @@ class SimEnvironment:
                 table = self._tables[rec_id]
                 self._update_chunk = lambda: resolved(table)
             else:
-                self._update_chunk = self._host.compile(body, name=name)
+                try:
+                    self._update_chunk = self._host.compile(body, name=name)
+                except Exception as exc:
+                    # A body that does not compile no-ops in the engine
+                    # too (a bad command never aborts the chart).
+                    self._update_chunk = False
+                    self._warnings.append(f'{name}: {exc}')
+                    return
         # No eager all-actor sync: pokes and getter reads _sync lazily,
         # so only the actors the body actually touches advance per tick.
         self._host.env['mod_time'] = self._now

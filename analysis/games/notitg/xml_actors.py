@@ -127,7 +127,9 @@ def _find_attr_value_end(text: str, start: int) -> int:
 
 def _parse_tag_attrs(tag_body: str) -> dict:
     """Attributes from the inside of a start tag. Duplicate names keep
-    the last value (engine field-overwrite order)."""
+    the last value (engine field-overwrite order). Lua-bearing values
+    (`%` bodies and Condition expressions) are rewritten to lex the
+    same under LuaJIT as under NotITG's Lua 5.0."""
     attrs = {}
     pos = 0
     while True:
@@ -136,9 +138,94 @@ def _parse_tag_attrs(tag_body: str) -> dict:
             break
         value_start = m.end()
         value_end = _find_attr_value_end(tag_body, value_start)
-        attrs[m.group(1)] = tag_body[value_start:value_end]
+        value = tag_body[value_start:value_end]
+        if value.startswith('%') or m.group(1) == 'Condition':
+            value = _lua50_compat(value)
+        attrs[m.group(1)] = value
         pos = value_end + 1
     return attrs
+
+
+# String escapes Lua 5.0 recognizes; for any OTHER `\c` its lexer
+# passes `c` through, where 5.1/LuaJIT raise "invalid escape sequence"
+# (real charts write `'\+$'` find-patterns).
+_LUA50_ESCAPES = frozenset("abfnrtv\\\"'\n0123456789")
+
+
+def _lua50_compat(source: str) -> str:
+    """Rewrite Lua source so LuaJIT (5.1 lexer) reads it exactly as
+    NotITG's Lua 5.0 lexer does. Three divergences real charts hit:
+
+    - a number may run straight into a keyword (`beat < 485then`): 5.0
+      ends the number token at the letter; insert the missing space.
+    - unknown string escapes pass the char through in 5.0; drop the
+      backslash.
+    - `[[`/`]]` NEST inside long comments in 5.0, so `--[[ .. [[ .. ]]
+      .. ]]` is one comment; blank the interior (newlines kept, so line
+      numbers survive) up to the DEPTH-MATCHED close.
+    """
+    out = []
+    i, n = 0, len(source)
+    while i < n:
+        ch = source[i]
+        if source.startswith('--[[', i):
+            out.append('--[[')
+            i += 4
+            depth = 1
+            while i < n and depth:
+                if source.startswith('[[', i):
+                    depth += 1
+                    out.append('  ')
+                    i += 2
+                elif source.startswith(']]', i):
+                    depth -= 1
+                    out.append(']]' if depth == 0 else '  ')
+                    i += 2
+                else:
+                    out.append(source[i] if source[i] == '\n' else ' ')
+                    i += 1
+        elif source.startswith('--', i):
+            stop = source.find('\n', i)
+            stop = n if stop == -1 else stop
+            out.append(source[i:stop])
+            i = stop
+        elif ch in '\'"':
+            out.append(ch)
+            i += 1
+            while i < n:
+                c = source[i]
+                if c == '\\':
+                    escaped = source[i + 1] if i + 1 < n else ''
+                    if escaped in _LUA50_ESCAPES:
+                        out.append(source[i:i + 2])
+                    else:
+                        out.append(escaped)
+                    i += 2
+                    continue
+                out.append(c)
+                i += 1
+                if c == ch:
+                    break
+        elif source.startswith('[[', i):
+            stop = source.find(']]', i + 2)
+            stop = n - 2 if stop == -1 else stop
+            out.append(source[i:stop + 2])
+            i = stop + 2
+        elif ch.isdigit():
+            start = i
+            while i < n and (source[i].isdigit() or source[i] == '.'):
+                i += 1
+            out.append(source[start:i])
+            begins_token = start == 0 or not (
+                source[start - 1].isalnum() or source[start - 1] in '_.')
+            if (begins_token and i < n
+                    and (source[i].isalpha() or source[i] == '_')
+                    and source[i] not in 'eExX'):
+                out.append(' ')
+        else:
+            out.append(ch)
+            i += 1
+    return ''.join(out)
 
 
 def _scan_start_tag(text: str, lt: int):
