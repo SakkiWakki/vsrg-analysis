@@ -32,11 +32,27 @@ _BEATS_PER_MEASURE = 4.0
 _COMMAND_VERBS = frozenset(COMMAND_NAMES)
 
 
+# The concrete lupa table type, learned on first sight and cached: an exact
+# `type(x) is _LUA_TABLE_TYPE` compare is far cheaper than the duck-check in the
+# per-tick index hot path (millions of calls on a real chart). lupa hands out
+# one table class, so one cache entry covers every table.
+_LUA_TABLE_TYPE = None
+
+
 def _is_lua_table(value) -> bool:
-    """Duck-typed lupa-table check: a Lua table supports integer indexing
-    but is not a Python string/bytes."""
-    return hasattr(value, '__getitem__') and not isinstance(
-        value, (str, bytes))
+    """Duck-typed lupa-table check: a Lua table supports integer indexing but
+    is not a Python string/bytes. Fast path: a value of the cached lupa table
+    type is a table outright; the duck-check runs only until the type is
+    learned."""
+    global _LUA_TABLE_TYPE
+    if type(value) is _LUA_TABLE_TYPE:
+        return True
+    if hasattr(value, '__getitem__') and not isinstance(value, (str, bytes)):
+        if _LUA_TABLE_TYPE is None and type(value).__module__.startswith(
+                ('lupa', '_lupa')):
+            _LUA_TABLE_TYPE = type(value)
+        return True
+    return False
 
 
 def _lua_index(table, key) -> Resolution:
