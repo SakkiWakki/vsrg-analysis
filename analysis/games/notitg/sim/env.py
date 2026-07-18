@@ -155,6 +155,7 @@ class SimEnvironment:
         self._named_commands: dict = {}
         self._message_commands: dict = {}
         self._labels: dict = {}
+        self._xml_dirs: dict = {}
         self._children: dict = {}
         self._next_id = 0
         self._active: list = []
@@ -602,6 +603,9 @@ class SimEnvironment:
     def _register_one(self, actor) -> int:
         rec_id = self._id_for(actor)
         self._labels[rec_id] = self._actor_label(actor, rec_id)
+        base_dir = getattr(actor, '_base_dir', None)
+        if base_dir is not None:
+            self._xml_dirs[rec_id] = f'{base_dir}/'
         for message, body in actor.message_commands().items():
             resolved = self._load_resolve(rec_id, f'msg:{message}', body)
             if resolved is not None:
@@ -887,6 +891,8 @@ class SimEnvironment:
             return float(len(self._children.get(_as_int(rec_id), ())))
         if verb in ('GetNumTapsInRange', 'GetNumVertices'):
             return 0.0
+        if verb == 'GetXMLDir':
+            return self._xml_dirs.get(_as_int(rec_id), '')
         actor = self._actors.get(_as_int(rec_id))
         if actor is None:
             return self._host.env['__permissive']()
@@ -977,6 +983,17 @@ class SimEnvironment:
         host.expose('__screen_get_child', self._screen_get_child)
 
         host.expose('loadfile', self._loadfile)
+        # os.clock/os.time read the SIM clock: charts derive per-frame
+        # deltaTime from them (Government Knows' CatUpdater), and the
+        # deterministic sweep time is the engine-true answer here. A
+        # chart assigning its own `os` global simply shadows this.
+        host.expose('os', host.to_lua({'clock': lambda: self._now,
+                                       'time': lambda: self._now}))
+        host.expose('SOUND', singleton(host.to_lua({
+            'PlayOnce': lambda _self, *_a: None,
+            'PlayMusicPart': lambda _self, *_a: None,
+            'StopMusic': lambda _self, *_a: None,
+        })))
         song = singleton(host.to_lua({
             'GetSongDir': lambda _self: (
                 f'{self._song_dir}/' if self._song_dir else ''),

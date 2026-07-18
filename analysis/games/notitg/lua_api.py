@@ -531,7 +531,7 @@ GETTER_NAMES = tuple(sorted((*_SCALAR_GETTERS, 'GetTexture', 'getrotation')))
 SIM_GETTER_NAMES = tuple(sorted(
     (*GETTER_NAMES, 'GetSecsIntoEffect', 'GetText', 'getaux',
      'GetTweenTimeLeft', 'GetNumChildren', 'GetNumTapsInRange',
-     'GetNumVertices')))
+     'GetNumVertices', 'GetXMLDir')))
 # `__COMMAND` = the actor commands whose dispatch runs the actor's
 # `<Name>Command` on its own recorder (`__actor_command`): playcommand runs
 # it now, queuecommand after the pending tween. `queuemessage` is a message

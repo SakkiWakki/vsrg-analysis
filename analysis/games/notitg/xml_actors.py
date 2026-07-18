@@ -107,7 +107,10 @@ class ParsedXml:
 
 
 _NAME = r'[A-Za-z_][A-Za-z0-9_]*'
-_ATTR_RE = re.compile(r'(' + _NAME + r')\s*=\s*"', re.DOTALL)
+# SM's XmlFile accepts single- OR double-quoted attribute values;
+# charts single-quote attrs whose Lua bodies use double-quoted strings
+# (Government Knows' CatEvent rig).
+_ATTR_RE = re.compile(r'(' + _NAME + r')\s*=\s*(["\'])', re.DOTALL)
 
 # Tag names are looser than attribute names: SM's XmlFile accepts any
 # run of name-ish characters, and charts use digit-leading tags
@@ -117,11 +120,12 @@ _ATTR_RE = re.compile(r'(' + _NAME + r')\s*=\s*"', re.DOTALL)
 _TAG_RE = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.:-]*')
 
 
-def _find_attr_value_end(text: str, start: int) -> int:
-    """Index of the closing `"` for an attribute value opened at
-    `start`. NotITG never escapes `"` inside attribute values (Lua uses
-    single quotes for its strings), so the next raw `"` closes it."""
-    close = text.find('"', start)
+def _find_attr_value_end(text: str, start: int, quote: str = '"') -> int:
+    """Index of the closing quote for an attribute value opened at
+    `start`. NotITG never escapes the delimiting quote inside attribute
+    values (a body quoted one way uses the other quote for its Lua
+    strings), so the next raw occurrence closes it."""
+    close = text.find(quote, start)
     return close if close != -1 else len(text)
 
 
@@ -137,7 +141,7 @@ def _parse_tag_attrs(tag_body: str) -> dict:
         if not m:
             break
         value_start = m.end()
-        value_end = _find_attr_value_end(tag_body, value_start)
+        value_end = _find_attr_value_end(tag_body, value_start, m.group(2))
         value = tag_body[value_start:value_end]
         if value.startswith('%') or m.group(1) == 'Condition':
             value = _lua50_compat(value)
@@ -272,8 +276,8 @@ def _scan_start_tag(text: str, lt: int):
     while pos < len(text):
         ch = text[pos]
         match ch:
-            case '"':
-                pos = _find_attr_value_end(text, pos + 1) + 1
+            case '"' | "'":
+                pos = _find_attr_value_end(text, pos + 1, ch) + 1
             case '>':
                 inner = text[lt + 1 + len(tag_name):pos]
                 self_closing = inner.rstrip().endswith('/')
