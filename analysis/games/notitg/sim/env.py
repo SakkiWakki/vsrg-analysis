@@ -51,9 +51,21 @@ _IDENT_CHAR_RE = re.compile(r'[A-Za-z_]')
 # semantics - reporting an nvidia-class renderer keeps chart feedback
 # trails at their authored decay instead of saturating.
 _VIDEO_VENDOR = 'NVIDIA Corporation'
+# Typed like the engine's: GetPreference returns the preference's real
+# type, and charts do arithmetic straight off the numeric ones (the
+# getfucked2 clock rig adds GlobalOffsetSeconds every frame - a ''
+# default there cascades thousands of downstream nil faults).
 _PREFERENCES = {
     'VideoRenderers': 'opengl',
     'LastSeenVideoDriver': _VIDEO_VENDOR,
+    'GlobalOffsetSeconds': 0.0,
+    'InputDuplication': False,
+    'Autoplay': False,
+    # SM 3.95 stock timing windows; charts derive prank judgment
+    # timing from these.
+    'JudgeWindowSecondsGreat': 0.090,
+    'JudgeWindowSecondsBoo': 0.180,
+    'PercentScoreWeightMarvelous': 3,
 }
 
 # Broadcast/command recursion guard: a handler may broadcast a message
@@ -503,6 +515,12 @@ class SimEnvironment:
         self._resolve_at_attrs(actor)
         self._expand_includes(actor)
         rec_id = self._register_one(actor)
+        # NotITG's Var= extension binds the actor into a Lua global at
+        # load (4400+ uses corpus-wide: `Var="spriteAscii"` then
+        # `spriteAscii:GetTexture()` from another actor).
+        var = actor.attrs.get('Var', '')
+        if var:
+            self._host.env[var] = self._tables[rec_id]
         value = actor.attrs.get('InitCommand', '')
         if value.startswith('%'):
             self._run_lua_body(rec_id, _strip_lua_wrapper(value),
@@ -862,6 +880,13 @@ class SimEnvironment:
         actor.poke(verb, list(args))
 
     def _actor_get(self, rec_id, verb):
+        # Numeric getters charts do arithmetic on: a permissive-table
+        # answer cascades type faults downstream, so these answer with
+        # real numbers (GetNumChildren) or the empty-count 0.
+        if verb == 'GetNumChildren':
+            return float(len(self._children.get(_as_int(rec_id), ())))
+        if verb in ('GetNumTapsInRange', 'GetNumVertices'):
+            return 0.0
         actor = self._actors.get(_as_int(rec_id))
         if actor is None:
             return self._host.env['__permissive']()
