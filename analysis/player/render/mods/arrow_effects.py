@@ -885,7 +885,14 @@ def hallway_x(percent, cols, y_offset, keycount, arrow_size=ARROW_SIZE,
 
 
 def _center_line(mini_percent):
+    # ArrowEffects.cpp GetCenterLine: CENTER_LINE_Y / (1 - mini*0.5).
+    # The engine does the raw C++ float divide, so mini == 200% (zoom 0)
+    # yields +inf, not a crash - the fade math downstream then treats the
+    # visibility window as infinitely far (mini this extreme collapses
+    # the field to a point). Match that instead of raising.
     zoom = 1.0 - mini_percent * 0.5
+    if zoom == 0.0:
+        return np.inf
     return CENTER_LINE_Y / zoom
 
 
@@ -908,18 +915,23 @@ def percent_visible(percents, cols, y_pos):
 
     hs = _hidden_sudden(hidden, sudden)
     center = _center_line(mini)
-    hidden_end = center + FADE_DIST_Y * _scale(hs, 0, 1, -1.0, -1.25) + center * hidden_off
-    hidden_start = center + FADE_DIST_Y * _scale(hs, 0, 1, 0.0, -0.25) + center * hidden_off
-    sudden_end = center + FADE_DIST_Y * _scale(hs, 0, 1, -0.0, 0.25) + center * sudden_off
-    sudden_start = center + FADE_DIST_Y * _scale(hs, 0, 1, 1.0, 1.25) + center * sudden_off
 
     adjust = np.zeros(cols.shape, dtype=np.float64)
-    if hidden != 0.0:
-        ha = np.clip(_scale(y_pos, hidden_start, hidden_end, 0.0, -1.0), -1.0, 0.0)
-        adjust = adjust + hidden * ha
-    if sudden != 0.0:
-        sa = np.clip(_scale(y_pos, sudden_start, sudden_end, -1.0, 0.0), -1.0, 0.0)
-        adjust = adjust + sudden * sa
+    # An extreme mini (>= 200%) drives the center line to +inf (the field
+    # collapses to a point); the hidden/sudden fade windows go infinitely
+    # far, so they never fade a note. Skip them rather than propagate
+    # inf-inf NaN through the _scale ramps.
+    if np.isfinite(center):
+        hidden_end = center + FADE_DIST_Y * _scale(hs, 0, 1, -1.0, -1.25) + center * hidden_off
+        hidden_start = center + FADE_DIST_Y * _scale(hs, 0, 1, 0.0, -0.25) + center * hidden_off
+        sudden_end = center + FADE_DIST_Y * _scale(hs, 0, 1, -0.0, 0.25) + center * sudden_off
+        sudden_start = center + FADE_DIST_Y * _scale(hs, 0, 1, 1.0, 1.25) + center * sudden_off
+        if hidden != 0.0:
+            ha = np.clip(_scale(y_pos, hidden_start, hidden_end, 0.0, -1.0), -1.0, 0.0)
+            adjust = adjust + hidden * ha
+        if sudden != 0.0:
+            sa = np.clip(_scale(y_pos, sudden_start, sudden_end, -1.0, 0.0), -1.0, 0.0)
+            adjust = adjust + sudden * sa
     if stealth != 0.0:
         adjust = adjust - stealth
     adjust = adjust + blink_adjust

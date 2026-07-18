@@ -1417,3 +1417,24 @@ def test_held_hold_body_samples_start_at_receptor():
     assert ys[0] == pytest.approx(300.0)
     assert ys[-1] == pytest.approx(100.0)
     assert float(ys.max()) <= 300.0 + 1e-9
+
+
+def test_extreme_mini_does_not_crash():
+    # mini == 200% drives the center line to +inf (field collapses to a
+    # point); the C++ engine does the raw float divide (-> inf, not a
+    # crash) and the hidden/sudden windows go infinitely far. We must
+    # match that: percent_visible stays finite and never raises.
+    cols = np.array([0, 1, 2, 3])
+    y = np.array([50.0, -50.0, 200.0, 0.0])
+    # mini alone: no fade, all visible (except the y<0 always-visible rule)
+    vis = ae.percent_visible({'mini': 2.0}, cols, y)
+    assert np.all(np.isfinite(vis))
+    assert np.all((vis >= 0.0) & (vis <= 1.0))
+    # mini extreme WITH hidden active: still finite, no NaN from inf-inf.
+    vis2 = ae.percent_visible({'mini': 2.0, 'hidden': 1.0}, cols, y)
+    assert np.all(np.isfinite(vis2))
+
+
+def test_center_line_infinite_at_zoom_zero():
+    assert not np.isfinite(ae._center_line(2.0))     # zoom 0 -> inf
+    assert ae._center_line(0.0) == ae.CENTER_LINE_Y   # no mini -> base
