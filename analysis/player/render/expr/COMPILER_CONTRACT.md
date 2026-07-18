@@ -108,16 +108,25 @@ dispatch, a tween start, a one-shot state change. Feeds `EventSchedule`.
 The residue path (measured 44%): a property whose value each tick depends on
 LIVE state the compiler cannot characterize analytically (another actor's
 current position, an accumulator). The core RUNS the residue over the tick grid
-(this is the hot loop = the Rust perf target) and emits the resulting piecewise
-curve as a Channel over its clock. Still a timeline Channel, still clock-named -
-just sampled rather than closed-form.
+NATIVELY (the tick loop is Rust, permanently - this is the load-speed motivation:
+parsing+execution must be native) and emits the resulting piecewise curve as a
+Channel over its clock. Still a timeline Channel, still clock-named - just
+sampled rather than closed-form. Only declarative formats (BMS) never reach here.
 
-### 4. `QUERY_LIVE(handle, kind) -> value`  (the only per-tick backend call)
+### 4. `QUERY_LIVE(handle, kind) -> value`  (per-tick backend call = the migration frontier)
 
 During the residue tick loop, the core needs the CURRENT value of something the
-backend owns. This is the sole runtime crossing into the backend. It is a
-NARROW, TYPED value query over an opaque `handle` (an actor id) - NOT a generic
-method dispatch. The adapter resolves game vocab to a `kind` at compile time.
+backend owns. It is a NARROW, TYPED value query over an opaque `handle` (an
+actor id) - NOT a generic method dispatch. The adapter resolves game vocab to a
+`kind` at compile time.
+
+This trait (QUERY_LIVE + poke + RESOLVE_HANDLE) is the MIGRATION FRONTIER: it is
+drawn wherever Python currently stops and Rust begins. TODAY its implementor is
+PYTHON (the Surface/SimActor, not yet ported - fine while adapters/backend are
+unfinalized), so the Rust tick loop bridges out to Python here. As each piece
+stabilizes and ports, the SAME trait gets a Rust implementor and the crossing
+becomes native - the core never changes. The frontier moves inward until it
+vanishes (all Rust). Design it as one clean trait now = every port is a drop-in.
 
 - Measured NotITG per-tick reads (the whole set, ~6 kinds = 95%): a numeric
   property (getaux 992 / GetX 893 / GetY 309 / GetZ 110 / GetShader 231) and
@@ -141,6 +150,28 @@ reproduce the Lua path" rule:
 - native math (`math.sin/cos/min/...`) -> native, inlined into a curve.
 - constants / no-ops (`GetTopScreen` 6021 as a handle constant; `SystemMessage`,
   `PlayOnce`, `IsEditMode`, `GetVersionDate`) -> folded away.
+
+## Rust crate internal shape (core = router; language piece = thin)
+
+The crate is two parts, deliberately (user): NOT rebuilding a CFG parser.
+
+- NEUTRAL CORE = the ROUTER + timeline-emission engines. It does NOT parse and
+  knows no language. It receives normalized, adapter-tagged nodes and ROUTES
+  each to the right machinery: analytic -> curve emitter, event -> schedule,
+  residue -> native tick loop, live-read -> QUERY_LIVE. It also owns the
+  analytic-vs-residue CLASSIFICATION (structural: does this expr read only
+  clock+math+const?) - classification is routing, so it is core. It owns the
+  value model, scope/store, data tables, tick loop. This is `frame_compile_exec`
+  generalized: a node->request router instead of node->Python-closure.
+- LANGUAGE PIECE (per language, NOT a from-scratch parser) = produces / accepts
+  that language's AST and its value semantics (Lua truthiness/and-or), then
+  hands normalized nodes to the core. Lua reuses the existing parser (Python
+  today); a language piece is thin - shape + semantics, not reprocessing.
+- ADAPTER (per game) = THIN pass-through: supplies vocab facts (which names are
+  clocks / live-queries / events) and passes the node to the relevant core
+  routing. Not a processing layer - a routing-hint provider.
+
+Dataflow: parse (language piece) -> adapter tags vocab -> core routes to emitter.
 
 ## Core-owned state (no backend involvement)
 
