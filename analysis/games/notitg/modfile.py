@@ -1190,9 +1190,12 @@ def _resolve_font(actor, fonts):
 
 # Storyboard properties the renderer samples. `hidden` is SM's hard
 # visibility bit (1 hidden, 0 shown), kept separate from `alpha` so a
-# `hidden,1` gate and a diffusealpha crossfade coexist. The recorder also
-# captures 3D-only channels (z, rotation_x/y, skew, scale_z) with no 2D
-# analogue; they are kept out of the built element timelines.
+# `hidden,1` gate and a diffusealpha crossfade coexist. The 3D scene
+# channels (z, rotation_x/y, scale_z, skew, fov) flow through too: the
+# storyboard renderer projects an element through its frame chain's
+# perspective camera, so an actor tilted/pushed in z or inside a
+# fov frame renders in true 3D. They rest at identity, so a flat actor
+# is unchanged.
 _DRAWABLE_PROPS = frozenset({
     'x', 'y', 'scale_x', 'scale_y', 'rotation', 'alpha', 'color', 'hidden',
     # Absolute on-screen size (SM zoomto/setsize). Rest is the unset
@@ -1201,6 +1204,8 @@ _DRAWABLE_PROPS = frozenset({
     # SM crop family (recorded onto crop_* by the crop setters); the
     # storyboard renderer insets the drawn/source rect by these fractions.
     'crop_top', 'crop_bottom', 'crop_left', 'crop_right',
+    # 3D scene channels (rest at identity -> flat actors unchanged).
+    'rotation_x', 'rotation_y', 'z', 'scale_z', 'skew_x', 'skew_y', 'fov',
 })
 
 

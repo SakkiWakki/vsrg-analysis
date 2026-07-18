@@ -431,3 +431,79 @@ def test_sprite_referencing_white_draws_without_missing_warning(capsys):
     bbox = _rendered_bbox(sb, t=0.5)
     assert bbox is not None                       # the white pixmap drew
     assert 'missing' not in capsys.readouterr().out
+
+
+# ── 3D scene projection (fov camera + out-of-plane tilt) ------------------
+
+def _pixel_bbox_center(storyboard, t, size=200):
+    """(cx, cy, width, height) of the drawn bbox, or None."""
+    bb = _rendered_bbox(storyboard, t, size)
+    if bb is None:
+        return None
+    x0, y0, x1, y1 = bb
+    return ((x0 + x1) / 2.0, (y0 + y1) / 2.0, x1 - x0, y1 - y0)
+
+
+def _centered_rect(w=40.0, h=40.0, extra=None):
+    tl = build_timelines({'x': 100.0, 'y': 100.0, 'w': w, 'h': h,
+                          **(extra or {})})
+    return _leaf('rect', origin=(0.5, 0.5), timelines=tl)
+
+
+def test_3d_rest_channels_are_pixel_identical_to_2d():
+    # An element carrying 3D channels AT REST (rot 0, z 0, fov 45) must
+    # render byte-identical to one without them - the flat no-op path.
+    flat = Storyboard(200, 200, 'stretch', (_centered_rect(),))
+    with_3d = Storyboard(200, 200, 'stretch', (_centered_rect(extra={
+        'rotation_x': 0.0, 'rotation_y': 0.0, 'z': 0.0, 'fov': 45.0}),))
+    assert _rendered_bbox(flat, t=0.5) == _rendered_bbox(with_3d, t=0.5)
+
+
+def test_rotation_y_narrows_via_perspective():
+    # Rotating a rect about its vertical axis foreshortens its WIDTH
+    # (the far edge recedes) - a real perspective effect the 2D path
+    # cannot produce. Height stays ~constant.
+    flat = _pixel_bbox_center(
+        Storyboard(200, 200, 'stretch', (_centered_rect(),)), t=0.5)
+    tilted = _pixel_bbox_center(
+        Storyboard(200, 200, 'stretch',
+                   (_centered_rect(extra={'rotation_y': 55.0}),)), t=0.5)
+    assert flat is not None and tilted is not None
+    assert tilted[2] < flat[2] - 2          # width foreshortened
+    assert abs(tilted[3] - flat[3]) < 6     # height ~unchanged
+
+
+def test_z_push_scales_by_perspective():
+    # SM +z is TOWARD the eye (enlarges via the perspective divide);
+    # pushing -z moves the plane away and shrinks it.
+    base = _pixel_bbox_center(
+        Storyboard(200, 200, 'stretch', (_centered_rect(),)), t=0.5)
+    near = _pixel_bbox_center(
+        Storyboard(200, 200, 'stretch',
+                   (_centered_rect(extra={'z': 80.0}),)), t=0.5)
+    far = _pixel_bbox_center(
+        Storyboard(200, 200, 'stretch',
+                   (_centered_rect(extra={'z': -80.0}),)), t=0.5)
+    assert base and near and far
+    assert near[2] > base[2] and far[2] < base[2]
+
+
+def test_group_fov_projects_children():
+    # A group's fov sets the camera for its subtree: a child pushed in z
+    # under a group with fov projects (shrinks), proving fov cascades.
+    child = _leaf('rect', origin=(0.5, 0.5),
+                  timelines=build_timelines({'x': 0.0, 'y': 0.0,
+                                             'w': 40.0, 'h': 40.0,
+                                             'z': -100.0}))
+    grp = _center_group([child],
+                        timelines=build_timelines({'fov': 60.0}))
+    flat_child = _leaf('rect', origin=(0.5, 0.5),
+                       timelines=build_timelines({'x': 0.0, 'y': 0.0,
+                                                  'w': 40.0, 'h': 40.0}))
+    flat_grp = _center_group([flat_child], timelines=build_timelines())
+    projected = _pixel_bbox_center(
+        Storyboard(200, 200, 'height', (grp,)), t=0.5)
+    flat = _pixel_bbox_center(
+        Storyboard(200, 200, 'height', (flat_grp,)), t=0.5)
+    assert projected is not None and flat is not None
+    assert projected[2] < flat[2]   # z-pushed child shrank under fov

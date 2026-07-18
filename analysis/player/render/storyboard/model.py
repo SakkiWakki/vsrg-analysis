@@ -72,6 +72,13 @@ _SCALAR_RESTS = {
     # (0..1) of the actor hidden from each edge before it draws. Rest 0 =
     # uncropped, so an element never poked with a crop verb draws whole.
     'crop_top': 0.0, 'crop_bottom': 0.0, 'crop_left': 0.0, 'crop_right': 0.0,
+    # 3D scene channels: out-of-plane rotation, z position/scale, skew,
+    # and the frame's perspective-camera fov (deg). All rest at identity
+    # (rot 0, z 0, scale_z 1, skew 0, fov 45 = the LoadMenuPerspective
+    # default), so an actor never poked in 3D projects as the exact 2D
+    # affine it does today - the flat-chart no-op path.
+    'rotation_x': 0.0, 'rotation_y': 0.0, 'z': 0.0, 'scale_z': 1.0,
+    'skew_x': 0.0, 'skew_y': 0.0, 'fov': 45.0,
 }
 
 

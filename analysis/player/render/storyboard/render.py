@@ -20,12 +20,15 @@ strobe tints don't re-rasterize every frame.
 """
 from __future__ import annotations
 
+from functools import lru_cache
+
 import numpy as np
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QPainter, QPen,
                            QPixmap)
 
+from analysis.player.render import transform3d as _t3d
 from analysis.player.render.effects.base import EffectFrame
 from analysis.player.render.storyboard.asset_size import AssetSizeSpec, resolve
 from analysis.player.render.storyboard.sprite_sheet import (frame_at_time,
@@ -33,6 +36,21 @@ from analysis.player.render.storyboard.sprite_sheet import (frame_at_time,
 
 _MIN_VISIBLE_ALPHA = 1.0 / 255.0
 _TINT_QUANT_LEVELS = 32
+
+# Perspective camera default: fov 45 (SM LoadMenuPerspective). An
+# element whose whole chain rests here with no out-of-plane tilt is
+# affine and paints through the plain QPainter bracket (no projection).
+_DEFAULT_FOV = 45.0
+_EPS = 1e-6
+
+
+@lru_cache(maxsize=32)
+def _design_projection(design_w, design_h, fov):
+    """A perspective camera's world -> design-pixel projection, cached
+    per (design size, fov). General scene projection (any game's
+    storyboard): fov is the frame camera's field of view in degrees,
+    the design rect its viewport. A chart uses a handful of fovs."""
+    return _t3d.projection(fov, design_w, design_h)
 
 
 def _logical_size(el, pm):
@@ -271,7 +289,8 @@ class StoryboardEffect:
 
     def _paint_element(self, painter, el, t, k, ox, oy,
                        ref_w, ref_h, inherited_alpha=1.0,
-                       walker=_ELEMENT_WALK, node=None) -> None:
+                       walker=_ELEMENT_WALK, node=None,
+                       world3d=None, fov=None) -> None:
         # SM's `hidden` bit hard-gates the draw independently of alpha, so
         # an actor carrying a diffusealpha crossfade stays dark while
         # hidden (the ShowAFTBG capture sprite sits `hidden,1` until its
@@ -300,6 +319,32 @@ class StoryboardEffect:
         if sx == 0.0 or sy == 0.0:
             return
 
+        # 3D scene channels. A frame's `fov` sets the perspective camera
+        # for its whole subtree (the innermost that set one wins); the
+        # out-of-plane rotations / z push / skew tilt the actor plane. As
+        # long as nothing in the chain is 3D-active the element paints
+        # through the exact 2D QPainter bracket below - the flat-chart
+        # no-op path.
+        (rx,) = el.sample('rotation_x', t)
+        (ry,) = el.sample('rotation_y', t)
+        (z,) = el.sample('z', t)
+        (sz,) = el.sample('scale_z', t)
+        (skx,) = el.sample('skew_x', t)
+        (sky,) = el.sample('skew_y', t)
+        (el_fov,) = el.sample('fov', t)
+        fov = el_fov if abs(el_fov - _DEFAULT_FOV) > _EPS else fov
+        active_3d = (world3d is not None
+                     or (fov is not None and abs(fov - _DEFAULT_FOV) > _EPS)
+                     or any(abs(v) > _EPS for v in (rx, ry, z, skx, sky))
+                     or abs(sz - 1.0) > _EPS)
+
+        if active_3d:
+            self._paint_element_3d(
+                painter, el, t, k, ox, oy, ref_w, ref_h, alpha, walker,
+                node, world3d, fov, w, h, x, y, rotation, sx, sy, rx, ry,
+                z, sz, skx, sky)
+            return
+
         ax, ay = el.anchor
         painter.save()
         painter.translate(ox + (ax * ref_w + x) * k,
@@ -318,6 +363,75 @@ class StoryboardEffect:
         else:
             self._paint_kind(painter, el, t, w, h)
         painter.restore()
+
+    def _paint_element_3d(self, painter, el, t, k, ox, oy, ref_w, ref_h,
+                          alpha, walker, node, world3d, fov, w, h, x, y,
+                          rotation, sx, sy, rx, ry, z, sz, skx, sky) -> None:
+        """Paint `el` through its frame chain's perspective camera.
+
+        The element's local model matrix (design space: translate to its
+        anchored position incl. z, rotate about all three axes, scale,
+        skew) composes onto the inherited group world; the result is
+        projected by the chain's fov camera (LoadMenuPerspective in
+        design pixels). A group recurses with the composed world so its
+        children inherit the tilt; a leaf draws its quad through the
+        planar homography (QPainter executes the projective transform).
+
+        Design pixels ARE the space the layer's painter maps to screen
+        (the design->screen translate+scale is already on the painter),
+        so the projection targets design pixels and the existing mapping
+        carries it to the window - a game-agnostic scene projection, not
+        NotITG-specific."""
+        ax, ay = el.anchor
+        # Local model in design space: rotate/scale/skew about the
+        # element origin, translate to its anchored design position.
+        px = ax * ref_w + x
+        py = ay * ref_h + y
+        local = _t3d.local_matrix(
+            pos=(px, py, z), rot=(rx, ry, rotation), scl=(sx, sy, sz),
+            skewx=skx, skewy=sky)
+        world = local if world3d is None else _t3d.compose(world3d, local)
+        cam_fov = _DEFAULT_FOV if fov is None else fov
+
+        if el.additive:
+            painter.save()
+            painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_Plus)
+        painter.setOpacity(min(1.0, alpha))
+
+        if el.kind == 'group':
+            for child_el, child_node in walker.children(el, node, t):
+                self._paint_element(painter, child_el, t, 1.0, 0.0, 0.0,
+                                    0.0, 0.0, alpha, walker, child_node,
+                                    world3d=world, fov=cam_fov)
+        else:
+            self._draw_quad_3d(painter, el, t, w, h, world, cam_fov)
+        if el.additive:
+            painter.restore()
+
+    def _draw_quad_3d(self, painter, el, t, w, h, world, fov) -> None:
+        """Draw a leaf element's w x h quad through the projected world.
+
+        The quad's own corners sit at [-origin*size, +(-origin+1)*size]
+        (the origin-relative box the 2D path draws via the final
+        `translate(-origin*w, -origin*h)`). Its content->design-pixel
+        homography is `origin_box @ world @ projection`; setting it on
+        the painter (combined with the layer's design->screen map already
+        in place) draws the element's local rect (0,0,w,h) exactly where
+        the perspective puts it."""
+        ox_, oy_ = el.origin
+        content_to_world = _t3d.translate(-ox_ * w, -oy_ * h) @ world
+        projection = _design_projection(self._sb.design_w,
+                                        self._sb.design_h, fov)
+        corners = ((0.0, 0.0), (w, 0.0), (w, h), (0.0, h))
+        verdict, H, _clip = _t3d.project_with_verdict(
+            content_to_world, projection, corners)
+        if verdict == 'gone':
+            return
+        saved = painter.transform()
+        painter.setTransform(_t3d.qtransform_from_h(H), combine=True)
+        self._paint_kind(painter, el, t, w, h)
+        painter.setTransform(saved)
 
     def _paint_children(self, painter, el, t, group_alpha,
                         walker=_ELEMENT_WALK, node=None) -> None:
