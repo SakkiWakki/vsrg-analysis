@@ -216,9 +216,41 @@ def _mod_events(result) -> list:
 # the grid's accumulator frame at section end, and the chain's hidden
 # carries it.
 
-# Screen children in player order: a proxy targeting a player's recorder
-# (or its NoteField child) re-renders that player's notefield.
-_PLAYER_CHILDREN = ('PlayerP1', 'PlayerP2')
+import re as _re
+
+# `PlayerP{n}` screen-child name -> 1-based player number. A chart
+# `GetChild('PlayerP3')`s any player it wants a field for; NotITG allows
+# up to 8, and SRT charts use the extra slots as field SOURCES for their
+# proxy copies (each plays the SAME notes with its OWN per-player mods).
+# We never hardcode a count: the referenced players are exactly those the
+# chart touched (screen children + the players its ApplyModifiers named).
+_PLAYER_NAME_RE = _re.compile(r'^PlayerP(\d+)$')
+
+
+def _player_number(child_name):
+    m = _PLAYER_NAME_RE.match(child_name)
+    return int(m.group(1)) if m else None
+
+
+def _base_players(mod_channels) -> list:
+    """The 1-based real gameplay players that render an always-drawn
+    base field: the ones the chart actually mods (ApplyModifiers(str,
+    pn) -> mod channels). A lone player [1] keeps the direct-draw fast
+    path; two+ means a versus/dual layout. Extra `GetChild('PlayerP3')`
+    slots are NOT base players - they exist only as proxy sources."""
+    players = {p + 1 for p in mod_channels.players}  # 0-based -> 1-based
+    players.add(1)
+    return sorted(players)
+
+
+def _proxy_source_players(env) -> list:
+    """Every 1-based player number a proxy could target: the PlayerP{n}
+    screen children the chart accessed. A proxy of P{n}'s notefield
+    re-renders that player's field (the SRT charts' decorative copies),
+    so its target must resolve to a player number even for n > the real
+    gameplay count."""
+    return sorted(n for name in env.screen_child_ids()
+                  if (n := _player_number(name)) is not None)
 
 # Drawable leaf kinds an AFT-rig fill can be (the rig's fullscreen
 # curtains are Quads and bg.png sprites).
@@ -265,8 +297,8 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
     player_ids = env.screen_child_ids()
     synthetic = env.synthetic_child_ids()
     proxy_players = {}
-    for number, child in enumerate(_PLAYER_CHILDREN, start=1):
-        player_id = player_ids.get(child)
+    for number in _proxy_source_players(env):
+        player_id = player_ids.get(f'PlayerP{number}')
         if player_id is None:
             continue
         proxy_players[player_id] = number
@@ -280,9 +312,10 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
                  for rec_id, sim in env.actors.items() if sim.is_aft}
 
     instances = []
-    if _dual_players(mod_channels, named_keyframes):
+    base_players = _base_players(mod_channels)
+    if _multi_players(base_players):
         oscillators = field_oscillators or {}
-        for number in (1, 2):
+        for number in base_players:
             instances.append(field_compose.player_instance(
                 number, named_keyframes.get(f'P{number}'),
                 oscillators.get(number), t0=t0))
@@ -377,11 +410,11 @@ class _HiddenAsVisible:
         return (0.0 if self._hidden.sample(t)[0] >= 0.5 else 1.0,)
 
 
-def _dual_players(mod_channels, named_keyframes) -> bool:
-    """A second real player is in play: the chart mods player 2's
-    channels or poked its PlayerP2 group. Then both player fields render
-    every frame, each an instance with its own capture."""
-    return 1 in mod_channels.players or bool(named_keyframes.get('P2'))
+def _multi_players(players) -> bool:
+    """More than one player field is in play. Then each referenced
+    player renders as its own instance with its own capture (its own
+    per-player mods); a lone player keeps the direct-draw fast path."""
+    return len(players) > 1
 
 
 def _map_parents(actor, parent, parents, env) -> None:

@@ -62,14 +62,21 @@ _LINK_RESTS = {
     'alpha': 1.0, 'hidden': 0.0,
 }
 
-# Player-field rest seats in design space: StepMania places each versus
-# player at the PlayerP{n}X metric (center -+ 160), SCREEN_CENTER_Y
-# (openitg ScreenGameplay player placement). Recorded pokes are seeded
-# from these, so the rests are only a backstop for never-poked players.
-PLAYER_REST = {
+# Player-field rest seats in design space: StepMania places the two
+# versus players at the PlayerP{n}X metric (center -+ 160),
+# SCREEN_CENTER_Y (openitg ScreenGameplay player placement). Recorded
+# pokes are seeded from these, so the rests are only a backstop for
+# never-poked players. Extra players (P3-P8 - the SRT charts' decorative
+# field SOURCES) have no style seat; they rest at center and the chart's
+# own pokes place them.
+_PLAYER_SEATS = {
     1: {'x': _CENTER_X - 160.0, 'y': _CENTER_Y},
     2: {'x': _CENTER_X + 160.0, 'y': _CENTER_Y},
 }
+
+
+def player_rest(number):
+    return _PLAYER_SEATS.get(number, {'x': _CENTER_X, 'y': _CENTER_Y})
 
 
 def link_timelines(keyframes, rests=None) -> dict:
@@ -198,7 +205,7 @@ def player_link(number, keyframes, osc_deltas=None,
     hidden channel to visible - a proxy draws its target WITH the
     target's transform but REGARDLESS of the target's hidden bit (the
     standard trick: hide the real field, let the proxies show it)."""
-    link = overlay_deltas(link_timelines(keyframes, rests=PLAYER_REST[number]),
+    link = overlay_deltas(link_timelines(keyframes, rests=player_rest(number)),
                           osc_deltas)
     if ignore_hidden:
         link['hidden'] = EventTimeline([], rest=(0.0,))
