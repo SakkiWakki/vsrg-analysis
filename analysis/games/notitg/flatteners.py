@@ -1,20 +1,19 @@
-"""Recurrence flatteners: the extensible SSM-vs-attention router core.
+"""Recurrence flatteners: the extensible closed-form router core.
 
 The NotITG Update body is compiled per frame variable. A per-frame update
 `x = a*x + b` is a LINEAR RECURRENCE - the same object a compiler's induction
 variable recognition turns into a CHAIN OF RECURRENCES (Bachmann/Zima 1994;
 what LLVM's ScalarEvolution calls a SCEVAddRec). A first-order,
 constant-coefficient chain of recurrence unrolls to a closed form evaluable at
-any step n with no stepping - Mamba's recurrent<->convolutional duality, and
-the recurrence->associative-scan identity (Blelloch parallel prefix) behind
-S4/Mamba parallel evaluation. A `ClosedForm{kernel, coeffs, h0}` IS that
+any step n with no stepping. A `ClosedForm{kernel, coeffs, h0}` IS that
 first-order constant-coefficient chain of recurrence.
 
 The router is a REGISTRY of flatteners, tried in order, first match wins; when
-none match the update falls to ATTENTION - the always-correct floor, the exact
-analogue of ScalarEvolution returning SCEVUnknown for a value it cannot
-characterize. Adding a recurrence class (modular counter, phase oscillator) is
-appending a Flattener; the router core and the IR never change.
+none match, the update is left to be EVALUATED (interpreted) - the
+always-correct floor, the analogue of ScalarEvolution returning SCEVUnknown for
+a value it cannot characterize. Adding a recurrence class (modular counter,
+phase oscillator) is appending a Flattener; the router core and the IR never
+change.
 
 `AffineFlattener` is the only class now. It matches `x = a*x + b` and its
 degenerate forms (toggle `x*-1`, sum `x+step`, geometric `a*x+b`) plus the
@@ -22,7 +21,7 @@ pure-curve poke `p:prop(expr)` where `expr` does not read the target, which is
 the a=0 case (value = b = the compiled curve). Coefficients `a` and `b` compile
 to `scheduler.Channel`s over a `Surface`; an uncompilable coefficient (a live
 local, an unmodeled call) means the update is not affine-flattenable and falls
-to attention.
+to evaluation.
 
 Stage A ASSUMPTION: a and b are treated as CONSTANT over the routed window -
 the kernel evaluates each coefficient Channel once at the window start. A
@@ -151,7 +150,7 @@ def _split_affine(value: ast.Node,
       target - t              -> a=1,  b=-t
       t - target              -> a=-1, b=t
     An expression that reads `target` in a shape this does not model returns
-    (_UNMODELED, value) so the caller routes to attention."""
+    (_UNMODELED, value) so the caller routes to evaluation."""
     if not _self_reads(value, target):
         return None, value
     match value:
@@ -289,7 +288,7 @@ FLATTENERS: list[Flattener] = [AffineFlattener()]
 def route(update: VarUpdate, frame: Frame, surface: Surface | None = None,
           flatteners: list[Flattener] | None = None) -> ClosedForm | None:
     """Try each registered flattener in order; the first `ClosedForm` wins and
-    routes the update to SSM. None means no flattener matched -> attention (the
+    routes the update to a closed form. None means no flattener matched -> evaluation (the
     always-correct floor). `surface` re-binds the default registry to a live
     surface; pass `flatteners` to override the registry entirely."""
     if flatteners is None:

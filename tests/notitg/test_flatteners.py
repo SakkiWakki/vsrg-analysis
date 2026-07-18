@@ -2,7 +2,7 @@
 
 The correctness core is `test_kernel_equals_recurrence`: the closed-form kernel
 must equal stepping `x = a*x + b` n times from h0, for n = 0..20 across a,b
-samples. If the closed form diverges from the scan the SSM path is wrong.
+samples. If the closed form diverges from the scan the closed form path is wrong.
 
 `frame_ir` (Lane 1's file) may not be landed in this worktree yet, so a minimal
 stub matching the brief's FROZEN shapes is injected into sys.modules before
@@ -120,7 +120,7 @@ def _coeff_at0(cf: ClosedForm, name: str) -> float:
     return cf.coeffs[name].at(0.0)
 
 
-def test_toggle_matches_ssm_a_minus_one():
+def test_toggle_matches_closed_form_a_minus_one():
     cf = AffineFlattener().match(_update('x = x*-1'), _empty_frame())
     assert cf is not None
     assert _coeff_at0(cf, 'a') == -1.0
@@ -128,7 +128,7 @@ def test_toggle_matches_ssm_a_minus_one():
     assert cf.kernel is affine_kernel
 
 
-def test_sum_matches_ssm_a_one_b_step():
+def test_sum_matches_closed_form_a_one_b_step():
     cf = AffineFlattener().match(_update('x = x + 3'), _empty_frame())
     assert cf is not None
     assert _coeff_at0(cf, 'a') == 1.0
@@ -157,7 +157,7 @@ def test_reflect_subtract_target_on_right():
     assert _coeff_at0(cf, 'b') == 10.0
 
 
-def test_geometric_plus_const_matches_ssm():
+def test_geometric_plus_const_matches_closed_form():
     cf = AffineFlattener().match(_update('x = 0.5*x + 3'), _empty_frame())
     assert cf is not None
     assert _coeff_at0(cf, 'a') == 0.5
@@ -171,7 +171,7 @@ def test_scale_target_on_right():
     assert _coeff_at0(cf, 'b') == 0.0
 
 
-def test_pure_curve_poke_matches_ssm_a_zero():
+def test_pure_curve_poke_matches_closed_form_a_zero():
     # A poke whose arg does not read the target: the a=0 degenerate. The arg is
     # a compiled constant here (ConstSurface resolves no live symbols).
     cf = AffineFlattener().match(_update('P1:rotationz(45)'), _empty_frame())
@@ -199,7 +199,7 @@ def test_h0_from_frame_binding():
     assert cf.kernel(3, cf.h0, cf.coeffs) == 12.0
 
 
-# -- attention: nonlinear / self-nonlinear / unmodeled -> None ---------------
+# -- evaluated (interpreted): nonlinear / self-nonlinear / unmodeled -> None ---------------
 
 
 def test_nonlinear_self_reference_falls_to_attention():
@@ -225,7 +225,7 @@ def test_division_by_self_falls_to_attention():
 
 def test_field_target_is_not_matched():
     # self.x = self.x + 1: a field target, not a bare frame variable this pass
-    # models -> no affine match (attention).
+    # models -> no affine match (evaluation).
     assert AffineFlattener().match(_update('self.x = self.x + 1'),
                                    _empty_frame()) is None
 

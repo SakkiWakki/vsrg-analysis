@@ -1,5 +1,5 @@
-"""Integrator seam sketch: split an Update body into SSM-baked keyframes and
-attention frames, so the lupa tick loop runs ONLY over what cannot be
+"""Integrator seam sketch: split an Update body into closed-form-baked keyframes and
+evaluated frames, so the lupa tick loop runs ONLY over what cannot be
 flattened.
 
 This is the compile pre-pass the frame-IR design calls for, kept as a standalone
@@ -8,25 +8,25 @@ correct enough for a byte-parity production cutover. It exists so the split can
 be measured and its reconstruction proven against the all-lupa oracle:
 
     plan = compile_update(body, surface, to_seconds)
-    plan.ssm_keyframes    # {(actor_global, prop): [Keyframe]} baked from
-                          # each SSM-routed poke's ClosedForm over its window
-    plan.attention_windows  # merged beat windows the lupa loop must still
+    plan.closed_keyframes    # {(actor_global, prop): [Keyframe]} baked from
+                          # each closed-form-routed poke's ClosedForm over its window
+    plan.evaluated_windows  # merged beat windows the lupa loop must still
                           # sample (every non-flattened VarUpdate's frame)
 
 The contract with the existing integrator (the byte-parity target): for each
 recorded (actor, prop),
 
-    {SSM-baked keyframes} + {keyframes the lupa loop records over the attention
+    {closed-form-baked keyframes} + {keyframes the lupa loop records over the evaluated
     windows} == {today's all-lupa keyframes}
 
-The SSM half is baked here with no lupa; the attention half is the SAME lupa
-tick loop the integrator runs today, only bounded to `attention_windows` instead
-of the whole body's live-window union. When `attention_windows` still covers
+The closed-form half is baked here with no lupa; the evaluated half is the SAME lupa
+tick loop the integrator runs today, only bounded to `evaluated_windows` instead
+of the whole body's live-window union. When `evaluated_windows` still covers
 every live window (nothing flattened - today's poke-router state), this pre-pass
 is a no-op and the integrator's output is unchanged: that is the safe floor the
 production cutover starts from.
 
-Bake grid: the SSM keyframes are sampled on the integrator's own tick grid
+Bake grid: the closed form keyframes are sampled on the integrator's own tick grid
 (`_TICK_HZ`) so a baked keyframe and a lupa-recorded keyframe share tick times
 exactly - the two halves compose without re-alignment.
 """
@@ -46,12 +46,12 @@ from analysis.player.render.expr.surface import UNRESOLVED
 
 _TICK_STEP_S = 1.0 / update_integrator._TICK_HZ
 
-# The time-driver symbols an SSM curve may read: they vary correctly per tick
+# The time-driver symbols an closed-form curve may read: they vary correctly per tick
 # through a clock reader. ANY other name (a local like `b = beat-1093.5`, a
 # live global) must NOT resolve for flattening - if it did, the flattener
 # would fold the curve to a stale snapshot of that name's current value and
 # bake a frozen constant. Restricting to drivers routes such pokes to
-# attention, where they evaluate live (the value-read hazard the parity
+# evaluation, where they evaluate live (the value-read hazard the parity
 # harness caught on a `diffusealpha(f(b))` fade).
 _DRIVER_SYMBOLS = frozenset({'beat', 'mod_time', 'time', 'curtime', 'measure'})
 
@@ -59,9 +59,9 @@ _DRIVER_SYMBOLS = frozenset({'beat', 'mod_time', 'time', 'curtime', 'measure'})
 class _DriverOnlySurface:
     """Wraps a live surface but resolves ONLY the time drivers (symbol + clock
     reader); every other symbol/index is UNRESOLVED. A pure-curve poke thus
-    flattens to SSM only when its argument is a genuine function of time; a
+    flattens to a closed form only when its argument is a genuine function of time; a
     poke reading a local or non-driver global fails to compile and stays
-    attention."""
+    evaluation."""
 
     def __init__(self, inner):
         self._inner = inner
@@ -83,11 +83,11 @@ class _DriverOnlySurface:
         return None
 
 # setter method -> the single scalar property it records (a bulk setter writing
-# a tuple of props is left to attention here - the SSM bake covers scalars).
+# a tuple of props is left to evaluation here - the closed form bake covers scalars).
 _SCALAR_PROP = {name: prop for name, prop in verb_surface.SCALAR_SETTERS.items()
                 if isinstance(prop, str)}
 
-# Instant keyframe defaults: a baked SSM sample is an untweened point (the
+# Instant keyframe defaults: a baked closed-form sample is an untweened point (the
 # recording actor emits the same shape for a per-tick poke).
 _INSTANT_DURATION = 0.0
 _LINEAR_EASE = 0
@@ -95,19 +95,19 @@ _LINEAR_EASE = 0
 
 @dataclass
 class UpdatePlan:
-    """The SSM/attention split of an Update body. `ssm_keyframes` are baked with
-    no lupa; `attention_windows` are the beat windows the lupa tick loop must
-    still cover. `flattened` / `attention` count the VarUpdates on each side."""
-    ssm_keyframes: dict = field(default_factory=dict)
-    attention_windows: list = field(default_factory=list)
-    flattened: int = 0
-    attention: int = 0
+    """The closed-form/evaluated split of an Update body. `closed_keyframes` are baked with
+    no lupa; `evaluated_windows` are the beat windows the lupa tick loop must
+    still cover. `closed` / `evaluated` count the VarUpdates on each side."""
+    closed_keyframes: dict = field(default_factory=dict)
+    evaluated_windows: list = field(default_factory=list)
+    closed: int = 0
+    evaluated: int = 0
 
 
 def compile_update(body: str, surface, to_seconds) -> UpdatePlan:
-    """Route every VarUpdate in `body`; bake the SSM-routed scalar pokes to
+    """Route every VarUpdate in `body`; bake the closed-form-routed scalar pokes to
     keyframes over their effective window, and collect the windows of everything
-    that stays attention. `surface` compiles coefficient channels (a live
+    that stays evaluated. `surface` compiles coefficient channels (a live
     `NotitgGuardSurface` for beat-driven curves); `to_seconds` maps beats to the
     song-time tick grid."""
     frame_root = build_frames(body)
@@ -126,20 +126,20 @@ def compile_update(body: str, surface, to_seconds) -> UpdatePlan:
         if (closed_form is not None and _bakeable(update, window)
                 and update.name in sole):
             _bake_into(plan, update, closed_form, window, to_seconds)
-            plan.flattened += 1
+            plan.closed += 1
         else:
-            plan.attention += 1
+            plan.evaluated += 1
             if window is not None:
                 attention_spans.append(window)
-    plan.attention_windows = _merge(attention_spans)
+    plan.evaluated_windows = _merge(attention_spans)
     return plan
 
 
 def _sole_writer_props(updates) -> set:
     """Property names written by exactly one VarUpdate in the whole body. A
     property touched by two or more writes composes across ticks/windows
-    (last-writer-wins) and cannot be a standalone SSM curve, so it is excluded
-    from flattening and stays on the attention path."""
+    (last-writer-wins) and cannot be a standalone closed-form curve, so it is excluded
+    from flattening and stays on the evaluated path."""
     counts: dict = {}
     for update, _frame in updates:
         counts[update.name] = counts.get(update.name, 0) + 1
@@ -149,7 +149,7 @@ def _sole_writer_props(updates) -> set:
 def _bakeable(update, window) -> bool:
     """True when the update is a scalar actor poke with a bounded window - the
     only shape this sketch bakes. A bare frame-variable assignment (no actor
-    prop) and an unbounded window are left to the attention/live-channel paths."""
+    prop) and an unbounded window are left to the evaluated/live-channel paths."""
     split = _split_actor_prop(update.name)
     return split is not None and window is not None
 
@@ -167,11 +167,11 @@ def _bake_into(plan, update, closed_form, window, to_seconds) -> None:
     keyframes, keyed by (actor global, property)."""
     actor, prop = _split_actor_prop(update.name)
     keyframes = _bake_keyframes(closed_form, window, to_seconds)
-    plan.ssm_keyframes.setdefault((actor, prop), []).extend(keyframes)
+    plan.closed_keyframes.setdefault((actor, prop), []).extend(keyframes)
 
 
 def _bake_keyframes(closed_form, window, to_seconds) -> list:
-    """The SSM value stream over `window` as instant Keyframes on the tick grid.
+    """The closed-form value stream over `window` as instant Keyframes on the tick grid.
     A pure curve (a=0) samples its coefficient channel at each tick coordinate
     (the true closed form); an accumulator steps the recurrence per tick index.
     """
@@ -192,7 +192,7 @@ def _window_ticks(window, to_seconds) -> list:
 
 
 def _value_stream(closed_form, ticks) -> list:
-    """The SSM value at each tick. A pure curve (a=0) is `b` sampled at the tick
+    """The closed-form value at each tick. A pure curve (a=0) is `b` sampled at the tick
     coordinate (the true closed form, evaluable at any t); an accumulator (a!=0)
     is the frozen affine_kernel at the tick index n, which per the Stage A
     assumption samples its coefficients once at coord 0.0."""
@@ -205,7 +205,7 @@ def _value_stream(closed_form, ticks) -> list:
 
 def _merge(spans) -> list:
     """Sorted, merged (start, end) windows - the contiguous beat ranges the
-    attention lupa loop must sample."""
+    evaluation lupa loop must sample."""
     merged = []
     for start, end in sorted(spans):
         if merged and start <= merged[-1][1]:

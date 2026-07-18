@@ -15,11 +15,11 @@ bindings.
   the parent window and carries the guard as a `gate`;
 - a numeric `for` with literal bounds UNROLLS into one child frame per loop
   value, each binding the loop var; non-literal bounds open a single frame
-  with the loop var UNBOUND (its writes route to attention downstream);
+  with the loop var UNBOUND (its writes route to evaluation downstream);
 - a `local` adds to the current frame's bindings;
 - a setter poke (`recv:prop(arg)` where `prop` is a verb-surface setter) or
   an assignment becomes a `VarUpdate` leaf; any other statement becomes a
-  `VarUpdate` carrying the raw node (attention fallback).
+  `VarUpdate` carrying the raw node (evaluated fallback).
 
 `resolve`, `effective_window`, and `iter_updates` read the tree: name
 lookup up the parent chain, the intersected live window of a frame, and a
@@ -27,7 +27,7 @@ flat enumeration of every `(VarUpdate, owning Frame)` pair for the router
 and sinks to consume.
 
 The router (a downstream lane) fills each `VarUpdate.closed_form`; `route`
-is DERIVED from it - None means attention, a set form means SSM.
+is DERIVED from it - None means evaluated, a set form means closed-form.
 """
 from __future__ import annotations
 
@@ -59,9 +59,9 @@ UNBOUND = object()
 
 @dataclass(frozen=True)
 class ClosedForm:
-    """What a flattener emits for an SSM-routed variable: a kernel plus the
+    """What a flattener emits for an closed-form-routed variable: a kernel plus the
     coefficient channels it reads and the initial value. `kernel(t_or_n, h0,
-    coeffs) -> value` is evaluable at any point with no stepping, so the SSM
+    coeffs) -> value` is evaluable at any point with no stepping, so the closed form
     sink stays flattener-agnostic."""
     kernel: object          # callable (t_or_n, h0, coeffs) -> value
     coeffs: dict            # {name: Channel}
@@ -72,9 +72,9 @@ class ClosedForm:
 class VarUpdate:
     """One write inside a frame - a property poke or a variable assignment.
     `name` is `actor.prop` (a poked setter) or the bare assigned name; `node`
-    is the raw write AST, always kept for the attention fallback.
+    is the raw write AST, always kept for the evaluated fallback.
     `closed_form` is set by a flattener when the write is a recognized
-    recurrence; None routes it to attention."""
+    recurrence; None routes it to evaluation."""
     name: str
     node: ast.Node
     closed_form: ClosedForm | None = None
@@ -174,7 +174,7 @@ def _normalize_perframe(node: ast.Node) -> ast.Node:
 def _build_for(node: ast.NumericFor, frame: Frame, surface: Surface) -> None:
     """A numeric `for` with LITERAL bounds unrolls to one child frame per
     loop value, each binding the loop var. Non-literal bounds open a single
-    child frame with the loop var UNBOUND, so its writes route to attention
+    child frame with the loop var UNBOUND, so its writes route to evaluation
     downstream."""
     values = _unroll_values(node)
     if values is None:
@@ -220,7 +220,7 @@ def _bind_local(names: Iterable[str], values: Iterable[ast.Node],
 
 def _poke_update(stmt: ast.ExprStmt) -> VarUpdate:
     """A setter poke `recv:prop(arg)` -> a VarUpdate named `<recv>.<prop>`.
-    Stores the whole ExprStmt as `node` (like the assign/attention branches),
+    Stores the whole ExprStmt as `node` (like the assign/evaluated branches),
     so the flattener's `_value_expr` sees the same statement shape it does for
     every other VarUpdate."""
     method = stmt.expr
@@ -232,7 +232,7 @@ def _target_name(targets: tuple[ast.Node, ...]) -> str:
 
 
 def _attention_name(stmt: ast.Node) -> str:
-    """A stable name for an unmodeled statement's VarUpdate (attention). A
+    """A stable name for an unmodeled statement's VarUpdate (evaluated fallback). A
     bare call names its callee; anything else names its node type."""
     match stmt:
         case ast.ExprStmt(expr=ast.Call(fn=fn)):

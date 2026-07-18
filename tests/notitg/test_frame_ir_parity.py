@@ -1,9 +1,9 @@
-"""Differential byte-parity harness: frame-IR SSM channels vs the all-lupa oracle.
+"""Differential byte-parity harness: frame-IR closed-form curves vs the all-lupa oracle.
 
 The existing `update_integrator.integrate_update` runs the whole Update body
 through lupa on a tick grid and records per-actor keyframes; that recorded
 keyframe set per (actor, prop) is the ORACLE. This harness proves the frame-IR
-router flattens ONLY what it should: for every VarUpdate the router sends to SSM
+router flattens ONLY what it should: for every VarUpdate the router sends to a closed form
 (a `ClosedForm`), it evaluates that closed form over the update's
 `effective_window` on the SAME tick grid and asserts the produced value stream
 matches the oracle at those ticks. A mismatch is not a soft failure - it is the
@@ -17,7 +17,7 @@ be sampled two ways and Stage A only guarantees one of them:
   promises; a pure curve (a=0) is `b(t)`.
 - KERNEL mode: call the frozen `affine_kernel(n, h0, coeffs)`, which per the
   Stage A assumption samples every coefficient at coord 0.0 (constant over the
-  window). This is what an SSM sink that bakes via the kernel would emit today.
+  window). This is what an closed-form sink that bakes via the kernel would emit today.
 The gap between the two IS the Stage B scope: a time-varying coefficient
 reproduces under CHANNEL mode but not under KERNEL mode.
 
@@ -46,7 +46,7 @@ from analysis.games.notitg import xml_actors
 
 # -- oracle: build an env, run the integrator, harvest recorded keyframes ----
 
-# The integrator's own tick rate; the SSM value stream is sampled on the SAME
+# The integrator's own tick rate; the closed-form value stream is sampled on the SAME
 # grid so a keyframe and a closed-form sample share a tick time exactly.
 _TICK_HZ = update_integrator._TICK_HZ
 _TICK_STEP = 1.0 / _TICK_HZ
@@ -91,7 +91,7 @@ def _run_oracle(env, root, to_seconds=_IDENTITY) -> dict:
     return env.named_actor_keyframes()
 
 
-# -- SSM value stream: evaluate a routed ClosedForm on the tick grid ---------
+# -- closed-form value stream: evaluate a routed ClosedForm on the tick grid ---------
 
 # setter-method -> recorded property name (or a tuple for a bulk setter). The
 # frame-IR names a poke by its SETTER method (`thing.rotationz`); the oracle
@@ -128,7 +128,7 @@ def _window_ticks(window: tuple, to_seconds) -> list[float]:
 
 
 def _channel_stream(cf, ticks: list[float]) -> list[float]:
-    """CHANNEL-mode SSM values: a pure curve (a==0) is `b` sampled at each tick
+    """CHANNEL-mode closed-form values: a pure curve (a==0) is `b` sampled at each tick
     coordinate - the true closed form; an accumulator (a!=0) steps the
     recurrence per tick from h0, reading coefficients at the tick coordinate
     (the live-coefficient scan, the Stage B form the frozen kernel does not do).
@@ -146,8 +146,8 @@ def _channel_stream(cf, ticks: list[float]) -> list[float]:
 
 
 def _kernel_stream(cf, ticks: list[float]) -> list[float]:
-    """KERNEL-mode SSM values: the frozen `affine_kernel(n, h0, coeffs)` at each
-    tick index n - what a keyframe-baking SSM sink emits today (coefficients
+    """KERNEL-mode closed-form values: the frozen `affine_kernel(n, h0, coeffs)` at each
+    tick index n - what a keyframe-baking closed-form sink emits today (coefficients
     sampled once at coord 0.0)."""
     return [affine_kernel(n, cf.h0, cf.coeffs) for n in range(len(ticks))]
 
@@ -164,20 +164,20 @@ def _oracle_at(keyframes: list, t: float) -> float | None:
     return None
 
 
-def _compare(name, prop, oracle_kfs, ssm_values, ticks, tol=1e-6):
-    """(matched, mismatches): pair each oracle keyframe with the SSM value at
-    its tick; a mismatch is (t, oracle, ssm). A tick the oracle never poked is
-    skipped (the SSM covers the window; the oracle only the fired ticks)."""
+def _compare(name, prop, oracle_kfs, closed_values, ticks, tol=1e-6):
+    """(matched, mismatches): pair each oracle keyframe with the closed-form value at
+    its tick; a mismatch is (t, oracle, closed_val). A tick the oracle never poked is
+    skipped (the closed form covers the window; the oracle only the fired ticks)."""
     matched = 0
     mismatches = []
-    for t, ssm in zip(ticks, ssm_values):
+    for t, closed_val in zip(ticks, closed_values):
         oracle = _oracle_at(oracle_kfs, t)
         if oracle is None:
             continue
-        if abs(oracle - ssm) <= tol:
+        if abs(oracle - closed_val) <= tol:
             matched += 1
         else:
-            mismatches.append((round(t, 5), oracle, ssm))
+            mismatches.append((round(t, 5), oracle, closed_val))
     return matched, mismatches
 
 
@@ -186,7 +186,7 @@ def _compare(name, prop, oracle_kfs, ssm_values, ticks, tol=1e-6):
 def _route_and_evaluate(env, root, to_seconds=_IDENTITY, to_beat=None,
                         corrected=False):
     """Build the Frame tree for the env's Update body, route each VarUpdate
-    against a surface bound to the SAME live env, and for every SSM-routed poke
+    against a surface bound to the SAME live env, and for every closed-form-routed poke
     evaluate its ClosedForm over its effective window on the tick grid. Returns
     a list of per-(actor, prop) result records.
 
@@ -228,7 +228,7 @@ def _corrected_update(update: VarUpdate) -> VarUpdate:
 
 def _evaluate_one(actor, method, prop, cf, window, oracle, to_seconds):
     record = {'actor': actor, 'method': method, 'prop': prop,
-              'routed_ssm': cf is not None, 'window': window}
+              'routed_closed': cf is not None, 'window': window}
     actor_props = oracle.get(actor, {})
     oracle_kfs = actor_props.get(prop, [])
     record['oracle_keyframes'] = len(oracle_kfs)
@@ -248,21 +248,21 @@ _ROUTER_POKE_BUG = (
     'ROUTER CORRECTION: frame_ir._poke_update stores the bare ast.Method as '
     'VarUpdate.node, but flatteners._value_expr matches only '
     'ast.ExprStmt(expr=ast.Method(...)). Every poke therefore routes to '
-    'attention instead of SSM. flatteners._value_expr must also accept a bare '
+    'evaluation instead of closed-form. flatteners._value_expr must also accept a bare '
     'ast.Method (or _poke_update must wrap it in an ExprStmt).')
 
 
 # -- assignment accumulators: the class that DOES flatten today --------------
 #
 # An `x = a*x + b` assignment carries an `ast.Assign` node, which
-# flatteners._value_expr matches; these route to SSM under the shipped router,
+# flatteners._value_expr matches; these route to a closed form under the shipped router,
 # so they are the harness's genuine positive parity proofs (no correction
 # needed). The oracle records their effect through the poke that reads them.
 
 
 def test_affine_accumulator_oracle_is_the_unit_ramp():
     """`acc = acc + 1; thing:rotationz(acc)` over its window: the accumulator
-    assignment is a=1,b=1 (SSM), and the poke reads the running total. The
+    assignment is a=1,b=1 (closed-form), and the poke reads the running total. The
     recorded keyframes must be the exact unit ramp 1,2,3,... the recurrence
     produces from the seed - proving the integrator's accumulator and the
     affine closed form agree on the recurrence itself."""
@@ -279,8 +279,8 @@ def test_affine_accumulator_oracle_is_the_unit_ramp():
         f'accumulator oracle is not a unit ramp: {recorded[:8]}')
 
 
-def test_affine_assignment_routes_to_ssm():
-    """The bare assignment `acc = acc + 1` routes to SSM (a=1, b=1) under the
+def test_affine_assignment_routes_to_closed_form():
+    """The bare assignment `acc = acc + 1` routes to a closed form (a=1, b=1) under the
     shipped router - the node-shape bug is poke-only, assignments are clean."""
     env, root = _oracle_env(
         "if perframe(0,1) then acc = acc + 1 end "
@@ -317,11 +317,11 @@ def test_constant_poke_does_not_flatten_but_would_match_when_corrected():
     # reproduces the oracle in BOTH modes (a constant is time-invariant).
     fixed = _one_prop(_route_and_evaluate(env, root, corrected=True),
                       'thing', 'rotation')
-    assert fixed['routed_ssm'], 'corrected router still failed to flatten'
+    assert fixed['routed_closed'], 'corrected router still failed to flatten'
     _assert_no_mismatch(fixed, 'channel')
     _assert_no_mismatch(fixed, 'kernel')
 
-    if not shipped['routed_ssm']:
+    if not shipped['routed_closed']:
         pytest.xfail(_ROUTER_POKE_BUG)
 
 
@@ -341,7 +341,7 @@ def test_beat_varying_poke_channel_matches_kernel_is_stage_b_gap():
 
     fixed = _one_prop(_route_and_evaluate(env, root, corrected=True),
                       'thing', 'rotation')
-    assert fixed['routed_ssm'], 'corrected router still failed to flatten'
+    assert fixed['routed_closed'], 'corrected router still failed to flatten'
     assert fixed['oracle_keyframes'] > 0
     # CHANNEL mode is the true closed form: it MUST match a time-varying curve.
     _assert_no_mismatch(fixed, 'channel')
@@ -353,20 +353,20 @@ def test_beat_varying_poke_channel_matches_kernel_is_stage_b_gap():
         'kernel should sample b once at coord 0.0 and hold flat')
 
     shipped = _one_prop(_route_and_evaluate(env, root), 'thing', 'rotation')
-    if not shipped['routed_ssm']:
+    if not shipped['routed_closed']:
         pytest.xfail(_ROUTER_POKE_BUG)
 
 
-def test_poke_reading_a_nonlinear_frame_var_needs_attention_not_ssm():
+def test_poke_reading_a_nonlinear_frame_var_needs_evaluation_not_closed_form():
     """DIFFERENTIAL FINDING: a poke whose arg READS a frame variable that is
     updated nonlinearly (`prev = prev*prev + 1; thing:rotationz(prev)`). The
     Stage A flattener treats the bare `prev` arg as a pure curve (a=0, b=prev)
     and compiles `b` off the LIVE surface, which - once the oracle has run and
     left `prev` set as a global - folds to a CONSTANT (prev's final value). That
     constant cannot reproduce the recorded per-tick ramp, so under the corrected
-    router this poke either falls to attention (b uncompilable) OR flattens to a
+    router this poke either falls to evaluation (b uncompilable) OR flattens to a
     value that MISMATCHES the oracle. Both outcomes say the same thing: this
-    class must route to attention, and a value-read coefficient is a Stage B
+    class must route to evaluation, and a value-read coefficient is a Stage B
     concern (cross-frame timeline resolution), never a compile-time constant.
 
     The engine records prev = 5, 26, 677, ... (x -> x*x + 1 from 2); a constant
@@ -380,8 +380,8 @@ def test_poke_reading_a_nonlinear_frame_var_needs_attention_not_ssm():
                       'thing', 'rotation')
     assert fixed['oracle_keyframes'] > 0
     # The recorded stream is the nonlinear ramp, not a constant.
-    if not fixed['routed_ssm']:
-        return          # correct outcome: attention floor caught it
+    if not fixed['routed_closed']:
+        return          # correct outcome: evaluation floor caught it
     # It flattened - then the frozen (constant-b) closed form MUST mismatch the
     # recorded nonlinear ramp under both evaluation modes.
     assert _has_mismatch(fixed, 'channel') or _has_mismatch(fixed, 'kernel'), (
@@ -414,7 +414,7 @@ def _load_gat1():
 
 @pytest.mark.skipif(not _GAT1.exists(), reason='gat 1 chart not present')
 def test_gat1_frame_ir_ssm_matches_oracle_or_reports():
-    """gat 1's real Update body: build frames, and for every SSM-routed poke
+    """gat 1's real Update body: build frames, and for every closed-form-routed poke
     that `compile_update` would actually BAKE (the sole-writer set), check its
     closed-form stream against the recorded oracle. Any mismatch in that set is
     reported LOUDLY and fails - it means the compiler baked something wrong.
@@ -433,24 +433,24 @@ def test_gat1_frame_ir_ssm_matches_oracle_or_reports():
 
     sole = _sole_writer_props(list(iter_updates(build_frames(
         update_integrator._update_body(root)))))
-    ssm_pokes = [r for r in results if r['routed_ssm']]
-    bakeable = [r for r in ssm_pokes
+    closed_pokes = [r for r in results if r['routed_closed']]
+    bakeable = [r for r in closed_pokes
                 if f"{r['actor']}.{r['method']}" in sole]
     mismatched = [r for r in bakeable
                   if _has_mismatch(r, 'channel')]
-    report = _gat_report(results, ssm_pokes, mismatched)
+    report = _gat_report(results, closed_pokes, mismatched)
     print(report, file=sys.stderr)
 
     # A mismatch in the BAKEABLE (sole-writer) set is a hard failure: the
     # compiler would emit wrong keyframes. Multi-writer props are excluded
-    # from baking (they stay attention), so they are not asserted here.
+    # from baking (they stay evaluation), so they are not asserted here.
     assert not mismatched, report
 
 
 @pytest.mark.skipif(not _GAT1.exists(), reason='gat 1 chart not present')
 def test_gat1_corrected_router_stage_split_report():
     """gat 1 under the CORRECTED router (poke nodes wrapped so they can
-    flatten): how many pokes flatten to SSM, and of those how many MATCH the
+    flatten): how many pokes flatten to a closed form, and of those how many MATCH the
     oracle (Stage A parity) vs MISMATCH (Stage B scope: time-varying or
     value-read coefficients). This quantifies the real-chart split the router
     correction unlocks, and is the scoping datum for Stage B. Reported, never a
@@ -464,14 +464,14 @@ def test_gat1_corrected_router_stage_split_report():
     results = _route_and_evaluate(env, root, to_seconds, to_beat,
                                   corrected=True)
 
-    ssm = [r for r in results if r['routed_ssm']]
-    with_oracle = [r for r in ssm if r['oracle_keyframes'] > 0]
+    closed_val = [r for r in results if r['routed_closed']]
+    with_oracle = [r for r in closed_val if r['oracle_keyframes'] > 0]
     channel_match = [r for r in with_oracle if not _has_mismatch(r, 'channel')]
     kernel_match = [r for r in with_oracle if not _has_mismatch(r, 'kernel')]
     print('\n'.join([
         '', '=== gat 1 corrected-router stage split ===',
         f'poke VarUpdates:            {len(results)}',
-        f'flatten to SSM:             {len(ssm)}',
+        f'flatten to a closed form:             {len(closed_val)}',
         f'  ... with an oracle stream:{len(with_oracle)}',
         f'  CHANNEL-mode parity:      {len(channel_match)}/{len(with_oracle)}',
         f'  KERNEL-mode parity:       {len(kernel_match)}/{len(with_oracle)}',
@@ -483,8 +483,8 @@ def test_gat1_corrected_router_stage_split_report():
 
 # -- Part 2: the integrator seam sketch (frame_compile.compile_update) --------
 #
-# compile_update splits an Update body into SSM-baked keyframes (no lupa) and
-# attention windows (the bounded lupa loop). These tests prove the SSM-baked
+# compile_update splits an Update body into closed-form-baked keyframes (no lupa) and
+# evaluated windows (the bounded lupa loop). These tests prove the closed-form-baked
 # half reconstructs the oracle for the flattenable class, and that the split
 # degrades to the whole-body window when nothing flattens (the safe production
 # floor). See analysis/games/notitg/frame_compile.py.
@@ -498,9 +498,9 @@ def _compile_plan(env, root, to_seconds=_IDENTITY, to_beat=None):
 
 
 def _baked_matches_oracle(plan, oracle, actor, prop, tol=1e-6):
-    """(matched, mismatches) for the baked SSM keyframes of (actor, prop) vs the
+    """(matched, mismatches) for the baked closed-form keyframes of (actor, prop) vs the
     oracle keyframes, paired at each tick the oracle poked."""
-    baked = plan.ssm_keyframes.get((actor, prop), [])
+    baked = plan.closed_keyframes.get((actor, prop), [])
     oracle_kfs = oracle.get(actor, {}).get(prop, [])
     ticks = [kf.t for kf in baked]
     values = [kf.values[0] for kf in baked]
@@ -510,8 +510,8 @@ def _baked_matches_oracle(plan, oracle, actor, prop, tol=1e-6):
 def test_seam_bakes_pure_curve_matching_the_oracle():
     """A pure-curve poke: compile_update bakes it (applying the poke-router
     correction locally) and the baked keyframes reconstruct the recorded oracle
-    tick for tick. This is the byte-parity proof for the SSM half of the split -
-    the seam's SSM sink == the all-lupa keyframes for the flattenable class."""
+    tick for tick. This is the byte-parity proof for the closed-form half of the split -
+    the seam's closed-form sink == the all-lupa keyframes for the flattenable class."""
     env, root = _oracle_env(
         "local beat = GAMESTATE:GetSongBeat() "
         "if perframe(0,4) then thing:rotationz(beat*10) end "
@@ -520,18 +520,18 @@ def test_seam_bakes_pure_curve_matching_the_oracle():
     oracle = _run_oracle(env, root)
     plan = _compile_plan(env, root)
 
-    assert plan.flattened >= 1, 'the pure-curve poke was not baked'
-    assert ('thing', 'rotation') in plan.ssm_keyframes
+    assert plan.closed >= 1, 'the pure-curve poke was not baked'
+    assert ('thing', 'rotation') in plan.closed_keyframes
     matched, mismatches = _baked_matches_oracle(plan, oracle, 'thing', 'rotation')
     assert matched > 0 and not mismatches, (
-        f'baked SSM keyframes did not reconstruct the oracle: {mismatches[:5]}')
+        f'baked closed-form keyframes did not reconstruct the oracle: {mismatches[:5]}')
 
 
 def test_seam_keeps_a_value_read_poke_on_attention():
     """A poke reading a frame variable updated nonlinearly
-    (`prev = prev*prev + 1; thing:rotationz(prev)`) must NOT bake to SSM: `prev`
+    (`prev = prev*prev + 1; thing:rotationz(prev)`) must NOT bake to a closed form: `prev`
     is not a time driver, so under the driver-only compile surface its curve
-    fails to compile and the poke stays on attention (where it evaluates live).
+    fails to compile and the poke stays on the evaluated path (where it evaluates live).
     This closes the value-read hazard - a coefficient that reads a
     frame/actor value can never be folded to a load-time constant, because
     only beat/mod_time/measure resolve for flattening. The baked stream is
@@ -542,18 +542,18 @@ def test_seam_keeps_a_value_read_poke_on_attention():
         "thing = self; prev = 2")
     plan = _compile_plan(env, root)
 
-    # The value-read poke is not baked - no SSM keyframes for thing.rotation.
-    assert not plan.ssm_keyframes.get(('thing', 'rotation')), (
-        'a value-read poke was baked to SSM; its non-driver coefficient must '
-        'keep it on attention')
+    # The value-read poke is not baked - no closed-form keyframes for thing.rotation.
+    assert not plan.closed_keyframes.get(('thing', 'rotation')), (
+        'a value-read poke was baked to a closed form; its non-driver coefficient must '
+        'keep it on the evaluated path')
 
 
 @pytest.mark.skipif(not _GAT1.exists(), reason='gat 1 chart not present')
 def test_seam_gat1_split_reduces_attention_windows():
-    """gat 1: compile_update's split flattens a subset of pokes to SSM and
-    leaves the rest as attention windows. Reports the lupa-tick reduction the
-    seam would buy (attention windows vs the whole live-window union) - the
-    Stage A measurement the design asks for. Not a parity gate; the SSM-half
+    """gat 1: compile_update's split flattens a subset of pokes to a closed form and
+    leaves the rest as evaluated windows. Reports the lupa-tick reduction the
+    seam would buy (evaluated windows vs the whole live-window union) - the
+    Stage A measurement the design asks for. Not a parity gate; the closed form-half
     parity is proven on the synthetic pure-curve class above and quantified on
     gat by test_gat1_corrected_router_stage_split_report."""
     env, root, to_seconds = _load_gat1()
@@ -564,16 +564,16 @@ def test_seam_gat1_split_reduces_attention_windows():
     plan = _compile_plan(env, root, to_seconds, to_beat)
 
     live_span = sum(e - s for s, e in windows)
-    attention_span = sum(e - s for s, e in plan.attention_windows)
+    evaluated_span = sum(e - s for s, e in plan.evaluated_windows)
     print('\n'.join([
         '', '=== gat 1 seam split (frame_compile) ===',
-        f'flattened pokes (SSM bake): {plan.flattened}',
-        f'attention pokes:            {plan.attention}',
+        f'flattened pokes (closed-form bake): {plan.closed}',
+        f'evaluated pokes:            {plan.evaluated}',
         f'live-window beats:          {live_span:.1f}',
-        f'attention-window beats:     {attention_span:.1f}',
-        f'baked (actor,prop) streams: {len(plan.ssm_keyframes)}',
+        f'evaluated-window beats:     {evaluated_span:.1f}',
+        f'baked (actor,prop) streams: {len(plan.closed_keyframes)}',
     ]), file=sys.stderr)
-    assert plan.attention + plan.flattened > 0
+    assert plan.evaluated + plan.closed > 0
 
 
 # -- report + assertion helpers ----------------------------------------------
@@ -598,16 +598,16 @@ def _assert_no_mismatch(record, mode):
     assert entry is not None, f'{mode} stream not evaluated for {record}'
     matched, mismatches = entry
     assert not mismatches, (
-        f'{mode}-mode SSM mismatched the oracle for '
+        f'{mode}-mode closed-form mismatched the oracle for '
         f'{record["actor"]}.{record["prop"]}: {mismatches[:5]} '
         f'(matched {matched})')
 
 
-def _gat_report(results, ssm_pokes, mismatched) -> str:
-    lines = ['', '=== gat 1 frame-IR SSM parity ===',
+def _gat_report(results, closed_pokes, mismatched) -> str:
+    lines = ['', '=== gat 1 frame-IR closed-form parity ===',
              f'poke VarUpdates seen:  {len(results)}',
-             f'routed to SSM:         {len(ssm_pokes)}',
-             f'SSM mismatched oracle: {len(mismatched)}']
+             f'routed to a closed form:         {len(closed_pokes)}',
+             f'closed-form mismatched oracle: {len(mismatched)}']
     for record in mismatched:
         for mode in ('channel', 'kernel'):
             entry = record.get(mode)
