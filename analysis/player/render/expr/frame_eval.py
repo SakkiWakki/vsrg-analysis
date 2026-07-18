@@ -553,11 +553,19 @@ class Interpreter:
             except _Return as ret:
                 return ret.values[0] if ret.values else None
             return None
+        closure._frame_closure = True   # UNRESOLVED-aware (no nil marshalling)
         return closure
 
     def _call_closure(self, fn, args, depth: int):
         if depth > _MAX_DEPTH:
             return UNRESOLVED
+        # A closure the interpreter made is UNRESOLVED-aware; any OTHER callable
+        # is a host (lupa) function that must receive Lua values - the sentinel
+        # marshals to nil, so a Lua helper never does arithmetic on userdata
+        # (the `compare userdata with number` fault). Interpreter closures carry
+        # the marker set in `_make_closure`.
+        if not getattr(fn, '_frame_closure', False):
+            args = [None if a is UNRESOLVED else a for a in args]
         try:
             return fn(*args)
         except _Return as ret:
