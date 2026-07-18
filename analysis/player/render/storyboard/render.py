@@ -25,7 +25,8 @@ from functools import lru_cache
 import numpy as np
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QPainter, QPen,
+from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QImage,
+                           QLinearGradient, QPainter, QPainterPath, QPen,
                            QPixmap)
 
 from analysis.player.render import transform3d as _t3d
@@ -176,6 +177,93 @@ def _quantize_color(r, g, b) -> tuple:
 def _is_white(quantized) -> bool:
     q = _TINT_QUANT_LEVELS - 1
     return quantized == (q, q, q)
+
+
+# -- per-corner diffuse gradient / glow / edge fade ---------------------------
+# The color channels rest at sentinels the flat draw ignores: a corner < 0
+# is "unset" (SetDiffuseUpperLeft never called), glow alpha 0 is "no glow"
+# (Actor.cpp:1008), fade 0 is "hard edge". So an element poked with none of
+# these paints the exact flat quad the base path always drew.
+_CORNER_PROPS = ('color_ul', 'color_ur', 'color_lr', 'color_ll')
+_FADE_PROPS = ('fade_left', 'fade_right', 'fade_top', 'fade_bottom')
+_GLOW_MIN_ALPHA = 1.0 / 255.0
+
+
+def _clamp01(v: float) -> float:
+    return max(0.0, min(1.0, v))
+
+
+def _corner_qcolor(rgba, flat: QColor, alpha: float) -> QColor:
+    """One gradient corner as a QColor: the individually-set corner color
+    (Actor.h:190), or the flat diffuse when this corner is unset. `alpha`
+    (the element's sampled diffusealpha * inherited) multiplies in, since
+    SM folds the actor alpha into the vertex color."""
+    if rgba[0] >= 0.0:
+        r, g, b, a = rgba
+    else:
+        r, g, b, a = flat.redF(), flat.greenF(), flat.blueF(), 1.0
+    return QColor.fromRgbF(_clamp01(r), _clamp01(g), _clamp01(b),
+                           _clamp01(a * alpha))
+
+
+def _gradient_pixmap(corners) -> QPixmap:
+    """A 2x2 pixmap of the four corner colors (UL, UR, LL, LR). Drawn
+    stretched with smooth (bilinear) scaling it reproduces SM's per-vertex
+    quad gradient (Sprite.cpp:526-530) - the GPU interpolates vertex
+    colors across the quad, and a smoothly-upscaled 2x2 is that exact
+    bilinear field."""
+    img = QImage(2, 2, QImage.Format.Format_ARGB32_Premultiplied)
+    ul, ur, lr, ll = corners
+    img.setPixelColor(0, 0, ul)
+    img.setPixelColor(1, 0, ur)
+    img.setPixelColor(0, 1, ll)
+    img.setPixelColor(1, 1, lr)
+    return QPixmap.fromImage(img)
+
+
+def _fade_alpha_mask(w: float, h: float, fades) -> QImage | None:
+    """An alpha mask (white, per-pixel alpha) ramping from 0 at each faded
+    edge up to 1 at the fade distance inward (SM SetFade*, Sprite.cpp:560).
+    `fades` is (left, right, top, bottom) as fractions of the w x h rect.
+    None when no edge fades (the caller then skips the mask entirely)."""
+    left, right, top, bottom = fades
+    if max(left, right, top, bottom) <= 0.0:
+        return None
+    img = QImage(max(1, int(round(w))), max(1, int(round(h))),
+                 QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(Qt.GlobalColor.white)
+    painter = QPainter(img)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+    for edge, dist in zip(('left', 'right', 'top', 'bottom'), fades):
+        if dist > 0.0:
+            _paint_edge_ramp(painter, img.width(), img.height(), edge, dist)
+    painter.end()
+    return img
+
+
+def _paint_edge_ramp(painter, w, h, edge, dist) -> None:
+    """Multiply into the mask a linear alpha ramp 0->1 over `dist` of the
+    rect from `edge`, holding 1 across the rest (a per-edge fade the
+    DestinationIn composition intersects with the others)."""
+    horizontal = edge in ('left', 'right')
+    span = (w if horizontal else h) * _clamp01(dist)
+    if edge == 'left':
+        grad = QLinearGradient(0, 0, span, 0)
+        stops = ((0.0, 0.0), (1.0, 1.0))
+    elif edge == 'right':
+        grad = QLinearGradient(w - span, 0, w, 0)
+        stops = ((0.0, 1.0), (1.0, 0.0))
+    elif edge == 'top':
+        grad = QLinearGradient(0, 0, 0, span)
+        stops = ((0.0, 0.0), (1.0, 1.0))
+    else:
+        grad = QLinearGradient(0, h - span, 0, h)
+        stops = ((0.0, 1.0), (1.0, 0.0))
+    for pos, a in stops:
+        grad.setColorAt(pos, QColor.fromRgbF(1.0, 1.0, 1.0, a))
+    # Outside the ramp band the gradient's Pad spread holds the end alpha
+    # (1 on the interior side), so only the edge band is attenuated.
+    painter.fillRect(QRectF(0, 0, w, h), grad)
 
 
 class _ElementWalk:
@@ -454,7 +542,32 @@ class StoryboardEffect:
                                 0.0, 0.0, group_alpha, walker, child_node)
 
     def _paint_kind(self, painter, el, t, w, h) -> None:
+        """Draw the element's content, then the additive glow pass. Content
+        is the flat diffuse (the fast path) unless the actor set a
+        per-corner diffuse gradient or an edge fade, in which case the quad
+        is drawn through a gradient/fade compositor. glow (SetGlow) rides on
+        top as an additive-tinted overlay (Sprite.cpp's glow pass)."""
         color = self._qcolor(el.sample('color', t))
+        corners = self._corners(el, t)
+        fades = tuple(el.sample(p, t)[0] for p in _FADE_PROPS)
+        if corners is not None or max(fades) > 0.0:
+            self._paint_color_composited(painter, el, t, w, h, color,
+                                         corners, fades)
+        else:
+            self._paint_flat(painter, el, t, w, h, color)
+        self._paint_glow(painter, el, t, w, h)
+
+    def _corners(self, el, t):
+        """The four gradient corner QColors (UL, UR, LR, LL) when any corner
+        was individually set, else None (the flat-diffuse fast path). Each
+        unset corner falls back to the flat diffuse color."""
+        rgba = tuple(el.sample(p, t) for p in _CORNER_PROPS)
+        if all(c[0] < 0.0 for c in rgba):
+            return None
+        flat = self._qcolor(el.sample('color', t))
+        return tuple(_corner_qcolor(c, flat, 1.0) for c in rgba)
+
+    def _paint_flat(self, painter, el, t, w, h, color) -> None:
         rect = QRectF(0.0, 0.0, w, h)
         crop = _crop_fractions(el, t)
         if crop != (0.0, 0.0, 0.0, 0.0):
@@ -485,6 +598,95 @@ class StoryboardEffect:
                 painter.drawText(QPointF(0.0, metrics.ascent()), el.text)
             case 'bitmaptext':
                 self._paint_bitmaptext(painter, el, color)
+
+    def _paint_color_composited(self, painter, el, t, w, h, color,
+                                corners, fades) -> None:
+        """Render the quad with a per-corner diffuse gradient and/or edge
+        fades into an offscreen buffer, then blit it once.
+
+        The gradient is a smoothly-upscaled 2x2 of the corner colors -
+        SM's per-vertex quad interpolation (Sprite.cpp:526-530). For a
+        sprite the gradient MULTIPLIES the texture (the diffuse tint the
+        vertex colors are); for a rect/ellipse it IS the fill. Edge fades
+        multiply an alpha ramp mask over the result (Sprite.cpp:560). Kinds
+        without a quad body (outline/text) have no gradient analogue, so
+        they fall back to the flat draw under the fade mask only."""
+        iw, ih = max(1, int(round(w))), max(1, int(round(h)))
+        buf = QPixmap(iw, ih)
+        buf.fill(Qt.GlobalColor.transparent)
+        bp = QPainter(buf)
+        bp.scale(iw / w if w else 1.0, ih / h if h else 1.0)
+        if corners is not None and el.kind in ('sprite', 'frames', 'rect',
+                                               'ellipse'):
+            self._paint_gradient_body(bp, el, t, w, h, corners)
+        else:
+            self._paint_flat(bp, el, t, w, h, color)
+        mask = _fade_alpha_mask(iw, ih, fades)
+        if mask is not None:
+            bp.resetTransform()
+            bp.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_DestinationIn)
+            bp.drawImage(0, 0, mask)
+        bp.end()
+        painter.drawPixmap(QRectF(0.0, 0.0, w, h), buf, QRectF(buf.rect()))
+
+    def _paint_gradient_body(self, painter, el, t, w, h, corners) -> None:
+        """The gradient diffuse pass into `painter`'s buffer. A sprite's
+        texture is multiplied by the gradient (vertex-color tint); a solid
+        rect/ellipse is filled with the gradient directly."""
+        rect = QRectF(0.0, 0.0, w, h)
+        crop = _crop_fractions(el, t)
+        if crop != (0.0, 0.0, 0.0, 0.0):
+            rect = _inset_rect(rect, crop)
+        grad = _gradient_pixmap(corners)
+        match el.kind:
+            case 'sprite' | 'frames':
+                pm = self._pixmap(self._asset_at(el, t))
+                if pm is None:
+                    return
+                src = _inset_rect(self._source_rect(el, t, pm), crop)
+                painter.drawPixmap(rect, pm, src)
+                painter.setCompositionMode(
+                    QPainter.CompositionMode.CompositionMode_Multiply)
+                painter.drawPixmap(rect, grad, QRectF(grad.rect()))
+                painter.setCompositionMode(
+                    QPainter.CompositionMode.CompositionMode_DestinationIn)
+                painter.drawPixmap(rect, pm, src)
+            case 'rect':
+                painter.drawPixmap(rect, grad, QRectF(grad.rect()))
+            case 'ellipse':
+                # Clip the gradient to the ellipse shape so the gradient
+                # fill matches the flat ellipse's silhouette.
+                path = QPainterPath()
+                path.addEllipse(rect)
+                painter.save()
+                painter.setClipPath(path)
+                painter.drawPixmap(rect, grad, QRectF(grad.rect()))
+                painter.restore()
+
+    def _paint_glow(self, painter, el, t, w, h) -> None:
+        """SM's additive glow pass (Sprite.cpp:536-541): a quad the size of
+        the element, filled with the glow color, drawn additively at the
+        glow alpha. glow rests at alpha 0 so an un-glowed actor draws
+        nothing here."""
+        r, g, b, a = el.sample('glow', t)
+        if a <= _GLOW_MIN_ALPHA:
+            return
+        painter.save()
+        painter.setCompositionMode(
+            QPainter.CompositionMode.CompositionMode_Plus)
+        painter.setOpacity(_clamp01(a))
+        glow = QColor.fromRgbF(_clamp01(r), _clamp01(g), _clamp01(b), 1.0)
+        crop = _crop_fractions(el, t)
+        rect = _inset_rect(QRectF(0.0, 0.0, w, h), crop) \
+            if crop != (0.0, 0.0, 0.0, 0.0) else QRectF(0.0, 0.0, w, h)
+        if el.kind in ('sprite', 'frames'):
+            pm = self._tinted_pixmap(self._asset_at(el, t), glow)
+            src = _inset_rect(self._source_rect(el, t, pm), crop)
+            painter.drawPixmap(rect, pm, src)
+        else:
+            painter.fillRect(rect, glow)
+        painter.restore()
 
     def _paint_bitmaptext(self, painter, el, color) -> None:
         """Composite `el.text` from its SM bitmap-font atlas: one glyph

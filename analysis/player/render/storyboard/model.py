@@ -79,6 +79,28 @@ _SCALAR_RESTS = {
     # affine it does today - the flat-chart no-op path.
     'rotation_x': 0.0, 'rotation_y': 0.0, 'z': 0.0, 'scale_z': 1.0,
     'skew_x': 0.0, 'skew_y': 0.0, 'fov': 45.0,
+    # SM edge-fade family (SetFadeLeft/Right/Top/Bottom): the fraction
+    # (0..1) of the actor over which alpha ramps from 0 at that edge to
+    # full at the fade distance (Sprite.cpp:560). Rest 0 = no fade, so an
+    # element never poked with a fade verb draws with hard edges.
+    'fade_left': 0.0, 'fade_right': 0.0, 'fade_top': 0.0, 'fade_bottom': 0.0,
+}
+
+# Tuple-valued color rests, merged alongside 'color' in build_timelines.
+# The flat single diffuse is 'color' (rgb, rest white). The per-corner
+# diffuse channels (SetDiffuseUpperLeft etc., Actor.h:190-197) carry rgba
+# and rest at the UNSET sentinel: any component < 0 means "this corner is
+# not individually set - use the flat color+alpha", so an element never
+# poked with a corner/edge verb draws the exact flat quad it does today
+# (the gradient no-op path). glow is an additive overlay color (rgba); its
+# rest alpha 0 means no glow pass (Actor.cpp:1008), so an un-glowed actor
+# composites identically.
+_COLOR_UNSET = (-1.0, -1.0, -1.0, -1.0)
+_COLOR_RESTS = {
+    'color': (1.0, 1.0, 1.0),
+    'color_ul': _COLOR_UNSET, 'color_ur': _COLOR_UNSET,
+    'color_ll': _COLOR_UNSET, 'color_lr': _COLOR_UNSET,
+    'glow': (1.0, 1.0, 1.0, 0.0),
 }
 
 
@@ -87,7 +109,7 @@ def build_timelines(rests: dict | None = None,
     """One `EventTimeline` per property. `rests` overrides the default
     rest state (scalars as floats, 'color' as an (r, g, b) tuple);
     `keyframes` maps property name -> list of Keyframes."""
-    rests = {**_SCALAR_RESTS, 'color': (1.0, 1.0, 1.0), **(rests or {})}
+    rests = {**_SCALAR_RESTS, **_COLOR_RESTS, **(rests or {})}
     keyframes = keyframes or {}
     out = {}
     for prop, rest in rests.items():

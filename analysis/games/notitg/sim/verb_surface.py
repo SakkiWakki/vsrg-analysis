@@ -182,6 +182,10 @@ TUPLE_GETTERS: dict = {
     'getrotation': ((_ROT['x'], _ROT['y'], _ROT['z']), READ_DEST),
     'getcurrentrotation': ((_ROT['x'], _ROT['y'], _ROT['z']), READ_CURRENT),
     'geteffectmagnitude': (None, READ_CURRENT),
+    # GetDiffuse -> DestTweenState().diffuse[0] as (r,g,b,a) (Actor.h:198);
+    # SimActor.read answers it via its own _get_diffuse path (the UL corner
+    # when set individually, else the flat diffuse color + alpha).
+    'getdiffuse': (None, READ_DEST),
 }
 
 
@@ -270,25 +274,8 @@ DEFERRED: dict = {
                     'size (Actor.h:553); size math not carried',
     'scaletofit': 'ScaleToFitInside(rect) - fit-inside scale from natural '
                   'size (Actor.h:554); size math not carried',
-    # per-edge diffuse + fade families: gradient tinting the color model
-    # (single diffuse color + alpha) does not represent.
-    'diffuseupperleft': 'per-corner diffuse gradient - flat color model only',
-    'diffuseupperright': 'per-corner diffuse gradient - flat color model only',
-    'diffuselowerleft': 'per-corner diffuse gradient - flat color model only',
-    'diffuselowerright': 'per-corner diffuse gradient - flat color model only',
-    'diffuseleftedge': 'per-edge diffuse gradient - flat color model only',
-    'diffuserightedge': 'per-edge diffuse gradient - flat color model only',
-    'diffusetopedge': 'per-edge diffuse gradient - flat color model only',
-    'diffusebottomedge': 'per-edge diffuse gradient - flat color model only',
-    'getdiffuse': 'diffuse color readback - flat color model, no consumer',
-    'glow': 'additive glow color overlay - no glow compositing pass yet',
-    'fade': 'edge-fade all sides - fade gradients not composited',
-    'fadeleft': 'left edge fade - fade gradients not composited',
-    'faderight': 'right edge fade - fade gradients not composited',
-    'fadetop': 'top edge fade - fade gradients not composited',
-    'fadebottom': 'bottom edge fade - fade gradients not composited',
-    'fadeh': 'horizontal edge fade - fade gradients not composited',
-    'fadev': 'vertical edge fade - fade gradients not composited',
+    # (diffuse gradients / glow / edge fades, and crop composites now
+    # implemented - see HANDLED_BY_NAME / CROP_COMPOSITES.)
     # primitives + live tiers already deferred in lua_api.
     'luaeffect': 'arbitrary per-frame Lua effect (SetEffectLua) - live '
                  'channel tier, chart Lua owns it',
@@ -297,14 +284,6 @@ DEFERRED: dict = {
                 'apply-math is COMDAT-folded so its offset/floor behavior '
                 'cannot be pinned) - recorded as an oscillator span, '
                 'synthesis left deferred until a source fixes it',
-    'rainbow': 'color oscillator - recorded as a span; color-oscillator '
-               'synthesis pending',
-    'diffuseshift': 'color oscillator - see rainbow',
-    'diffuseblink': 'color oscillator - see rainbow',
-    'diffuseramp': 'color oscillator - see rainbow',
-    'glowshift': 'glow oscillator - see rainbow',
-    'glowblink': 'glow oscillator - see rainbow',
-    'glowramp': 'glow oscillator - see rainbow',
     'effectoffset': 'effect phase offset - oscillator param, recorded but '
                     'the position/rotation synthesis does not read it yet',
     # effect readback getters: the effect draw-time contribution the sim
@@ -372,6 +351,27 @@ HANDLED_BY_NAME: dict = {
     'setstate': 'sprite', 'animate': 'sprite', 'play': 'sprite',
     'pause': 'sprite',
     'diffuse': 'diffuse', 'diffusecolor': 'diffuse',
+    # per-corner / per-edge diffuse gradient (SetDiffuseUpperLeft etc.,
+    # Actor.h:190-197): each writes one/two of the four corner-color
+    # channels the storyboard element draws as a gradient quad.
+    'diffuseupperleft': 'diffuse-corner', 'diffuseupperright': 'diffuse-corner',
+    'diffuselowerleft': 'diffuse-corner', 'diffuselowerright': 'diffuse-corner',
+    'diffuseleftedge': 'diffuse-corner', 'diffuserightedge': 'diffuse-corner',
+    'diffusetopedge': 'diffuse-corner', 'diffusebottomedge': 'diffuse-corner',
+    # additive glow overlay (SetGlow, Actor.h:200) + edge fades
+    # (SetFadeLeft etc., Actor.h:178-181): a glow color channel and four
+    # fade-distance channels the renderer composites (glow pass, alpha
+    # ramps at the quad edges).
+    'glow': 'glow',
+    'fade': 'fade', 'fadeleft': 'fade', 'faderight': 'fade',
+    'fadetop': 'fade', 'fadebottom': 'fade', 'fadeh': 'fade', 'fadev': 'fade',
+    # color/glow oscillators (rainbow/diffuse*/glow*): recorded as effect
+    # spans and synthesized into color/glow keyframes at compile, mirroring
+    # the position-oscillator synthesis (Actor.cpp:288-330).
+    'rainbow': 'effect-span',
+    'diffuseshift': 'effect-span', 'diffuseblink': 'effect-span',
+    'diffuseramp': 'effect-span', 'glowshift': 'effect-span',
+    'glowblink': 'effect-span', 'glowramp': 'effect-span',
     # modchart scratch state (SimActor handles aux/addaux directly, with
     # getaux as the current-read getter above)
     'aux': 'scratch', 'addaux': 'scratch',

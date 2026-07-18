@@ -784,6 +784,89 @@ def _pulse_zoom(fraction, mag) -> float:
     return lo + (hi - lo) * fraction
 
 
+# Color / glow oscillators (Actor.cpp:288-330). Unlike the position kinds
+# (which add a delta onto the tweened base), these SET the diffuse/glow
+# color absolutely each frame from effectcolor1/effectcolor2, so they
+# synthesize onto their OWN property ('color' or 'glow') as absolute
+# keyframes, not base+delta. A bare verb leaves both effect colors white
+# (Actor.cpp:60), so a default-color oscillator is white<->white = the
+# actor's flat white diffuse: parity holds until a chart sets effectcolor.
+_COLOR_OSC_KINDS = frozenset({
+    'rainbow', 'diffuseshift', 'diffuseblink', 'diffuseramp',
+    'glowshift', 'glowblink', 'glowramp'})
+_GLOW_OSC_KINDS = frozenset({'glowshift', 'glowblink', 'glowramp'})
+_DEFAULT_EFFECT_COLOR = (1.0, 1.0, 1.0, 1.0)
+_TWO_THIRDS_PI = 2.0 * math.pi / 3.0
+
+
+def _effect_colors(span) -> tuple:
+    """(color1, color2) as rgba tuples from the span's recorded
+    effectcolor1/effectcolor2, each defaulting to white (Actor.cpp:60)."""
+    extra = getattr(span, 'extra', None) or {}
+    return (_rgba_or_white(extra.get('effectcolor1')),
+            _rgba_or_white(extra.get('effectcolor2')))
+
+
+def _rgba_or_white(vec) -> tuple:
+    if not vec:
+        return _DEFAULT_EFFECT_COLOR
+    vals = list(vec[:4]) + [1.0] * (4 - len(vec[:4]))
+    return tuple(vals[:4])
+
+
+def _mix(c1, c2, f) -> tuple:
+    """c1*f + c2*(1-f), per SM's RageColor blend (Actor.cpp:303)."""
+    return tuple(a * f + b * (1.0 - f) for a, b in zip(c1, c2))
+
+
+def _color_osc_value(kind, pct, c1, c2) -> tuple:
+    """The absolute (r,g,b,a) SM assigns at fraction `pct` through the
+    period for a color/glow oscillator (Actor.cpp:288-330). blink switches
+    at the half-period; shift blends by a phase-shifted sine; ramp blends
+    linearly by pct; rainbow sweeps hue by the same sine parameter."""
+    between = math.sin((pct + 0.25) * _TWO_PI) / 2.0 + 0.5
+    match kind:
+        case 'diffuseblink' | 'glowblink':
+            return c1 if pct > 0.5 else c2
+        case 'diffuseshift' | 'glowshift':
+            return _mix(c1, c2, between)
+        case 'diffuseramp' | 'glowramp':
+            return _mix(c1, c2, pct)
+        case 'rainbow':
+            theta = between * _TWO_PI
+            return (math.cos(theta) * 0.5 + 0.5,
+                    math.cos(theta + _TWO_THIRDS_PI) * 0.5 + 0.5,
+                    math.cos(theta + 2.0 * _TWO_THIRDS_PI) * 0.5 + 0.5,
+                    c1[3])
+    return _DEFAULT_EFFECT_COLOR
+
+
+def _color_span_keyframes(span, osc_clock, end) -> dict:
+    """Dense absolute-color keyframes for one color/glow oscillator span.
+
+    Mirrors `_span_keyframes` but the sampled value is the ABSOLUTE color
+    SM writes (not a delta): 'color' carries the (r,g,b) diffuse, 'glow'
+    carries the (r,g,b,a) glow overlay. A trailing rest hands the property
+    back to its base value when the effect stops."""
+    start = span.start
+    if end <= start:
+        return {}
+    prop = 'glow' if span.kind in _GLOW_OSC_KINDS else 'color'
+    c1, c2 = _effect_colors(span)
+    n = min(_OSC_MAX_SAMPLES, int((end - start) / _OSC_SAMPLE_STEP_S) + 1)
+    frames: list = []
+    for i in range(n + 1):
+        t = min(end, start + i * _OSC_SAMPLE_STEP_S)
+        phase = osc_clock.phase_source(span.clock, t)
+        pct = _effect_pct(phase, span.period, span.offset)
+        r, g, b, a = _color_osc_value(span.kind, pct, c1, c2)
+        value = (r, g, b, a) if prop == 'glow' else (r, g, b)
+        frames.append(Keyframe(t, value, 0.0, _STEP_EASE))
+    rest = (1.0, 1.0, 1.0, 0.0) if prop == 'glow' else (1.0, 1.0, 1.0)
+    frames.append(Keyframe(end + _OSC_SAMPLE_STEP_S, rest, 0.0, _STEP_EASE))
+    return {prop: frames}
+
+
 class _OscillatorClock:
     """Maps a sample time (seconds) to the effect clock's phase source.
 
@@ -923,6 +1006,15 @@ def compile_oscillator_keyframes(spans, base_keyframes, osc_clock, rng,
     Mutates and returns `base_keyframes` (a dict of {prop: [Keyframe]})."""
     for span in spans:
         end = _effective_end(span, end_seconds)
+        if span.kind in _COLOR_OSC_KINDS:
+            # Color/glow oscillators write the property ABSOLUTELY (SM sets
+            # tempState.diffuse/glow), so the synthesized stream replaces
+            # the base inside the window outright - no base+delta rebase.
+            for prop, abs_frames in _color_span_keyframes(
+                    span, osc_clock, end).items():
+                base_keyframes[prop] = _merge_base_outside(
+                    base_keyframes.get(prop, []), abs_frames, span.start, end)
+            continue
         deltas = _span_keyframes(span, osc_clock, rng, end)
         for prop, delta_frames in deltas.items():
             # Additive props (x/y/rotation) rest at 0, multiplicative zoom
@@ -1257,6 +1349,10 @@ _DRAWABLE_PROPS = frozenset({
     'crop_top', 'crop_bottom', 'crop_left', 'crop_right',
     # 3D scene channels (rest at identity -> flat actors unchanged).
     'rotation_x', 'rotation_y', 'z', 'scale_z', 'skew_x', 'skew_y', 'fov',
+    # Per-corner diffuse gradient + additive glow + edge fades (rest at
+    # the unset/no-effect sentinels -> a flat actor draws identically).
+    'color_ul', 'color_ur', 'color_ll', 'color_lr', 'glow',
+    'fade_left', 'fade_right', 'fade_top', 'fade_bottom',
 })
 
 

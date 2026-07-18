@@ -87,6 +87,31 @@ _MAX_DRAIN_STEPS = 10000
 
 _DEFAULT_EFFECT_CLOCK = 'bgm'
 
+# Per-corner diffuse (SetDiffuseUpperLeft etc., openitg Actor.h:190-197).
+# The four corner channels the storyboard element carries; each verb
+# writes the RageColor(r,g,b,a) to one or two of them (an edge verb sets
+# the two corners on that edge). Corner order is UL/UR/LL/LR.
+_DIFFUSE_CORNER_VERBS = {
+    'diffuseupperleft': ('color_ul',),
+    'diffuseupperright': ('color_ur',),
+    'diffuselowerleft': ('color_ll',),
+    'diffuselowerright': ('color_lr',),
+    'diffuseleftedge': ('color_ul', 'color_ll'),
+    'diffuserightedge': ('color_ur', 'color_lr'),
+    'diffusetopedge': ('color_ul', 'color_ur'),
+    'diffusebottomedge': ('color_ll', 'color_lr'),
+}
+
+# Edge-fade setters (SetFadeLeft etc., Actor.h:178-181): one 0..1 scalar
+# per edge onto its fade channel.
+_FADE_VERBS = {
+    'fadeleft': ('fade_left',), 'faderight': ('fade_right',),
+    'fadetop': ('fade_top',), 'fadebottom': ('fade_bottom',),
+    'fadeh': ('fade_left', 'fade_right'),
+    'fadev': ('fade_top', 'fade_bottom'),
+    'fade': ('fade_left', 'fade_right', 'fade_top', 'fade_bottom'),
+}
+
 # Custom shader-uniform upload verbs (`GetShader():uniform1f(name, v)`).
 # All carry the GLSL uniform name first and its value(s) after; only the
 # first scalar component is recorded onto `uniform:<name>` (the
@@ -146,7 +171,22 @@ _SIM_BULK_ADD_SETTERS = verb_surface.BULK_ADD_SETTERS
 _SIM_CROP_COMPOSITES = verb_surface.CROP_COMPOSITES
 
 
+# Tuple-valued rests for the color-gradient / glow channels, which
+# lua_api._REST (scalar-only) does not carry. A corner rests at the UNSET
+# sentinel (any component < 0 = "use the flat diffuse"); glow rests at
+# alpha 0 = no glow pass (Actor.cpp:1008). Kept in sync with the storyboard
+# model's _COLOR_RESTS - the recording and the render must agree on rest.
+_COLOR_UNSET = (-1.0, -1.0, -1.0, -1.0)
+_COLOR_RESTS = {
+    'color_ul': _COLOR_UNSET, 'color_ur': _COLOR_UNSET,
+    'color_ll': _COLOR_UNSET, 'color_lr': _COLOR_UNSET,
+    'glow': (1.0, 1.0, 1.0, 0.0),
+}
+
+
 def _rest(prop):
+    if prop in _COLOR_RESTS:
+        return _COLOR_RESTS[prop]
     return _REST.get(prop, 0.0)
 
 
@@ -426,8 +466,21 @@ class SimActor:
                 return self._current.get('skew_x_before', 0.0)
             case 'GetSkewYBeforeRotation':
                 return self._current.get('skew_y_before', 0.0)
+            case 'getdiffuse':
+                return self._get_diffuse()
             case _:
                 return None
+
+    def _get_diffuse(self) -> tuple:
+        """GetDiffuse -> DestTweenState().diffuse[0] (Actor.h:198): the
+        upper-left corner when set individually, else the flat diffuse
+        color with its alpha, as an (r, g, b, a) tuple."""
+        ul = self.get_dest('color_ul')
+        if isinstance(ul, tuple) and ul[0] >= 0.0:
+            return ul
+        color = self.get_dest('color')
+        rgb = color if isinstance(color, tuple) else (1.0, 1.0, 1.0)
+        return (rgb[0], rgb[1], rgb[2], self.get_dest('alpha'))
 
     def _secs_into_effect(self) -> float:
         """m_fSecsIntoEffect by effect clock (Actor.cpp:559-590): the
@@ -511,6 +564,8 @@ class SimActor:
         if self._poke_multi_arg(verb, args) or self._poke_bulk(verb, args):
             return
         if self._poke_effect(verb, args):
+            return
+        if self._poke_color(verb, args):
             return
         if self._poke_uniform(verb, args):
             return
@@ -784,6 +839,46 @@ class SimActor:
         alpha = _arg_float(args[3]) if len(args) > 3 else None
         if alpha is not None:
             self._write_dest('alpha', alpha)
+
+    def _poke_color(self, verb, args) -> bool:
+        """Per-corner/edge diffuse gradient, additive glow, and edge fades
+        (Sprite.cpp draws the gradient quad, glow pass, and fade ramps).
+        The corner/edge/glow verbs carry a RageColor(r,g,b,a); the fade
+        verbs carry one 0..1 distance per edge. Each writes the queue-tail
+        dest so a `linear(t)` before it eases the channel exactly as the
+        chart authored, and rests at the identity sentinel so an actor
+        never poked with one draws its flat quad unchanged."""
+        corners = _DIFFUSE_CORNER_VERBS.get(verb)
+        if corners is not None:
+            color = self._rgba(args)
+            if color is not None:
+                for prop in corners:
+                    self._write_dest(prop, color)
+            return True
+        if verb == 'glow':
+            color = self._rgba(args)
+            if color is not None:
+                self._write_dest('glow', color)
+            return True
+        edges = _FADE_VERBS.get(verb)
+        if edges is not None:
+            dist = _arg_float(args[0] if args else None)
+            if dist is not None:
+                for prop in edges:
+                    self._write_dest(prop, dist)
+            return True
+        return False
+
+    @staticmethod
+    def _rgba(args) -> tuple | None:
+        """A RageColor(r,g,b,a) from the verb args, alpha defaulting to 1
+        (openitg FArg reads a missing 4th as 0, but every gat color verb
+        passes alpha; default 1 keeps a 3-arg call opaque)."""
+        vals = [_arg_float(a) for a in args[:4]]
+        if len(vals) < 3 or any(v is None for v in vals[:3]):
+            return None
+        alpha = vals[3] if len(vals) == 4 and vals[3] is not None else 1.0
+        return (vals[0], vals[1], vals[2], alpha)
 
     def _visibility(self, hidden: bool) -> None:
         self._set_immediate('hidden', 1.0 if hidden else 0.0)
