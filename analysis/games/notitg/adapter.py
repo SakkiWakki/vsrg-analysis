@@ -263,11 +263,15 @@ class NotitgAdapter(EtternaAdapter):
     def effects(self, replay):
         from analysis.games.notitg.field_instances import (
             NotitgFieldInstances, NotitgScreenCamera)
-        from analysis.games.notitg.shader_bridge import notitg_shader_effects
+        from analysis.games.notitg.shader_bridge import (
+            chart_shader_effect, notitg_shader_effects)
         compiled = self._compiled_modfile(replay)
         if not compiled:
             return []
         effects = list(notitg_shader_effects(compiled.get('shader_flags')))
+        chart_shaders = chart_shader_effect(compiled.get('chart_shaders'))
+        if chart_shaders is not None:
+            effects.append(chart_shaders)
         base_hidden = compiled.get('base_field_hidden')
         sm_path, _index = split_chart_ref(replay.get('filepath', ''))
         instances = self._field_instances(compiled)

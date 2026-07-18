@@ -100,6 +100,7 @@ def _compile_via_sim(sm_path, end_seconds):
             env, osc_context),
         'field_oscillators': field_oscillators,
         'field_vanish': modfile._field_vanish_timelines(env),
+        'chart_shaders': _chart_shaders(doc, env, actor_keyframes),
         'aft_bg_visible': modfile._aft_bg_visible_timeline(
             doc.root, _bg_stem(sm_path), actor_keyframes),
         'base_field_hidden': modfile._base_field_hidden_timeline(env),
@@ -412,6 +413,82 @@ def _iter_xml(actor):
     yield actor
     for child in actor.children:
         yield from _iter_xml(child)
+
+
+def _chart_shaders(doc, env, actor_keyframes) -> list:
+    """The map-supplied fragment-shader passes (shader_bridge's
+    `chart_shaders` contract), harvested from the actor tree.
+
+    A `Frag=` attribute binds a per-actor GLSL program that samples the
+    actor's own texture (openitg Sprite::DrawPrimitives -> sampler0 =
+    m_pTexture). Only actors whose texture is a whole-screen
+    ActorFrameTexture capture (`aft_source` set - they drew
+    `SetTexture(<aft>:GetTexture())`) are fullscreen-expressible: there
+    sampler0 IS our finished-frame capture, so the frag maps onto the
+    fullscreen `u_tex` contract exactly. Per-actor frags on ordinary
+    small textures are Stage B (they would wrongly post-process the
+    whole screen) and skipped - the same fullscreen/per-actor split the
+    engine has no concept of but that our fullscreen pipeline requires.
+
+    Each pass carries the resolved `.frag` path, the per-uniform value
+    streams the actor's `GetShader():uniform*` pokes recorded, and a 0/1
+    visibility window from its `hidden` channel (these sprites sit
+    `hidden,1` until their section's show message)."""
+    passes = []
+    for actor in _iter_xml(doc.root):
+        frag = actor.attrs.get('Frag')
+        rec_id = env.actor_id(actor)
+        if not frag or rec_id is None:
+            continue
+        sim = env.actors.get(rec_id)
+        if sim is None or not sim.aft_source:
+            continue
+        frag_path = _resolve_frag(actor, frag)
+        if frag_path is None:
+            continue
+        frames = actor_keyframes.get(rec_id, {})
+        uniforms = {prop[len('uniform:'):]: _uniform_events(kfs)
+                    for prop, kfs in frames.items()
+                    if prop.startswith('uniform:')}
+        passes.append({
+            'name': f'gf{rec_id}_{Path(frag).stem}',
+            'frag_path': str(frag_path),
+            'uniforms': uniforms,
+            'windows': _visibility_events(frames.get('hidden')),
+        })
+    return passes
+
+
+def _resolve_frag(actor, frag) -> Path | None:
+    """Absolute path to a `Frag=` reference, resolved against the actor's
+    own XML directory (`_base_dir`), like every other chart asset. `./`
+    prefixes and bare `shaders/x.frag` both resolve under that dir."""
+    base_dir = getattr(actor, '_base_dir', None)
+    if base_dir is None:
+        return None
+    candidate = Path(base_dir) / frag.lstrip('./')
+    return candidate if candidate.is_file() else None
+
+
+def _uniform_events(keyframes) -> list:
+    """A uniform's `Keyframe` stream as the bridge's `.ffx`-shaped event
+    dicts (ms times, `strength` value): the same shape the shader-flag
+    path emits, so shader_bridge stays the one stable contract."""
+    return [{'time': kf.t * 1000.0, 'duration': kf.duration * 1000.0,
+             'ease': kf.easing, 'strength': kf.values[0]}
+            for kf in keyframes]
+
+
+def _visibility_events(hidden_kfs) -> list:
+    """A pass-liveness window stream from the actor's `hidden` channel
+    (1 hidden, 0 shown) inverted to `strength` (1 live, 0 off), or []
+    when the actor never toggled hidden (always live). Instant steps -
+    the hidden bit is immediate, never tweened."""
+    if not hidden_kfs:
+        return []
+    return [{'time': kf.t * 1000.0, 'duration': 0.0, 'ease': 0,
+             'strength': 0.0 if kf.values[0] else 1.0}
+            for kf in hidden_kfs]
 
 
 def _osc_context(env, doc, end_seconds):

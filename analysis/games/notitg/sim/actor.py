@@ -85,6 +85,17 @@ _TWEEN_OVERFLOW = 50
 _MAX_DRAIN_STEPS = 10000
 
 _DEFAULT_EFFECT_CLOCK = 'bgm'
+
+# Custom shader-uniform upload verbs (`GetShader():uniform1f(name, v)`).
+# All carry the GLSL uniform name first and its value(s) after; only the
+# first scalar component is recorded onto `uniform:<name>` (the
+# chart-shader bridge drives scalar strengths). The `*fv` array and
+# integer forms are accepted for coverage, reduced to their first value.
+_UNIFORM_VERBS = frozenset({
+    'uniform1f', 'uniform2f', 'uniform3f', 'uniform4f',
+    'uniform1i', 'uniform2i', 'uniform3i', 'uniform4i',
+    'uniform1fv', 'uniform2fv', 'uniform3fv', 'uniform4fv'})
+
 # The COMPLETE effect-kind verb surface the NotITG fork registers on
 # every actor. Position/rotation kinds synthesize downstream today; the
 # color/zoom families (rainbow/diffuse*/glow*/pulse*) record spans for
@@ -473,6 +484,8 @@ class SimActor:
             return
         if self._poke_effect(verb, args):
             return
+        if self._poke_uniform(verb, args):
+            return
         if self._poke_channel(verb, arg0) or self._poke_tween(verb, arg0):
             return
         match verb:
@@ -539,6 +552,30 @@ class SimActor:
             self._add_dest(_SIM_ADD_SETTERS[verb], _arg_float(arg0))
         else:
             return False
+        return True
+
+    def _poke_uniform(self, verb, args) -> bool:
+        """A `self:GetShader():uniform1f(name, value)` custom-uniform
+        upload, recorded onto a per-uniform channel `uniform:<name>`,
+        returning whether `verb` belonged to the shader-uniform surface.
+
+        `GetShader()` returns the recorder itself (an unmodeled verb
+        chains `self` through the sandbox), so the uniform call lands as
+        a poke on the frag-owning actor. arg0 is the GLSL uniform name,
+        the rest its value; only the first scalar component is kept - the
+        chart-shader bridge drives scalar strengths, and a vec's extra
+        lanes have no fullscreen-pass consumer yet. Writing through the
+        normal dest path means a `linear(t)` before the poke eases the
+        uniform exactly as the chart authored it (SM's shader uniforms
+        are Actor tween state, openitg RageDisplay::SetUniform*)."""
+        if verb == 'GetShader':
+            return True
+        if verb not in _UNIFORM_VERBS:
+            return False
+        name = args[0] if args else None
+        value = _arg_float(args[1]) if len(args) > 1 else None
+        if isinstance(name, str) and value is not None:
+            self._set_scalar(f'uniform:{name}', value)
         return True
 
     def _poke_bulk(self, verb, args) -> bool:
@@ -703,6 +740,15 @@ class SimActor:
             self._aft_texture_name = arg
         elif arg.startswith('aft:'):
             self._aft_source = arg[len('aft:'):]
+
+    def mark_aft(self, name: str) -> None:
+        """Declare this actor an ActorFrameTexture render target under
+        `name`, so `GetTexture()` returns its `aft:<name>` marker for a
+        copy/post-process sprite to pick up. The engine makes an actor
+        an AFT by its `Type="ActorFrameTexture"` + `Create()`; a chart
+        that also calls `SetTextureName` overrides this default name."""
+        if self._aft_texture_name is None:
+            self._aft_texture_name = name
 
     # -- effect oscillators ---------------------------------------------
 

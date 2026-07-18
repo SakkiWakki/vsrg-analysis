@@ -606,6 +606,12 @@ class SimEnvironment:
         base_dir = getattr(actor, '_base_dir', None)
         if base_dir is not None:
             self._xml_dirs[rec_id] = f'{base_dir}/'
+        if actor.kind == 'ActorFrameTexture':
+            # An `<... Type="ActorFrameTexture">` render target: name it so
+            # its GetTexture() marker reaches copy/post-process sprites
+            # even when the chart never calls SetTextureName (getfucked2
+            # references AFTs by Lua global, not name).
+            self._actors[rec_id].mark_aft(f'aft#{rec_id}')
         for message, body in actor.message_commands().items():
             resolved = self._load_resolve(rec_id, f'msg:{message}', body)
             if resolved is not None:
