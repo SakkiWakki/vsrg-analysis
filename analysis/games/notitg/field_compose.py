@@ -55,10 +55,11 @@ _REST_EPS = 1e-4
 # an ActorFrame sets for its whole subtree - its rest is the
 # LoadMenuPerspective default the shared projection uses.
 _LINK_RESTS = {
-    'x': 0.0, 'y': 0.0,
-    'rotation': 0.0, 'rotation_x': 0.0, 'rotation_y': 0.0, 'skew_x': 0.0,
-    'scale_x': 1.0, 'scale_y': 1.0,
-    'base_scale_x': 1.0, 'base_scale_y': 1.0,
+    'x': 0.0, 'y': 0.0, 'z': 0.0,
+    'rotation': 0.0, 'rotation_x': 0.0, 'rotation_y': 0.0,
+    'skew_x': 0.0, 'skew_y': 0.0,
+    'scale_x': 1.0, 'scale_y': 1.0, 'scale_z': 1.0,
+    'base_scale_x': 1.0, 'base_scale_y': 1.0, 'base_scale_z': 1.0,
     'alpha': 1.0, 'hidden': 0.0,
     'fov': field_projection.FOV,
 }
@@ -173,17 +174,23 @@ class TransformChannel:
         rx, ry, rz = v('rotation_x'), v('rotation_y'), v('rotation')
         sx = v('scale_x') * v('base_scale_x')
         sy = v('scale_y') * base_sy
+        sz = v('scale_z') * v('base_scale_z')
         skew = v('skew_x')
-        if not (rx or ry or rz or skew) and sx == 1.0 and sy == 1.0:
+        skewy = v('skew_y')
+        z = v('z')
+        if (not (rx or ry or rz or skew or skewy or z)
+                and sx == 1.0 and sy == 1.0 and sz == 1.0):
             # The overwhelmingly common link state (a plain positioned
             # frame): one translation matrix instead of three matmuls,
             # sampled for every instance link every frame.
             return transform3d.translate(v('x'), v('y'))
         m = transform3d.rotate_xyz(rx, ry, rz)
-        m = m @ transform3d.scale(sx, sy)
-        m = m @ transform3d.translate(v('x'), v('y'))
+        m = m @ transform3d.scale(sx, sy, sz)
+        m = m @ transform3d.translate(v('x'), v('y'), z)
         if skew:
             m = transform3d.skew_x(skew) @ m
+        if skewy:
+            m = transform3d.skew_y(skewy) @ m
         return m
 
 
