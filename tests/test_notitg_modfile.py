@@ -432,6 +432,49 @@ def test_scroll_multipliers_relative_to_base_and_snap_holds():
     assert tl.sample(25.0)[0] == pytest.approx(1.0)    # reverts to base
 
 
+def test_scroll_multipliers_persistent_window_holds_flat_over_bursts():
+    """A persistent xmod window (a `{0, 9999, '2.5x'}` baseline the reader
+    re-applies as per-frame bursts) holds a FLAT rate: the overlapped
+    burst windows resolve away instead of sawtoothing to base between
+    them (the Crazy Shuffle scroll-stutter regression)."""
+    from analysis.games.notitg.mod_channels import compile_scroll_multipliers
+    from analysis.player.render.effects.timeline import (
+        EventTimeline, keyframes_from_events)
+
+    events = [{'t_start': 0.0, 't_end': 100.0, 'modstring': '*-1 2.5x',
+               'player': None}]
+    # The reader re-applies the same 2.5x every ~0.1s inside the span.
+    t = 0.1
+    while t < 5.0:
+        events.append({'t_start': t, 't_end': t + 0.017,
+                       'modstring': '2.5x', 'player': None})
+        t += 0.1
+    sc, _skipped = compile_scroll_multipliers(events)
+    tl = EventTimeline(keyframes_from_events(sc, ('multiplier',), (1.0,)),
+                       rest=(1.0,))
+    # 2.5x / 2.0 base = 1.25, held flat across every burst gap (a sawtooth
+    # would dip toward 1.0 at each 0.083s gap between reapplies).
+    for t in (1.0, 2.0, 3.0, 4.0):
+        assert tl.sample(t)[0] == pytest.approx(1.25)
+
+
+def test_scroll_multipliers_fast_toggle_stays_monotonic():
+    """A scroll xmod toggled faster than its chase completes keeps the
+    breakpoints time-ordered (the _xmod_breakpoints overrun regression):
+    an unclamped ramp arriving past the next event made durations go
+    negative and the mult jitter."""
+    from analysis.games.notitg.mod_channels import compile_scroll_multipliers
+
+    events = []
+    t = 0.0
+    while t < 3.0:
+        events.append({'t_start': t, 't_end': t + 0.05,
+                       'modstring': '*1 4x', 'player': None})
+        t += 0.1
+    sc, _skipped = compile_scroll_multipliers(events)
+    assert all(e['duration'] >= 0.0 for e in sc)
+
+
 def test_scroll_multipliers_skip_and_count_cmods():
     from analysis.games.notitg.mod_channels import compile_scroll_multipliers
 

@@ -137,19 +137,22 @@ def compile_scroll_multipliers(mod_events, base_xmod=_DEFAULT_BASE_XMOD):
     (`{time, duration, multiplier, ease}`, ms-keyed) for
     `GameAdapter.scroll_multipliers`.
 
-    Each xmod window re-targets the field's scroll to `xmod / base_xmod`
-    at its start (chasing at the `*S` approach speed) and reverts to base
-    (1.0) at its end at clearall speed (the always-on `{0,9000,'2x'}`
-    baseline, no `*S`, re-drives the field at speed 1.0 once a burst
-    window ends -- so a `*100000` burst eases back over ~1s, it does not
-    snap). The shared approach-chase compiler resolves the chain to
-    piecewise-linear breakpoints (the base window is always the resting
-    1.0). Player-0 windows only, matching the note-mod consumer. C/M-mods
-    pin an absolute rate our user-scroll model cannot express; they are
-    skipped (their count is returned for the caller to log)."""
-    events = []
+    Each xmod window drives the field's scroll to `xmod / base_xmod`
+    over its span (chasing at the `*S` approach speed); where no window
+    is active the scroll rests at base (1.0), reverting at clearall speed
+    (the float, so a `*100000` burst eases back over ~1s, it does not
+    snap). Overlapping windows resolve exactly like the per-note mod
+    channels through `_resolve_windows`: the highest-order active window
+    wins and an end another window still covers never dips - so a
+    persistent `{0, 9999, '2.5x'}` baseline (re-applied as per-frame
+    bursts by the reader) holds a FLAT rate instead of sawtoothing to
+    base between the bursts. Player-0 windows only, matching the note-mod
+    consumer. C/M-mods pin an absolute rate our user-scroll model cannot
+    express; they are skipped (their count is returned for the caller to
+    log)."""
+    windows = []
     skipped_cm = 0
-    for row in mod_events:
+    for order, row in enumerate(mod_events):
         if _row_player(row) != 0:
             continue
         start = float(row['t_start'])
@@ -161,9 +164,10 @@ def compile_scroll_multipliers(mod_events, base_xmod=_DEFAULT_BASE_XMOD):
                 skipped_cm += 1
                 continue
             mult = value / base_xmod if base_xmod else 1.0
-            events.append(ModEvent(start, mult, speed, 'xmod', 0))
-            events.append(ModEvent(end, 1.0, _CLEARALL_SPEED, 'xmod', 0))
+            windows.append(_Window(start, end, mult, speed, order))
 
+    events = [ModEvent(t, value, speed, 'xmod', 0)
+              for t, value, speed in _resolve_windows(windows)]
     breakpoints = _xmod_breakpoints(events)
     return _breakpoints_to_scroll_events(breakpoints), skipped_cm
 
@@ -183,14 +187,24 @@ def _xmod_breakpoints(events):
     idles between two distant windows stays flat instead of interpolating
     across the gap. This flat-hold is why xmod cannot reuse
     `_compile_channel` directly (that layout suits densely-retargeted
-    per-note mods, not sparse whole-field speed changes)."""
+    per-note mods, not sparse whole-field speed changes).
+
+    Each chase is clamped to end at the next event's time, carrying the
+    value it actually reached: an unclamped ramp can arrive past the next
+    event (a persistent `2.5x` window's slow chase overrunning the
+    per-tick reapply bursts) and make the breakpoints non-monotonic,
+    which corrupts `_piecewise_at`'s bisect - the classic scroll-mult
+    sawtooth."""
     times: list = []
     values: list = []
 
     def sample(t):
         return _piecewise_at(times, values, t, rest=1.0)
 
-    for ev in sorted(events, key=lambda e: e.beat):
+    ordered = sorted(events, key=lambda e: e.beat)
+    next_times = [ordered[j].beat for j in range(1, len(ordered))]
+    next_times.append(float('inf'))
+    for ev, until in zip(ordered, next_times):
         t = ev.beat
         current = sample(t)
         if ev.speed <= 0.0:
@@ -204,7 +218,12 @@ def _xmod_breakpoints(events):
             _append_point(times, values, t, current)
             gap = abs(ev.value - current)
             arrival = t if gap == 0.0 else t + gap / ev.speed
-            _append_point(times, values, arrival, ev.value)
+            if arrival <= until:
+                _append_point(times, values, arrival, ev.value)
+            else:
+                reached = current + (ev.value - current) * (until - t) \
+                    / (arrival - t)
+                _append_point(times, values, until, reached)
     return times, values
 
 
@@ -255,10 +274,17 @@ def _breakpoints_to_scroll_events(breakpoints):
     return out
 
 
-def compile_mod_channels(mod_events) -> ModChannels:
+def compile_mod_channels(mod_events, beat_curves=None) -> ModChannels:
     """Compile `compile_modfile`'s normalized mod-window dicts
     (`t_start`/`t_end` seconds, `modstring`, `player`) into sampled
-    channels."""
+    channels.
+
+    `beat_curves` ({(mod, player): (beats, values)}) are per-frame
+    beat-keyed curves (sim.record.perframe_curves) sampled live at beat
+    instead of through the time-keyed approach chase; the (mod, player)
+    keys they cover are dropped from the chased windows so each mod lives
+    in exactly one representation."""
+    covered = set(beat_curves or ())
     windows = defaultdict(list)
     for order, row in enumerate(mod_events):
         start = float(row['t_start'])
@@ -273,6 +299,8 @@ def compile_mod_channels(mod_events) -> ModChannels:
                    else (max(0, int(raw_player) - 1),))
         for percent, speed, name in parse_modstring(row['modstring']):
             for player in players:
+                if (name, player) in covered:
+                    continue
                 windows[(name, player)].append(
                     _Window(start, end, percent, speed, order))
 
@@ -280,7 +308,7 @@ def compile_mod_channels(mod_events) -> ModChannels:
     for (name, player), chan_windows in windows.items():
         for beat, value, speed in _resolve_windows(chan_windows):
             events.append(ModEvent(beat, value, speed, name, player))
-    return ModChannels.compile(events)
+    return ModChannels.compile(events, beat_curves=beat_curves)
 
 
 @dataclass(frozen=True)

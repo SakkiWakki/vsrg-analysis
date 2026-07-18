@@ -24,7 +24,8 @@ from pathlib import Path
 from analysis.games.notitg import field_compose, modfile
 from analysis.games.notitg.sim.loop import (
     load_chart, run_declarative, run_sim)
-from analysis.games.notitg.sim.record import chase_events, coalesce_applied
+from analysis.games.notitg.sim.record import (
+    chase_events, coalesce_applied, perframe_curves)
 from analysis.player.render.effects.timeline import EventTimeline
 from analysis.player.render.mods.channels import ModChannels
 
@@ -74,9 +75,15 @@ def _compile_via_sim(sm_path, end_seconds):
     declarative = modfile._normalize_mod_events(_TableView(env), doc.to_seconds)
     applied = _mod_events(result)
     mod_events = declarative + applied
-    # Precompiled channels: the declarative windows compiled through
-    # the approach-chase resolver, plus the driver-injected chase.
-    mod_channels = _compile_channels(mod_events)
+    # Per-frame drivers that paint a beat-keyed curve (a dense snap-fired
+    # mod whose value tracks a function of beat) are sampled live at
+    # beat_at(t) instead of run through the time-keyed approach chase,
+    # which distorts a snap-fired curve into a jagged staircase. The
+    # remaining windows (the declarative bulk + any chasing driver) still
+    # compile through the resolver; a curve mod is excluded from them so
+    # it lives in exactly one representation.
+    beat_curves = perframe_curves(result.applied_mods)
+    mod_channels = _compile_channels(mod_events, beat_curves)
 
     field_oscillators = modfile._field_oscillator_timelines(env, osc_context)
     field_instances = _sim_field_instances(
@@ -151,12 +158,14 @@ class _TableView:
         self.mods2 = env.read_table('mods2')
 
 
-def _compile_channels(mod_events):
+def _compile_channels(mod_events, beat_curves=None):
     """Mod channels from the combined event set (declarative windows +
     driver-injected windows), all in the one row shape the approach-chase
-    resolver reads."""
+    resolver reads. `beat_curves` ({(mod, index): (beats, values)}) are
+    the per-frame beat-keyed curves that bypass the chase and sample live
+    at beat; the mods they cover are dropped from the chased windows."""
     from analysis.games.notitg.mod_channels import compile_mod_channels
-    return compile_mod_channels(mod_events)
+    return compile_mod_channels(mod_events, beat_curves=beat_curves)
 
 
 def _mod_events(result) -> list:

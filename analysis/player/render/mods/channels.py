@@ -138,42 +138,98 @@ def _add_snap(seg: _Segments, t: float, target: float) -> None:
         seg._append_step(t, target)
 
 
-def _add_chase(seg: _Segments, t: float, target: float, speed: float) -> None:
-    """Emit a linear ramp from the current value at `t` to `target`,
-    arriving after |target - from| / speed seconds, then a hold point."""
+def _add_chase(seg: _Segments, t: float, target: float, speed: float,
+               until: float) -> None:
+    """Emit the fapproach chase toward `target` starting at `t`, clamped
+    to end at `until` (the next event's time).
+
+    fapproach (PlayerOptions::Approach) moves the live value toward the
+    current target by dt*speed every frame - a constant-rate ramp, then
+    flat once it arrives. Its continuous form is a single line from the
+    value at `t` to the value REACHED by `until`: the full `target` when
+    the chase completes first (`arrival <= until`), else the partial
+    value at `until` when a re-target interrupts it. Clamping to `until`
+    is what keeps the breakpoints time-ordered - an unclamped ramp can
+    arrive past the next event and make `times` non-monotonic, which
+    breaks the bisect in `_sample`."""
     frm = seg._sample(t)
     seg._append(t, frm)
     gap = abs(target - frm)
     if gap == 0.0:
         return
     arrival = t + gap / speed
-    seg._append(arrival, target)
+    if arrival <= until:
+        seg._append(arrival, target)
+    else:
+        reached = frm + (target - frm) * (until - t) / (arrival - t)
+        seg._append(until, reached)
 
 
 def _compile_channel(events: list) -> _Segments:
+    ordered = sorted(events, key=lambda e: e.beat)
+    # The clamp bound for each event is the next distinct event time; the
+    # last event chases unbounded (nothing re-targets it).
+    next_times = [ordered[j].beat for j in range(1, len(ordered))]
+    next_times.append(float('inf'))
     seg = _Segments()
-    for ev in sorted(events, key=lambda e: e.beat):
+    for ev, until in zip(ordered, next_times):
         if ev.speed <= 0.0:
             _add_snap(seg, ev.beat, ev.value)
         else:
-            _add_chase(seg, ev.beat, ev.value, ev.speed)
+            _add_chase(seg, ev.beat, ev.value, ev.speed, until)
     return seg
 
 
+class _BeatCurve:
+    """A per-frame mod recorded as a beat-keyed curve: parallel
+    `beats`/`values`, linear-interpolated at the current song beat.
+    OUTSIDE the fired span (before the first fire, after the last) the
+    mod RESTS at 0 - the driver only paints its own `perframe` window,
+    and the engine's clearall reverts the mod to rest elsewhere. (Holding
+    the endpoints flat instead would leave a z-push / zoom mod fully on
+    for the whole song before its window, exploding note size.) Sampled
+    at beat rather than time so it plays smooth at any refresh, bypassing
+    the time-keyed approach chase that distorts a dense snap-fired
+    curve."""
+
+    __slots__ = ('beats', 'values')
+
+    def __init__(self, beats, values):
+        self.beats = np.asarray(beats, dtype=np.float64)
+        self.values = np.asarray(values, dtype=np.float64)
+
+    def sample(self, beat: float) -> float:
+        return float(np.interp(beat, self.beats, self.values,
+                               left=DEFAULT_REST, right=DEFAULT_REST))
+
+    def sample_array(self, beats: np.ndarray) -> np.ndarray:
+        return np.interp(beats, self.beats, self.values,
+                         left=DEFAULT_REST, right=DEFAULT_REST)
+
+
 class ModChannels:
-    """Compiled (mod, player) -> piecewise-linear value curve.
+    """Compiled (mod, player) -> value curve.
 
-    Build with `ModChannels.compile(events, beat_to_time=...)`; the
-    caller-supplied `beat_to_time` maps event beats to seconds (identity
-    if events are already time-keyed). Query with `value(mod, t)` for one
-    channel or `values_at(t)` for every active mod at once."""
+    Most mods are `(mod, player) -> piecewise-linear TIME curve` (the
+    approach chase). Per-frame drivers that paint a beat-keyed curve are
+    held separately as `_BeatCurve`s sampled at the song BEAT - a
+    `beat_now` the caller supplies (note_mods already computes it). A mod
+    is in exactly one of the two maps.
 
-    def __init__(self, channels: dict, players: tuple):
+    Build with `ModChannels.compile(events, beat_to_time=..., beat_curves=
+    ...)`; the caller-supplied `beat_to_time` maps event beats to seconds
+    (identity if events are already time-keyed). Query with `value(mod,
+    t)` for one channel or `values_at(t)` for every active mod at once,
+    passing `beat_now` when any beat curve is present."""
+
+    def __init__(self, channels: dict, players: tuple, beat_curves=None):
         self._channels = channels
+        self._beat_curves = beat_curves or {}
         self._players = players
 
     @classmethod
-    def compile(cls, events, beat_to_time: Callable[[float], float] | None = None):
+    def compile(cls, events, beat_to_time: Callable[[float], float] | None = None,
+                beat_curves=None):
         to_time = beat_to_time if beat_to_time is not None else (lambda b: b)
         grouped = defaultdict(list)
         players = set()
@@ -182,40 +238,72 @@ class ModChannels:
             timed = ModEvent(to_time(ev.beat), ev.value, ev.speed, ev.mod, ev.player)
             grouped[(ev.mod, ev.player)].append(timed)
         channels = {key: _compile_channel(evs) for key, evs in grouped.items()}
-        return cls(channels, tuple(sorted(players)))
+        curves = {}
+        for (mod, player), (beats, values) in (beat_curves or {}).items():
+            players.add(player)
+            curves[(mod, player)] = _BeatCurve(beats, values)
+        return cls(channels, tuple(sorted(players)), beat_curves=curves)
 
     @property
     def players(self) -> tuple:
         return self._players
 
     def mods(self, player: int = 0) -> tuple:
-        return tuple(sorted(mod for (mod, pn) in self._channels if pn == player))
+        keys = set(self._channels) | set(self._beat_curves)
+        return tuple(sorted(mod for (mod, pn) in keys if pn == player))
 
-    def value(self, mod: str, t: float, player: int = 0) -> float:
-        """Current percentage of one (mod, player) at time `t` (seconds).
-        Returns the rest value (0) for a mod that has no events."""
+    def value(self, mod: str, t: float, player: int = 0,
+              beat_now: float | None = None) -> float:
+        """Current percentage of one (mod, player). A beat curve samples
+        at `beat_now`; a chase channel samples at time `t`. Rest (0) for a
+        mod with no events."""
+        curve = self._beat_curves.get((mod, player))
+        if curve is not None:
+            return curve.sample(self._beat(t, beat_now))
         seg = self._channels.get((mod, player))
         return DEFAULT_REST if seg is None else seg._sample(float(t))
 
-    def values_at(self, t: float, player: int = 0) -> dict:
-        """Every mod's current percentage for `player` at time `t`, as
-        `{mod: value}`. Only mods with events appear; a consumer treats a
-        missing mod as rest (0)."""
+    def values_at(self, t: float, player: int = 0,
+                  beat_now: float | None = None) -> dict:
+        """Every mod's current percentage for `player`, as `{mod: value}`.
+        Beat curves sample at `beat_now`, chase channels at time `t`. Only
+        mods with events appear; a consumer treats a missing mod as rest
+        (0)."""
         t = float(t)
-        return {mod: seg._sample(t)
-                for (mod, pn), seg in self._channels.items() if pn == player}
+        out = {mod: seg._sample(t)
+               for (mod, pn), seg in self._channels.items() if pn == player}
+        if self._beat_curves:
+            beat = self._beat(t, beat_now)
+            for (mod, pn), curve in self._beat_curves.items():
+                if pn == player:
+                    out[mod] = curve.sample(beat)
+        return out
 
-    def values_over(self, ts, player: int = 0) -> dict:
+    def values_over(self, ts, player: int = 0, beats=None) -> dict:
         """Vectorized `values_at` over a time array: `{mod: ndarray}` with
-        one sampled value per t in `ts`. Convenience for batch prepasses;
-        each channel is sampled with numpy interpolation."""
+        one sampled value per t in `ts`. Beat curves sample over `beats`
+        (per-t song beats; defaults to `ts` when the curves are already
+        beat==time, e.g. a test harness). Convenience for batch
+        prepasses."""
         ts = np.asarray(ts, dtype=np.float64)
         out = {}
         for (mod, pn), seg in self._channels.items():
             if pn != player:
                 continue
             out[mod] = _sample_array(seg, ts)
+        if self._beat_curves:
+            bs = ts if beats is None else np.asarray(beats, dtype=np.float64)
+            for (mod, pn), curve in self._beat_curves.items():
+                if pn == player:
+                    out[mod] = curve.sample_array(bs)
         return out
+
+    @staticmethod
+    def _beat(t: float, beat_now: float | None) -> float:
+        """The beat to sample a beat curve at: the caller's `beat_now`, or
+        `t` itself when unsupplied (a beat==time test harness / a caller
+        with no tempo map). A real player always passes `beat_now`."""
+        return float(t) if beat_now is None else float(beat_now)
 
 
 def _sample_array(seg: _Segments, ts: np.ndarray) -> np.ndarray:
