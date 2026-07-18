@@ -7,7 +7,8 @@ import time
 import numpy as np
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
+from PySide6.QtGui import (QBrush, QColor, QFont, QPainter, QPen,
+                           QTransform)
 
 # The HUD (sidebar + free-region panels) re-renders at most this often;
 # between renders the cached pixmap blits in one call. Text readouts at
@@ -31,6 +32,16 @@ _SCREEN_PREV_SCOPE = 'screen_prev'
 # An AFT-rig curtain quad: a flat color fill at its tree position among
 # the instance blits (covers earlier blits, capped by later ones).
 _FILL_SCOPE = 'fill'
+
+# Field captures render with this much extra margin per side (fraction
+# of the window): a proxied/transformed field instance maps the capture
+# boundary into view, and any note a mod pushed past the window would
+# get sliced on that edge. The engine has no such intermediate boundary
+# for proxies (it re-renders through the transform), so the margin
+# hides the divergence for everything but extreme excursions. AFT
+# ('screen') captures deliberately stay window-sized - the engine's AFT
+# texture IS the screen, and its hard edge is chart-visible.
+_FIELD_OVERSCAN_FRAC = 0.25
 # The second, independently-modded playfield capture (dual-player NotITG).
 # A 'field2' copy blits the second field capture instead of the
 # primary; produced only when the frame carries a second_field spec.
@@ -170,6 +181,7 @@ class QtPlayerRenderer:
         self._screen_open = False
         # This frame's node-point capture, taken lazily during the
         # instance blits and promoted to `_prev_screen` at composite end.
+        self._field_overscan = (0, 0)
         self._screen_capture = None
         # The host painter bracketed by an open 'post' capture slot
         # (the unified GL shader stage); None outside that window.
@@ -632,7 +644,13 @@ class QtPlayerRenderer:
                 or getattr(ctx, 'player', None) is None):
             return None
         p = ctx.player
-        return self._capture.open('field', painter, p.W, p.H)
+        mx, my = self._field_overscan = (int(p.W * _FIELD_OVERSCAN_FRAC),
+                                         int(p.H * _FIELD_OVERSCAN_FRAC))
+        capture_painter = self._capture.open('field', painter,
+                                             p.W + 2 * mx, p.H + 2 * my)
+        if capture_painter is not None:
+            capture_painter.translate(mx, my)
+        return capture_painter
 
     def _end_field_capture(self) -> None:
         self._field_src = self._capture.close('field')
@@ -659,7 +677,11 @@ class QtPlayerRenderer:
             return
         player = ctx.player
         primary = getattr(player, '_note_mods', None)
-        fp = self._capture.open('field2', painter, player.W, player.H)
+        mx, my = self._field_overscan
+        fp = self._capture.open('field2', painter,
+                                player.W + 2 * mx, player.H + 2 * my)
+        if fp is not None:
+            fp.translate(mx, my)
         try:
             player._note_mods = spec.note_mods
             self._rebuild_note_mods(ctx)
@@ -786,8 +808,22 @@ class QtPlayerRenderer:
                     batch.blit(self._backdrop_src, transform=transform,
                                src_box=box, opacity=opacity)
                 source = self._field_src
+        if scope != _SCREEN_SCOPE and scope != _SCREEN_PREV_SCOPE:
+            transform, box = self._overscan_blit(transform, box)
         batch.blit(source, transform=transform, src_box=box,
                    opacity=opacity)
+
+    def _overscan_blit(self, transform, box):
+        """Blit args for an overscanned field source: the window origin
+        sits at (+mx, +my) inside the capture, so the draw shifts back
+        and a source-space clip box shifts forward."""
+        mx, my = self._field_overscan
+        if not mx and not my:
+            return transform, box
+        offset = QTransform.fromTranslate(-mx, -my)
+        composed = offset * transform if transform is not None else offset
+        shifted = box.translated(mx, my) if box is not None else None
+        return composed, shifted
 
     def _aft_source(self, extra, live_capture):
         """The capture handle an AFT sampler blits, honouring
