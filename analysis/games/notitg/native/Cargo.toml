@@ -1,0 +1,25 @@
+[package]
+name = "notitg_frame_native"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+# The script->timeline compiler CORE, built as a PyO3 extension module
+# (importable from Python as ``notitg_frame_native``). This is the neutral
+# ROUTER + value model + scope + data tables + native tick loop the
+# COMPILER_CONTRACT names; the language piece hands it the existing AST and the
+# game frontier (QUERY_LIVE/poke) is a Python-implemented trait it calls back
+# into. ``abi3-py310`` builds against CPython's stable ABI so one wheel loads on
+# 3.10+ (matches games/osu/native).
+[lib]
+name = "notitg_frame_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py310"] }
+
+# The residue tick loop runs millions of node evaluations per chart; release
+# optimizations are the whole point of the port (native parse+execute).
+[profile.release]
+lto = "thin"
+opt-level = 3
