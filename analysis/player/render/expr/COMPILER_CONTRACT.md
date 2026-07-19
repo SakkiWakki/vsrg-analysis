@@ -113,6 +113,23 @@ parsing+execution must be native) and emits the resulting piecewise curve as a
 Channel over its clock. Still a timeline Channel, still clock-named - just
 sampled rather than closed-form. Only declarative formats (BMS) never reach here.
 
+WHEN does the residue run - COMPILE or REPLAY? (user, decisive.) NOT eagerly at
+compile: compile only STORES the closure-compiled body (native, ~0ms - the
+interpreter through a no-op frontier is ~0ms/tick, measured). The residue body
+RUNS LAZILY AT REPLAY - when a tick arrives, that tick's body executes against
+the live actor world, exactly as a real engine runs a modchart at 60fps (NotITG
+does not pre-bake). So the tick loop IS the render loop; `EMIT_SAMPLED` does not
+mean "pre-sample all N ticks into a baked Channel", it means "the residue body
+is the Channel's evaluator, run live at `channel.at(t)`". The prior eager model
+(sim the whole chart -> bake every keyframe -> replay samples the bake) is what
+made gat "compile" take ~65s (51,780 ticks pre-run); lazy replay amortizes that
+to ~1 tick/frame = trivially real-time, and only the ticks actually watched ever
+run. Cost of lazy: replay owns a LIVE actor world (the SimActor executor at
+replay time, native), and a stateful residue (accumulators like `gat_frame`, +
+126 cross-actor `GetX` reads in gat) means SEEK must replay-forward or checkpoint
+(eager baking got seek for free). Forward playback is strictly better under lazy;
+seek is the open question. See [[project_lazy_residue_replay]].
+
 ### 4. `QUERY_LIVE(handle, kind) -> value`  (per-tick backend call = the migration frontier)
 
 During the residue tick loop, the core needs the CURRENT value of something the
