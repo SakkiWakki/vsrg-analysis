@@ -103,6 +103,17 @@ def _compile_live(sm_path, end_seconds) -> dict | None:
                                                 doc.to_seconds)
     mod_channels = _compile_channels(declarative)
 
+    # DRIVER-injected mods (ApplyGameCommand from the per-frame Update body:
+    # gat's drunk/tipsy/hallway approach-chase bursts) inherently need a full
+    # sim pass to resolve their ramps - the ~5s sweep that made the eager bake
+    # slow. Rather than pay it up front (instant open is the whole point) or
+    # skip it (notes drift during driver windows), run it on a BACKGROUND thread
+    # and hot-swap the resolved channels into `mod_channels` IN PLACE when done.
+    # The player holds this exact ModChannels object and reads _channels every
+    # frame, so the upgrade goes live with no reference plumbing - the driver
+    # mods simply fill in a few seconds after open.
+    _spawn_driver_mod_upgrade(mod_channels, declarative, sm_path, end)
+
     # The whole-scene camera (gat's screen zoom) is a single actor - read it
     # LIVE like the element tree, so the screen-zoom camera works instantly.
     screen_transform = modfile._screen_transform_live(live)
@@ -125,9 +136,9 @@ def _compile_live(sm_path, end_seconds) -> dict | None:
         '_live_sim': live,
         'named_actors': 0, 'recorded_keyframes': 0,
         'warnings': list(live.warnings) + ['lazy replay (VSRG_NOTITG_LAZY): '
-                                           'element tree + declarative mods '
-                                           'live; driver-applied mods + field '
-                                           'instances deferred'],
+                                           'element tree + declarative mods + '
+                                           'field instances live; driver-applied '
+                                           'mods fill in via background compile'],
     }
 
 
@@ -168,6 +179,47 @@ class _LiveFieldInstances:
         # snapshot. The base players bind at t0, so 'player' ownership is
         # decidable from the first rebuild.
         return iter(self())
+
+
+class _SweptResult:
+    """The `.applied_mods` surface `_mod_events` reads, from a LiveSim swept to
+    the chart end (no baking - just the accumulated ApplyGameCommand stream)."""
+
+    __slots__ = ('applied_mods',)
+
+    def __init__(self, applied_mods):
+        self.applied_mods = applied_mods
+
+
+def _spawn_driver_mod_upgrade(mod_channels, declarative, sm_path, end_seconds):
+    """Background-resolve the driver-injected mods and hot-swap them into the
+    live `mod_channels` in place (see the call site). Runs a SEPARATE LiveSim
+    (the playback sim advances during play) swept to the chart end, extracts the
+    applied stream, recompiles declarative + applied, and atomically replaces
+    the channel object's internals. A daemon thread so it never blocks exit."""
+    import threading
+
+    from analysis.games.notitg.sim.loop import LiveSim
+
+    def worker():
+        doc = load_chart(sm_path)
+        if doc is None:
+            return
+        sweep = LiveSim(doc.root, doc.to_seconds, doc.start_beat, end_seconds,
+                        rng_seed=doc.rng_seed, song_dir=doc.lua_dir.parent,
+                        use_compiled_body=_compiled_body_flag())
+        sweep.advance_to(end_seconds)
+        applied = _mod_events(_SweptResult(sweep.env.applied_mods))
+        full = _compile_channels(declarative + applied)
+        # Swap the resolved channels/players into the object the player holds.
+        # ModChannels reads _channels/_players on every value() call, so the
+        # single-statement rebind is atomic enough for a reader (GIL-guarded
+        # dict/tuple reference swap); no half-updated state is ever observed.
+        mod_channels._channels = full._channels
+        mod_channels._players = full._players
+
+    threading.Thread(target=worker, daemon=True,
+                     name='notitg-lazy-driver-mods').start()
 
 
 def _compile_via_sim(sm_path, end_seconds):
