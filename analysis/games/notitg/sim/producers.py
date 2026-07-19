@@ -164,16 +164,27 @@ class _LiveFieldInstances:
         # lookups/frame).
         self._osc_clock = modfile._osc_clock_for_end(
             doc.to_seconds, doc.start_beat, doc.end_seconds)
+        self._cache = None
+        self._cache_sig = None
 
     def __call__(self):
-        # Rebuild EVERY call: a field oscillator delta channel binds to the sim's
-        # span state at BUILD time, so a cached instance would freeze the
-        # vibrate at a stale phase. A rebuild is ~1ms (2 base players + a handful
-        # of proxies), negligible at 60fps, and guarantees the oscillator is
-        # re-derived from the current sim state. (An earlier signature-cache
-        # froze the oscillating player field at its rebuild-time phase.) The
-        # cached clock keeps that rebuild cheap.
+        # Instance-list caching: the rebuild is ~1.2ms and 94% of it is the
+        # topology walk + per-link LiveCurve build, which only CHANGES when a
+        # proxy/AFT binds. The transforms are LiveCurves (re-read the sim), so a
+        # cached list stays live for FREE - EXCEPT the field oscillator, whose
+        # OscDeltaChannel snapshots a COPY of the open span at build (actor.
+        # oscillator_spans() copies _osc_open), so a cached instance freezes the
+        # vibrate phase while a span is OPEN. So: cache keyed on topology, and
+        # while ANY player field has an open oscillator span, bypass the cache
+        # and rebuild every frame (gat oscillates only ~t8-48; the other ~8min
+        # reuse the cache). This is why an earlier topology-only cache froze the
+        # field - it missed the open-span exception.
         env = self._live.env
+        oscillating = self._oscillating(env)
+        sig = None if oscillating else self._topology_sig(env)
+        if sig is not None and sig == self._cache_sig:
+            return self._cache
+
         osc_context = _osc_context(env, self._doc, self._doc.end_seconds,
                                    clock=self._osc_clock)
         field_oscillators = modfile._field_oscillator_timelines(
@@ -183,10 +194,34 @@ class _LiveFieldInstances:
         # env.named_actor_keyframes() here (which re-simplifies every named
         # actor's poke stream, invalidated each tick during playback) was pure
         # per-frame waste, so pass an empty map.
-        return _sim_field_instances(
+        instances = _sim_field_instances(
             self._doc, env, None, osc_context,
             {}, field_oscillators,
             self._mod_channels, t0=self._t0, live_sim=self._live)
+        # Cache only closed-oscillator frames; an oscillating frame's list holds
+        # a frozen open-span copy and must never be reused.
+        self._cache = instances if not oscillating else None
+        self._cache_sig = sig
+        return instances
+
+    def _oscillating(self, env) -> bool:
+        """Any player field with an OPEN oscillator span (its delta channel
+        snapshots a stale copy, so the instance list can't be cached)."""
+        actors = (env.player_actor(name) for name in modfile._PLAYER_FIELD_NAMES)
+        return any(a is not None and a._osc_open is not None for a in actors)
+
+    def _topology_sig(self, env):
+        """A cheap hashable signature of everything _sim_field_instances'
+        STRUCTURE depends on: proxy binds, AFT binds + visibility, and the
+        screen child set. Unchanged signature => an identical instance list
+        (transforms stay live via LiveCurves), so the cache is reused."""
+        proxy = tuple(sorted((rec_id, a.proxy_target)
+                             for rec_id, a in env.actors.items()
+                             if a.proxy_target is not None))
+        aft = tuple(sorted((rec_id, a.aft_source, a.is_aft)
+                           for rec_id, a in env.actors.items()
+                           if a.aft_source is not None or a.is_aft))
+        return (proxy, aft, tuple(sorted(env.screen_child_ids().items())))
 
     def __iter__(self):
         # The provider IS the instance list: any consumer that iterates it
