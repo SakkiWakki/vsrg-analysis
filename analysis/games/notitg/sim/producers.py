@@ -103,15 +103,6 @@ def _compile_live(sm_path, end_seconds) -> dict | None:
                                                 doc.to_seconds)
     mod_channels = _compile_channels(declarative)
 
-    # BACKGROUND upgrade (one daemon sweep): resolve the driver-injected mods
-    # (gat's drunk/tipsy/hallway approach-chase bursts need a full sim pass to
-    # resolve their ramps) AND freeze the tree's never-poked LiveCurves to
-    # constants (~86% of them). Both hot-swap in place, so instant open pays for
-    # neither: the driver mods fill in and the storyboard gets cheaper to sample
-    # a few seconds after open. The player holds the same mod_channels object and
-    # the same element tree, so no reference plumbing is needed.
-    _spawn_background_upgrade(mod_channels, declarative, tree, sm_path, end)
-
     # The whole-scene camera (gat's screen zoom) is a single actor - read it
     # LIVE like the element tree, so the screen-zoom camera works instantly.
     screen_transform = modfile._screen_transform_live(live)
@@ -121,6 +112,18 @@ def _compile_live(sm_path, end_seconds) -> dict | None:
     # effect calls it each frame; transform values are LiveCurves.
     field_instances = _LiveFieldInstances(doc, live, mod_channels,
                                           t0=live._load_s)
+
+    # BACKGROUND upgrade (one daemon sweep to chart end): resolve the driver-
+    # injected mods (gat's drunk/tipsy/hallway approach-chase bursts need the
+    # full pass to resolve their ramps), freeze the tree's never-poked LiveCurves
+    # to constants (~86%), and hand the field provider the swept env as its
+    # COMPLETE topology source (the playback sim only knows proxy/AFT/NoteField
+    # binds up to the playhead, so proxy-heavy charts render missing copies until
+    # the sweep lands). All hot-swap in place, so instant open pays for none of
+    # it: the driver mods fill in, the storyboard gets cheaper, and the full
+    # field-instance set appears a few seconds after open.
+    _spawn_background_upgrade(mod_channels, declarative, tree, field_instances,
+                             sm_path, end)
 
     return {
         'mod_events': declarative, 'mod_channels': mod_channels,
@@ -164,6 +167,25 @@ class _LiveFieldInstances:
             doc.to_seconds, doc.start_beat, doc.end_seconds)
         self._cache = None
         self._cache_sig = None
+        # The topology source: which actors are proxies/AFTs/fills, their
+        # targets, and the NoteField synthetic-child mapping. The PLAYBACK sim
+        # only knows the topology GetChild/SetTarget calls have fired UP TO the
+        # playhead, so proxy-heavy charts (SRT allproxies) render missing copies
+        # until the chart reaches those binds - and NoteField proxies never bind
+        # if GetChild('NoteField') fires late. The background sweep runs the full
+        # sim, so it holds the COMPLETE topology; once it lands here (via
+        # set_topology_source) the provider reads structure from the swept env
+        # while still sampling transforms live from the playback sim. None until
+        # the sweep completes (early frames use the growing live topology).
+        self._topology_env = None
+
+    def set_topology_source(self, swept_env) -> None:
+        """Called by the background upgrade with the fully-swept env (complete
+        proxy/AFT/NoteField topology). Invalidates the cache so the next build
+        emits the full instance set."""
+        self._topology_env = swept_env
+        self._cache = None
+        self._cache_sig = None
 
     def __call__(self):
         # Instance-list caching: the rebuild is ~1.2ms and 94% of it is the
@@ -183,17 +205,23 @@ class _LiveFieldInstances:
         if sig is not None and sig == self._cache_sig:
             return self._cache
 
+        # Oscillator state is LIVE (playback env); the instance STRUCTURE uses
+        # the swept env once available (complete topology) so proxy/AFT/fill
+        # copies all appear. rec_ids match between the two sims, so the links'
+        # LiveCurves (keyed by rec_id) still sample the playback sim live.
         osc_context = _osc_context(env, self._doc, self._doc.end_seconds,
                                    clock=self._osc_clock)
         field_oscillators = modfile._field_oscillator_timelines(
             env, osc_context)
+        topology_env = self._topology_env if self._topology_env is not None \
+            else env
         # `named_keyframes` feeds ONLY the eager (`live_sim is None`) branches of
         # _sim_field_instances; the live path reads the sim directly. Computing
         # env.named_actor_keyframes() here (which re-simplifies every named
         # actor's poke stream, invalidated each tick during playback) was pure
         # per-frame waste, so pass an empty map.
         instances = _sim_field_instances(
-            self._doc, env, None, osc_context,
+            self._doc, topology_env, None, osc_context,
             {}, field_oscillators,
             self._mod_channels, t0=self._t0, live_sim=self._live)
         # Cache only closed-oscillator frames; an oscillating frame's list holds
@@ -239,10 +267,10 @@ class _SweptResult:
         self.applied_mods = applied_mods
 
 
-def _spawn_background_upgrade(mod_channels, declarative, tree, sm_path,
-                             end_seconds):
+def _spawn_background_upgrade(mod_channels, declarative, tree, field_provider,
+                             sm_path, end_seconds):
     """Background pass on a daemon thread: sweep a SEPARATE LiveSim to the chart
-    end (the playback sim advances during play), then hot-swap two things the
+    end (the playback sim advances during play), then hot-swap three things the
     instant compile left approximate:
 
     1. Driver-injected mods: resolve the applied ApplyGameCommand stream and
@@ -255,7 +283,13 @@ def _spawn_background_upgrade(mod_channels, declarative, tree, sm_path,
        property's LiveCurve with a constant EventTimeline (its rest) IN the
        element's mutable `timelines` dict, so the live effect samples a cheap
        constant. Never-poked is exact: a prop absent from the swept actor's
-       `_frames` (and not a set rotation_order/quat) is provably constant."""
+       `_frames` (and not a set rotation_order/quat) is provably constant.
+    3. Field-instance topology: the playback sim only knows the proxy/AFT/
+       NoteField binds that fired up to the playhead, so proxy-heavy charts (SRT
+       allproxies) render missing copies. The swept env holds the COMPLETE
+       topology, so tag its AFT fills onto the provider's tree and hand it the
+       swept env as the topology source (transforms still sample the playback
+       sim live - rec_ids match, so the LiveCurves resolve either way)."""
     import threading
 
     from analysis.games.notitg.sim.loop import LiveSim
@@ -278,6 +312,12 @@ def _spawn_background_upgrade(mod_channels, declarative, tree, sm_path,
         mod_channels._players = full._players
         if tree:
             _freeze_static_timelines(tree, sweep.env)
+        if field_provider is not None:
+            # Tag AFT-rig fills on the PROVIDER's tree (the one _sim_field_
+            # instances iterates) using the swept env's actor flags, then give
+            # the provider the swept env as its complete topology source.
+            _mark_aft_fills(field_provider._doc, sweep.env)
+            field_provider.set_topology_source(sweep.env)
 
     threading.Thread(target=worker, daemon=True,
                      name='notitg-lazy-upgrade').start()
