@@ -1,0 +1,30 @@
+[package]
+name = "audio_ring_native"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+# A native SPSC audio ring + a PortAudio callback registered directly with
+# Pa_OpenStream, built as a PyO3 extension module (importable from Python as
+# ``audio_ring_native``). The point is that the real-time callback is a plain
+# C-ABI Rust function PortAudio calls on its own thread; it NEVER acquires the
+# GIL and never touches the Python heap, so a preempted Python producer can only
+# slow refill -- it can no longer stall the consumer (the failure mode the
+# Python-callback engine has). ``abi3-py310`` builds one wheel for CPython 3.10+
+# (matches games/notitg/native + games/osu/native).
+[lib]
+name = "audio_ring_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+# abi3-py311 (not py310): PyO3's zero-copy buffer API (PyBuffer) is gated on
+# Py_3_11 under the limited API, and write_block borrows the numpy block buffer
+# through it to avoid a per-block copy. 3.11 is a fine floor (the app runs 3.14).
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py311"] }
+
+# Minimal hand-declared PortAudio FFI (see src/pa.rs); we link the system
+# libportaudio the app already loads via sounddevice, so no build-time codegen.
+
+[profile.release]
+lto = "thin"
+opt-level = 3

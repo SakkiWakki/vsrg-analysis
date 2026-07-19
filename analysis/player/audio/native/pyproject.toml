@@ -1,0 +1,18 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "audio_ring_native"
+version = "0.1.0"
+description = "Native SPSC audio ring + PortAudio callback for the vsrg-analysis player (GIL-free real-time consumer)."
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Rust",
+    "Private :: Do Not Upload",
+]
+
+[tool.maturin]
+bindings = "pyo3"
+# The .so imports as ``audio_ring_native`` ; match the crate name.
+module-name = "audio_ring_native"
