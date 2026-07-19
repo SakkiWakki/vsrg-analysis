@@ -192,6 +192,11 @@ class SimEnvironment:
         # path stays the baseline until the compiled path passes the same
         # tests; `run_declarative` flips it via `use_compiled_body`.
         self.use_compiled_body = False
+        # Opt-in further: run the compiled body through the Rust-native core
+        # (notitg_frame_native) instead of the Python interpreter - the same AST,
+        # the residue tick loop ported native. Requires `use_compiled_body`; the
+        # native path falls back to Python when the wheel is absent.
+        self.use_native_body = False
         self._compiled_body = None
         self._install()
 
@@ -277,11 +282,23 @@ class SimEnvironment:
         """The interpreter-driven Update body (frame_eval, no Lua). Builds one
         persistent CompiledBody the first tick and re-runs it thereafter, so a
         body's accumulator globals carry across ticks. `mod_time` is set like
-        the Lua path so a body reading it sees this tick."""
-        from analysis.games.notitg.sim.compiled_body import CompiledBody
+        the Lua path so a body reading it sees this tick.
+
+        `use_native_body` selects the Rust core (`NativeCompiledBody`) over the
+        Python interpreter - the SAME AST, the residue tick loop ported native.
+        It falls back to the Python `CompiledBody` when the native wheel is
+        absent or does not compile the body, so a missing wheel never breaks a
+        run."""
+        from analysis.games.notitg.sim.compiled_body import (
+            CompiledBody, NativeCompiledBody)
 
         if self._compiled_body is None:
-            self._compiled_body = CompiledBody(self, body, rec_id, name)
+            if getattr(self, 'use_native_body', False):
+                native = NativeCompiledBody(self, body, rec_id, name)
+                self._compiled_body = native if native._ok \
+                    else CompiledBody(self, body, rec_id, name)
+            else:
+                self._compiled_body = CompiledBody(self, body, rec_id, name)
         self._host.env['mod_time'] = self._now
         self._compiled_body.run()
 

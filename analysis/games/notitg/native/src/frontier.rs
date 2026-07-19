@@ -18,6 +18,24 @@ pub trait Frontier {
     /// know it (skip, do not guess).
     fn symbol(&mut self, name: &str) -> Value;
 
+    /// Whether the frontier BACKS globals (a host env the load pass populated).
+    /// When true, the core routes global reads/writes to `global_get`/
+    /// `global_set` so an accumulator the body writes persists to the SAME
+    /// namespace the guards + load globals share. The NoFrontier stub returns
+    /// false (the core's own MapStore holds globals - the pure-logic path).
+    fn backs_globals(&self) -> bool {
+        false
+    }
+
+    /// Read a global from the host env (frontier-backed mode). UNRESOLVED for an
+    /// absent name.
+    fn global_get(&mut self, _name: &str) -> Value {
+        Value::Unresolved
+    }
+
+    /// Write a global to the host env (frontier-backed mode).
+    fn global_set(&mut self, _name: &str, _value: &Value) {}
+
     /// A free call `name(args)` the core did not service (`perframe`), else
     /// UNRESOLVED.
     fn call(&mut self, name: &str, args: &[Value]) -> Value;

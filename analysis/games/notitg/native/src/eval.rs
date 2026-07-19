@@ -62,6 +62,28 @@ impl<'a> Interp<'a> {
         self.scopes.truncate(keep.max(1));
     }
 
+    /// Read `name` as a GLOBAL - from the frontier's host env when it backs
+    /// globals (so an accumulator shares the load-populated namespace + the
+    /// guards read what the body wrote), else the core's own MapStore. Returns
+    /// (found, value); UNRESOLVED value means unbound.
+    fn global_lookup(&mut self, name: &str) -> (bool, Value) {
+        if self.frontier.backs_globals() {
+            let v = self.frontier.global_get(name);
+            (!v.is_unresolved(), v)
+        } else {
+            (self.globals.has(name), self.globals.get(name))
+        }
+    }
+
+    /// Write `name` as a global - to the frontier's host env or the MapStore.
+    fn global_set(&mut self, name: &str, value: &Value) {
+        if self.frontier.backs_globals() {
+            self.frontier.global_set(name, value);
+        } else {
+            self.globals.set(name, value.clone());
+        }
+    }
+
     fn exec_block(&mut self, body: &[Stmt], scope: usize, depth: u32) -> Flow {
         for stmt in body {
             match self.exec(stmt, scope, depth) {
@@ -146,7 +168,7 @@ impl<'a> Interp<'a> {
                 body,
             } => {
                 let closure = self.make_closure(params.clone(), body.clone(), scope);
-                self.scopes.assign(scope, name, closure, self.globals);
+                self.assign_name(scope, name, closure);
                 Flow::Normal
             }
             Stmt::Return { values } => {
@@ -275,11 +297,19 @@ impl<'a> Interp<'a> {
         }
     }
 
+    /// `name = value`: rebind the nearest local, else write a global (to the
+    /// frontier's host env or the MapStore). The Python `Scope.assign` rule.
+    fn assign_name(&mut self, scope: usize, name: &str, value: Value) {
+        if !self.scopes.assign_local(scope, name, &value) {
+            self.global_set(name, &value);
+        }
+    }
+
     fn assign_target(&mut self, target: &Expr, value: Value, scope: usize, depth: u32) {
         match target {
             Expr::Sym(name) => {
                 // `_G[k]` computed writes come through Index; a bare Sym assigns.
-                self.scopes.assign(scope, name, value, self.globals);
+                self.assign_name(scope, name, value);
             }
             Expr::Index { base, key } => {
                 // `_G['name'] = v` is a computed global write.
@@ -287,7 +317,7 @@ impl<'a> Interp<'a> {
                     if &**bname == "_G" {
                         let k = self.eval(key, scope, depth);
                         if let Some(name) = key_as_name(&k) {
-                            self.scopes.assign(scope, &name, value, self.globals);
+                            self.assign_name(scope, &name, value);
                         }
                         return;
                     }
@@ -349,7 +379,10 @@ impl<'a> Interp<'a> {
     }
 
     fn eval_symbol(&mut self, name: &str, scope: usize) -> Value {
-        let (found, value) = self.scopes.lookup(scope, name, self.globals);
+        if let Some(v) = self.scopes.lookup_local(scope, name) {
+            return v;
+        }
+        let (found, value) = self.global_lookup(name);
         if found {
             value
         } else {
@@ -435,7 +468,11 @@ impl<'a> Interp<'a> {
         }
         match fn_ {
             Expr::Sym(name) => {
-                let (found, bound) = self.scopes.lookup(scope, name, self.globals);
+                let local = self.scopes.lookup_local(scope, name);
+                let (found, bound) = match local {
+                    Some(v) => (true, v),
+                    None => self.global_lookup(name),
+                };
                 if found {
                     if let Value::Func(c) = &bound {
                         return self.call_callable(c.clone(), &arg_vs, depth);

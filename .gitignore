@@ -18,6 +18,7 @@ analysis/games/osu/vulkan_layer/VkLayer_vsrg_overlay.json
 analysis/games/osu/vulkan_layer/libVkLayer_vsrg_overlay.so
 analysis/games/osu/native/target/
 analysis/games/osu/native/.maturin-stamp
+analysis/games/notitg/native/.maturin-stamp
 
 # Distribution / packaging
 .Python

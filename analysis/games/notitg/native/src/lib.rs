@@ -16,12 +16,14 @@ mod eval;
 mod frontier;
 mod marshal;
 mod pyconv;
+mod pyfrontier;
 mod scope;
 mod table;
 mod value;
 
 use crate::eval::Interp;
 use crate::frontier::NoFrontier;
+use crate::pyfrontier::PyFrontier;
 use crate::scope::{GlobalStore, MapStore};
 
 /// A persistent native interpreter over a private global store (pure-logic).
@@ -72,6 +74,25 @@ impl NativeInterpreter {
     fn run_body(&mut self, py_body: &Bound<'_, PyAny>) -> PyResult<()> {
         let body = marshal::marshal_body(py_body)?;
         let mut frontier = NoFrontier;
+        let mut interp = Interp::new(&mut self.globals, &mut frontier);
+        interp.run(&body);
+        Ok(())
+    }
+
+    /// Run a marshalled body against the LIVE frontier: `bridge` is a Python
+    /// object implementing the frontier protocol (symbol/call/method/poke/
+    /// index/set_index/iter_table/call_host over the live NotitgGuardSurface),
+    /// `unresolved` is frame_eval's sentinel. The core owns scope/tables/math;
+    /// every live-engine crossing routes to `bridge`. This is the step-2 seam -
+    /// the Rust residue tick loop driving the real sim.
+    fn run_body_frontier(
+        &mut self,
+        py_body: &Bound<'_, PyAny>,
+        bridge: &Bound<'_, PyAny>,
+        unresolved: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let body = marshal::marshal_body(py_body)?;
+        let mut frontier = PyFrontier::new(bridge.clone().unbind(), unresolved.clone().unbind());
         let mut interp = Interp::new(&mut self.globals, &mut frontier);
         interp.run(&body);
         Ok(())

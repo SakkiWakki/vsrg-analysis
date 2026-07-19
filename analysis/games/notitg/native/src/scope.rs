@@ -94,23 +94,21 @@ impl ScopeArena {
         self.scopes.len() - 1
     }
 
-    /// Look up `name`: nearest local up the chain, else the global store. Returns
-    /// (found, value) so a caller can tell "bound to nil" from "unbound".
-    pub fn lookup(&self, mut scope: usize, name: &str, globals: &dyn GlobalStore) -> (bool, Value) {
+    /// Look up `name` in the LOCAL scope chain only. `Some(value)` when bound as
+    /// a local somewhere up the chain, else None (the caller then consults
+    /// globals - the core's MapStore or the frontier's host env). Splitting
+    /// local-vs-global lookup lets the interpreter route globals to whichever
+    /// store backs them without the scope knowing.
+    pub fn lookup_local(&self, mut scope: usize, name: &str) -> Option<Value> {
         loop {
             let s = &self.scopes[scope];
             if let Some(v) = s.locals.get(name) {
-                return (true, v.clone());
+                return Some(v.clone());
             }
             match s.parent {
                 Some(p) => scope = p,
-                None => break,
+                None => return None,
             }
-        }
-        if globals.has(name) {
-            (true, globals.get(name))
-        } else {
-            (false, globals.get(name))
         }
     }
 
@@ -119,27 +117,22 @@ impl ScopeArena {
         self.scopes[scope].locals.insert(name.to_string(), value);
     }
 
-    /// `name = v` (assignment, not `local`): rebind the nearest existing local
-    /// up the chain, else write the global store. Matches Python `Scope.assign`.
-    pub fn assign(
-        &mut self,
-        scope: usize,
-        name: &str,
-        value: Value,
-        globals: &mut dyn GlobalStore,
-    ) {
+    /// Rebind the nearest existing LOCAL up the chain to `value`. Returns true
+    /// when a local was rebound; false means `name` is not a local anywhere, so
+    /// the caller writes it as a global. Matches Python `Scope.assign`'s
+    /// local-first rule.
+    pub fn assign_local(&mut self, scope: usize, name: &str, value: &Value) -> bool {
         let mut cur = scope;
         loop {
             if self.scopes[cur].locals.contains_key(name) {
-                self.scopes[cur].locals.insert(name.to_string(), value);
-                return;
+                self.scopes[cur].locals.insert(name.to_string(), value.clone());
+                return true;
             }
             match self.scopes[cur].parent {
                 Some(p) => cur = p,
-                None => break,
+                None => return false,
             }
         }
-        globals.set(name, value);
     }
 
     /// Truncate the arena back to `keep` scopes (drop transient block scopes

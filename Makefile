@@ -26,6 +26,7 @@ VENV_MATURIN := $(VENV)/bin/maturin
 VENV_PYTEST  := $(VENV)/bin/pytest
 
 NATIVE_DIR    := analysis/games/osu/native
+FRAME_NATIVE_DIR := analysis/games/notitg/native
 WEBTEX_DIR    := analysis/overlay/web_texture_ipc
 OVERLAY_DIR   := analysis/games/osu/gamescope_overlay
 OVERLAY_BIN   := $(OVERLAY_DIR)/osu_overlay
@@ -91,6 +92,26 @@ $(NATIVE_STAMP): $(NATIVE_SRCS) | venv
 
 .PHONY: native
 native: $(NATIVE_STAMP)
+
+# ─── NotITG frame-interpreter core (script->timeline compiler) ─────────
+
+# The native residue tick-loop interpreter (notitg_frame_native). Same
+# maturin develop pattern; the sim imports it opt-in via
+# `use_native_body` and falls back to the Python interpreter when the
+# wheel is absent, so this target is not required to run the app.
+FRAME_NATIVE_SRCS := $(shell find $(FRAME_NATIVE_DIR)/src -type f -name '*.rs' 2>/dev/null) \
+                     $(FRAME_NATIVE_DIR)/Cargo.toml
+FRAME_NATIVE_STAMP := $(FRAME_NATIVE_DIR)/.maturin-stamp
+
+$(FRAME_NATIVE_STAMP): $(FRAME_NATIVE_SRCS) | venv
+	$(Q)echo "[frame-native] maturin develop --release"
+	$(Q)cd $(FRAME_NATIVE_DIR) && ../../../../$(VENV_MATURIN) develop --release
+	$(Q)$(VENV_PY) -c "import notitg_frame_native" \
+	    || { echo "[frame-native] post-build import failed ; venv mismatch?"; exit 1; }
+	$(Q)touch $@
+
+.PHONY: frame-native
+frame-native: $(FRAME_NATIVE_STAMP)
 
 # ─── web-texture IPC Rust extension (Linux dmabuf side channel) ───────
 
@@ -325,7 +346,7 @@ vulkan-layer-uninstall:
 # ─── aggregate ─────────────────────────────────────────────────────────
 
 .PHONY: build
-build: native overlay
+build: native frame-native overlay
 
 # "Build everything" without running tests or launching. For CI or
 # packaging. The venv is implied via the native dep chain.

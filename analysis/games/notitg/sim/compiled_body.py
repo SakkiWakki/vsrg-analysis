@@ -48,6 +48,50 @@ class _LuaEnvStore(GlobalStore):
         self._env[name] = value
 
 
+class NativeCompiledBody:
+    """The Rust-native sibling of `CompiledBody`: the SAME parsed AST runs
+    through the native `notitg_frame_native` core (the residue tick loop ported
+    to Rust) driving the live sim via the `NativeFrontier` bridge. Falls back to
+    None when the native wheel is not installed, so callers degrade to the
+    Python `CompiledBody`. Globals live in the shared lupa env (through the
+    frontier), so accumulators persist exactly as the Python path's do."""
+
+    def __init__(self, env, body: str, rec_id: int, name: str):
+        self._env = env
+        self._rec_id = rec_id
+        self._name = name
+        try:
+            import notitg_frame_native as native
+        except ImportError:
+            self._ok = False
+            return
+        from analysis.games.notitg.native_frontier import NativeFrontier
+        from analysis.player.render.expr.surface import UNRESOLVED
+        try:
+            self._stmts, self._sink = parse_body(body)
+        except Exception as exc:
+            self._ok = False
+            env._warnings.append(f'{name}: native compile: {exc}')
+            return
+        self._native = native.NativeInterpreter()
+        self._bridge = NativeFrontier(NotitgGuardSurface(env), env._host.env)
+        self._unresolved = UNRESOLVED
+        self._ok = True
+
+    def run(self) -> None:
+        if not self._ok:
+            return
+        table = self._env._tables.get(self._rec_id)
+        if table is None:
+            return
+        self._bridge.set_self(table)
+        try:
+            self._native.run_body_frontier(
+                self._stmts, self._bridge, self._unresolved)
+        except Exception as exc:
+            self._env._record_fault(self._name, exc)
+
+
 class CompiledBody:
     """Per-actor compiled Update body: parse once, run every tick through the
     interpreter. Faults are swallowed and reported to the env's fault sink, so

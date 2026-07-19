@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyList, PyString};
 
 use crate::table::Key;
-use crate::value::Value;
+use crate::value::{Callable, Value};
 
 /// Python -> core Value (seeding globals). None/True/False/int/float/str map
 /// directly; a list becomes an array table; anything else -> UNRESOLVED (the
@@ -86,4 +86,67 @@ fn table_to_py<'py>(
         }
         Ok(dict.into_any())
     }
+}
+
+// -- frontier marshalling (step 2) -------------------------------------------
+//
+// At the live frontier, a value crossing to/from Python is either a PRIMITIVE
+// (num/str/bool/None/UNRESOLVED) or an opaque HANDLE (a Python object the core
+// cannot represent - an actor recorder, a lupa table/function). The bridge tags
+// a handle as a Python object carrying `__handle__` (a host object/table id) or
+// `__host_fn__` (a host callable id); the core marshals those to `Value::Handle`
+// / `Callable::Host`. Everything else marshals as a plain value.
+
+/// core Value -> a Python arg for the bridge. A handle becomes a tagged dict
+/// `{"__handle__": id}` / `{"__host_fn__": id}` the bridge resolves to its
+/// object; a table crosses as its list/dict form (rare at the frontier).
+pub fn value_to_frontier<'py>(
+    py: Python<'py>,
+    v: &Value,
+    unresolved: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let obj = match v {
+        Value::Handle(id) => tagged(py, "__handle__", *id)?,
+        Value::Func(Callable::Host(id)) => tagged(py, "__host_fn__", *id)?,
+        _ => return value_to_py(py, v, unresolved),
+    };
+    Ok(obj)
+}
+
+fn tagged<'py>(py: Python<'py>, tag: &str, id: u64) -> PyResult<Bound<'py, PyAny>> {
+    let dict = PyDict::new(py);
+    dict.set_item(tag, id)?;
+    Ok(dict.into_any())
+}
+
+/// A slice of core Values -> a Python list for the bridge.
+pub fn values_to_frontier<'py>(
+    py: Python<'py>,
+    vs: &[Value],
+    unresolved: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyList>> {
+    let list = PyList::empty(py);
+    for v in vs {
+        list.append(value_to_frontier(py, v, unresolved)?)?;
+    }
+    Ok(list)
+}
+
+/// A Python value FROM the bridge -> core Value. A tagged handle dict becomes a
+/// `Handle`/`Host`; UNRESOLVED (by identity) stays UNRESOLVED; primitives map
+/// directly. A dict/list that is NOT a handle tag is a data table (rare) and
+/// marshals through `value_from_py`.
+pub fn value_from_frontier(obj: &Bound<'_, PyAny>, unresolved: &Bound<'_, PyAny>) -> PyResult<Value> {
+    if obj.is(unresolved) {
+        return Ok(Value::Unresolved);
+    }
+    if let Ok(dict) = obj.cast::<PyDict>() {
+        if let Some(id) = dict.get_item("__handle__")?.and_then(|v| v.extract::<u64>().ok()) {
+            return Ok(Value::Handle(id));
+        }
+        if let Some(id) = dict.get_item("__host_fn__")?.and_then(|v| v.extract::<u64>().ok()) {
+            return Ok(Value::Func(Callable::Host(id)));
+        }
+    }
+    value_from_py(obj)
 }
