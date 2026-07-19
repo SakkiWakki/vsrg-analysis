@@ -49,18 +49,64 @@ def _compiled_body_flag() -> bool:
 _compiled_body_flag._announced = False
 
 
+def _lazy_flag() -> bool:
+    """LAZY REPLAY: `compile` stores a LiveSim (instant, no bake) and the
+    storyboard element tree samples it live at draw time. Set VSRG_NOTITG_LAZY=1
+    to open charts instantly. Off by default until the whole-song outputs
+    (mod_channels/AFT/oscillators) are lazy-complete."""
+    return os.environ.get('VSRG_NOTITG_LAZY', '').lower() in _TRUE
+
+
 def compile_via_sim(sm_path, end_seconds: float | None = None) -> dict | None:
     """The compiled-modfile dict via the engine loop, or None when the
     chart has no modfile. `end_seconds` defaults to the chart's last
     measure plus a tail. Never raises (same contract as
     `compile_modfile`)."""
     try:
+        if _lazy_flag():
+            return _compile_live(sm_path, end_seconds)
         return _compile_via_sim(sm_path, end_seconds)
     except Exception as exc:
         return {'mod_events': [], 'shader_flags': [], 'unsupported':
                 {'count': 0, 'described': []}, 'elements': [], 'tree': [],
                 'named_actors': 0, 'recorded_keyframes': 0,
                 'warnings': [f'sim compile aborted: {exc}']}
+
+
+def _compile_live(sm_path, end_seconds) -> dict | None:
+    """LAZY compile (near-instant): build a `LiveSim` (load + store, NO ticking)
+    and the storyboard element tree whose value timelines are LiveCurves reading
+    that sim at draw time. The whole-song outputs (mod_channels, field_instances,
+    oscillators) are DEFERRED for this first cut - the storyboard element tree is
+    the bulk of what renders; those effects appear as they are lazy-completed."""
+    from analysis.games.notitg.sim.loop import LiveSim
+
+    doc = load_chart(sm_path)
+    if doc is None:
+        return None
+    end = doc.end_seconds if end_seconds is None else end_seconds
+    live = LiveSim(doc.root, doc.to_seconds, doc.start_beat, end,
+                   rng_seed=doc.rng_seed, song_dir=doc.lua_dir.parent,
+                   use_compiled_body=_compiled_body_flag())
+    fonts = modfile._font_resolver(doc.lua_dir)
+    tree = modfile.compile_element_tree(
+        doc.root, doc.to_seconds, doc.start_beat, named_keyframes={},
+        fonts=fonts, actor_keyframes=None, sim=live)
+    return {
+        'mod_events': [], 'mod_channels': None,
+        'shader_flags': [], 'unsupported': {'count': 0, 'described': []},
+        'elements': [], 'tree': tree,
+        'has_background': modfile._has_background_actors(tree, sm_path),
+        'field_instances': [], 'screen_transform': None,
+        'screen_oscillator': None, 'field_oscillators': [],
+        'field_vanish': None, 'chart_shaders': [],
+        'aft_bg_visible': None, 'base_field_hidden': None,
+        '_live_sim': live,
+        'named_actors': 0, 'recorded_keyframes': 0,
+        'warnings': list(live.warnings) + ['lazy replay (VSRG_NOTITG_LAZY): '
+                                           'element tree live; other effects '
+                                           'deferred'],
+    }
 
 
 def _compile_via_sim(sm_path, end_seconds):

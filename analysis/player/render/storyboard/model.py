@@ -126,6 +126,45 @@ def build_timelines(rests: dict | None = None,
     return out
 
 
+class LiveCurve:
+    """A `.sample(t)`-protocol curve backed by a LIVE sim instead of baked
+    keyframes (lazy replay). `sample(t)` advances the shared sim to `t` and
+    reads the actor's engine-current value for `prop`, returning it in the same
+    tuple shape a baked `EventTimeline.sample` gives. Duck-typed drop-in: the
+    renderer samples it identically, never knowing it is live.
+
+    `sim` exposes `advance_to(t)` and `.env._actors` (a `LiveSim`); `rec_id` is
+    the actor's recorder id. Before the actor exists (t < its create time) or a
+    missing prop, returns `rest`."""
+
+    __slots__ = ('_sim', '_rec_id', '_prop', '_rest')
+
+    def __init__(self, sim, rec_id, prop, rest):
+        self._sim = sim
+        self._rec_id = rec_id
+        self._prop = prop
+        self._rest = rest if isinstance(rest, tuple) else (float(rest),)
+
+    def sample(self, t: float) -> tuple:
+        self._sim.advance_to(t)
+        actor = self._sim.env._actors.get(self._rec_id)
+        if actor is None:
+            return self._rest
+        value = actor.get(self._prop)
+        if value is None:
+            return self._rest
+        return value if isinstance(value, tuple) else (value,)
+
+
+def build_live_timelines(sim, rec_id, rests: dict | None = None) -> dict:
+    """Like `build_timelines`, but each property is a `LiveCurve` reading the
+    live sim - the lazy-replay counterpart. Same key set + rest defaults so the
+    element samples identically."""
+    rests = {**_SCALAR_RESTS, **_COLOR_RESTS, **(rests or {})}
+    return {prop: LiveCurve(sim, rec_id, prop, rest)
+            for prop, rest in rests.items()}
+
+
 @dataclass(frozen=True)
 class Element:
     kind: str

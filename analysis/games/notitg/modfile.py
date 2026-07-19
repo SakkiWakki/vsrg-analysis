@@ -49,7 +49,8 @@ from analysis.games.notitg.paths import find_notitg_dirs
 from analysis.games.notitg.recording_actor import RecordingActor
 from analysis.player.render.effects.timeline import EventTimeline, Keyframe
 from analysis.player.render.storyboard import bitmap_font
-from analysis.player.render.storyboard.model import Element, build_timelines
+from analysis.player.render.storyboard.model import (
+    Element, build_live_timelines, build_timelines)
 
 _DESIGN_W = 640.0
 _DESIGN_H = 480.0
@@ -412,7 +413,12 @@ def _compile_elements(classic_commands, to_seconds, start_beat,
 
 
 def compile_element_tree(root, to_seconds, start_beat, named_keyframes=None,
-                         fonts=None, actor_keyframes=None, osc_context=None):
+                         fonts=None, actor_keyframes=None, osc_context=None,
+                         sim=None):
+    # `sim` (a LiveSim) switches the element VALUE timelines to LiveCurves read
+    # from the live sim (lazy replay): structure/hierarchy still come from the
+    # tree, but per-property animation is sampled live at draw time. None keeps
+    # the eager baked-keyframe path.
     """HIERARCHICAL compile: the actor tree becomes a tree of storyboard
     Elements. An ActorFrame with drawable descendants becomes a 'group'
     whose transform composes onto its children; a Sprite/Quad/BitmapText
@@ -436,14 +442,14 @@ def compile_element_tree(root, to_seconds, start_beat, named_keyframes=None,
     below = []
     for child in root.children:
         element = _compile_actor(child, start_time, named_keyframes, fonts,
-                                 below, actor_keyframes, osc_context)
+                                 below, actor_keyframes, osc_context, sim)
         if element is not None:
             children.append(element)
     return below + children
 
 
 def _compile_actor(actor, start_time, named_keyframes, fonts, below=None,
-                   actor_keyframes=None, osc_context=None):
+                   actor_keyframes=None, osc_context=None, sim=None):
     if below is None:
         below = []
     if getattr(actor, '_aft_fill', False):
@@ -461,7 +467,7 @@ def _compile_actor(actor, start_time, named_keyframes, fonts, below=None,
     child_elements = []
     for child in actor.children:
         element = _compile_actor(child, start_time, named_keyframes, fonts,
-                                 below, actor_keyframes, osc_context)
+                                 below, actor_keyframes, osc_context, sim)
         if element is not None:
             child_elements.append(element)
 
@@ -469,9 +475,9 @@ def _compile_actor(actor, start_time, named_keyframes, fonts, below=None,
                                   actor_keyframes, osc_context)
     if child_elements:
         return _group_element(actor, start_time, keyframes,
-                              tuple(child_elements))
+                              tuple(child_elements), sim)
     leaf = _leaf_element(actor, start_time, named_keyframes,
-                         precomputed=keyframes, fonts=fonts)
+                         precomputed=keyframes, fonts=fonts, sim=sim)
     if leaf is not None and _is_aft_backdrop(actor):
         # The AFT rig's fullscreen backdrops (the ShowAFT black quad,
         # the ShowAFTBG bg image) sit UNDER the proxies in engine tree
@@ -1032,18 +1038,30 @@ def _osc_beat_range(spans_by_id, to_seconds, start_beat, end_seconds=None):
     return (start_beat, hi)
 
 
-def _group_element(actor, start_time, keyframes, children):
+def _element_timelines(actor, keyframes, sim, rests=None):
+    """The element's per-property timelines: LiveCurves reading the live sim in
+    lazy mode (keyed on the actor's recorder id), else the baked keyframes."""
+    if sim is not None:
+        rec_id = getattr(actor, '_recorder_id', None)
+        if rec_id is None:
+            rec_id = getattr(actor, '_sim_id', None)
+        if rec_id is not None:
+            return build_live_timelines(sim, rec_id, rests=rests)
+    return build_timelines(rests=rests, keyframes=keyframes)
+
+
+def _group_element(actor, start_time, keyframes, children, sim=None):
     return Element(
         kind='group', z=0, z_index=0,
         t_start=start_time, t_end=float('inf'),
         anchor=(0.0, 0.0), origin=(0.5, 0.5),
-        timelines=build_timelines(keyframes=_drawable_props(keyframes)),
+        timelines=_element_timelines(actor, _drawable_props(keyframes), sim),
         children=children,
     )
 
 
 def _leaf_element(actor, start_time, named_keyframes, precomputed=None,
-                  fonts=None):
+                  fonts=None, sim=None):
     text = actor.attrs.get('Text', '')
     font = _resolve_font(actor, fonts)
     if font is not None:
@@ -1062,13 +1080,17 @@ def _leaf_element(actor, start_time, named_keyframes, precomputed=None,
     # A frame pin is real content (a sprite animated purely by
     # setstate/animate pokes), so it keeps an otherwise-untweened actor
     # alive alongside any transform/color keyframes.
-    if not any(drawable.values()) and state_pin is None:
+    # LAZY: nothing is baked at compile, so a per-frame-driven actor has empty
+    # `drawable` here - do NOT prune on emptiness in live mode (its animation
+    # arrives from the LiveCurves at playback). Only static rest-drawing actors
+    # are over-included, which is harmless.
+    if sim is None and not any(drawable.values()) and state_pin is None:
         return None
     return Element(
         kind=kind, z=0, z_index=0,
         t_start=start_time, t_end=float('inf'),
         anchor=(0.0, 0.0), origin=(0.5, 0.5),
-        timelines=build_timelines(keyframes=drawable),
+        timelines=_element_timelines(actor, drawable, sim),
         asset=asset,
         text=str(text), font=font,
         additive=_is_additive(actor),

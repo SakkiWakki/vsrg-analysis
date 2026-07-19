@@ -271,3 +271,110 @@ def run_declarative(root, to_seconds, start_beat, end_seconds,
     env.drain(end_seconds, defer_queued=False)
     return SimResult(env=env, ticks=ticks, end_seconds=end_seconds,
                      load_seconds=load_s, warnings=warnings)
+
+
+class LiveSim:
+    """A `SimEnvironment` advanced INCREMENTALLY, for lazy replay: `compile`
+    loads the chart and stores this (near-instant, no baking); playback calls
+    `advance_to(t)` each frame to tick the sim forward to the playhead, then
+    reads actor current values.
+
+    INVARIANT (critical): the tick GRID is identical to `run_declarative`'s -
+    ticks land only on `load_s + k*step` and exact body re-arm times, NEVER on
+    the caller's arbitrary `t`. `advance_to(t)` runs whole grid ticks until the
+    next one would pass `t`, so stepping in tiny per-frame increments produces
+    the EXACT same tick sequence as one continuous run (a fractional drain would
+    leave a queued command half-fired / spawn a dynamic actor out of order).
+    A backward jump rebuilds and re-sims forward (sim is ~90x realtime).
+    """
+
+    def __init__(self, root, to_seconds, start_beat, end_seconds,
+                 rng_seed=0, tick_hz=_TICK_HZ, song_dir=None,
+                 use_compiled_body=False):
+        self._root = root
+        self._to_seconds = to_seconds
+        self._start_beat = start_beat
+        self._end_seconds = end_seconds
+        self._rng_seed = rng_seed
+        self._tick_hz = float(tick_hz)
+        self._song_dir = song_dir
+        self._use_compiled_body = use_compiled_body
+        self.warnings = []
+        self._build()
+
+    def _build(self):
+        from analysis.games.notitg import update_integrator
+        from analysis.games.notitg.xml_actors import _strip_lua_wrapper
+
+        self._load_s = load_anchor_seconds(self._start_beat, self._to_seconds)
+        self._to_beats = beat_inverter(self._to_seconds, self._end_seconds)
+        env = SimEnvironment(self._load_s, self._rng_seed,
+                             to_seconds=self._to_seconds,
+                             song_dir=self._song_dir)
+        env.set_time(self._load_s, self._to_beats(self._load_s))
+        self.warnings = env.load_actors(self._root)
+        env.use_compiled_body = self._use_compiled_body
+        env.prepare_mod_actions()
+        env.suppressed_queued_commands = frozenset(
+            {update_integrator._UPDATE_COMMAND})
+
+        body, body_name, update_actor = update_integrator._update_source(
+            self._root)
+        self._update_rec = getattr(update_actor, '_sim_id', None)
+        self._body = _strip_lua_wrapper(body) if body else None
+        self._body_name = body_name
+        self._step = 1.0 / self._tick_hz
+        body_step = (update_integrator._body_rearm_period(self._body)
+                     or self._step) if self._body else self._step
+        self._body_step = max(body_step, self._step)
+
+        self.env = env
+        self._t = self._load_s
+        self._next_body_t = self._load_s
+
+    def advance_to(self, target_t):
+        """Tick the sim forward to the largest grid point <= `target_t`. Grid
+        ticks are never truncated to `target_t` (the INVARIANT above), so `_t`
+        may sit up to one step behind the playhead - the engine's own frame
+        quantization, and what keeps stepping identical to a continuous run."""
+        # The sim loads at `load_s` (gat's is 0.25s - the chart's first FGCHANGE),
+        # while the playback clock starts at 0. A playhead BELOW load_s just means
+        # "chart not started yet" - the sim sits at load_s, not a backward seek.
+        # Clamp the target up to load_s so early playback never trips the reset.
+        end = min(max(target_t, self._load_s), self._end_seconds)
+        # A genuine BACKWARD jump (scrub to an already-past point) rebuilds and
+        # re-sims forward. Compared against load_s-clamped `end`, so pre-start
+        # frames do not reset.
+        if end < self._t - self._step:
+            self.reset()
+            end = min(max(target_t, self._load_s), self._end_seconds)
+        # Advance whole ticks. `run_declarative`'s loop is: target = min(t+step,
+        # END); run_body if next_body_t <= target; snap target to next_body_t.
+        # Here END is the far chart end (grid never depends on the call), and we
+        # stop once the next tick's target would exceed the playhead.
+        while self._t < end:
+            target = min(self._t + self._step, self._end_seconds)
+            run_body = self._body is not None and self._next_body_t <= target
+            if run_body:
+                target = max(self._next_body_t, self._t)
+            # Stop BEFORE any tick (body or plain) that would pass the playhead -
+            # `_t` stays at the last grid point <= playhead. Without this a
+            # body-firing tick ran past `end`, overshooting the whole chart on
+            # the first call (and tripping the backward-seek reset next call).
+            if target > end:
+                break
+            self._t = target
+            self.env.fire_mod_actions_until(self._t)
+            self.env.set_time(self._t, self._to_beats(self._t))
+            self.env.drain(self._t)
+            if run_body:
+                self.env.run_update_body(self._body, name=self._body_name,
+                                         rec_id=self._update_rec)
+                self._next_body_t = self._t + self._body_step
+
+    def reset(self):
+        self._build()
+
+    @property
+    def now(self):
+        return self._t
