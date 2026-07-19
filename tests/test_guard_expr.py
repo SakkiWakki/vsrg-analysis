@@ -217,6 +217,49 @@ def test_uncompilable_guard_returns_none():
     assert compile_guard(parse_guard('beat > a'), ConstSurface()) is None
 
 
+class _ClockSurface(ConstSurface):
+    """A surface whose `beat` is the identity clock (coord == t), for testing
+    the compile backend's curve lowering directly."""
+
+    def clock_reader(self, name):
+        return (lambda t: t) if name == 'beat' else None
+
+
+def test_math_call_lowers_to_native_curve():
+    import math
+
+    from analysis.player.render.expr.compile_sched import compile_guard
+    # `320 + 40*math.sin(beat)` - the contract's canonical oscillator - lowers
+    # to a native curve, no host call.
+    channel = compile_guard(parse_guard('320 + 40 * math.sin(beat)'),
+                            _ClockSurface())
+    assert channel is not None
+    for i in range(20):
+        t = i * 0.3
+        assert abs(channel.at(t) - (320 + 40 * math.sin(t))) < 1e-9
+
+
+def test_math_pi_constant_and_nested_calls_lower():
+    import math
+
+    from analysis.player.render.expr.compile_sched import compile_guard
+    channel = compile_guard(
+        parse_guard('math.floor(math.cos(beat * math.pi) * 10)'),
+        _ClockSurface())
+    assert channel is not None
+    for i in range(15):
+        t = i * 0.4
+        assert channel.at(t) == float(math.floor(math.cos(t * math.pi) * 10))
+
+
+def test_math_random_stays_uncompilable():
+    from analysis.player.render.expr.compile_sched import compile_guard
+    # `math.random` is non-deterministic - it must NOT lower to a curve (a curve
+    # is a pure function of the clock), so the guard is uncompilable.
+    assert compile_guard(parse_guard('math.random() * beat'),
+                         _ClockSurface()) is None
+
+
 # -- diagnostics -------------------------------------------------------------
 
 def test_unmodeled_body_records_warning_not_error():

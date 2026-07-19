@@ -19,6 +19,7 @@ identity `SongTimeClock` at the top and `guard.at(t_seconds) -> bool`.
 """
 from __future__ import annotations
 
+import math
 import operator
 from typing import Callable
 
@@ -36,6 +37,26 @@ _ARITH = {
     '+': operator.add, '-': operator.sub, '*': operator.mul,
     '/': operator.truediv, '%': operator.mod, '^': operator.pow,
 }
+
+# `math.*` functions that inline into an analytic curve as NATIVE ops (the
+# contract's "native math -> native, inlined into a curve"). Deterministic,
+# pure functions only: `math.random` is excluded (non-deterministic -> not a
+# curve). Lua `math.log(x)` is natural log; `math.pow`/`math.fmod` mirror the
+# operators. Degree variants and `atan2` cover the oscillator idioms.
+_MATH = {
+    'sin': math.sin, 'cos': math.cos, 'tan': math.tan,
+    'asin': math.asin, 'acos': math.acos, 'atan': math.atan,
+    'atan2': math.atan2, 'sinh': math.sinh, 'cosh': math.cosh,
+    'tanh': math.tanh, 'exp': math.exp, 'log': math.log,
+    'log10': math.log10, 'sqrt': math.sqrt, 'abs': abs,
+    'floor': lambda x: float(math.floor(x)),
+    'ceil': lambda x: float(math.ceil(x)),
+    'fmod': math.fmod, 'pow': math.pow,
+    'deg': math.degrees, 'rad': math.radians,
+    'min': min, 'max': max,
+}
+# `math` constants that fold to a literal.
+_MATH_CONST = {'pi': math.pi, 'huge': math.inf}
 
 # A lowered node is a `seconds -> value` callable, or None when the subtree
 # cannot be compiled (an unresolved leaf).
@@ -61,8 +82,15 @@ def _lower(node: ast.Node, surface: Surface) -> _Reader | None:
             return lambda t: v
         case ast.Sym(name=name):
             return _lower_symbol(name, surface)
+        case ast.Field(base=ast.Sym(name='math'), name=const) \
+                if const in _MATH_CONST:
+            value = _MATH_CONST[const]
+            return lambda t: value
         case ast.Index(base=ast.Sym(name=table), key=key):
             return _lower_index(table, key, surface)
+        case ast.Call(fn=ast.Field(base=ast.Sym(name='math'), name=fn),
+                      args=args) if fn in _MATH:
+            return _lower_math(_MATH[fn], args, surface)
         case ast.Unary(op=op, operand=operand):
             return _lower_unary(op, _lower(operand, surface))
         case ast.Binary(op='and', left=left, right=right):
@@ -73,6 +101,16 @@ def _lower(node: ast.Node, surface: Surface) -> _Reader | None:
             return _lower_binary(op, _lower(left, surface),
                                  _lower(right, surface))
     return None
+
+
+def _lower_math(fn, args: tuple, surface: Surface) -> _Reader | None:
+    """A `math.f(a, b, ...)` call -> a reader applying the native `fn` to its
+    lowered args. Any uncompilable arg makes the whole call uncompilable (the
+    curve falls to residue), never a guessed value."""
+    readers = [_lower(arg, surface) for arg in args]
+    if any(r is None for r in readers):
+        return None
+    return lambda t: fn(*[r(t) for r in readers])
 
 
 def _lower_symbol(name: str, surface: Surface) -> _Reader | None:
