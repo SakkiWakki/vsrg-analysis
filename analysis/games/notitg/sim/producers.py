@@ -145,37 +145,22 @@ class _LiveFieldInstances:
         self._live = live
         self._mod_channels = mod_channels
         self._t0 = t0
-        self._sig = None
-        self._instances = []
-
-    def _topology_signature(self):
-        env = self._live.env
-        # Topology: bound proxy/AFT actors. PLUS the set of actors that have an
-        # oscillator span (the field vibrate/bob), since a span opening changes
-        # which instances carry a delta channel - a rebuild picks up the live
-        # oscillator. (The delta VALUES are live; only the span's EXISTENCE needs
-        # a rebuild.)
-        topo = frozenset(
-            (rec_id, sim.proxy_target, sim.aft_source, sim.is_aft)
-            for rec_id, sim in env.actors.items()
-            if sim.proxy_target is not None or sim.aft_source or sim.is_aft)
-        osc = frozenset(rec_id for rec_id, sim in env.actors.items()
-                        if sim.oscillator_spans())
-        return (topo, osc)
 
     def __call__(self):
-        sig = self._topology_signature()
-        if sig != self._sig:
-            self._sig = sig
-            env = self._live.env
-            osc_context = _osc_context(env, self._doc, self._doc.end_seconds)
-            field_oscillators = modfile._field_oscillator_timelines(
-                env, osc_context)
-            self._instances = _sim_field_instances(
-                self._doc, env, None, osc_context,
-                env.named_actor_keyframes(), field_oscillators,
-                self._mod_channels, t0=self._t0, live_sim=self._live)
-        return self._instances
+        # Rebuild EVERY call: a field oscillator delta channel binds to the sim's
+        # span state at BUILD time, so a cached instance would freeze the
+        # vibrate at a stale phase. A rebuild is ~1ms (2 base players + a handful
+        # of proxies), negligible at 60fps, and guarantees the oscillator is
+        # re-derived from the current sim state. (An earlier signature-cache
+        # froze the oscillating player field at its rebuild-time phase.)
+        env = self._live.env
+        osc_context = _osc_context(env, self._doc, self._doc.end_seconds)
+        field_oscillators = modfile._field_oscillator_timelines(
+            env, osc_context)
+        return _sim_field_instances(
+            self._doc, env, None, osc_context,
+            env.named_actor_keyframes(), field_oscillators,
+            self._mod_channels, t0=self._t0, live_sim=self._live)
 
 
 def _compile_via_sim(sm_path, end_seconds):
