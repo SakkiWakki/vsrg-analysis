@@ -92,20 +92,36 @@ def _compile_live(sm_path, end_seconds) -> dict | None:
     tree = modfile.compile_element_tree(
         doc.root, doc.to_seconds, doc.start_beat, named_keyframes={},
         fonts=fonts, actor_keyframes=None, sim=live)
+
+    # DECLARATIVE mods (the bulk of the note-mod windows: the mods/mods2 tables
+    # the load pass populated) need NO sim - read them straight from the live
+    # env's tables, exactly as the eager path does. This restores the scroll/
+    # tipsy/drunk/etc. note mods instantly. The DRIVER-injected `applied` mods
+    # (ApplyGameCommand from the per-frame body) still need the sim run and are
+    # deferred - a minority for most charts.
+    declarative = modfile._normalize_mod_events(_TableView(live.env),
+                                                doc.to_seconds)
+    mod_channels = _compile_channels(declarative)
+
+    # The whole-scene camera (gat's screen zoom) is a single actor - read it
+    # LIVE like the element tree, so the screen-zoom camera works instantly.
+    screen_transform = modfile._screen_transform_live(live)
+
     return {
-        'mod_events': [], 'mod_channels': None,
+        'mod_events': declarative, 'mod_channels': mod_channels,
         'shader_flags': [], 'unsupported': {'count': 0, 'described': []},
         'elements': [], 'tree': tree,
         'has_background': modfile._has_background_actors(tree, sm_path),
-        'field_instances': [], 'screen_transform': None,
+        'field_instances': [], 'screen_transform': screen_transform,
         'screen_oscillator': None, 'field_oscillators': [],
         'field_vanish': None, 'chart_shaders': [],
         'aft_bg_visible': None, 'base_field_hidden': None,
         '_live_sim': live,
         'named_actors': 0, 'recorded_keyframes': 0,
         'warnings': list(live.warnings) + ['lazy replay (VSRG_NOTITG_LAZY): '
-                                           'element tree live; other effects '
-                                           'deferred'],
+                                           'element tree + declarative mods '
+                                           'live; driver-applied mods + field '
+                                           'instances deferred'],
     }
 
 

@@ -1579,6 +1579,18 @@ def _screen_transform_timelines(env) -> dict | None:
     return build_timelines(rests=_SCREEN_RESTS, keyframes=moved)
 
 
+def _screen_transform_live(sim):
+    """LAZY: the screen-zoom camera as LiveCurves on the top-screen actor
+    (x/y/scale), read live at draw time. Unlike the eager path it cannot know
+    up front whether the screen ever moves, so it always returns the live
+    curves (they rest at the screen defaults until the chart pokes them).
+    None when the sim has no screen actor."""
+    screen_id = getattr(sim.env, '_screen_id', None)
+    if screen_id is None:
+        return None
+    return build_live_timelines(sim, screen_id, rests=_SCREEN_RESTS)
+
+
 def _screen_oscillator_timelines(env, osc_context) -> dict | None:
     """The whole-scene vibrate the screen's effect oscillator drives, as
     `{prop: EventTimeline}` of the x/y jitter DELTA, or None when the
