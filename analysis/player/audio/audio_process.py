@@ -89,9 +89,188 @@ class AudioProcessConfig:
     pitch_correct: bool = True
     volume: float = 0.5
     block_size: int = 512
-    # 512 frames minimal block size and overflows in the single 
-    # digits on stress tests. So use 1024 for some headroom.
-    ring_capacity: int = 1024
+    # Ring depth is the real defense against consumer-side starvation: the
+    # producer refills the whole ring each pass, so as long as the ring holds
+    # more than one producer-wake interval of audio, the consumer can't drain
+    # it to empty between fills. A 2-block ring (the old 1024 default) starves
+    # under a coarse OS timer -- on Windows Event.wait(0.005) rounds up to
+    # ~15 ms while the device drains a block every ~11.6 ms, so the ring sat at
+    # 0-50% and never filled. 8 blocks clears that window with margin (measured:
+    # 2 blocks -> 37% mean fill / 26% at-empty; 8 blocks -> 84% / 0% at-empty).
+    ring_capacity: int = 4096
+    # Drain the ring with the native Rust callback (audio_ring_native)
+    # instead of a Python sounddevice callback. The native callback runs
+    # on PortAudio's real-time thread and never takes the GIL, so a
+    # preempted producer can't stall the consumer. Opt-in via
+    # VSRG_AUDIO_NATIVE=1 (see AudioProcessClient); falls back to the
+    # Python callback when the native module is unavailable.
+    use_native: bool = False
+    # Native path needs a power-of-two capacity that is a power-of-two
+    # multiple of block_size (ring invariant). 16 blocks of headroom.
+    native_ring_capacity: int = 8192
+
+
+# ── native ring adapter ────────────────────────────────────────────
+
+
+class _NativeRingAdapter:
+    """Present a ``NativeAudioStream`` to ``AudioProducer`` through the same
+    surface the Python ``AudioRing`` exposes, so the producer loop is byte-for-
+    byte identical whether it feeds the Python ring or the native one.
+
+    Two differences the adapter absorbs:
+
+    * ``write_block`` takes a ``(block, channels)`` float32 array plus a
+      ``BlockStamp``; the native stream wants a flat interleaved buffer plus
+      unpacked stamp fields. We flatten and unpack here.
+    * There is no Python callback to apply output volume, so we fold volume in
+      producer-side (one numpy multiply on the block being written). Volume is
+      held in a one-element array the command loop mutates, so changes take
+      effect on the next block without a lock.
+    """
+
+    def __init__(self, native_stream, channels: int, block_size: int,
+                 volume_ref) -> None:
+        self._s = native_stream
+        # AudioProducer reads _block_size and _channels off its ring directly,
+        # so the adapter exposes them under the same names.
+        self._channels = channels
+        self._block_size = block_size
+        self._volume_ref = volume_ref  # numpy 1-elem float32, mutated by cmds
+
+    # producer-facing surface (mirrors AudioRing)
+    def writable_frames(self) -> int:
+        return self._s.writable_frames()
+
+    def readable_frames(self) -> int:
+        return self._s.readable_frames()
+
+    def reset_to_empty(self) -> None:
+        self._s.reset_to_empty()
+
+    def write_block(self, samples, stamp) -> None:
+        import numpy as np
+        vol = float(self._volume_ref[0])
+        block = samples if vol == 1.0 else samples * vol
+        flat = np.ascontiguousarray(block, dtype=np.float32).reshape(-1)
+        self._s.write_block(flat, stamp.chart_end, stamp.rate,
+                            stamp.ended, stamp.silent)
+
+
+def _try_open_native(config: AudioProcessConfig, source, sr: int,
+                     last_status_str):
+    """Open a native PortAudio stream, or return None if the native module
+    isn't importable / the device won't open. Non-fatal: the caller falls
+    back to the Python callback path.
+    
+    The fallback will remain until it has been proven on systems other than 
+    mine!
+    """
+    try:
+        import audio_ring_native as arn
+    except Exception as e:
+        _write_status_str(last_status_str, f'no audio_ring_native: {e}')
+        return None
+    try:
+        return arn.NativeAudioStream(
+            float(sr),
+            int(source.src_channels),
+            int(config.block_size),
+            int(config.native_ring_capacity),
+            -1,      # default output device
+            0.0,     # suggested latency: let the stream derive block/sr
+        )
+    except Exception as e:
+        _write_status_str(last_status_str, f'native open failed: {e}')
+        return None
+
+
+def _run_native_loop(cmd_queue, state: _ChildState) -> None:
+    """Command + status loop for the native path.
+
+    The Rust callback drains the ring and publishes its anchor autonomously;
+    this loop (a) applies parent commands and (b) mirrors the native anchor
+    into the shared status array so the parent's ``current_chart_time`` and
+    HUD read the same fields they do on the Python path. We poll rather than
+    block on the queue so the anchor mirror stays fresh between commands.
+    """
+    native = state.native_stream
+    sr = state.sr
+    n = state.block_size
+    while True:
+        # Drain any pending commands without blocking.
+        drained_stop = _drain_native_commands(cmd_queue, state)
+        if drained_stop:
+            return
+        # Mirror the native anchor -> shared status (matches the Python
+        # callback's publish at _F_HW_*).
+        chart_end, dac_end, rate, valid, ended = native.anchor()
+        if valid:
+            dac_now = native.stream_time()
+            block_period = n / sr
+            if dac_now > 0.0 and dac_end > dac_now:
+                mono_end = time.monotonic() + (dac_end - dac_now)
+            else:
+                mono_end = time.monotonic() + block_period
+            state.status[_F_HW_POS] = chart_end
+            state.status[_F_HW_WALL] = dac_end
+            state.status[_F_HW_MONO] = mono_end
+            state.status[_F_HW_RATE] = rate
+            state.status[_F_DAC_ANCHOR_VALID] = 1.0
+        if ended:
+            state.status[_F_ENDED] = 1.0
+        under, cbs, fill, _cap = native.stats()
+        state.status[_F_CB_RING_UNDERFLOW] = float(under)
+        state.status[_F_RING_FILL_FRAMES] = float(fill)
+        # ~2 ms poll: fresh enough for the HUD, cheap enough to be free.
+        time.sleep(0.002)
+
+
+def _drain_native_commands(cmd_queue, state: _ChildState) -> bool:
+    """Apply all queued commands. Returns True if a stop was seen."""
+    native = state.native_stream
+    while True:
+        try:
+            op, payload = cmd_queue.get_nowait()
+        except Exception:
+            if os.getppid() == 1:  # parent died
+                return True
+            return False
+        try:
+            if op == _OP_STOP:
+                return True
+            elif op == _OP_SET_VOLUME:
+                state.volume_ref[0] = float(payload)
+            elif op == _OP_SET_SILENT:
+                state.producer.set_silent(bool(payload))
+            elif op == _OP_SET_RATE:
+                rate = max(0.05, float(payload))
+                state.rate = rate
+                state.producer.set_rate(rate)
+            elif op == _OP_SET_PITCH_CORRECT:
+                state.producer.set_pitch_correct(bool(payload))
+            elif op == _OP_SEEK:
+                chart_t = float(payload)
+                if chart_t < 0.0:
+                    lead_in, audio_t = -chart_t, 0.0
+                else:
+                    lead_in, audio_t = 0.0, chart_t
+                state.lead_in_seconds = lead_in
+                state.status[_F_LEAD_IN_SECONDS] = lead_in
+                state.status[_F_DAC_ANCHOR_VALID] = 0.0
+                state.status[_F_ENDED] = 0.0
+                native.invalidate_anchor()
+                state.scheduled_chart_pos = audio_t
+                state.chart_time = audio_t
+                state.producer.request_seek(audio_t, lead_in)
+                state.seek_gen += 1
+                state.status[_F_SEEK_GEN] = float(state.seek_gen)
+            elif op == _OP_PREWARM:
+                pass
+        except Exception as e:
+            traceback.print_exc(file=sys.stderr)
+            _write_status_str(state.last_status_str,
+                              f'cmd {op} failed: {e}')
 
 
 # ── child entry point ──────────────────────────────────────────────
@@ -141,8 +320,24 @@ def _run_audio_child(config: AudioProcessConfig,
     source = WaveSource(samples, sr)
     pv = StreamingPhaseVocoder(source, rate=1.0,
                                 pitch_correct=config.pitch_correct)
-    ring = AudioRing(config.ring_capacity, source.src_channels,
-                     block_size=config.block_size)
+
+    native_stream = None
+    if config.use_native:
+        native_stream = _try_open_native(config, source, sr, last_status_str)
+        if native_stream is None:
+            # Native requested but unavailable: fall through to the Python
+            # callback path rather than leaving the child silent.
+            _write_status_str(last_status_str, 'native unavailable; python cb')
+
+    volume_ref = np.array([float(config.volume)], dtype=np.float32)
+    if native_stream is not None:
+        ring = _NativeRingAdapter(native_stream, source.src_channels,
+                                  config.block_size, volume_ref)
+        capacity_frames = native_stream.capacity_frames()
+    else:
+        ring = AudioRing(config.ring_capacity, source.src_channels,
+                         block_size=config.block_size)
+        capacity_frames = config.ring_capacity
     producer = AudioProducer(pv, ring, sr=sr)
     producer.set_silent(True)
     producer.start()
@@ -159,8 +354,27 @@ def _run_audio_child(config: AudioProcessConfig,
         scheduled_chart_pos=0.0,
         lead_in_seconds=0.0,
     )
+    state.volume_ref = volume_ref
+    state.native_stream = native_stream
     status[_F_BASE_DURATION] = source.duration
-    status[_F_RING_CAPACITY_FRAMES] = float(config.ring_capacity)
+    status[_F_RING_CAPACITY_FRAMES] = float(capacity_frames)
+
+    if native_stream is not None:
+        # Native path: no Python callback. The Rust callback drains the ring
+        # and publishes the DAC/chart anchor into its own atomics; a poller
+        # mirrors those into the shared status array, and the command loop
+        # runs alongside. Everything below (the Python _callback + sd stream)
+        # is the fallback path.
+        status[_F_READY] = 1.0
+        state.producer = producer
+        state.source = source
+        _run_native_loop(cmd_queue, state)
+        producer.stop()
+        try:
+            native_stream.close()
+        except Exception:
+            pass
+        return
 
     scratch = np.zeros((config.block_size, source.src_channels),
                        dtype=np.float32)
@@ -267,6 +481,8 @@ class _ChildState:
     stream: object = None
     producer: object = None
     source: object = None
+    native_stream: object = None
+    volume_ref: object = None  # numpy 1-elem float32, native volume (producer-side)
 
 
 def _command_loop(cmd_queue, state: _ChildState) -> None:
@@ -436,6 +652,7 @@ class AudioProcessClient:
             audio_path=audio_path,
             pitch_correct=pitch_correct,
             volume=volume,
+            use_native=os.environ.get('VSRG_AUDIO_NATIVE', '') not in ('', '0'),
         )
         # Monotone floor for current_chart_time(); reset on seek, which
         # is the only legitimate backward move of the playhead. The gen

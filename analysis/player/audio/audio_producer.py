@@ -369,22 +369,27 @@ class AudioProducer:
         while not self._stop.is_set():
             self._apply_pending_seek()
             silent, rate = self._read_cmd_state()
-            # Fill the ring as much as it will hold. Each pass through
-            # the inner loop generates one block; we exit when there's
-            # no room for one more. No high-water gate -- the deeper
-            # the ring stays, the more GIL hitch we can absorb before
-            # the consumer underruns.
+            # Fill the ring as much as it will hold. Each pass through the inner
+            # loop generates one block; we exit when there's no room for one
+            # more. The whole ring is refilled every pass, so the defense
+            # against consumer-side starvation is ring DEPTH, not the wake
+            # cadence: as long as the ring holds more than one wake-interval of
+            # audio, the consumer can't drain it to empty between fills. See
+            # `AudioProcessConfig.native_ring_capacity` -- a 2-block ring
+            # starves under a coarse (Windows ~15 ms) timer, a >=8-block ring
+            # does not.
             while self._ring.writable_frames() >= self._block_size:
                 self._produce_block(silent=silent, rate=rate)
-                # Re-check pending commands inside the fill loop so a
-                # seek arriving mid-fill doesn't have to wait for the
-                # producer to fill the entire ring before it applies.
+                # Re-check pending commands inside the fill loop so a seek
+                # arriving mid-fill doesn't have to wait for the producer to
+                # fill the entire ring before it applies.
                 if self._seek_gen != self._applied_seek_gen:
                     break
-            # Ring is full (or seek pending). Sleep until the consumer
-            # drains a block (signal_drain wakes us) or a command lands.
-            # Bounded sleep so a missed wake doesn't stall us; one block
-            # period is ~12 ms, so 5 ms is generous slack.
+            # Ring is full (or seek pending). Sleep until a command lands or the
+            # bounded timeout elapses. The timeout only bounds command latency;
+            # refill correctness comes from ring depth (above), not from waking
+            # on each drain -- which matters because the native path has no
+            # Python callback to call signal_drain at all.
             self._wake.wait(timeout=0.005)
             self._wake.clear()
 
