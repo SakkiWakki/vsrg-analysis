@@ -156,6 +156,14 @@ class _LiveFieldInstances:
         self._live = live
         self._mod_channels = mod_channels
         self._t0 = t0
+        # The seconds<->beat inverter is the expensive part of the oscillator
+        # context (a dense table over the whole chart tempo map) and is STATIC -
+        # it depends on the chart, not the live span set - so build it once here
+        # and reuse it every frame. Without this the provider rebuilt an ~8000-
+        # point inverter per draw (the dominant per-frame cost, ~16k tempo-map
+        # lookups/frame).
+        self._osc_clock = modfile._osc_clock_for_end(
+            doc.to_seconds, doc.start_beat, doc.end_seconds)
 
     def __call__(self):
         # Rebuild EVERY call: a field oscillator delta channel binds to the sim's
@@ -163,9 +171,11 @@ class _LiveFieldInstances:
         # vibrate at a stale phase. A rebuild is ~1ms (2 base players + a handful
         # of proxies), negligible at 60fps, and guarantees the oscillator is
         # re-derived from the current sim state. (An earlier signature-cache
-        # froze the oscillating player field at its rebuild-time phase.)
+        # froze the oscillating player field at its rebuild-time phase.) The
+        # cached clock keeps that rebuild cheap.
         env = self._live.env
-        osc_context = _osc_context(env, self._doc, self._doc.end_seconds)
+        osc_context = _osc_context(env, self._doc, self._doc.end_seconds,
+                                   clock=self._osc_clock)
         field_oscillators = modfile._field_oscillator_timelines(
             env, osc_context)
         return _sim_field_instances(
@@ -755,12 +765,14 @@ def _visibility_events(hidden_kfs) -> list:
             for kf in hidden_kfs]
 
 
-def _osc_context(env, doc, end_seconds):
+def _osc_context(env, doc, end_seconds, clock=None):
     """The oscillator synthesis context over the sim env's spans, via
     the same modfile machinery the harvest path uses. `end_seconds` is
-    the compile end still-open spans extend to."""
+    the compile end still-open spans extend to. `clock` reuses a
+    precomputed seconds<->beat inverter (the lazy per-frame fast path)."""
     return modfile._build_osc_context(env, doc.to_seconds, doc.start_beat,
-                                      doc.lua_dir, end_seconds=end_seconds)
+                                      doc.lua_dir, end_seconds=end_seconds,
+                                      clock=clock)
 
 
 def _bg_stem(sm_path) -> str:

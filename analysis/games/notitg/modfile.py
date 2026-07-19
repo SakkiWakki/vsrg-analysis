@@ -1002,25 +1002,47 @@ class _OscContext:
 
 
 def _build_osc_context(env, to_seconds, start_beat, lua_dir,
-                       end_seconds=None):
+                       end_seconds=None, clock=None):
     """Build the oscillator compile context, or None when the chart has no
     effect oscillators. The RNG and the integer seed are per-chart (the
     same determinism contract as the spawner scatter), so a chart's
     vibrate shake compiles identically every run. `end_seconds`
     (the compile end) is what still-open spans run to; None keeps every
-    span at its recorded end."""
+    span at its recorded end.
+
+    `clock` lets a caller pass a PRECOMPUTED `_OscillatorClock` (the
+    seconds<->beat inverter over the chart tempo map). Building it is the
+    expensive part - a dense inverter table over the whole beat range - and
+    it depends only on the chart, not the live span set, so the lazy field
+    provider builds it once and reuses it every frame instead of paying the
+    ~8000-point rebuild per draw."""
     import random
     import zlib
 
     spans_by_id = env.actor_oscillator_spans()
     if not spans_by_id:
         return None
-    clock = _OscillatorClock(
-        to_seconds, _osc_beat_range(spans_by_id, to_seconds, start_beat,
-                                    end_seconds))
+    if clock is None:
+        clock = _OscillatorClock(
+            to_seconds, _osc_beat_range(spans_by_id, to_seconds, start_beat,
+                                        end_seconds))
     rng = random.Random(f'notitg-osc:{lua_dir}')
     seed = zlib.crc32(f'notitg-osc:{lua_dir}'.encode())
     return _OscContext(spans_by_id, clock, rng, seed, end_seconds)
+
+
+def _osc_clock_for_end(to_seconds, start_beat, end_seconds):
+    """A `_OscillatorClock` whose beat range covers the whole chart up to
+    `end_seconds`. Independent of the live span set, so a lazy caller builds
+    it ONCE and reuses it every frame (the inverter table is the expensive
+    part). Doubling `hi` from a small start until its mapped time passes the
+    chart end mirrors `_osc_beat_range`, bounded against a pathological map."""
+    hi = start_beat + 8.0
+    for _ in range(64):
+        if end_seconds is None or to_seconds(hi) >= end_seconds:
+            break
+        hi = start_beat + (hi - start_beat) * 2.0
+    return _OscillatorClock(to_seconds, (start_beat, hi))
 
 
 def _osc_beat_range(spans_by_id, to_seconds, start_beat, end_seconds=None):
