@@ -10,6 +10,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+mod analyze;
 mod ast;
 mod builtins;
 mod eval;
@@ -21,10 +22,15 @@ mod scope;
 mod table;
 mod value;
 
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+
+use crate::ast::Stmt;
 use crate::eval::Interp;
 use crate::frontier::NoFrontier;
 use crate::pyfrontier::PyFrontier;
 use crate::scope::{GlobalStore, MapStore};
+use crate::value::Value;
 
 /// A persistent native interpreter over a private global store (pure-logic).
 /// One instance runs a body repeatedly (accumulator globals carry across calls),
@@ -37,6 +43,12 @@ use crate::scope::{GlobalStore, MapStore};
 #[pyclass(unsendable)]
 struct NativeInterpreter {
     globals: MapStore,
+    /// The body compiled ONCE (marshalled AST + its snapshottable-name set), so
+    /// the per-tick path re-uses it - no re-marshal, no re-analysis per tick.
+    compiled: Option<Rc<[Stmt]>>,
+    snapshottable: HashSet<String>,
+    /// name -> snapshotted native data table, persisted across ticks.
+    snapshots: HashMap<String, Value>,
 }
 
 #[pymethods]
@@ -45,7 +57,44 @@ impl NativeInterpreter {
     fn new() -> NativeInterpreter {
         NativeInterpreter {
             globals: MapStore::new(),
+            compiled: None,
+            snapshottable: HashSet::new(),
+            snapshots: HashMap::new(),
         }
+    }
+
+    /// Compile a body ONCE: marshal the Python AST and compute the snapshottable
+    /// data-table names (referenced, never written). Subsequent ticks call
+    /// `run_compiled_frontier`, re-using this without re-marshalling.
+    fn compile_body(&mut self, py_body: &Bound<'_, PyAny>) -> PyResult<()> {
+        let body = marshal::marshal_body(py_body)?;
+        self.snapshottable = analyze::snapshottable_names(&body);
+        self.snapshots.clear();
+        self.compiled = Some(body);
+        Ok(())
+    }
+
+    /// Run the compiled body against the live frontier (the per-tick hot path).
+    /// Snapshottable data tables are copied native on first sight and cached, so
+    /// their `v[i][j]` reads never cross the frontier again.
+    fn run_compiled_frontier(
+        &mut self,
+        bridge: &Bound<'_, PyAny>,
+        unresolved: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let body = match &self.compiled {
+            Some(b) => b.clone(),
+            None => return Ok(()),
+        };
+        let mut frontier = PyFrontier::new(bridge.clone().unbind(), unresolved.clone().unbind());
+        let mut interp = Interp::new(
+            &mut self.globals,
+            &mut frontier,
+            &self.snapshottable,
+            &mut self.snapshots,
+        );
+        interp.run(&body);
+        Ok(())
     }
 
     /// Seed a global from Python (a driver value like `beat`, an accumulator
@@ -74,7 +123,9 @@ impl NativeInterpreter {
     fn run_body(&mut self, py_body: &Bound<'_, PyAny>) -> PyResult<()> {
         let body = marshal::marshal_body(py_body)?;
         let mut frontier = NoFrontier;
-        let mut interp = Interp::new(&mut self.globals, &mut frontier);
+        let empty = HashSet::new();
+        let mut snaps = HashMap::new();
+        let mut interp = Interp::new(&mut self.globals, &mut frontier, &empty, &mut snaps);
         interp.run(&body);
         Ok(())
     }
@@ -93,7 +144,9 @@ impl NativeInterpreter {
     ) -> PyResult<()> {
         let body = marshal::marshal_body(py_body)?;
         let mut frontier = PyFrontier::new(bridge.clone().unbind(), unresolved.clone().unbind());
-        let mut interp = Interp::new(&mut self.globals, &mut frontier);
+        let empty = HashSet::new();
+        let mut snaps = HashMap::new();
+        let mut interp = Interp::new(&mut self.globals, &mut frontier, &empty, &mut snaps);
         interp.run(&body);
         Ok(())
     }

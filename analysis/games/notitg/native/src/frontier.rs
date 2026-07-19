@@ -62,6 +62,17 @@ pub trait Frontier {
     /// Call a host function by its opaque id (a lupa closure). The frontier
     /// marshals UNRESOLVED->nil so a host fn never sees the sentinel.
     fn call_host(&mut self, id: u64, args: &[Value]) -> Value;
+
+    /// Deep-snapshot a load-populated host DATA TABLE named `name` into a native
+    /// value (recursively: nested tables become native tables, leaves are
+    /// primitives; a host function inside stays a `Func(Host)`). Returns
+    /// UNRESOLVED when `name` is not a host table. The core caches the result so
+    /// `v[i][j]` reads are then FULLY NATIVE - no per-element frontier crossing
+    /// (the measured 15K index crossings/tick). Only sound for tables the body
+    /// does not write (the caller gates on a static "never assigned" check).
+    fn snapshot_global(&mut self, _name: &str) -> Value {
+        Value::Unresolved
+    }
 }
 
 /// The pure-logic stub: no live engine. Every crossing is inert, so a body that

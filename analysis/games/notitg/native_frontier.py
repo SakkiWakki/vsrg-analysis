@@ -136,3 +136,48 @@ class NativeFrontier:
             return UNRESOLVED
         result = fn(*self._args(args))
         return self._to_handle(result)
+
+    def snapshot_global(self, name):
+        """Deep-copy a load-populated host DATA TABLE into a plain Python tree
+        (lists for array runs, dicts for keyed parts, primitives at the leaves),
+        which the core marshals into native tables. Lets the core read `v[i][j]`
+        with ZERO frontier crossings after the one snapshot. Returns UNRESOLVED
+        when `name` is not a host table. The caller (core) only snapshots tables
+        the body never writes, so the copy staying frozen is correct."""
+        obj = self._env[name]
+        if obj is None or not self._surface.is_host_table(obj):
+            return UNRESOLVED
+        snap = self._deep_copy(obj)
+        # None means the copy aborted (a non-array/non-primitive inside); the
+        # table then stays on the crossing path.
+        return UNRESOLVED if snap is None else snap
+
+    def _deep_copy(self, obj, depth=0):
+        """A lupa ARRAY table -> a native Python list (nested arrays recurse);
+        primitives pass through; a leaf that is not a primitive or a pure array
+        table aborts the snapshot (-> UNRESOLVED), so the table stays on the
+        crossing path rather than snapshotting something the list model cannot
+        hold. The corpus data tables (v/mods/e) are pure nested arrays, which is
+        the case this covers; a keyed/mixed table is rare and simply not
+        snapshotted. Bounded depth guards a self-referential table."""
+        if depth > 16:
+            return None
+        if obj is None or isinstance(obj, (bool, int, float, str)):
+            return obj
+        if not self._surface.is_host_table(obj):
+            return None          # a function/actor inside -> not snapshottable
+        items = list(obj.items())
+        n = len(items)
+        is_pure_array = all(
+            isinstance(k, (int, float)) and float(k).is_integer()
+            and 1 <= int(k) <= n for k, _ in items)
+        if not is_pure_array:
+            return None          # keyed/mixed -> leave on the crossing path
+        ordered = sorted(items, key=lambda kv: int(kv[0]))
+        out = []
+        for _, v in ordered:
+            cv = self._deep_copy(v, depth + 1)
+            if cv is None and v is not None:
+                return None      # an unsnapshottable element aborts the whole
+            out.append(cv)
+        return out

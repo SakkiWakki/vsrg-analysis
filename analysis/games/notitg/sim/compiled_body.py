@@ -74,6 +74,11 @@ class NativeCompiledBody:
             env._warnings.append(f'{name}: native compile: {exc}')
             return
         self._native = native.NativeInterpreter()
+        # Compile ONCE: marshal the AST + compute the snapshottable data-table
+        # names, so the per-tick path re-uses them (no re-marshal, and a
+        # read-only data table is snapshotted native so its v[i][j] reads stop
+        # crossing the frontier).
+        self._native.compile_body(self._stmts)
         self._bridge = NativeFrontier(NotitgGuardSurface(env), env._host.env)
         self._unresolved = UNRESOLVED
         self._ok = True
@@ -86,8 +91,7 @@ class NativeCompiledBody:
             return
         self._bridge.set_self(table)
         try:
-            self._native.run_body_frontier(
-                self._stmts, self._bridge, self._unresolved)
+            self._native.run_compiled_frontier(self._bridge, self._unresolved)
         except Exception as exc:
             self._env._record_fault(self._name, exc)
 

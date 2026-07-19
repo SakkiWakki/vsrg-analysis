@@ -43,14 +43,29 @@ pub struct Interp<'a> {
     pub scopes: ScopeArena,
     pub globals: &'a mut dyn GlobalStore,
     pub frontier: &'a mut dyn Frontier,
+    /// Names the body NEVER assigns to and that resolve to a host DATA TABLE:
+    /// safe to snapshot into a native table once (read-only), eliminating the
+    /// per-element `v[i][j]` frontier crossings. Empty when snapshotting is off.
+    pub snapshottable: &'a std::collections::HashSet<String>,
+    /// name -> the snapshotted native table, persisted across ticks (owned by
+    /// the persistent NativeInterpreter). A name maps to Unresolved once probed
+    /// and found NOT snapshottable, so it is not re-probed every tick.
+    pub snapshots: &'a mut std::collections::HashMap<String, Value>,
 }
 
 impl<'a> Interp<'a> {
-    pub fn new(globals: &'a mut dyn GlobalStore, frontier: &'a mut dyn Frontier) -> Interp<'a> {
+    pub fn new(
+        globals: &'a mut dyn GlobalStore,
+        frontier: &'a mut dyn Frontier,
+        snapshottable: &'a std::collections::HashSet<String>,
+        snapshots: &'a mut std::collections::HashMap<String, Value>,
+    ) -> Interp<'a> {
         Interp {
             scopes: ScopeArena::new(),
             globals,
             frontier,
+            snapshottable,
+            snapshots,
         }
     }
 
@@ -382,6 +397,11 @@ impl<'a> Interp<'a> {
         if let Some(v) = self.scopes.lookup_local(scope, name) {
             return v;
         }
+        // A snapshottable DATA TABLE: return the native copy (snapshotted once,
+        // cached across ticks), so `v[i][j]` reads never cross the frontier.
+        if let Some(v) = self.snapshot_lookup(name) {
+            return v;
+        }
         let (found, value) = self.global_lookup(name);
         if found {
             value
@@ -389,6 +409,28 @@ impl<'a> Interp<'a> {
             // Not a local/global: ask the frontier (a driver clock symbol like
             // `beat`, an actor global). Pure-logic path -> UNRESOLVED.
             self.frontier.symbol(name)
+        }
+    }
+
+    /// If `name` is snapshottable, return its native table (snapshotting on
+    /// first sight, caching thereafter). None when not snapshottable, so the
+    /// caller falls through to the normal global/frontier read. A name that
+    /// probes as non-snapshottable caches `Unresolved` so it is not re-probed.
+    fn snapshot_lookup(&mut self, name: &str) -> Option<Value> {
+        if !self.snapshottable.contains(name) {
+            return None;
+        }
+        if let Some(v) = self.snapshots.get(name) {
+            return match v {
+                Value::Unresolved => None, // probed, not snapshottable
+                other => Some(other.clone()),
+            };
+        }
+        let snap = self.frontier.snapshot_global(name);
+        self.snapshots.insert(name.to_string(), snap.clone());
+        match snap {
+            Value::Unresolved => None,
+            other => Some(other),
         }
     }
 

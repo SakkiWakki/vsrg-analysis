@@ -158,4 +158,20 @@ impl Frontier for PyFrontier {
             Ok(PyTuple::new(py, [id.into_pyobject(py)?.into_any(), arglist.into_any()])?.unbind())
         })
     }
+
+    fn snapshot_global(&mut self, name: &str) -> Value {
+        // The bridge returns a plain Python list/dict tree (nested), which
+        // `value_from_py` deep-marshals into native LuaTables - so the snapshot
+        // is a fully native structure the core owns.
+        Python::attach(|py| {
+            let result = (|| -> PyResult<Value> {
+                let ret = self.bridge.bind(py).call_method1("snapshot_global", (name,))?;
+                if ret.is(self.unresolved.bind(py)) || ret.is_none() {
+                    return Ok(Value::Unresolved);
+                }
+                pyconv::value_from_py(&ret)
+            })();
+            result.unwrap_or(Value::Unresolved)
+        })
+    }
 }
