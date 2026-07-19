@@ -150,10 +150,18 @@ class _LiveFieldInstances:
 
     def _topology_signature(self):
         env = self._live.env
-        return frozenset(
+        # Topology: bound proxy/AFT actors. PLUS the set of actors that have an
+        # oscillator span (the field vibrate/bob), since a span opening changes
+        # which instances carry a delta channel - a rebuild picks up the live
+        # oscillator. (The delta VALUES are live; only the span's EXISTENCE needs
+        # a rebuild.)
+        topo = frozenset(
             (rec_id, sim.proxy_target, sim.aft_source, sim.is_aft)
             for rec_id, sim in env.actors.items()
             if sim.proxy_target is not None or sim.aft_source or sim.is_aft)
+        osc = frozenset(rec_id for rec_id, sim in env.actors.items()
+                        if sim.oscillator_spans())
+        return (topo, osc)
 
     def __call__(self):
         sig = self._topology_signature()
