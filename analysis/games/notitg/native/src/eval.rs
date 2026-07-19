@@ -33,8 +33,9 @@ pub struct Closure {
     pub defining_scope: usize,
 }
 
-/// Non-local control flow out of a body (a `return`).
-enum Flow {
+/// Non-local control flow out of a body (a `return`). Public so the closure
+/// compiler (`compile.rs`) can thread it through compiled statement closures.
+pub enum Flow {
     Normal,
     Return(Value),
 }
@@ -93,6 +94,42 @@ impl<'a> Interp<'a> {
         let keep = 1; // keep the root; drop nothing below it
         let _ = self.exec_block(body, ScopeArena::ROOT, 0);
         self.scopes.truncate(keep.max(1));
+    }
+
+    /// Run a PRE-COMPILED body (a `compile::CStmt` closure) at the root scope.
+    /// The closure-compiled equivalent of `run` - no per-node match, no AST walk.
+    pub fn run_compiled(&mut self, body: &crate::compile::CStmt) {
+        let _ = body(self, ScopeArena::ROOT, 0);
+        self.scopes.truncate(1);
+    }
+
+    // -- public entry points for the closure compiler (compile.rs) ----------
+
+    /// Evaluate one AST expression node (the tree-walk path the compiler defers
+    /// to for node shapes it does not yet closure-compile).
+    pub fn eval_node(&mut self, expr: &Expr, scope: usize, depth: u32) -> Value {
+        self.eval(expr, scope, depth)
+    }
+
+    /// Execute one AST statement node (the tree-walk fallback for the compiler).
+    pub fn exec_node(&mut self, stmt: &Stmt, scope: usize, depth: u32) -> Flow {
+        self.exec(stmt, scope, depth)
+    }
+
+    /// Read a bare symbol (local -> global -> frontier), for a compiled `Sym`.
+    pub fn read_symbol(&mut self, name: &str, scope: usize) -> Value {
+        self.eval_symbol(name, scope)
+    }
+
+    /// A fresh child scope of `scope` (for a compiled block that binds locals).
+    pub fn child_scope(&mut self, scope: usize) -> usize {
+        self.scopes.child(scope)
+    }
+
+    /// Whether the frontier aborted (a host-fn error) - the compiled block
+    /// stops on this, like `exec_block`.
+    pub fn frontier_aborted(&self) -> bool {
+        self.frontier.aborted()
     }
 
     /// Read `name` as a GLOBAL - from the frontier's host env when it backs

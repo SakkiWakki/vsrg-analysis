@@ -13,6 +13,7 @@ use pyo3::types::PyDict;
 mod analyze;
 mod ast;
 mod builtins;
+mod compile;
 mod eval;
 mod frontier;
 mod marshal;
@@ -46,6 +47,9 @@ struct NativeInterpreter {
     /// The body compiled ONCE (marshalled AST + its snapshottable-name set), so
     /// the per-tick path re-uses it - no re-marshal, no re-analysis per tick.
     compiled: Option<Rc<[Stmt]>>,
+    /// The body's AST closure-compiled ONCE (compile.rs) - the per-tick run is a
+    /// direct call chain, no per-node match/AST-walk.
+    compiled_fn: Option<compile::CStmt>,
     snapshottable: HashSet<String>,
     /// name -> snapshotted native data table, persisted across ticks.
     snapshots: HashMap<String, Value>,
@@ -68,6 +72,7 @@ impl NativeInterpreter {
         NativeInterpreter {
             globals: MapStore::new(),
             compiled: None,
+            compiled_fn: None,
             snapshottable: HashSet::new(),
             snapshots: HashMap::new(),
             tick_cache: HashMap::new(),
@@ -119,6 +124,7 @@ impl NativeInterpreter {
         let body = marshal::marshal_body(py_body)?;
         self.snapshottable = analyze::snapshottable_names(&body);
         self.snapshots.clear();
+        self.compiled_fn = Some(compile::compile_block(&body));
         self.compiled = Some(body);
         Ok(())
     }
@@ -131,8 +137,8 @@ impl NativeInterpreter {
         bridge: &Bound<'_, PyAny>,
         unresolved: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
-        let body = match &self.compiled {
-            Some(b) => b.clone(),
+        let body_fn = match &self.compiled_fn {
+            Some(f) => f.clone(),
             None => return Ok(()),
         };
         self.actor_reads.borrow_mut().clear();
@@ -146,7 +152,7 @@ impl NativeInterpreter {
             &self.actor_cache,
             &self.actor_reads,
         );
-        interp.run(&body);
+        interp.run_compiled(&body_fn);
         Ok(())
     }
 
