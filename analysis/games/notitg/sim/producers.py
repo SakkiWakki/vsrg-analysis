@@ -122,7 +122,7 @@ def _compile_live(sm_path, end_seconds) -> dict | None:
     # the sweep lands). All hot-swap in place, so instant open pays for none of
     # it: the driver mods fill in, the storyboard gets cheaper, and the full
     # field-instance set appears a few seconds after open.
-    _spawn_background_upgrade(mod_channels, declarative, tree, field_instances,
+    _spawn_background_upgrade(mod_channels, tree, field_instances,
                              sm_path, end)
 
     return {
@@ -267,7 +267,7 @@ class _SweptResult:
         self.applied_mods = applied_mods
 
 
-def _spawn_background_upgrade(mod_channels, declarative, tree, field_provider,
+def _spawn_background_upgrade(mod_channels, tree, field_provider,
                              sm_path, end_seconds):
     """Background pass on a daemon thread: sweep a SEPARATE LiveSim to the chart
     end (the playback sim advances during play), then hot-swap three things the
@@ -302,8 +302,16 @@ def _spawn_background_upgrade(mod_channels, declarative, tree, field_provider,
                         rng_seed=doc.rng_seed, song_dir=doc.lua_dir.parent,
                         use_compiled_body=_compiled_body_flag())
         sweep.advance_to(end_seconds)
+        # Re-read the declarative mods from the SWEPT env, not the load-time
+        # capture: some charts populate their mods/mods2 tables from the Update
+        # BODY (e.g. a beat-gated ApplyModifiers loop), so at load the table is
+        # empty and the instant-compile `declarative` misses them entirely. The
+        # table entries carry their own beat/time windows, so reading the fully
+        # populated table once at the end preserves the time-windowing.
+        swept_declarative = modfile._normalize_mod_events(
+            _TableView(sweep.env), doc.to_seconds)
         applied = _mod_events(_SweptResult(sweep.env.applied_mods))
-        full = _compile_channels(declarative + applied)
+        full = _compile_channels(swept_declarative + applied)
         # Swap the resolved channels/players into the object the player holds.
         # ModChannels reads _channels/_players on every value() call, so the
         # single-statement rebind is atomic enough for a reader (GIL-guarded
