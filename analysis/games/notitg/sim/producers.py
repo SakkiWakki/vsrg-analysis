@@ -644,11 +644,21 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
     base_players = _base_players(mod_channels)
     if _multi_players(base_players):
         oscillators = field_oscillators or {}
+        # The base field's transform comes from the chart's `P{n}` GLOBAL binding
+        # (`P1 = self` in a field actor's InitCommand) - the exact actor eager's
+        # `named_keyframes['P{n}']` came from - NOT the raw `PlayerP{n}` screen
+        # child. When the chart binds P{n} to its field, that global IS the
+        # screen child (gat: P1 -> screen 778, live x tracks the chart's moves).
+        # When it does NOT (Ayakashi has no P1 global), eager falls to the
+        # player_rest seat (+-160/center), and the screen child sits at the
+        # engine's default multi-player X fan (design 288...) which is NOT where
+        # the versus field renders - so lazy must fall to the seat too. Reading
+        # named_actor_id (None when unbound) matches eager on both.
         for number in base_players:
             if live_sim is not None:
-                pid = player_ids.get(f'PlayerP{number}')
+                rec_id = env.named_actor_id(f'P{number}')
                 instances.append(field_compose.player_live_instance(
-                    live_sim, number, pid, oscillators.get(number), t0=t0))
+                    live_sim, number, rec_id, oscillators.get(number), t0=t0))
             else:
                 instances.append(field_compose.player_instance(
                     number, named_keyframes.get(f'P{number}'),

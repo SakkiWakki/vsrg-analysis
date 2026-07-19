@@ -504,6 +504,14 @@ class SimEnvironment:
                 out[rec_id] = key
         return out
 
+    def named_actor_id(self, name: str) -> int | None:
+        """recorder id of the actor bound to global `name` (`name = self`),
+        or None when the global is unbound / not one of our recorder tables.
+        The inverse of the label map: the lazy field producer reads the SAME
+        actor eager's `named_actor_keyframes()[name]` came from."""
+        value = self._host.env[name] if name in self._host.env else None
+        return self._table_rec_id(value) if value is not None else None
+
     def screen_child_ids(self) -> dict:
         """screen child name ('PlayerP1', ...) -> recorder id."""
         return dict(self._screen_children)
