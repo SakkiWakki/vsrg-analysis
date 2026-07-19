@@ -162,6 +162,13 @@ class _LiveFieldInstances:
             env.named_actor_keyframes(), field_oscillators,
             self._mod_channels, t0=self._t0, live_sim=self._live)
 
+    def __iter__(self):
+        # The provider IS the instance list: any consumer that iterates it
+        # (e.g. adapter._field_owned's topology check) gets the current
+        # snapshot. The base players bind at t0, so 'player' ownership is
+        # decidable from the first rebuild.
+        return iter(self())
+
 
 def _compile_via_sim(sm_path, end_seconds):
     doc = load_chart(sm_path)

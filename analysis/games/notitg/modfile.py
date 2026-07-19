@@ -459,7 +459,8 @@ def _compile_actor(actor, start_time, named_keyframes, fonts, below=None,
         return None
     if getattr(actor, '_background_layer', False):
         element = _compile_background_actor(actor, start_time, named_keyframes,
-                                           fonts, actor_keyframes, osc_context)
+                                           fonts, actor_keyframes, osc_context,
+                                           sim)
         if element is not None:
             below.append(element)
         return None
@@ -508,16 +509,18 @@ def _is_aft_backdrop(actor) -> bool:
 
 
 def _compile_background_actor(actor, start_time, named_keyframes, fonts,
-                              actor_keyframes=None, osc_context=None):
+                              actor_keyframes=None, osc_context=None, sim=None):
     """Compile a background-layer subtree as one top-level element at the
     background z. The subtree is self-contained (its own gat_all_bg /
     gat_bg transforms), so hoisting it past the identity top frames keeps
-    its placement while moving it behind the notes."""
+    its placement while moving it behind the notes. `sim` threads the lazy-
+    replay live sim so background actors animate live like the rest of the
+    tree (else the bg group transforms bake empty -> draw at the origin)."""
     child_elements = []
     for child in actor.children:
         element = _compile_background_actor(child, start_time,
                                            named_keyframes, fonts,
-                                           actor_keyframes, osc_context)
+                                           actor_keyframes, osc_context, sim)
         if element is not None:
             child_elements.append(element)
 
@@ -525,10 +528,10 @@ def _compile_background_actor(actor, start_time, named_keyframes, fonts,
                                   actor_keyframes, osc_context)
     if child_elements:
         element = _group_element(actor, start_time, keyframes,
-                                tuple(child_elements))
+                                tuple(child_elements), sim)
     else:
         element = _leaf_element(actor, start_time, named_keyframes,
-                               precomputed=keyframes, fonts=fonts)
+                               precomputed=keyframes, fonts=fonts, sim=sim)
     return _with_z(element, _BACKGROUND_Z) if element is not None else None
 
 

@@ -291,7 +291,21 @@ class LiveSim:
     def __init__(self, root, to_seconds, start_beat, end_seconds,
                  rng_seed=0, tick_hz=_TICK_HZ, song_dir=None,
                  use_compiled_body=False):
-        self._root = root
+        # `load_actors` MUTATES the tree it loads (tags nodes with _sim_id /
+        # _recorder_id, expands includes, removes Condition-falsy children). The
+        # element-tree compiler keys its LiveCurves off those SAME tags on this
+        # exact `root`, so the FIRST build must load `root` in place (shared ids).
+        # A reset (backward seek) rebuilds a fresh env; re-loading an already-
+        # tagged node would skip table creation (_id_for returns the stale id
+        # without _new_actor) -> KeyError on _tables[rec_id]. So reset loads a
+        # fresh deep copy instead (~4ms), leaving the compiler's `root` intact.
+        import copy
+
+        self._root_source = root
+        # A PRISTINE snapshot taken before the first build tags `root` in place.
+        # Every rebuild loads a fresh copy of this so no stale _sim_id survives.
+        self._pristine_root = copy.deepcopy(root)
+        self._built_once = False
         self._to_seconds = to_seconds
         self._start_beat = start_beat
         self._end_seconds = end_seconds
@@ -303,9 +317,17 @@ class LiveSim:
         self._build()
 
     def _build(self):
+        import copy
+
         from analysis.games.notitg import update_integrator
         from analysis.games.notitg.xml_actors import _strip_lua_wrapper
 
+        # First build tags `_root_source` in place (the compiler keys its
+        # LiveCurves off those tags); every rebuild loads a fresh copy of the
+        # pristine snapshot so load's mutation never leaks across a reset.
+        self._root = self._root_source if not self._built_once \
+            else copy.deepcopy(self._pristine_root)
+        self._built_once = True
         self._load_s = load_anchor_seconds(self._start_beat, self._to_seconds)
         self._to_beats = beat_inverter(self._to_seconds, self._end_seconds)
         env = SimEnvironment(self._load_s, self._rng_seed,
