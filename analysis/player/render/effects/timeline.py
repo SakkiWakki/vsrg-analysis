@@ -30,8 +30,11 @@ def bloom(elapsed, total, in_frac, easing, rest, peak) -> float:
     return peak + (rest - peak) * ease(easing, u)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Keyframe:
+    # slots: ~775K are constructed per heavy-chart bake; dropping the per-instance
+    # __dict__ speeds allocation + attribute access in simplify/sample. Nothing
+    # sets ad-hoc attributes on a Keyframe.
     t: float          # seconds
     values: tuple     # target value(s) at t + duration
     duration: float   # seconds

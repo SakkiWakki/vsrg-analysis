@@ -164,6 +164,15 @@ _SCREEN_CONSTANTS = {
 
 
 def _as_float(value, default=None):
+    # Hot path: almost every poke arg / read is already a Python float coming
+    # out of frame_eval, so skip the float() call + exception frame for it
+    # (~3M calls per heavy-chart bake). `type() is` is byte-identical to float()
+    # for a genuine float/int and leaves the str/screen-expr path untouched.
+    t = type(value)
+    if t is float:
+        return value
+    if t is int:
+        return float(value)
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -214,6 +223,11 @@ def _references_screen(node) -> bool:
 
 
 def _as_int(value, default=None):
+    # Hot path: a rec_id / index arriving already int (the common case) skips
+    # the _as_float round-trip. `type() is int` excludes bool (a rare, correct
+    # exclusion: float(True)==1.0 still resolves via the slow path identically).
+    if type(value) is int:
+        return value
     f = _as_float(value)
     return int(f) if f is not None else default
 
