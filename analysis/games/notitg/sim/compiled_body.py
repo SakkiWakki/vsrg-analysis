@@ -90,6 +90,12 @@ class NativeCompiledBody:
         if table is None:
             return
         self._bridge.set_self(table)
+        # Seed the per-tick driver clocks native so the body's (many) mod_time /
+        # beat reads do not cross to the host env each time (mod_time alone was
+        # ~134 crossings/tick on gat). These are sim-owned, never body-written.
+        host = self._env._host.env
+        self._native.set_tick_driver('mod_time', host['mod_time'])
+        self._native.set_tick_driver('beat', host['beat'])
         try:
             self._native.run_compiled_frontier(self._bridge, self._unresolved)
         except Exception as exc:

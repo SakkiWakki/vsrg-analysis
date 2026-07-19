@@ -51,6 +51,10 @@ pub struct Interp<'a> {
     /// the persistent NativeInterpreter). A name maps to Unresolved once probed
     /// and found NOT snapshottable, so it is not re-probed every tick.
     pub snapshots: &'a mut std::collections::HashMap<String, Value>,
+    /// Per-tick DRIVER cache: `mod_time`/`beat`/... seeded once per tick by the
+    /// sim (values it owns, the body never writes). Checked BEFORE the frontier
+    /// so these hot reads (mod_time was 134 crossings/tick on gat) stay native.
+    pub tick_cache: &'a std::collections::HashMap<String, Value>,
 }
 
 impl<'a> Interp<'a> {
@@ -59,6 +63,7 @@ impl<'a> Interp<'a> {
         frontier: &'a mut dyn Frontier,
         snapshottable: &'a std::collections::HashSet<String>,
         snapshots: &'a mut std::collections::HashMap<String, Value>,
+        tick_cache: &'a std::collections::HashMap<String, Value>,
     ) -> Interp<'a> {
         Interp {
             scopes: ScopeArena::new(),
@@ -66,6 +71,7 @@ impl<'a> Interp<'a> {
             frontier,
             snapshottable,
             snapshots,
+            tick_cache,
         }
     }
 
@@ -82,6 +88,11 @@ impl<'a> Interp<'a> {
     /// guards read what the body wrote), else the core's own MapStore. Returns
     /// (found, value); UNRESOLVED value means unbound.
     fn global_lookup(&mut self, name: &str) -> (bool, Value) {
+        // Per-tick driver clocks (mod_time/beat) are seeded native each tick;
+        // hit them here instead of crossing to the host env every read.
+        if let Some(v) = self.tick_cache.get(name) {
+            return (true, v.clone());
+        }
         if self.frontier.backs_globals() {
             let v = self.frontier.global_get(name);
             (!v.is_unresolved(), v)

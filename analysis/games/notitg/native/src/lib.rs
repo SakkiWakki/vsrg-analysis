@@ -49,6 +49,10 @@ struct NativeInterpreter {
     snapshottable: HashSet<String>,
     /// name -> snapshotted native data table, persisted across ticks.
     snapshots: HashMap<String, Value>,
+    /// Per-tick DRIVER cache (mod_time/beat/...): seeded by the sim each tick,
+    /// read native so the hot driver reads (mod_time was 134 crossings/tick on
+    /// gat) do not cross to the host env.
+    tick_cache: HashMap<String, Value>,
 }
 
 #[pymethods]
@@ -60,7 +64,17 @@ impl NativeInterpreter {
             compiled: None,
             snapshottable: HashSet::new(),
             snapshots: HashMap::new(),
+            tick_cache: HashMap::new(),
         }
+    }
+
+    /// Seed a per-tick DRIVER value (mod_time/beat) read natively this tick,
+    /// bypassing the frontier crossing. Only for values the sim owns and the
+    /// body never writes (the driver clocks); call once per tick before running.
+    fn set_tick_driver(&mut self, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.tick_cache
+            .insert(name.to_string(), pyconv::value_from_py(value)?);
+        Ok(())
     }
 
     /// Compile a body ONCE: marshal the Python AST and compute the snapshottable
@@ -92,6 +106,7 @@ impl NativeInterpreter {
             &mut frontier,
             &self.snapshottable,
             &mut self.snapshots,
+            &self.tick_cache,
         );
         interp.run(&body);
         Ok(())
@@ -124,8 +139,9 @@ impl NativeInterpreter {
         let body = marshal::marshal_body(py_body)?;
         let mut frontier = NoFrontier;
         let empty = HashSet::new();
+        let empty_cache = HashMap::new();
         let mut snaps = HashMap::new();
-        let mut interp = Interp::new(&mut self.globals, &mut frontier, &empty, &mut snaps);
+        let mut interp = Interp::new(&mut self.globals, &mut frontier, &empty, &mut snaps, &empty_cache);
         interp.run(&body);
         Ok(())
     }
@@ -145,8 +161,9 @@ impl NativeInterpreter {
         let body = marshal::marshal_body(py_body)?;
         let mut frontier = PyFrontier::new(bridge.clone().unbind(), unresolved.clone().unbind());
         let empty = HashSet::new();
+        let empty_cache = HashMap::new();
         let mut snaps = HashMap::new();
-        let mut interp = Interp::new(&mut self.globals, &mut frontier, &empty, &mut snaps);
+        let mut interp = Interp::new(&mut self.globals, &mut frontier, &empty, &mut snaps, &empty_cache);
         interp.run(&body);
         Ok(())
     }
