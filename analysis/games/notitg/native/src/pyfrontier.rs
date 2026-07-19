@@ -22,6 +22,8 @@
 //! or a tagged handle dict `{"__handle__": id}` (a Python object the core sees
 //! as opaque). The marshalling is symmetric in both directions.
 
+use std::cell::Cell;
+
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyTuple};
 
@@ -34,16 +36,26 @@ pub struct PyFrontier {
     /// The shared UNRESOLVED sentinel (frame_eval's), so the boundary marshals
     /// UNRESOLVED to the exact object the Python side compares by identity.
     unresolved: Py<PyAny>,
+    /// Set when a bridge call RAISED a Python exception (a host function
+    /// erroring). The core checks `aborted()` and stops the body run - the Lua
+    /// path aborts the tick on such an error, so native must too.
+    aborted: Cell<bool>,
 }
 
 impl PyFrontier {
     pub fn new(bridge: Py<PyAny>, unresolved: Py<PyAny>) -> PyFrontier {
-        PyFrontier { bridge, unresolved }
+        PyFrontier {
+            bridge,
+            unresolved,
+            aborted: Cell::new(false),
+        }
     }
 
     /// Call `method_name(*args)` on the bridge and marshal the result back to a
-    /// core Value. Any Python/marshalling error collapses to UNRESOLVED (the
-    /// "skip, do not guess" floor - a frontier error never crashes the tick).
+    /// core Value. A raised Python exception (a host function erroring) sets the
+    /// `aborted` flag so the core stops the tick body - matching the Lua path,
+    /// which lets the error propagate to the fault handler. (A clean nil return
+    /// is UNRESOLVED, NOT an abort.)
     fn call_bridge(&self, method_name: &str, args_builder: impl FnOnce(Python) -> PyResult<Py<PyTuple>>) -> Value {
         Python::attach(|py| {
             let result = (|| -> PyResult<Value> {
@@ -51,12 +63,22 @@ impl PyFrontier {
                 let ret = self.bridge.bind(py).call_method1(method_name, args.bind(py))?;
                 pyconv::value_from_frontier(&ret, self.unresolved.bind(py))
             })();
-            result.unwrap_or(Value::Unresolved)
+            match result {
+                Ok(v) => v,
+                Err(_) => {
+                    self.aborted.set(true);
+                    Value::Unresolved
+                }
+            }
         })
     }
 }
 
 impl Frontier for PyFrontier {
+    fn aborted(&self) -> bool {
+        self.aborted.get()
+    }
+
     fn symbol(&mut self, name: &str) -> Value {
         self.call_bridge("symbol", |py| Ok(PyTuple::new(py, [name])?.unbind()))
     }

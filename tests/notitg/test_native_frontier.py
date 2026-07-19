@@ -117,6 +117,51 @@ def test_native_read_only_data_table_is_snapshotted():
     assert EventTimeline(frames, (0.0,)).sample(1.0)[0] == 51.0  # 20 + 31
 
 
+def test_native_pairs_iterates_array_in_index_order():
+    # `for i,v in pairs(t)` over a snapshotted array must walk 1..n in index
+    # order (LuaJIT's array-part-first), so a string built by concatenation
+    # matches the Lua path (the POP mods-display order bug).
+    env, rec = _env()
+    _lua_table(env, 'rows', '{"a", "b", "c", "d"}')
+    bridge = NativeFrontier(NotitgGuardSurface(env), env._host.env)
+    interp = native.NativeInterpreter()
+    stmts, _ = parse_body(_strip_lua_wrapper(
+        '%function(self) acc = "" for i,v in pairs(rows) do acc = acc .. v end '
+        'foo:settext(acc) end'))
+    interp.compile_body(stmts)
+    env.set_time(0.5, 1.0)
+    env._host.env['beat'] = 1.0
+    bridge.set_self(env._tables[rec])
+    interp.run_compiled_frontier(bridge, UNRESOLVED)
+    frames = env.actor_keyframes().get(rec, {}).get('text', [])
+    assert EventTimeline(frames, ('',)).sample(0.5)[0] == 'abcd'
+
+
+def test_native_host_fn_error_aborts_the_body_tick():
+    # A host function that ERRORS (Lua `compare number with nil`) must abort the
+    # WHOLE body tick, exactly like the Lua path - so a later poke does NOT run
+    # and the property stays at rest. A swallowed error would let native compute
+    # values Python never reaches (the Nisemono shader-uniform bug).
+    env, rec = _env()
+    # a host helper that errors when its 2nd arg is nil (compares against it)
+    env._host.env['needs2'] = env._host.compile(
+        'return function(a, b) if a > b then return 1 end return 0 end')()
+    bridge = NativeFrontier(NotitgGuardSurface(env), env._host.env)
+    interp = native.NativeInterpreter()
+    # `missing` is nil -> needs2(beat, missing) errors -> the following poke must
+    # NOT fire, so x stays at its rest 0 (never becomes 99).
+    stmts, _ = parse_body(_strip_lua_wrapper(
+        '%function(self) local r = needs2(beat, missing) foo:x(99) end'))
+    interp.compile_body(stmts)
+    env.set_time(0.5, 1.0)
+    env._host.env['beat'] = 1.0
+    bridge.set_self(env._tables[rec])
+    interp.run_compiled_frontier(bridge, UNRESOLVED)
+    frames = env.actor_keyframes().get(rec, {}).get('x', [])
+    # the tick aborted at the erroring call: foo:x(99) never ran
+    assert EventTimeline(frames, (0.0,)).sample(0.5)[0] == 0.0
+
+
 def test_native_written_data_table_is_not_snapshotted():
     # A host table the body WRITES must NOT be snapshotted (a frozen copy would
     # diverge). `scratch[1] = beat` then read it back - the write must land AND

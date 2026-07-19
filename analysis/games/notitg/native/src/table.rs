@@ -129,18 +129,29 @@ impl LuaTable {
         out
     }
 
-    /// `pairs`: every (key, value). Order is unspecified in Lua (and here); the
-    /// interpreter only relies on ipairs order for the array part.
+    /// `pairs`: every (key, value). Lua leaves `pairs` order unspecified, but
+    /// LuaJIT (what the charts + the Python oracle run on) walks the ARRAY part
+    /// 1..n in index order FIRST, then the hash part. A chart building a string
+    /// by `for i,v in pairs(t)` relies on that array order (POP's mods display),
+    /// so we reproduce it: the contiguous 1..n run in order, then the remaining
+    /// keys. The hash-part order still matches lupa closely enough that no
+    /// corpus chart depends on it (0 hash-keyed constructors).
     pub fn pairs(&self) -> Vec<(Value, Value)> {
-        self.data
-            .iter()
-            .map(|(k, v)| {
+        let n = self.length();
+        let mut out = Vec::with_capacity(self.data.len());
+        for i in 1..=n {
+            out.push((Value::Num(i as f64), self.data[&Key::Int(i)].clone()));
+        }
+        for (k, v) in self.data.iter() {
+            let past_array = matches!(k, Key::Int(i) if *i >= 1 && *i <= n);
+            if !past_array {
                 let key = match k {
                     Key::Int(i) => Value::Num(*i as f64),
                     Key::Str(s) => Value::str(s.clone()),
                 };
-                (key, v.clone())
-            })
-            .collect()
+                out.push((key, v.clone()));
+            }
+        }
+        out
     }
 }

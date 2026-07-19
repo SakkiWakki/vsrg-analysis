@@ -105,6 +105,12 @@ impl<'a> Interp<'a> {
                 Flow::Normal => {}
                 ret @ Flow::Return(_) => return ret,
             }
+            // A host-fn call that RAISED aborts the whole body tick (the Lua
+            // path lets the error propagate to the fault handler); stop here so
+            // native does not run statements Python never reached.
+            if self.frontier.aborted() {
+                return Flow::Normal;
+            }
         }
         Flow::Normal
     }

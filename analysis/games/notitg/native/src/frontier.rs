@@ -73,6 +73,16 @@ pub trait Frontier {
     fn snapshot_global(&mut self, _name: &str) -> Value {
         Value::Unresolved
     }
+
+    /// Whether a frontier call RAISED (a host function erroring, e.g. a Lua
+    /// `attempt to compare number with nil`). The Python interpreter lets such
+    /// an error abort the WHOLE body tick (it propagates to the fault handler),
+    /// so the core checks this after a frontier call and stops the run to match
+    /// - a swallowed error would let the body compute values Python never
+    /// reaches. NoFrontier never faults.
+    fn aborted(&self) -> bool {
+        false
+    }
 }
 
 /// The pure-logic stub: no live engine. Every crossing is inert, so a body that
