@@ -178,9 +178,14 @@ class _LiveFieldInstances:
                                    clock=self._osc_clock)
         field_oscillators = modfile._field_oscillator_timelines(
             env, osc_context)
+        # `named_keyframes` feeds ONLY the eager (`live_sim is None`) branches of
+        # _sim_field_instances; the live path reads the sim directly. Computing
+        # env.named_actor_keyframes() here (which re-simplifies every named
+        # actor's poke stream, invalidated each tick during playback) was pure
+        # per-frame waste, so pass an empty map.
         return _sim_field_instances(
             self._doc, env, None, osc_context,
-            env.named_actor_keyframes(), field_oscillators,
+            {}, field_oscillators,
             self._mod_channels, t0=self._t0, live_sim=self._live)
 
     def __iter__(self):
