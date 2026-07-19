@@ -274,7 +274,12 @@ class NotitgAdapter(EtternaAdapter):
         base_hidden = compiled.get('base_field_hidden')
         sm_path, _index = split_chart_ref(replay.get('filepath', ''))
         instances = self._field_instances(compiled)
-        field_owned = any(inst['kind'] == 'player' for inst in instances)
+        # LAZY: `instances` may be a PROVIDER callable (the set grows as bindings
+        # fire). Materialize a snapshot for the one-time setup checks below
+        # (field-owned / player-fields), but pass the PROVIDER to the effect so
+        # it re-reads the growing set each frame.
+        snapshot = instances() if callable(instances) else instances
+        field_owned = any(inst['kind'] == 'player' for inst in snapshot)
         if not field_owned:
             # Single-field charts only: the field-3D transform warps the
             # base playfield capture, with BOTH tilt producers (actor
@@ -296,7 +301,7 @@ class NotitgAdapter(EtternaAdapter):
         if instances:
             effects.append(NotitgFieldInstances(
                 instances, base_hidden=base_hidden,
-                player_fields=self._player_fields(replay, instances)))
+                player_fields=self._player_fields(replay, snapshot)))
         return effects
 
     def engine_beat_px(self):

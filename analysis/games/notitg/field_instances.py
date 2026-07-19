@@ -145,24 +145,35 @@ class NotitgFieldInstances:
     capture renders."""
 
     def __init__(self, instances, base_hidden=None, player_fields=None):
-        self._instances = tuple(instances)
+        # `instances` is a fixed sequence (eager) OR a PROVIDER callable
+        # returning the current instance list (LAZY: the set grows as proxy/AFT
+        # bindings fire during playback - the consumer re-reads it every frame
+        # with no cross-frame state, so a growing set just lights up copies as
+        # they appear).
+        self._provider = instances if callable(instances) else None
+        self._instances = None if self._provider else tuple(instances)
         self._base_hidden = base_hidden
         self._player_fields_spec = player_fields
         self._player_fields = (player_fields.note_mods
                                if player_fields is not None else {})
 
+    def _current_instances(self):
+        return self._provider() if self._provider is not None else self._instances
+
     def __bool__(self):
-        return bool(self._instances)
+        # A lazy provider may be empty now but grow later; keep the effect alive.
+        return True if self._provider is not None else bool(self._instances)
 
     def at(self, ctx) -> EffectFrame | None:
-        if not self._instances:
+        instances = self._current_instances()
+        if not instances:
             return None
         t = float(ctx.t_now)
         base_hidden = self._base_field_hidden(t)
         kx, ky, ox, oy = _design_map(ctx.chart_rect)
 
         entries = []
-        for inst in self._instances:
+        for inst in instances:
             if inst['kind'] == 'player' and base_hidden:
                 continue
             sampled = inst['transform'].at(t)

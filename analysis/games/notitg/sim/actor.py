@@ -442,6 +442,26 @@ class SimActor:
         value = self._current.get(prop)
         return value if value is not None else _rest(prop)
 
+    def current(self, prop: str):
+        """The current value of ANY recorded channel, for a live reader (lazy
+        replay's LiveCurve). Same as `get` for tweened/immediate props, but also
+        exposes the transform-ORDER state (`rotation_order` token, `quat` tuple)
+        that the eager recorder emits as keyframes but which live outside
+        `_current` (`_rotation_order`/`_quat`). Returns None when the channel has
+        no value yet, so the caller falls to that channel's rest."""
+        if prop == 'rotation_order':
+            return self._rotation_order
+        if prop == 'quat':
+            return self._quat
+        head = self._tweens[0] if self._tweens else None
+        if head is not None and head.started and head.dur > 0.0:
+            dest = head.state.get(prop)
+            start = self._ease_start.get(prop, _rest(prop))
+            if dest is not None and dest != start:
+                progress = 1.0 - head.left / head.dur
+                return self._lerp(start, dest, ease(head.ease, progress))
+        return self._current.get(prop)
+
     def get_dest(self, prop: str):
         """The destination value: the queue tail's state (GetDestX ->
         DestTweenState, Actor.h:110), which `add*` verbs stack onto."""

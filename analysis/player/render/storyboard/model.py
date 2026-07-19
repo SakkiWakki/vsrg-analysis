@@ -143,14 +143,19 @@ class LiveCurve:
         self._sim = sim
         self._rec_id = rec_id
         self._prop = prop
-        self._rest = rest if isinstance(rest, tuple) else (float(rest),)
+        # A tuple rest passes through (color, quat, rotation_order token); a
+        # scalar wraps to a 1-tuple. Do NOT force float - a rotation_order rest
+        # is a string token.
+        self._rest = rest if isinstance(rest, tuple) else (rest,)
 
     def sample(self, t: float) -> tuple:
         self._sim.advance_to(t)
         actor = self._sim.env._actors.get(self._rec_id)
         if actor is None:
             return self._rest
-        value = actor.get(self._prop)
+        # `current` exposes ANY channel (incl the rotation_order token / quat
+        # tuple that live outside _current); None -> the prop's rest.
+        value = actor.current(self._prop)
         if value is None:
             return self._rest
         return value if isinstance(value, tuple) else (value,)

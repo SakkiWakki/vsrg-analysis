@@ -111,6 +111,21 @@ def link_timelines(keyframes, rests=None) -> dict:
     return timelines
 
 
+def link_live_timelines(sim, rec_id, rests=None) -> dict:
+    """LAZY counterpart of `link_timelines`: one `LiveCurve` per link property,
+    reading the live sim's actor at draw time (same key set + rests, so
+    `TransformChannel` samples it identically). Covers the scalar link props and
+    the tuple ones (rotation_order token, quat)."""
+    from analysis.player.render.storyboard.model import LiveCurve
+
+    merged = {**_LINK_RESTS, **(rests or {})}
+    timelines = {prop: LiveCurve(sim, rec_id, prop, rest)
+                 for prop, rest in merged.items()}
+    for prop, rest in _TUPLE_LINK_RESTS.items():
+        timelines[prop] = LiveCurve(sim, rec_id, prop, rest)
+    return timelines
+
+
 class _SumTimeline:
     """Additive overlay: oscillator deltas riding on a recorded stream."""
 
@@ -268,9 +283,28 @@ def player_link(number, keyframes, osc_deltas=None,
     return link
 
 
+def player_live_link(sim, number, rec_id, osc_deltas=None,
+                     ignore_hidden=False) -> dict:
+    """LAZY player-field link: LiveCurves over the live PlayerP{n} actor
+    (`rec_id`), seated at its versus rest. Same overlay/ignore_hidden as
+    `player_link`."""
+    link = overlay_deltas(
+        link_live_timelines(sim, rec_id, rests=player_rest(number)),
+        osc_deltas)
+    if ignore_hidden:
+        link['hidden'] = EventTimeline([], rest=(0.0,))
+    return link
+
+
 def player_instance(number, keyframes, osc_deltas=None, t0=None) -> dict:
     """A player-field instance drawn in place from its own link."""
     link = player_link(number, keyframes, osc_deltas)
+    return instance(f'P{number}', 'player', number, [link], t0=t0)
+
+
+def player_live_instance(sim, number, rec_id, osc_deltas=None, t0=None) -> dict:
+    """LAZY player-field instance: LiveCurves over the live PlayerP{n} actor."""
+    link = player_live_link(sim, number, rec_id, osc_deltas)
     return instance(f'P{number}', 'player', number, [link], t0=t0)
 
 

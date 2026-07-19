@@ -107,12 +107,18 @@ def _compile_live(sm_path, end_seconds) -> dict | None:
     # LIVE like the element tree, so the screen-zoom camera works instantly.
     screen_transform = modfile._screen_transform_live(live)
 
+    # The note-field proxy/AFT instances: a PROVIDER that rebuilds from the live
+    # sim as proxy/AFT bindings fire (topology grows throughout the chart). The
+    # effect calls it each frame; transform values are LiveCurves.
+    field_instances = _LiveFieldInstances(doc, live, mod_channels,
+                                          t0=live._load_s)
+
     return {
         'mod_events': declarative, 'mod_channels': mod_channels,
         'shader_flags': [], 'unsupported': {'count': 0, 'described': []},
         'elements': [], 'tree': tree,
         'has_background': modfile._has_background_actors(tree, sm_path),
-        'field_instances': [], 'screen_transform': screen_transform,
+        'field_instances': field_instances, 'screen_transform': screen_transform,
         'screen_oscillator': None, 'field_oscillators': [],
         'field_vanish': None, 'chart_shaders': [],
         'aft_bg_visible': None, 'base_field_hidden': None,
@@ -123,6 +129,45 @@ def _compile_live(sm_path, end_seconds) -> dict | None:
                                            'live; driver-applied mods + field '
                                            'instances deferred'],
     }
+
+
+class _LiveFieldInstances:
+    """A provider that rebuilds the field-instance list from the LIVE sim as its
+    topology grows (proxy/AFT bindings fire throughout the chart). Called by the
+    NotitgFieldInstances effect each frame; rebuilds ONLY when the topology
+    SIGNATURE (the set of bound proxy_target / aft_source / is_aft actors)
+    changes - a rebuild is ~1ms and topology changes are rare, so per-frame cost
+    is a cheap signature check. Transform values are LiveCurves (read live), so
+    only STRUCTURE triggers a rebuild."""
+
+    def __init__(self, doc, live, mod_channels, t0):
+        self._doc = doc
+        self._live = live
+        self._mod_channels = mod_channels
+        self._t0 = t0
+        self._sig = None
+        self._instances = []
+
+    def _topology_signature(self):
+        env = self._live.env
+        return frozenset(
+            (rec_id, sim.proxy_target, sim.aft_source, sim.is_aft)
+            for rec_id, sim in env.actors.items()
+            if sim.proxy_target is not None or sim.aft_source or sim.is_aft)
+
+    def __call__(self):
+        sig = self._topology_signature()
+        if sig != self._sig:
+            self._sig = sig
+            env = self._live.env
+            osc_context = _osc_context(env, self._doc, self._doc.end_seconds)
+            field_oscillators = modfile._field_oscillator_timelines(
+                env, osc_context)
+            self._instances = _sim_field_instances(
+                self._doc, env, None, osc_context,
+                env.named_actor_keyframes(), field_oscillators,
+                self._mod_channels, t0=self._t0, live_sim=self._live)
+        return self._instances
 
 
 def _compile_via_sim(sm_path, end_seconds):
@@ -363,7 +408,7 @@ def _mark_aft_fills(doc, env) -> None:
 
 def _sim_field_instances(doc, env, actor_keyframes, osc_context,
                          named_keyframes, field_oscillators,
-                         mod_channels, t0) -> list:
+                         mod_channels, t0, live_sim=None) -> list:
     # `t0` is the sim's load anchor: channel samples clamp to it so
     # pre-chart times hold the load state (see TransformChannel).
     parents: dict = {}
@@ -391,9 +436,14 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
     if _multi_players(base_players):
         oscillators = field_oscillators or {}
         for number in base_players:
-            instances.append(field_compose.player_instance(
-                number, named_keyframes.get(f'P{number}'),
-                oscillators.get(number), t0=t0))
+            if live_sim is not None:
+                pid = player_ids.get(f'PlayerP{number}')
+                instances.append(field_compose.player_live_instance(
+                    live_sim, number, pid, oscillators.get(number), t0=t0))
+            else:
+                instances.append(field_compose.player_instance(
+                    number, named_keyframes.get(f'P{number}'),
+                    oscillators.get(number), t0=t0))
     for actor in _iter_xml(doc.root):
         rec_id = env.actor_id(actor)
         sim = env.actors.get(rec_id)
@@ -418,14 +468,18 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
             kind, player = 'proxy', proxy_players[sim.proxy_target]
         elif getattr(actor, '_aft_fill', False):
             kind, player = 'fill', 0
-            color = EventTimeline(
-                (actor_keyframes.get(rec_id) or {}).get('color', []),
-                rest=(1.0, 1.0, 1.0))
+            if live_sim is not None:
+                from analysis.player.render.storyboard.model import LiveCurve
+                color = LiveCurve(live_sim, rec_id, 'color', (1.0, 1.0, 1.0))
+            else:
+                color = EventTimeline(
+                    (actor_keyframes.get(rec_id) or {}).get('color', []),
+                    rest=(1.0, 1.0, 1.0))
         else:
             continue
         chain = _chain(actor, parents)
         links = [_instance_link(link_actor, env, actor_keyframes,
-                                osc_context)
+                                osc_context, live_sim)
                  for link_actor in reversed(chain)]
         if kind == 'proxy':
             # The engine draws a proxied target WITH the target's own
@@ -438,7 +492,13 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
             # too would double every seat/motion offset).
             if sim.proxy_target in notefields:
                 links.append(_notefield_link(sim.proxy_target,
-                                             actor_keyframes))
+                                             actor_keyframes, live_sim))
+            elif live_sim is not None:
+                pid = player_ids.get(f'PlayerP{player}')
+                links.append(field_compose.player_live_link(
+                    live_sim, player, pid,
+                    (field_oscillators or {}).get(player),
+                    ignore_hidden=True))
             else:
                 links.append(field_compose.player_link(
                     player, named_keyframes.get(f'P{player}'),
@@ -482,10 +542,11 @@ def _aft_chain_graph(doc, env, aft_nodes, proxy_players):
         node_by_id, blit_sources, draw_order, screen_content_ids)
 
 
-def _notefield_link(notefield_id, actor_keyframes) -> dict:
+def _notefield_link(notefield_id, actor_keyframes, sim=None) -> dict:
     """The proxied NoteField child's own transform link, hidden pinned
     visible (proxies draw their target regardless of its hidden bit)."""
-    link = field_compose.link_timelines(actor_keyframes.get(notefield_id))
+    link = field_compose.link_live_timelines(sim, notefield_id) if sim is not None \
+        else field_compose.link_timelines(actor_keyframes.get(notefield_id))
     link['hidden'] = EventTimeline([], rest=(0.0,))
     return link
 
@@ -539,15 +600,17 @@ def _chain(actor, parents) -> list:
     return chain
 
 
-def _instance_link(actor, env, actor_keyframes, osc_context) -> dict:
+def _instance_link(actor, env, actor_keyframes, osc_context, sim=None) -> dict:
     """One chain link: the actor's recorded transform timelines with its
     oscillator spans overlaid as LIVE delta channels, never baked - the
     vibrate mirage is per-frame randomness, so it must evaluate at frame
     time (and a long-running span never freezes at a sample cap). The
     link's own scale_x channel feeds the vibrate amplitude, as the
-    engine scales the offset by the actor's zoom."""
+    engine scales the offset by the actor's zoom. `sim` (lazy) makes the
+    base transform LiveCurves instead of baked keyframes."""
     rec_id = env.actor_id(actor)
-    link = field_compose.link_timelines(actor_keyframes.get(rec_id))
+    link = field_compose.link_live_timelines(sim, rec_id) if sim is not None \
+        else field_compose.link_timelines(actor_keyframes.get(rec_id))
     spans = (osc_context.spans_by_id.get(rec_id)
              if osc_context is not None else None)
     if spans:
