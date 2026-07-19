@@ -353,12 +353,25 @@ class LiveSim:
         self.env = env
         self._t = self._load_s
         self._next_body_t = self._load_s
+        # Cleared on every (re)build so a post-reset advance to the same `t`
+        # re-simulates (the fast path must never short-circuit a fresh env).
+        self._last_advance_t = None
 
     def advance_to(self, target_t):
         """Tick the sim forward to the largest grid point <= `target_t`. Grid
         ticks are never truncated to `target_t` (the INVARIANT above), so `_t`
         may sit up to one step behind the playhead - the engine's own frame
         quantization, and what keeps stepping identical to a continuous run."""
+        # Same-playhead fast path: the renderer samples ~1400 LiveCurves per
+        # frame, each calling advance_to with the IDENTICAL frame `t`. Only the
+        # first does work; the rest are no-ops. A cached last-target check skips
+        # the end-clamp + backward-seek test + loop guard on the other ~1399,
+        # the single biggest cheap per-frame win (advance_to went from the hot
+        # path to a dict-compare). Any different `t` falls through to the real
+        # advance below.
+        if target_t == self._last_advance_t:
+            return
+        self._last_advance_t = target_t
         # The sim loads at `load_s` (gat's is 0.25s - the chart's first FGCHANGE),
         # while the playback clock starts at 0. A playhead BELOW load_s just means
         # "chart not started yet" - the sim sits at load_s, not a backward seek.
