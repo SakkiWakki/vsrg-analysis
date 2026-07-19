@@ -100,6 +100,25 @@ class NativeFrontier:
         handle the body's `self:...` pokes resolve against."""
         self._env['self'] = recv_obj
 
+    def actor_value(self, handle, verb):
+        """The current value of `handle:verb()` (a no-arg getter like GetX) - for
+        the sim to seed the native actor-value cache. Reads `SimActor.read`
+        DIRECTLY (not through `surface.method`, which adds ~5x dispatch): the
+        surface's method path for an actor getter is exactly `actor.read(verb)`,
+        so the seeded value is identical but cheap. None when the handle is not a
+        live actor, or the getter yields nil (the native side then leaves the
+        read to cross)."""
+        obj = self._objs.get(int(handle))
+        if obj is None:
+            return None
+        rec_id = self._surface._rec_id(obj)
+        if rec_id is None:
+            return None
+        actor = self._surface._env._actors.get(int(rec_id))
+        if actor is None:
+            return None
+        return actor.read(verb)   # None (nil) flows through; the sim skips it
+
     def symbol(self, name):
         return self._to_handle(self._surface.symbol(name))
 

@@ -96,10 +96,30 @@ class NativeCompiledBody:
         host = self._env._host.env
         self._native.set_tick_driver('mod_time', host['mod_time'])
         self._native.set_tick_driver('beat', host['beat'])
+        # LEARN-THEN-CACHE the actor-value reads (GetX/GetY/...): seed the
+        # current values for the (handle, verb) pairs the LAST tick read, so
+        # those ~23 reads/tick stay native this tick. Drain runs before this
+        # (loop.py), so `_current` is the value in force at this tick. A newly
+        # read actor still crosses on its first tick, then joins the seed set.
+        self._seed_learned_actor_values()
         try:
             self._native.run_compiled_frontier(self._bridge, self._unresolved)
         except Exception as exc:
             self._env._record_fault(self._name, exc)
+
+    def _seed_learned_actor_values(self) -> None:
+        reads = self._native.take_actor_reads()
+        if not reads:
+            return
+        self._native.clear_actor_cache()
+        seen = set()
+        for handle, verb in reads:
+            if (handle, verb) in seen:
+                continue
+            seen.add((handle, verb))
+            value = self._bridge.actor_value(handle, verb)
+            if value is not None:
+                self._native.seed_actor_value(handle, verb, value)
 
 
 class CompiledBody:

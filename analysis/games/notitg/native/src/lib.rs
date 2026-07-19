@@ -53,6 +53,12 @@ struct NativeInterpreter {
     /// read native so the hot driver reads (mod_time was 134 crossings/tick on
     /// gat) do not cross to the host env.
     tick_cache: HashMap<String, Value>,
+    /// Per-tick ACTOR-value cache (handle, verb) -> current value, seeded by the
+    /// sim after drain for the learned read set, so GetX/GetY/... stay native.
+    actor_cache: HashMap<(u64, String), Value>,
+    /// The (handle, verb) actor reads the last run made - the sim drains this to
+    /// learn which values to seed next tick.
+    actor_reads: std::cell::RefCell<Vec<(u64, String)>>,
 }
 
 #[pymethods]
@@ -65,6 +71,8 @@ impl NativeInterpreter {
             snapshottable: HashSet::new(),
             snapshots: HashMap::new(),
             tick_cache: HashMap::new(),
+            actor_cache: HashMap::new(),
+            actor_reads: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -75,6 +83,33 @@ impl NativeInterpreter {
         self.tick_cache
             .insert(name.to_string(), pyconv::value_from_py(value)?);
         Ok(())
+    }
+
+    /// Seed an actor's current value for `(handle, verb)` this tick, read native
+    /// by a GetX/GetY/... on that handle. The sim calls this after drain for the
+    /// learned read set (from `take_actor_reads`).
+    fn seed_actor_value(
+        &mut self,
+        handle: u64,
+        verb: &str,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        self.actor_cache
+            .insert((handle, verb.to_string()), pyconv::value_from_py(value)?);
+        Ok(())
+    }
+
+    /// Clear the actor-value cache (call before re-seeding each tick, so a stale
+    /// value from a no-longer-read actor cannot linger).
+    fn clear_actor_cache(&mut self) {
+        self.actor_cache.clear();
+    }
+
+    /// Drain and return the (handle, verb) actor reads the last run made, as a
+    /// list of (handle, verb) tuples - the sim uses them to learn which values
+    /// to seed next tick.
+    fn take_actor_reads(&self) -> Vec<(u64, String)> {
+        std::mem::take(&mut self.actor_reads.borrow_mut())
     }
 
     /// Compile a body ONCE: marshal the Python AST and compute the snapshottable
@@ -100,6 +135,7 @@ impl NativeInterpreter {
             Some(b) => b.clone(),
             None => return Ok(()),
         };
+        self.actor_reads.borrow_mut().clear();
         let mut frontier = PyFrontier::new(bridge.clone().unbind(), unresolved.clone().unbind());
         let mut interp = Interp::new(
             &mut self.globals,
@@ -107,6 +143,8 @@ impl NativeInterpreter {
             &self.snapshottable,
             &mut self.snapshots,
             &self.tick_cache,
+            &self.actor_cache,
+            &self.actor_reads,
         );
         interp.run(&body);
         Ok(())
@@ -140,8 +178,10 @@ impl NativeInterpreter {
         let mut frontier = NoFrontier;
         let empty = HashSet::new();
         let empty_cache = HashMap::new();
+        let empty_actor = HashMap::new();
+        let empty_reads = std::cell::RefCell::new(Vec::new());
         let mut snaps = HashMap::new();
-        let mut interp = Interp::new(&mut self.globals, &mut frontier, &empty, &mut snaps, &empty_cache);
+        let mut interp = Interp::new(&mut self.globals, &mut frontier, &empty, &mut snaps, &empty_cache, &empty_actor, &empty_reads);
         interp.run(&body);
         Ok(())
     }
@@ -162,8 +202,10 @@ impl NativeInterpreter {
         let mut frontier = PyFrontier::new(bridge.clone().unbind(), unresolved.clone().unbind());
         let empty = HashSet::new();
         let empty_cache = HashMap::new();
+        let empty_actor = HashMap::new();
+        let empty_reads = std::cell::RefCell::new(Vec::new());
         let mut snaps = HashMap::new();
-        let mut interp = Interp::new(&mut self.globals, &mut frontier, &empty, &mut snaps, &empty_cache);
+        let mut interp = Interp::new(&mut self.globals, &mut frontier, &empty, &mut snaps, &empty_cache, &empty_actor, &empty_reads);
         interp.run(&body);
         Ok(())
     }

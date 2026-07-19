@@ -55,15 +55,25 @@ pub struct Interp<'a> {
     /// sim (values it owns, the body never writes). Checked BEFORE the frontier
     /// so these hot reads (mod_time was 134 crossings/tick on gat) stay native.
     pub tick_cache: &'a std::collections::HashMap<String, Value>,
+    /// Per-tick ACTOR-value cache: (handle, verb) -> the actor's current value,
+    /// seeded by the sim after drain for the LEARNED read set. A GetX/GetY/... on
+    /// a handle hits this instead of crossing.
+    pub actor_cache: &'a std::collections::HashMap<(u64, String), Value>,
+    /// The (handle, verb) actor reads this run made - recorded so the sim learns
+    /// which values to seed next tick. `RefCell` so a `&self` read path can push.
+    pub actor_reads: &'a std::cell::RefCell<Vec<(u64, String)>>,
 }
 
 impl<'a> Interp<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         globals: &'a mut dyn GlobalStore,
         frontier: &'a mut dyn Frontier,
         snapshottable: &'a std::collections::HashSet<String>,
         snapshots: &'a mut std::collections::HashMap<String, Value>,
         tick_cache: &'a std::collections::HashMap<String, Value>,
+        actor_cache: &'a std::collections::HashMap<(u64, String), Value>,
+        actor_reads: &'a std::cell::RefCell<Vec<(u64, String)>>,
     ) -> Interp<'a> {
         Interp {
             scopes: ScopeArena::new(),
@@ -72,6 +82,8 @@ impl<'a> Interp<'a> {
             snapshottable,
             snapshots,
             tick_cache,
+            actor_cache,
+            actor_reads,
         }
     }
 
@@ -622,6 +634,19 @@ impl<'a> Interp<'a> {
         if recv_v.is_unresolved() {
             return Value::Unresolved;
         }
+        // Actor-value getter (GetX/GetY/GetZ/getaux/GetText) on a handle: hit the
+        // per-tick actor cache the sim seeded after drain, so these ~23 reads/
+        // tick stay native. The verb is RECORDED so the sim knows which
+        // (actor,verb) to seed next tick (learn-then-cache). A miss falls to the
+        // frontier (first tick, or a verb/actor not yet learned).
+        if let Value::Handle(id) = &recv_v {
+            if args.is_empty() && is_actor_getter(name) {
+                self.actor_reads.borrow_mut().push((*id, name.to_string()));
+                if let Some(v) = self.actor_cache.get(&(*id, name.to_string())) {
+                    return v.clone();
+                }
+            }
+        }
         let arg_vs: Vec<Value> = args.iter().map(|a| self.eval(a, scope, depth)).collect();
         // A method in VALUE position is a getter read through the frontier.
         self.frontier.method(&recv_v, name, &arg_vs)
@@ -669,6 +694,16 @@ impl<'a> Interp<'a> {
             Callable::Host(id) => self.frontier.call_host(id, args),
         }
     }
+}
+
+/// Verbs that read an actor's current animated value (no args) - the ones the
+/// sim can seed into the per-tick actor cache. GetSongBeat is NOT here (it is a
+/// singleton clock, handled by the beat driver cache).
+fn is_actor_getter(name: &str) -> bool {
+    matches!(
+        name,
+        "GetX" | "GetY" | "GetZ" | "getaux" | "GetZoom" | "GetZoomX" | "GetZoomY"
+    )
 }
 
 /// A computed `_G[k]` name: only a string/number key names a global.
