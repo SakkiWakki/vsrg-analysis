@@ -428,27 +428,46 @@ class SimActor:
 
     # -- reads -----------------------------------------------------------
 
-    def get(self, prop: str):
+    def _tween_progress(self, head, at_t):
+        """The head tween's eased progress in [0, 1]. `at_t` is the CONTINUOUS
+        query time: the scheduler principle - `advance_to` establishes WHICH
+        tween is live (discrete), then the value is a closed-form ease at the
+        real `at_t`, exactly like SV's cumulative_at(raw_t). `head.left` only
+        tracks the last GRID tick, so reading progress from it quantizes the
+        motion to 60Hz (the frame-lag residual); `(at_t - _head_begin_t)/dur`
+        is continuous. `at_t=None` keeps the tick-quantized read for engine-
+        internal callers that have no sub-frame query time."""
+        if at_t is None:
+            frac = 1.0 - head.left / head.dur
+        else:
+            frac = (float(at_t) - self._head_begin_t) / head.dur
+            frac = 0.0 if frac < 0.0 else (1.0 if frac > 1.0 else frac)
+        return ease(head.ease, frac)
+
+    def get(self, prop: str, at_t=None):
         """The engine-current value: mid-flight interpolation when the
         head tween is running (GetX -> m_current, Actor.h:107), else the
-        settled value, else rest."""
+        settled value, else rest. `at_t` (continuous query time) evaluates a
+        running tween at the exact sub-frame time (see `_tween_progress`)."""
         head = self._tweens[0] if self._tweens else None
         if head is not None and head.started and head.dur > 0.0:
             dest = head.state.get(prop, _rest(prop))
             start = self._ease_start.get(prop, _rest(prop))
             if dest != start:
-                progress = 1.0 - head.left / head.dur
-                return self._lerp(start, dest, ease(head.ease, progress))
+                return self._lerp(start, dest,
+                                  self._tween_progress(head, at_t))
         value = self._current.get(prop)
         return value if value is not None else _rest(prop)
 
-    def current(self, prop: str):
+    def current(self, prop: str, at_t=None):
         """The current value of ANY recorded channel, for a live reader (lazy
         replay's LiveCurve). Same as `get` for tweened/immediate props, but also
         exposes the transform-ORDER state (`rotation_order` token, `quat` tuple)
         that the eager recorder emits as keyframes but which live outside
         `_current` (`_rotation_order`/`_quat`). Returns None when the channel has
-        no value yet, so the caller falls to that channel's rest."""
+        no value yet, so the caller falls to that channel's rest. `at_t` is the
+        continuous query time - a running tween is evaluated at the exact sub-
+        frame `at_t`, not the last grid tick (the frame-lag residual)."""
         if prop == 'rotation_order':
             return self._rotation_order
         if prop == 'quat':
@@ -458,8 +477,8 @@ class SimActor:
             dest = head.state.get(prop)
             start = self._ease_start.get(prop, _rest(prop))
             if dest is not None and dest != start:
-                progress = 1.0 - head.left / head.dur
-                return self._lerp(start, dest, ease(head.ease, progress))
+                return self._lerp(start, dest,
+                                  self._tween_progress(head, at_t))
         return self._current.get(prop)
 
     def get_dest(self, prop: str):

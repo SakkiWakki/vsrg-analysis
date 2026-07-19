@@ -155,7 +155,7 @@ class LiveCurve:
             return self._rest
         # `current` exposes ANY channel (incl the rotation_order token / quat
         # tuple that live outside _current); None -> the prop's rest.
-        value = actor.current(self._prop)
+        value = actor.current(self._prop, at_t=t)
         if value is None:
             return self._rest
         return value if isinstance(value, tuple) else (value,)
