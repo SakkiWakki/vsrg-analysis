@@ -103,16 +103,14 @@ def _compile_live(sm_path, end_seconds) -> dict | None:
                                                 doc.to_seconds)
     mod_channels = _compile_channels(declarative)
 
-    # DRIVER-injected mods (ApplyGameCommand from the per-frame Update body:
-    # gat's drunk/tipsy/hallway approach-chase bursts) inherently need a full
-    # sim pass to resolve their ramps - the ~5s sweep that made the eager bake
-    # slow. Rather than pay it up front (instant open is the whole point) or
-    # skip it (notes drift during driver windows), run it on a BACKGROUND thread
-    # and hot-swap the resolved channels into `mod_channels` IN PLACE when done.
-    # The player holds this exact ModChannels object and reads _channels every
-    # frame, so the upgrade goes live with no reference plumbing - the driver
-    # mods simply fill in a few seconds after open.
-    _spawn_driver_mod_upgrade(mod_channels, declarative, sm_path, end)
+    # BACKGROUND upgrade (one daemon sweep): resolve the driver-injected mods
+    # (gat's drunk/tipsy/hallway approach-chase bursts need a full sim pass to
+    # resolve their ramps) AND freeze the tree's never-poked LiveCurves to
+    # constants (~86% of them). Both hot-swap in place, so instant open pays for
+    # neither: the driver mods fill in and the storyboard gets cheaper to sample
+    # a few seconds after open. The player holds the same mod_channels object and
+    # the same element tree, so no reference plumbing is needed.
+    _spawn_background_upgrade(mod_channels, declarative, tree, sm_path, end)
 
     # The whole-scene camera (gat's screen zoom) is a single actor - read it
     # LIVE like the element tree, so the screen-zoom camera works instantly.
@@ -241,12 +239,23 @@ class _SweptResult:
         self.applied_mods = applied_mods
 
 
-def _spawn_driver_mod_upgrade(mod_channels, declarative, sm_path, end_seconds):
-    """Background-resolve the driver-injected mods and hot-swap them into the
-    live `mod_channels` in place (see the call site). Runs a SEPARATE LiveSim
-    (the playback sim advances during play) swept to the chart end, extracts the
-    applied stream, recompiles declarative + applied, and atomically replaces
-    the channel object's internals. A daemon thread so it never blocks exit."""
+def _spawn_background_upgrade(mod_channels, declarative, tree, sm_path,
+                             end_seconds):
+    """Background pass on a daemon thread: sweep a SEPARATE LiveSim to the chart
+    end (the playback sim advances during play), then hot-swap two things the
+    instant compile left approximate:
+
+    1. Driver-injected mods: resolve the applied ApplyGameCommand stream and
+       replace `mod_channels`' internals in place (the player holds that exact
+       object and reads it every frame).
+    2. Static storyboard timelines: ~86% of the tree's per-property LiveCurves
+       belong to a property the actor NEVER pokes (avg 1.7 animated props out of
+       38), so each frame they advance the sim + look up the actor + read a
+       channel only to return the same rest. Replace every never-poked
+       property's LiveCurve with a constant EventTimeline (its rest) IN the
+       element's mutable `timelines` dict, so the live effect samples a cheap
+       constant. Never-poked is exact: a prop absent from the swept actor's
+       `_frames` (and not a set rotation_order/quat) is provably constant."""
     import threading
 
     from analysis.games.notitg.sim.loop import LiveSim
@@ -267,9 +276,59 @@ def _spawn_driver_mod_upgrade(mod_channels, declarative, sm_path, end_seconds):
         # dict/tuple reference swap); no half-updated state is ever observed.
         mod_channels._channels = full._channels
         mod_channels._players = full._players
+        if tree:
+            _freeze_static_timelines(tree, sweep.env)
 
     threading.Thread(target=worker, daemon=True,
-                     name='notitg-lazy-driver-mods').start()
+                     name='notitg-lazy-upgrade').start()
+
+
+def _poked_props(actor) -> set:
+    """Every storyboard property the swept actor ever WROTE: its recorded
+    channel keys plus the transform-order channels that live outside `_frames`
+    (rotation_order token / quat tuple). A property NOT in this set is never
+    poked, so its LiveCurve is constant at the property's rest for all t."""
+    poked = set(actor._frames)
+    if getattr(actor, '_rotation_order', None) not in (None, 'ZYX'):
+        poked.add('rotation_order')
+    if getattr(actor, '_quat', None) is not None:
+        poked.add('quat')
+    return poked
+
+
+def _freeze_static_timelines(tree, swept_env) -> None:
+    """Replace never-poked LiveCurves in the element tree with constant
+    EventTimelines (their rest), sampled once against the fully-swept env.
+    Mutates each element's `timelines` dict in place (the frozen Element
+    dataclass holds a mutable dict), so the live storyboard effect - which
+    samples timelines every frame - sees the cheaper constants immediately."""
+    from analysis.player.render.effects.timeline import EventTimeline
+    from analysis.player.render.storyboard.model import LiveCurve
+
+    actors = swept_env._actors
+    poked_cache: dict = {}
+
+    def poked_for(rec_id):
+        if rec_id not in poked_cache:
+            actor = actors.get(rec_id)
+            poked_cache[rec_id] = _poked_props(actor) if actor else None
+        return poked_cache[rec_id]
+
+    def visit(elements):
+        for element in elements:
+            timelines = element.timelines
+            for prop, curve in list(timelines.items()):
+                if not isinstance(curve, LiveCurve):
+                    continue
+                poked = poked_for(curve._rec_id)
+                # Unknown actor (never created by chart end) - leave live rather
+                # than guess; freeze only the provably never-poked properties.
+                if poked is not None and prop not in poked:
+                    timelines[prop] = EventTimeline([], rest=curve._rest)
+            if element.children:
+                visit(element.children)
+
+    visit(tree)
 
 
 def _compile_via_sim(sm_path, end_seconds):
