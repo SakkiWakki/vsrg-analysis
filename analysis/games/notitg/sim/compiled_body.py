@@ -162,3 +162,70 @@ class CompiledBody:
             self._run_compiled(root)
         except Exception as exc:
             self._env._record_fault(self._name, exc)
+
+
+class OpStreamCompiledBody:
+    """The C op-stream sibling: the SAME parsed AST is lowered ONCE to a flat
+    op array (native_c/opstream.py) and run per tick by the C computed-goto
+    executor (native_c/exec.c) via ctypes (native_c/cbody.py). Byte-identical to
+    the Lua/interpreter path (gated by keyframe_diff). Falls back (`_ok=False`)
+    when the .so is missing or the body fails to compile, so callers degrade to
+    the Python `CompiledBody` and a missing native build never breaks a run.
+
+    The executor drives the live sim through the SAME `NotitgGuardSurface` /
+    `_LuaEnvStore` the Python path uses (only the DISPATCH is native); a rare
+    FALLBACK op routes an unmodeled node back to the Python interpreter."""
+
+    def __init__(self, env, body: str, rec_id: int, name: str):
+        self._env = env
+        self._rec_id = rec_id
+        self._name = name
+        try:
+            import os
+            import sys
+            nc = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                              'native_c')
+            if nc not in sys.path:
+                sys.path.insert(0, nc)
+            import opstream
+            import cbody
+        except Exception:
+            self._ok = False
+            return
+        try:
+            self._stmts, self._sink = parse_body(body)
+            prog = opstream.compile_body_ops(self._stmts)
+        except Exception as exc:
+            self._ok = False
+            env._warnings.append(f'{name}: opstream compile: {exc}')
+            return
+        surface = NotitgGuardSurface(env)
+        store = _LuaEnvStore(env._host.env)
+        interp = Interpreter(surface, store=store)
+        self._interp = interp
+
+        def fallback_run(node):
+            root = interp.root
+            root.bindings.clear()
+            root.bindings['self'] = self._env._tables.get(self._rec_id)
+            return interp._eval(node, root, 0)
+
+        try:
+            self._cbody = cbody.CompiledBodyC(
+                prog, surface, store, prog.nodes, fallback_run, interp=interp)
+        except Exception as exc:
+            self._ok = False
+            env._warnings.append(f'{name}: opstream link: {exc}')
+            return
+        self._ok = True
+
+    def run(self) -> None:
+        if not self._ok:
+            return
+        table = self._env._tables.get(self._rec_id)
+        if table is None:
+            return
+        try:
+            self._cbody.run(table)
+        except Exception as exc:
+            self._env._record_fault(self._name, exc)

@@ -336,6 +336,19 @@ class LiveSim:
         env.set_time(self._load_s, self._to_beats(self._load_s))
         self.warnings = env.load_actors(self._root)
         env.use_compiled_body = self._use_compiled_body
+        # C op-stream executor for the Update body (native_c/, no Lua) is the
+        # default compiled-body path (env.use_opstream_body defaults True) and
+        # falls back to the Python CompiledBody when the .so is missing. The env
+        # flag is an override in both directions: VSRG_NOTITG_OPSTREAM=1 also
+        # turns on the compiled path (the op-stream IS the compiled path); =0
+        # forces the Python interpreter for differential testing.
+        import os as _os
+        _opstream_flag = _os.environ.get('VSRG_NOTITG_OPSTREAM', '').lower()
+        if _opstream_flag in ('1', 'true', 'yes', 'on'):
+            env.use_compiled_body = True
+            env.use_opstream_body = True
+        elif _opstream_flag in ('0', 'false', 'no', 'off'):
+            env.use_opstream_body = False
         env.prepare_mod_actions()
         env.suppressed_queued_commands = frozenset(
             {update_integrator._UPDATE_COMMAND})

@@ -51,6 +51,7 @@ help:
 	@echo "  make run        - alias for the default"
 	@echo "  make venv       - create $(VENV) and install requirements"
 	@echo "  make native     - build osu_memory_native Rust extension into the venv"
+	@echo "  make cbody      - build the NotITG C op-stream body executor (libcbody.so)"
 	@echo "  make overlay    - build the gamescope in-game overlay binary"
 	@echo "  make gl-layer   - build OpenGL/EGL/GLX preload hooks"
 	@echo "  make build      - native + overlay"
@@ -112,6 +113,36 @@ $(FRAME_NATIVE_STAMP): $(FRAME_NATIVE_SRCS) | venv
 
 .PHONY: frame-native
 frame-native: $(FRAME_NATIVE_STAMP)
+
+# ─── NotITG C op-stream body executor (libcbody.so) ────────────────────
+#
+# The computed-goto op-stream executor: the Lua-free native compute core
+# for the per-tick Update body. The Python driver (native_c/cbody.py)
+# dlopen's libcbody.so from this directory via ctypes, so the build just
+# drops the shared object in place. Opt-in at runtime via
+# VSRG_NOTITG_OPSTREAM=1; the sim falls back to the Python compiled body
+# (and then Lua) when the .so is absent, so this target is not required
+# to run the app. Trust model: C only ever sees the validated op array +
+# const pool the upstream Python compiler emits, never untrusted input.
+CBODY_DIR  := analysis/games/notitg/native_c
+CBODY_SO   := $(CBODY_DIR)/libcbody.so
+CBODY_SRCS := $(CBODY_DIR)/carena.c \
+              $(CBODY_DIR)/cvalue_ops.c \
+              $(CBODY_DIR)/exec.c \
+              $(CBODY_DIR)/cbody_abi.c
+CBODY_HDRS := $(CBODY_DIR)/cvalue.h \
+              $(CBODY_DIR)/carena.h \
+              $(CBODY_DIR)/cvalue_ops.h \
+              $(CBODY_DIR)/exec.h
+
+CBODY_CFLAGS := -std=c11 -O2 -fPIC -Wall -Wextra -I$(CBODY_DIR)
+
+$(CBODY_SO): $(CBODY_SRCS) $(CBODY_HDRS)
+	$(Q)echo "[cbody] gcc $(notdir $@)"
+	$(Q)gcc $(CBODY_CFLAGS) -shared -o $@ $(CBODY_SRCS) -lm
+
+.PHONY: cbody
+cbody: $(CBODY_SO)
 
 # ─── web-texture IPC Rust extension (Linux dmabuf side channel) ───────
 
@@ -346,7 +377,7 @@ vulkan-layer-uninstall:
 # ─── aggregate ─────────────────────────────────────────────────────────
 
 .PHONY: build
-build: native frame-native overlay
+build: native frame-native cbody overlay
 
 # "Build everything" without running tests or launching. For CI or
 # packaging. The venv is implied via the native dep chain.
@@ -414,7 +445,7 @@ clean:
 	$(Q)echo "[clean] overlay binary + maturin stamp + target/"
 	$(Q)rm -f $(OVERLAY_BIN) $(GL_LAYER_SO) $(GL_LAYER_SO64_ALT) \
 	    $(GL_LAYER_SO32) $(GL_LAYER_DIR)/libvsrg_gl_overlay.so \
-	    $(GL_LAYER_DIR)/libvsrg_gl_overlay32.so $(NATIVE_STAMP)
+	    $(GL_LAYER_DIR)/libvsrg_gl_overlay32.so $(CBODY_SO) $(NATIVE_STAMP)
 	$(Q)rm -rf $(NATIVE_DIR)/target
 	$(Q)find . -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 

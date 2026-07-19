@@ -48,11 +48,23 @@ def _is_lua_table(value) -> bool:
     if type(value) is _LUA_TABLE_TYPE:
         return True
     if hasattr(value, '__getitem__') and not isinstance(value, (str, bytes)):
+        # A lupa FUNCTION is also `__getitem__`-able, so seed the cache only
+        # from an actually-iterable lupa object (a table). Learning the type
+        # from a function would invert every later `type(x) is _LUA_TABLE_TYPE`
+        # check - reporting functions as tables and tables as non-tables.
         if _LUA_TABLE_TYPE is None and type(value).__module__.startswith(
-                ('lupa', '_lupa')):
+                ('lupa', '_lupa')) and _iterable(value):
             _LUA_TABLE_TYPE = type(value)
         return True
     return False
+
+
+def _iterable(value) -> bool:
+    try:
+        iter(value)
+        return True
+    except TypeError:
+        return False
 
 
 def _is_iterable_lua_table(value) -> bool:
@@ -62,9 +74,7 @@ def _is_iterable_lua_table(value) -> bool:
     global _LUA_TABLE_TYPE
     if not type(value).__module__.startswith(('lupa', '_lupa')):
         return False
-    try:
-        iter(value)
-    except TypeError:
+    if not _iterable(value):
         return False
     if _LUA_TABLE_TYPE is None:
         _LUA_TABLE_TYPE = type(value)

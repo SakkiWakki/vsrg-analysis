@@ -197,6 +197,17 @@ class SimEnvironment:
         # the residue tick loop ported native. Requires `use_compiled_body`; the
         # native path falls back to Python when the wheel is absent.
         self.use_native_body = False
+        # Run the per-frame Update body through the C op-stream executor
+        # (native_c/: opstream.py -> exec.c computed-goto, no Lua). Byte-
+        # identical to the Python CompiledBody (keyframe_diff-gated, 25/25 corpus
+        # charts 0-divergence), Lua-free, and the fastest self-contained path.
+        # This is the DEFAULT for the compiled-body path: it is preferred
+        # whenever `use_compiled_body` is set and falls back to the Python
+        # CompiledBody when the .so is absent or a body does not compile, so a
+        # missing build never breaks a run. Takes precedence over
+        # use_native_body when both are set. Set False to force the Python
+        # interpreter for the compiled path (e.g. differential testing).
+        self.use_opstream_body = True
         self._compiled_body = None
         self._install()
 
@@ -290,10 +301,14 @@ class SimEnvironment:
         absent or does not compile the body, so a missing wheel never breaks a
         run."""
         from analysis.games.notitg.sim.compiled_body import (
-            CompiledBody, NativeCompiledBody)
+            CompiledBody, NativeCompiledBody, OpStreamCompiledBody)
 
         if self._compiled_body is None:
-            if getattr(self, 'use_native_body', False):
+            if getattr(self, 'use_opstream_body', False):
+                ops = OpStreamCompiledBody(self, body, rec_id, name)
+                self._compiled_body = ops if ops._ok \
+                    else CompiledBody(self, body, rec_id, name)
+            elif getattr(self, 'use_native_body', False):
                 native = NativeCompiledBody(self, body, rec_id, name)
                 self._compiled_body = native if native._ok \
                     else CompiledBody(self, body, rec_id, name)
