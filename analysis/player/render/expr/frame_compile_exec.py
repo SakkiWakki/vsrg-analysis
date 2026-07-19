@@ -20,7 +20,7 @@ from __future__ import annotations
 from analysis.player.render.expr import ast
 from analysis.player.render.expr.frame_eval import (
     LuaTable, Scope, UNRESOLVED, _NO_BUILTIN, _binary, _builtin_call, _num,
-    _truthy, _truthy_raw, _unary)
+    _resolved_nil, _truthy, _truthy_raw, _unary)
 
 
 def compile_body(stmts, interp):
@@ -124,7 +124,7 @@ def _compile_index(node, interp):
             return UNRESOLVED
         if b.__class__ is LuaTable:
             return b.get(k)
-        return surface.index(b, k)
+        return _resolved_nil(surface.index(b, k))
     return read_index
 
 
@@ -139,7 +139,7 @@ def _compile_field(node, interp):
             return UNRESOLVED
         if b.__class__ is LuaTable:
             return b.get(name)
-        return surface.index(b, name)
+        return _resolved_nil(surface.index(b, name))
     return read_field
 
 
@@ -153,12 +153,16 @@ def _compile_call(node, interp):
 
         def call_sym(scope):
             arg_vs = [a(scope) for a in arg_fns]
-            builtin = _builtin_call(fn_node, arg_vs)
+            builtin = _builtin_call(fn_node, arg_vs, surface)
             if builtin is not _NO_BUILTIN:
                 return builtin
             found, bound = scope.lookup(name)
             if found and callable(bound):
                 return interp._call_closure(bound, arg_vs, 0)
+            if not found:
+                global_fn = surface.symbol(name)
+                if global_fn is not UNRESOLVED and callable(global_fn):
+                    return interp._call_closure(global_fn, arg_vs, 0)
             if UNRESOLVED in arg_vs:
                 return UNRESOLVED
             return surface.call(name, arg_vs)
@@ -168,7 +172,7 @@ def _compile_call(node, interp):
 
     def call_expr(scope):
         arg_vs = [a(scope) for a in arg_fns]
-        builtin = _builtin_call(fn_node, arg_vs)
+        builtin = _builtin_call(fn_node, arg_vs, surface)
         if builtin is not _NO_BUILTIN:
             return builtin
         target = fn(scope)
@@ -312,20 +316,24 @@ def _compile_target(target, interp):
     if t is ast.Index:
         base = compile_expr(target.base, interp)
         key = compile_expr(target.key, interp)
-        return _element_setter(base, key)
+        return _element_setter(base, key, interp)
     if t is ast.Field:
         base = compile_expr(target.base, interp)
         name = target.name
-        return _element_setter(base, lambda scope: name)
+        return _element_setter(base, lambda scope: name, interp)
     return lambda scope, value: interp._emit_trace('skip-target', target)
 
 
-def _element_setter(base, key):
+def _element_setter(base, key, interp):
+    surface = interp._surface
+
     def set_element(scope, value):
         table = base(scope)
         k = key(scope)
         if table.__class__ is LuaTable and k is not UNRESOLVED:
             table.set(k, value)
+        else:
+            surface.set_index(table, k, value)
     return set_element
 
 

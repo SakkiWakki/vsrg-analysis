@@ -64,6 +64,22 @@ class Surface(Protocol):
         `key` a resolved key, else UNRESOLVED."""
         ...
 
+    def set_index(self, base: Resolution, key: Resolution, value) -> bool:
+        """`base[key] = value` on a HOST table (a lupa table a load pass built,
+        used by a body as scratch/accumulator state). Returns True when the
+        write landed on a host table the surface owns, False when `base` is not
+        such a table (the interpreter's own `LuaTable` writes itself). A surface
+        with no live host to mutate (window extraction) is a no-op returning
+        False."""
+        ...
+
+    def is_host_table(self, value) -> bool:
+        """True when `value` is a host table (a lupa table a load pass built).
+        Lets the value-model tell a host TABLE from a host FUNCTION when both are
+        opaque, callable host objects - so `type(t)` reports `'table'`, not
+        `'function'`. A surface with no host world returns False."""
+        ...
+
     def call(self, name: str, args: list) -> Resolution:
         """`name(args)` (e.g. `perframe`) -> value, else UNRESOLVED. `args`
         are already-resolved (a caller passes UNRESOLVED through)."""
@@ -119,6 +135,13 @@ class ConstSurface:
         except (IndexError, ValueError, TypeError):
             return UNRESOLVED
         return UNRESOLVED
+
+    def set_index(self, base: Resolution, key: Resolution, value) -> bool:
+        # No live host to mutate: window extraction reads constants only.
+        return False
+
+    def is_host_table(self, value) -> bool:
+        return False
 
     def call(self, name: str, args: list) -> Resolution:
         return UNRESOLVED

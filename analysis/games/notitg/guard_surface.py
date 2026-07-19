@@ -55,6 +55,22 @@ def _is_lua_table(value) -> bool:
     return False
 
 
+def _is_iterable_lua_table(value) -> bool:
+    """A lupa TABLE (iterable) vs a lupa FUNCTION (not) - both indexable, so the
+    coarse `_is_lua_table` cannot tell them apart. Only a lupa host object
+    qualifies; a table also seeds `_LUA_TABLE_TYPE` for the fast path."""
+    global _LUA_TABLE_TYPE
+    if not type(value).__module__.startswith(('lupa', '_lupa')):
+        return False
+    try:
+        iter(value)
+    except TypeError:
+        return False
+    if _LUA_TABLE_TYPE is None:
+        _LUA_TABLE_TYPE = type(value)
+    return True
+
+
 def _lua_index(table, key) -> Resolution:
     """Read `table[key]` from a raw lupa table, returning the RAW Lua value
     (a nested table stays a raw table, a function stays callable) so it round-
@@ -135,6 +151,34 @@ class NotitgGuardSurface:
         except (IndexError, ValueError, TypeError):
             return UNRESOLVED
         return UNRESOLVED
+
+    def set_index(self, base: Resolution, key: Resolution, value) -> bool:
+        """`base[key] = value` on a lupa host table (a body writing scratch
+        state - `pc_strinkku[i] = string.sub(...)`). Mirrors `index`'s key rule
+        (string key = field, numeric = 1-based element). UNRESOLVED marshals to
+        nil so a host table never stores the sentinel. Returns True on a landed
+        write, False when `base` is not a host table (the interpreter's own
+        LuaTable handles itself upstream)."""
+        if base is UNRESOLVED or key is UNRESOLVED:
+            return False
+        if type(base) is not _LUA_TABLE_TYPE and not _is_lua_table(base):
+            return False
+        try:
+            base[key if isinstance(key, str) else int(key)] = \
+                None if value is UNRESOLVED else value
+        except (KeyError, TypeError, ValueError):
+            return False
+        return True
+
+    def is_host_table(self, value) -> bool:
+        # Strict: a lupa TABLE, not a lupa FUNCTION. Both are callable host
+        # objects that duck-type as indexable (`_is_lua_table` says yes to
+        # both), so `type()` needs the finer split - a table iterates, a
+        # function does not. Prefer the exact learned type; fall back to the
+        # iterability probe (which also learns the type on first table sight).
+        if _LUA_TABLE_TYPE is not None:
+            return type(value) is _LUA_TABLE_TYPE
+        return _is_iterable_lua_table(value)
 
     def call(self, name: str, args: list) -> Resolution:
         if name != 'perframe' or not args or any(a is UNRESOLVED for a in args):

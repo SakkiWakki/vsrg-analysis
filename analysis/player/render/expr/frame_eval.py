@@ -91,7 +91,11 @@ class LuaTable:
             self._data[k] = value
 
     def get(self, key):
-        return self._data.get(_norm_key(key), UNRESOLVED)
+        # An absent key is Lua nil (None), NOT UNRESOLVED: the table is a
+        # resolved value, so `t[absent]` is a KNOWN nil - `t[k] or x` must then
+        # evaluate x. (`set` already collapses a stored nil to removal, so absent
+        # and nil are indistinguishable here, which is exactly Lua's rule.)
+        return self._data.get(_norm_key(key))
 
     def length(self) -> int:
         # Lua `#t` / table.getn: the border of the 1..n contiguous array run.
@@ -308,6 +312,8 @@ class Interpreter:
             else self._eval(key, scope, depth)
         if isinstance(table, LuaTable) and k is not UNRESOLVED:
             table.set(k, value)
+        elif self._surface.set_index(table, k, value):
+            return
         else:
             self._emit_trace('skip-target', base)
 
@@ -434,7 +440,7 @@ class Interpreter:
                 return UNRESOLVED
             if b.__class__ is LuaTable:
                 return b.get(node.name)
-            return self._surface.index(b, node.name)
+            return _resolved_nil(self._surface.index(b, node.name))
         if t is ast.Unary:
             return _unary(node.op, self._eval(node.operand, scope, depth))
         if t is ast.Nil:
@@ -480,7 +486,7 @@ class Interpreter:
             return UNRESOLVED
         if b.__class__ is LuaTable:
             return b.get(k)
-        return self._surface.index(b, k)
+        return _resolved_nil(self._surface.index(b, k))
 
     def _eval_method(self, recv, name, args, scope, depth):
         # A method in VALUE position is a getter read through the surface.
@@ -494,7 +500,7 @@ class Interpreter:
         arg_vs = [self._eval(a, scope, depth) for a in args]
         # Lua stdlib over the interpreter's own LuaTable (table.insert, ipairs,
         # ...): handled here so a table-building chart never needs a host table.
-        builtin = _builtin_call(fn, arg_vs)
+        builtin = _builtin_call(fn, arg_vs, self._surface)
         if builtin is not _NO_BUILTIN:
             return builtin
         # A call to an in-scope closure re-enters the interpreter; otherwise
@@ -504,6 +510,10 @@ class Interpreter:
                 found, bound = scope.lookup(name)
                 if found and callable(bound):
                     return self._call_closure(bound, arg_vs, depth)
+                if not found:
+                    global_fn = self._surface.symbol(name)
+                    if global_fn is not UNRESOLVED and callable(global_fn):
+                        return self._call_closure(global_fn, arg_vs, depth)
                 if UNRESOLVED in arg_vs:
                     return UNRESOLVED
                 return self._surface.call(name, arg_vs)
@@ -585,17 +595,39 @@ def _closure_depth_guard(interp) -> int:
     return 1
 
 
+def _resolved_nil(value):
+    """Map a surface index/field read of a RESOLVED base+key from UNRESOLVED to
+    nil (None). The surface returns UNRESOLVED for an absent element so guard-
+    window extraction skips a guard reading an unknown constant; but in the
+    residue tick loop the base and key are already resolved, so an absent field
+    is a KNOWN nil, not an unprovable read. The distinction is load-bearing for
+    `and`/`or`: `t[absent] or x` must evaluate `x` (nil is falsy), whereas an
+    UNRESOLVED left poisons the operator (skip, do not guess). Callers apply
+    this ONLY where the base was already checked resolved."""
+    return None if value is UNRESOLVED else value
+
+
 # Sentinel: this call is not a stdlib builtin (distinct from a builtin that
 # legitimately returns None/UNRESOLVED).
 _NO_BUILTIN = object()
 
 
-def _builtin_call(fn, args):
-    """The Lua stdlib functions the interpreter services over its own
-    `LuaTable` - `table.insert/remove/getn`, `#`-style length. Returns
+def _builtin_call(fn, args, surface=None):
+    """The Lua stdlib functions the interpreter services itself - the
+    value-inspection globals (`type`/`tonumber`/`tostring`) and the
+    `table.insert/remove/getn` family over its own `LuaTable`. Returns
     `_NO_BUILTIN` when `fn` is not one of them (so the caller falls through to
-    closures/the surface). A call whose table arg is not a LuaTable is not a
-    builtin here either - it flows on (a host table handles its own)."""
+    closures/the surface). A `table.*` call whose table arg is not a LuaTable is
+    not a builtin here either - it flows on (a host table handles its own).
+    `surface` (when given) lets `type` tell a host table from a host function."""
+    if isinstance(fn, ast.Sym):
+        if fn.name == 'type' and args:
+            return _lua_type(args[0], surface)
+        if fn.name == 'tonumber' and args:
+            return _lua_tonumber(args[0], args[1] if len(args) > 1 else None)
+        if fn.name == 'tostring' and args:
+            return _lua_tostring(args[0])
+        return _NO_BUILTIN
     if not isinstance(fn, ast.Field) or not isinstance(fn.base, ast.Sym):
         return _NO_BUILTIN
     if fn.base.name != 'table' or not args or not isinstance(args[0], LuaTable):
@@ -610,6 +642,73 @@ def _builtin_call(fn, args):
         case 'getn':
             return float(table.length())
     return _NO_BUILTIN
+
+
+def _lua_type(value, surface=None) -> str:
+    """Lua `type(v)` -> the type name string. `nil`/UNRESOLVED is `'nil'`; the
+    primitives map directly; a `LuaTable` is `'table'`. A host object is
+    ambiguous - a lupa table AND a lupa function are both `callable`, so a host
+    table is asked of `surface` FIRST (else it would mis-report `'function'` and
+    break a `type(t) == 'table'` gate). Any remaining callable - an interpreter
+    closure or a host function - is `'function'`."""
+    if value is UNRESOLVED or value is None:
+        return 'nil'
+    if isinstance(value, bool):
+        return 'boolean'
+    if isinstance(value, (int, float)):
+        return 'number'
+    if isinstance(value, str):
+        return 'string'
+    if value.__class__ is LuaTable:
+        return 'table'
+    if surface is not None and surface.is_host_table(value):
+        return 'table'
+    if callable(value):
+        return 'function'
+    return 'table'
+
+
+def _lua_tonumber(value, base):
+    """Lua `tonumber(v[, base])` -> a number, or nil when `v` does not name one.
+    A number passes through; a numeric string parses (respecting an optional
+    integer base); anything else (nil/UNRESOLVED/table/bool) is nil. Faithful to
+    the setter idiom `setstate(tonumber(t[k]))`, where a nil parse leaves the
+    frame at its default rather than poking a bogus value."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        if value.strip().lower().lstrip('+-') in ('inf', 'nan', 'infinity'):
+            # Python `float('inf'/'nan')` parses these words; Lua `tonumber`
+            # does not (a non-finite only arises from numeric overflow, e.g.
+            # `1e400`, which float() still yields). Reject the words -> nil.
+            return None
+        try:
+            if base is not None:
+                return float(int(value.strip(), int(base)))
+            return float(int(value, 0)) if _is_int_literal(value) \
+                else float(value)
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def _is_int_literal(text: str) -> bool:
+    return text.strip().lower().startswith(('0x', '-0x', '+0x'))
+
+
+def _lua_tostring(value) -> str:
+    """Lua `tostring(v)` -> its string form. nil/UNRESOLVED is `'nil'`, a bool
+    is `'true'`/`'false'`, an integer-valued float drops the `.0` (Lua prints
+    `2`, not `2.0`) via `_concat`."""
+    if value is UNRESOLVED or value is None:
+        return 'nil'
+    if value is True:
+        return 'true'
+    if value is False:
+        return 'false'
+    return _concat(value)
 
 
 def _table_insert(table: LuaTable, rest) -> None:

@@ -132,4 +132,40 @@ def _scan_string(text: str, i: int) -> tuple[Token, int]:
         j += 1
     if j >= n:
         return Token(Tok.ERROR, text[i:j], (i, j)), j
-    return Token(Tok.STRING, text[i + 1:j], (i, j + 1)), j + 1
+    return Token(Tok.STRING, _decode_escapes(text[i + 1:j]), (i, j + 1)), j + 1
+
+
+# Lua single-char string escapes -> their character. `\ddd` decimal escapes are
+# handled separately (variable length); an unknown `\x` keeps `x` (Lua drops the
+# backslash). The token value is the DECODED string, so a `'a\nb'` literal
+# concatenates as a real newline (the lexer previously stored the raw two-char
+# `\n`, which then round-tripped into recorded text as a literal backslash-n).
+_STRING_ESCAPES = {
+    'n': '\n', 't': '\t', 'r': '\r', 'a': '\a', 'b': '\b', 'f': '\f',
+    'v': '\v', '\\': '\\', '"': '"', "'": "'", '\n': '\n',
+}
+
+
+def _decode_escapes(raw: str) -> str:
+    if '\\' not in raw:
+        return raw
+    out = []
+    i = 0
+    n = len(raw)
+    while i < n:
+        c = raw[i]
+        if c != '\\' or i + 1 >= n:
+            out.append(c)
+            i += 1
+            continue
+        nxt = raw[i + 1]
+        if nxt.isdigit():
+            j = i + 1
+            while j < n and raw[j].isdigit() and j - (i + 1) < 3:
+                j += 1
+            out.append(chr(int(raw[i + 1:j]) & 0xFF))
+            i = j
+            continue
+        out.append(_STRING_ESCAPES.get(nxt, nxt))
+        i += 2
+    return ''.join(out)

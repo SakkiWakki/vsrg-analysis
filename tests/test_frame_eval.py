@@ -180,3 +180,53 @@ def test_g_table_computed_global_write_and_read():
 def test_index_assignment_into_a_table():
     root = _run('t = {}\nt.foo = 7\nt[1] = 9\na = t.foo\nb = t[1]')
     assert root.get('a') == 7.0 and root.get('b') == 9.0
+
+
+# -- stdlib value-inspection builtins ----------------------------------------
+
+def test_type_builtin_names_each_value_kind():
+    # `type(v)` drives dispatch gates (`if type(x) == 'function'`); each kind
+    # must name itself. A LuaTable is 'table', an interpreter closure is
+    # 'function', an unset name is 'nil'.
+    root = _run("f = function() end\n"
+                "tn = type(3)\nts = type('x')\ntb = type(true)\n"
+                "tt = type({})\ntf = type(f)\ntz = type(missing)")
+    assert root.get('tn') == 'number'
+    assert root.get('ts') == 'string'
+    assert root.get('tb') == 'boolean'
+    assert root.get('tt') == 'table'
+    assert root.get('tf') == 'function'
+    assert root.get('tz') == 'nil'
+
+
+def test_tonumber_parses_strings_and_passes_numbers():
+    root = _run("a = tonumber('2')\nb = tonumber(5)\n"
+                "c = tonumber('nope')\nd = tonumber('0x1F')")
+    assert root.get('a') == 2.0
+    assert root.get('b') == 5.0
+    assert root.get('c') is None            # unparsable -> nil
+    assert root.get('d') == 31.0            # hex literal
+
+
+def test_tostring_stringifies_lua_style():
+    root = _run("a = tostring(2)\nb = tostring(true)\nc = tostring(missing)")
+    assert root.get('a') == '2'             # integer float drops the .0
+    assert root.get('b') == 'true'
+    assert root.get('c') == 'nil'
+
+
+def test_absent_table_field_is_nil_not_unresolved_for_or():
+    # A resolved table indexed at an absent key is a KNOWN nil, so `t[k] or x`
+    # evaluates x (nil is falsy). This is the residue-loop semantics the guard
+    # UNRESOLVED discipline must NOT poison - the Machine Wave action-dispatch
+    # gate `t[3] or beat < t[1]+2` hinges on it.
+    root = _run("t = {10}\nr = t[3] or 99")
+    assert root.get('r') == 99.0
+
+
+def test_string_escape_sequences_decode_to_characters():
+    # A `\n` in a string literal is a real newline, not a literal backslash-n
+    # (the POP debug-text divergence: recorded text had a literal \\n). `\t`
+    # and an escaped quote decode too.
+    root = _run("s = 'a\\nb\\tc\\'d'")
+    assert root.get('s') == "a\nb\tc'd"

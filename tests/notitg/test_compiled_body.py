@@ -52,6 +52,66 @@ def test_math_library_resolves_in_compiled_body():
     assert diff_runs(lua, comp, sample_grid(0.0, 3.0)) == []
 
 
+def _run_with_globals(setup, update_wrapped, compiled, beats=(0.0, 2.0, 4.0)):
+    """Like `_run` but runs `setup` (a Lua chunk) in the host env FIRST - so a
+    body can rely on a global host function or a load-populated host table, the
+    way a real chart's InitCommand seeds one."""
+    body = _strip_lua_wrapper(update_wrapped)
+    env = SimEnvironment(0.0, 0, to_seconds=lambda b: b * 0.5)
+    env.load_actors(parse_actor_xml(
+        '<ActorFrame><children><Quad Name="Q"/></children></ActorFrame>').root)
+    env._host.compile(setup)()
+    env.use_compiled_body = compiled
+    rec = _quad_id(env)
+    env._host.env['self'] = env._tables[rec]
+    for beat in beats:
+        env.set_time(beat * 0.5, beat)
+        env._host.env['beat'] = beat
+        env.run_update_body(body, rec_id=rec)
+    return env
+
+
+def test_global_host_function_call_resolves_in_compiled_body():
+    # A body calling a GLOBAL host function (`SecondsToClock`, defined at load
+    # in the host env, not a body local) must invoke it - not fall to the
+    # surface's free-call path and return nil (the Private Caller regression).
+    setup = "function dub(n) return n * 2 end"
+    body = '%function(self) self:x(dub(beat) + 100) end'
+    lua = _run_with_globals(setup, body, compiled=False)
+    comp = _run_with_globals(setup, body, compiled=True)
+    assert diff_runs(lua, comp, sample_grid(0.0, 3.0)) == []
+    # and it actually moved (not a nil-arg no-op parity)
+    rec = _quad_id(comp)
+    assert 'x' in comp.actor_keyframes().get(rec, {})
+
+
+def test_host_table_write_lands_in_compiled_body():
+    # `t[i] = expr` on a LOAD-POPULATED host table must write through the
+    # surface (the interpreter's own LuaTable path skips a host table). The
+    # Private Caller `pc_strinkku[i] = string.sub(...)` scratch-state idiom.
+    setup = "scratch = {}"
+    body = ('%function(self) scratch[1] = beat * 3 '
+            'self:x(scratch[1] + 10) end')
+    lua = _run_with_globals(setup, body, compiled=False)
+    comp = _run_with_globals(setup, body, compiled=True)
+    assert diff_runs(lua, comp, sample_grid(0.0, 3.0)) == []
+
+
+def test_type_of_host_function_and_table_dispatch_in_compiled_body():
+    # `type(v)` over host values drives action dispatch (Machine Wave's
+    # `type(action) == 'function'` gate). A host function is 'function', a host
+    # table is 'table' - both must match Lua so the same branch fires.
+    setup = "helper = function() return 5 end\ndata = {1, 2}"
+    body = ('%function(self) '
+            "if type(helper) == 'function' then self:x(helper() * beat) end "
+            "if type(data) == 'table' then self:y(200) end end")
+    lua = _run_with_globals(setup, body, compiled=False)
+    comp = _run_with_globals(setup, body, compiled=True)
+    assert diff_runs(lua, comp, sample_grid(0.0, 3.0)) == []
+    rec = _quad_id(comp)
+    assert 'y' in comp.actor_keyframes().get(rec, {})  # the 'table' gate fired
+
+
 def test_lua_env_store_shares_globals_with_the_host():
     # A global the interpreter writes is visible in the Lua env (one
     # namespace), so a guard or another body reads what the body wrote.
