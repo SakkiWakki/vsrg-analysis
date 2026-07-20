@@ -183,8 +183,14 @@ class OpStreamCompiledBody:
         try:
             import os
             import sys
-            nc = os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                              'native_c')
+            # The C op-stream executor is game-agnostic and lives in the shared
+            # render/expr tree; NotITG supplies only the surface + program.
+            # __file__ = analysis/games/notitg/sim/compiled_body.py; four
+            # dirnames reach the `analysis` dir, then into the shared expr tree.
+            nc = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(
+                    os.path.dirname(__file__)))),
+                'player', 'render', 'expr', 'native_c')
             if nc not in sys.path:
                 sys.path.insert(0, nc)
             import opstream

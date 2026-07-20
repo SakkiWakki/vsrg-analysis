@@ -124,7 +124,7 @@ frame-native: $(FRAME_NATIVE_STAMP)
 # (and then Lua) when the .so is absent, so this target is not required
 # to run the app. Trust model: C only ever sees the validated op array +
 # const pool the upstream Python compiler emits, never untrusted input.
-CBODY_DIR  := analysis/games/notitg/native_c
+CBODY_DIR  := analysis/player/render/expr/native_c
 CBODY_SO   := $(CBODY_DIR)/libcbody.so
 CBODY_SRCS := $(CBODY_DIR)/carena.c \
               $(CBODY_DIR)/cvalue_ops.c \
