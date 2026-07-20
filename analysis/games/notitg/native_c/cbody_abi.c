@@ -153,6 +153,29 @@ uint64_t cbody_intern(CBody *b, const char *s, int len) {
 uint64_t cbody_frame_get(CBody *b, int slot) { return (uint64_t)b->frame[slot]; }
 void     cbody_frame_set(CBody *b, int slot, uint64_t v) { b->frame[slot] = (CValue)v; }
 
+/* --- arena table construction (the load-set snapshot) ------------------- */
+/* Build a read-only DATA table into the arena ONCE at compile so nested
+ * v[i][j] indexing resolves in C (exec.c INDEX fast path) instead of crossing
+ * back to Python every read. Python deep-copies a lupa host array table
+ * (native_frontier._deep_copy semantics) and mirrors it here bottom-up:
+ * new_array(n) -> seti(i, elem) for each 1-based slot -> the boxed TABLE
+ * CValue is handed back and cached as the symbol's value. */
+uint64_t cbody_table_new_array(CBody *b, int n) {
+    return (uint64_t)cv_table(carena_table_new_array(b->arena, (size_t)n));
+}
+void cbody_table_seti(CBody *b, uint64_t tbl_cv, int64_t i, uint64_t v) {
+    carena_table_seti(b->arena, cv_payload((CValue)tbl_cv), i, (CValue)v);
+}
+/* Read an arena table's array element / length (1-based, Lua). Lets iter_next
+ * yield ARENA rows for a snapshotted table so v[j] inside the loop stays in C
+ * instead of crossing to a lupa row. */
+uint64_t cbody_table_geti(CBody *b, uint64_t tbl_cv, int64_t i) {
+    return (uint64_t)carena_table_geti(b->arena, cv_payload((CValue)tbl_cv), i);
+}
+int64_t cbody_table_len(CBody *b, uint64_t tbl_cv) {
+    return carena_table_len(b->arena, cv_payload((CValue)tbl_cv));
+}
+
 /* Value constructors for Python (so it can build args/results without knowing
  * the box layout). */
 uint64_t cbody_num(double d)   { return (uint64_t)cv_num(d); }

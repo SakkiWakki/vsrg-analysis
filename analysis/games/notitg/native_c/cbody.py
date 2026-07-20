@@ -21,6 +21,11 @@ from analysis.player.render.expr.frame_eval import (
 
 _LIB = None
 
+# Cache sentinel: a snapshot candidate not yet resolved. Distinct from a cached
+# None (resolved, not snapshottable -> use the crossing path) so each name is
+# probed at most once.
+_SNAP_MISS = object()
+
 
 def _load_lib():
     global _LIB
@@ -47,6 +52,13 @@ def _load_lib():
     lib.cbody_frame_get.restype = u64
     lib.cbody_frame_get.argtypes = [ctypes.c_void_p, ctypes.c_int]
     lib.cbody_frame_set.argtypes = [ctypes.c_void_p, ctypes.c_int, u64]
+    lib.cbody_table_new_array.restype = u64
+    lib.cbody_table_new_array.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    lib.cbody_table_seti.argtypes = [ctypes.c_void_p, u64, ctypes.c_int64, u64]
+    lib.cbody_table_geti.restype = u64
+    lib.cbody_table_geti.argtypes = [ctypes.c_void_p, u64, ctypes.c_int64]
+    lib.cbody_table_len.restype = ctypes.c_int64
+    lib.cbody_table_len.argtypes = [ctypes.c_void_p, u64]
     for name, ret, args in [
         ('cbody_num', u64, [ctypes.c_double]), ('cbody_nil', u64, []),
         ('cbody_true', u64, []), ('cbody_false', u64, []),
@@ -94,6 +106,16 @@ class CompiledBodyC:
         self._nodes = fallback_nodes   # node-id -> AST node for FALLBACK
         self._fallback_run = fallback_run  # (node, env_read, env_write) -> value
         self._interp = interp          # for invoking host-fn globals (call_sym)
+        # Load-set snapshot: bare-symbol reads the body never writes, resolved
+        # once to an arena TABLE so nested v[i][j] indexing stays in C. `symbol`
+        # consults these before crossing; None caches a non-snapshottable result.
+        self._snap_names = set(getattr(program, 'symbol_reads', ()) or ())
+        self._snap_cache: dict[str, int] = {}
+        # arena TABLE id -> the original lupa host table it snapshots. INDEX
+        # resolves in C, but the rare crossing of a snapshotted table back to
+        # Python (type()/#/passed to a host fn) returns the real host object so
+        # its semantics match the non-snapshot path exactly.
+        self._table_origin: dict[int, object] = {}
 
         ser = program.serialize()
         self._b = self._lib.cbody_new(ser['nslots'], 4096)
@@ -161,12 +183,64 @@ class CompiledBodyC:
         if lib.cbody_is_handle(cv):
             hid = lib.cbody_handle_id(cv)
             return self._handles.get(hid)
-        # a table (arena) crossing to Python is rare here (fallback path); return
-        # None as a placeholder - the fallback bridge does not need arena tables.
+        if lib.cbody_is_table(cv):
+            # A snapshotted load-set table crossing back to Python (type()/#/
+            # passed to a host fn): return the ORIGINAL host object so its
+            # semantics match the non-snapshot path. INDEX never reaches here -
+            # it resolves in C against the arena.
+            return self._table_origin.get(lib.cbody_handle_id(cv))
         return None
 
     def _args(self, arr, argc):
         return [self._from_cv(arr[i]) for i in range(argc)]
+
+    def _snapshot_symbol(self, name):
+        """Resolve a never-written symbol to an arena TABLE CValue, or None if it
+        is not a snapshottable host DATA table (then `symbol` falls through to
+        the crossing path). Mirrors native_frontier._deep_copy: only a PURE
+        nested-array lupa table (v/mods/e...) snapshots; a keyed/mixed table or a
+        table holding a function/actor stays on the frontier."""
+        r = self._surface.symbol(name)
+        obj = r
+        if obj is UNRESOLVED or obj is None or not self._surface.is_host_table(obj):
+            return None
+        cv = self._copy_into_arena(obj)
+        if cv is not None:
+            self._table_origin[self._lib.cbody_handle_id(cv)] = obj
+        return cv
+
+    def _copy_into_arena(self, obj, depth=0):
+        """A lupa ARRAY table -> an arena TABLE CValue (nested arrays recurse);
+        primitives box directly; a non-primitive, non-pure-array leaf aborts the
+        whole snapshot (returns None) so the table stays crossing. Bounded depth
+        guards a self-referential table."""
+        if depth > 16:
+            return None
+        if obj is None or isinstance(obj, bool):
+            return self._to_cv(obj)
+        if isinstance(obj, (int, float)):
+            return self._lib.cbody_num(float(obj))
+        if isinstance(obj, str):
+            e = obj.encode('utf-8', 'surrogatepass')
+            return self._lib.cbody_intern(self._b, e, len(e))
+        if not self._surface.is_host_table(obj):
+            return None
+        items = list(obj.items())
+        n = len(items)
+        pure_array = all(
+            isinstance(k, (int, float)) and float(k).is_integer()
+            and 1 <= int(k) <= n for k, _ in items)
+        if not pure_array:
+            return None
+        ordered = sorted(items, key=lambda kv: int(kv[0]))
+        tbl = self._lib.cbody_table_new_array(self._b, n)
+        for idx, (_, v) in enumerate(ordered, start=1):
+            cv = self._copy_into_arena(v, depth + 1)
+            if cv is None and v is not None:
+                return None
+            self._lib.cbody_table_seti(self._b, tbl, idx,
+                                       self._lib.cbody_nil() if cv is None else cv)
+        return tbl
 
     def _call_host(self, fn, args):
         """Invoke a host (lupa) callable resolved from a symbol - the call_sym
@@ -183,9 +257,19 @@ class CompiledBodyC:
     def _install_frontier(self):
         surf = self._surface
         store = self._store
+        lib = self._lib
+        nil_cv = lib.cbody_nil()
 
         def symbol(ctx, name):
-            r = surf.symbol(name.decode())
+            nm = name.decode()
+            if nm in self._snap_names:
+                cv = self._snap_cache.get(nm, _SNAP_MISS)
+                if cv is _SNAP_MISS:
+                    cv = self._snapshot_symbol(nm)
+                    self._snap_cache[nm] = cv
+                if cv is not None:
+                    return cv
+            r = surf.symbol(nm)
             return self._to_cv(_res(r))
         def gget(ctx, name):
             v = store.get(name.decode()) if store is not None else UNRESOLVED
@@ -249,13 +333,19 @@ class CompiledBodyC:
                 except Exception:
                     pass
         def iter_setup(ctx, exprs, n):
-            # exprs = [mode, table]: mode 0=ipairs, 1=pairs. Build the (k,v) rows
-            # matching frame_eval._iter_pairs: a host _LuaTable iterates via
-            # surface.iter_table; an arena/py list-like via ipairs/pairs.
-            mode = int(self._from_cv(exprs[0]))
-            table = self._from_cv(exprs[1])
-            rows = _iter_rows(surf, mode, table)
-            it = iter(rows)
+            # exprs = [mode, table]: mode 0=ipairs, 1=pairs. A SNAPSHOTTED table
+            # (arena TABLE CValue) iterates directly over the arena, yielding
+            # (index, arena-row) pairs already as CValues - so v[j] inside the
+            # loop hits the arena INDEX fast path instead of a lupa row crossing.
+            # Otherwise fall back to the host iteration (surface.iter_table),
+            # matching frame_eval._iter_pairs.
+            table_cv = exprs[1]
+            if lib.cbody_is_table(table_cv):
+                it = self._arena_rows(table_cv)
+            else:
+                mode = int(self._from_cv(exprs[0]))
+                rows = _iter_rows(surf, mode, self._from_cv(table_cv))
+                it = ([self._to_cv(c) for c in row] for row in rows)
             h = self._handle_next; self._handle_next += 1
             self._handles[h] = it
             return h
@@ -266,7 +356,7 @@ class CompiledBodyC:
             except StopIteration:
                 return 0
             for i in range(nvars):
-                vars_out[i] = self._to_cv(row[i] if i < len(row) else None)
+                vars_out[i] = row[i] if i < len(row) else nil_cv
             return 1
         def fallback(ctx, node_id, frame, nslots):
             node = self._nodes[node_id]
@@ -288,6 +378,17 @@ class CompiledBodyC:
         )
         ptrs = [ctypes.cast(c, ctypes.c_void_p) for c in self._cb]
         self._lib.cbody_set_frontier(self._b, None, *ptrs)
+
+    def _arena_rows(self, table_cv):
+        """Iterate a snapshotted (arena) table as (index_cv, element_cv) pairs,
+        both CValues, so iter_next writes them without marshalling and any v[j]
+        on an element row stays in the C INDEX fast path. A snapshotted table is
+        a dense pure array (no holes), so ipairs and pairs agree on the 1..n
+        run - hence one iterator regardless of mode."""
+        lib = self._lib
+        n = lib.cbody_table_len(self._b, table_cv)
+        for i in range(1, n + 1):
+            yield (lib.cbody_num(float(i)), lib.cbody_table_geti(self._b, table_cv, i))
 
     def run(self, self_table):
         self._handles.clear(); self._obj_to_handle.clear()

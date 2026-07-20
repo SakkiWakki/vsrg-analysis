@@ -102,6 +102,10 @@ class Compiler:
         self.nodes: list = []           # FALLBACK node pool
         self._name_id: dict[str, int] = {}
         self.nslots = 0
+        # Names read as bare frontier symbols (LOAD_SYMBOL) and never written -
+        # candidates to snapshot into the arena so nested v[i][j] indexing never
+        # crosses back to Python. `writes` are excluded when compile() runs.
+        self._symbol_reads: set[str] = set()
 
     # -- pools --
     def _const(self, value):
@@ -150,7 +154,7 @@ class Compiler:
             self._stmt(s, root)
         self._emit(Op.RETURN_HALT)
         return OpProgram(self.ops, self.consts, self.names, self.nodes,
-                         self.nslots)
+                         self.nslots, self._symbol_reads)
 
     # -- statements --
     def _stmt(self, node, scope):
@@ -359,6 +363,7 @@ class Compiler:
             self._emit(Op.LOAD_GLOBAL, self._name(node.name))
         else:
             # a frontier symbol: driver clock (beat), an actor global, a host fn
+            self._symbol_reads.add(node.name)
             self._emit(Op.LOAD_SYMBOL, self._name(node.name))
 
     def _field(self, node, scope):
@@ -473,12 +478,14 @@ class OpProgram:
     """The compiled body: op records + pools + slot count. `serialize()` packs
     into the flat buffers the C executor consumes."""
 
-    def __init__(self, ops, consts, names, nodes, nslots):
+    def __init__(self, ops, consts, names, nodes, nslots, symbol_reads=None):
         self.ops = ops
         self.consts = consts
         self.names = names
         self.nodes = nodes
         self.nslots = nslots
+        # Bare-symbol reads never written by the body: arena-snapshot candidates.
+        self.symbol_reads = symbol_reads or set()
 
     def summary(self):
         from collections import Counter
