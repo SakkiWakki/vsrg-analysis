@@ -508,12 +508,15 @@ class SimEnvironment:
         return out
 
     def named_actor_ids(self) -> dict:
-        """recorder id -> bound global name (first one seen), for
-        labeling producer output."""
+        """recorder id -> bound global name, for labeling producer output.
+        When several globals bind the same actor, the lexicographically
+        smallest name wins - a STABLE tiebreak, because `_host.env.items()`
+        iteration order is not deterministic (a hash-seed artifact), and the
+        chosen label is what keyframe_diff joins on."""
         out = {}
-        for key, value in self._host.env.items():
-            if not isinstance(key, str):
-                continue
+        for key, value in sorted(
+                ((k, v) for k, v in self._host.env.items()
+                 if isinstance(k, str)), key=lambda kv: kv[0]):
             rec_id = self._table_rec_id(value)
             if rec_id is not None and rec_id not in out:
                 out[rec_id] = key
@@ -727,6 +730,41 @@ class SimEnvironment:
     def _label(self, rec_id) -> str:
         return self._labels.get(rec_id, f'actor#{rec_id}')
 
+    def actor_tree_paths(self) -> dict:
+        """rec_id -> a STABLE structural identity (its path from the root by
+        actor kind + sibling index, e.g. `ActorFrame[3]/Quad[1]`). Unlike the
+        `kind#rec_id` label or the `actor#rec_id` fallback, this is chart-
+        intrinsic - identical across any run of the same chart regardless of
+        rec-id assignment order - so a cross-run diff can join anonymous actors
+        that carry no `file:Name`. Roots are the registered actors with no
+        parent, ordered by rec_id (load order is deterministic)."""
+        parent_of = {}
+        for parent, kids in self._children.items():
+            for child in kids:
+                parent_of[child] = parent
+        paths = {}
+
+        def kind_of(rid):
+            actor = self._actors.get(rid)
+            return getattr(actor, 'kind', 'Actor') if actor else 'Actor'
+
+        def path_of(rid):
+            if rid in paths:
+                return paths[rid]
+            parent = parent_of.get(rid)
+            if parent is None:
+                seg = f'{kind_of(rid)}'
+            else:
+                siblings = self._children.get(parent, ())
+                idx = siblings.index(rid) if rid in siblings else 0
+                seg = f'{path_of(parent)}/{kind_of(rid)}[{idx}]'
+            paths[rid] = seg
+            return seg
+
+        for rid in sorted(self._labels):
+            path_of(rid)
+        return paths
+
     def _id_for(self, actor) -> int:
         existing = getattr(actor, '_sim_id', None)
         if existing is not None:
@@ -745,7 +783,7 @@ class SimEnvironment:
         actor.beat_fn = lambda: self._beat
         actor.queue_notify = lambda: self._queued.add(rec_id)
         self._actors[rec_id] = actor
-        self._tables[rec_id] = self._host.env['__make_recorder'](rec_id)
+        self._tables[rec_id] = self._host.env["__make_recorder"](rec_id)
         self._active.append(rec_id)
         return rec_id
 
@@ -1103,7 +1141,7 @@ class SimEnvironment:
             'Broadcast': self._broadcast,
         })))
         self._screen_id = self._new_actor()
-        top_screen = self._host.env['__make_screen_recorder'](self._screen_id)
+        top_screen = self._host.env["__make_screen_recorder"](self._screen_id)
         self._tables[self._screen_id] = top_screen
         host.expose('SCREENMAN', singleton(host.to_lua({
             'SystemMessage': lambda _self, *_a: None,

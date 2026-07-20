@@ -132,11 +132,28 @@ def _by_label(env, labels) -> dict:
 
 
 def _env_labels(env) -> dict:
-    """rec_id -> label using the env's own `_labels` map (source `file:Name`),
-    falling back to bound-global names for anything unlabeled."""
-    labels = dict(getattr(env, '_labels', {}))
-    for rec_id, name in env.named_actor_ids().items():
-        labels.setdefault(rec_id, name)
+    """rec_id -> a CROSS-RUN-STABLE label for the diff join. Priority:
+      1. a real source `file:Name` (chart-intrinsic, no `#rec_id` suffix);
+      2. a bound-global name (`named_actor_ids`, stable tiebreak);
+      3. the actor's structural tree path (`actor_tree_paths`).
+    A raw `kind#rec_id` label or the `actor#rec_id` fallback is NEVER used to
+    join two runs - the rec_id is a run artifact, so those buckets would not
+    line up (two runs assign ids in different order). The tree path is the
+    stable identity for the anonymous actors that dominate a real chart."""
+    raw = dict(getattr(env, '_labels', {}))
+    named = env.named_actor_ids()
+    paths = env.actor_tree_paths() if hasattr(env, 'actor_tree_paths') else {}
+    labels = {}
+    for rec_id in set(raw) | set(named) | set(paths):
+        source = raw.get(rec_id, '')
+        if source and '#' not in source:
+            labels[rec_id] = source          # real file:Name
+        elif rec_id in named:
+            labels[rec_id] = named[rec_id]    # bound-global name
+        elif rec_id in paths:
+            labels[rec_id] = f'@{paths[rec_id]}'  # structural tree path
+        else:
+            labels[rec_id] = source or f'actor#{rec_id}'
     return labels
 
 
