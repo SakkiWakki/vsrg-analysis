@@ -209,7 +209,18 @@ class SimEnvironment:
         # interpreter for the compiled path (e.g. differential testing).
         self.use_opstream_body = True
         self._compiled_body = None
+        self._native_host = None
         self._install()
+
+    @property
+    def _native(self):
+        """The lazily-built native execution host (interpreter over the shared
+        lupa namespace). Load-pass chunks run through this instead of compiling
+        as lupa chunks; see sim.native_host."""
+        if self._native_host is None:
+            from analysis.games.notitg.sim.native_host import NativeHost
+            self._native_host = NativeHost(self)
+        return self._native_host
 
     # -- declarative tables (the classic template's event data) ----------
 
@@ -608,10 +619,9 @@ class SimEnvironment:
         if not expr:
             return False
         name = f'{self._actor_label(actor, "?")}.Condition'
-        try:
-            result = self._host.compile(f'return ({expr})', name=name)()
-        except Exception as exc:
-            self._warnings.append(f'{name}: {exc}')
+        result, error = self._native.eval_expr(expr)
+        if error is not None:
+            self._warnings.append(f'{name}: {error}')
             # A faulting gate keeps a plain actor (a permissive-stub
             # error must not drop real content) but DROPS a looped
             # include - re-expanding on a broken condition would spin
@@ -627,13 +637,12 @@ class SimEnvironment:
             if not value.startswith('@'):
                 continue
             name = f'{self._actor_label(actor, "?")}.{attr}@'
-            try:
-                result = self._host.compile(
-                    f'return ({value[1:].strip()})', name=name)()
-            except Exception as exc:
-                self._warnings.append(f'{name}: {exc}')
+            result, error = self._native.eval_expr(value[1:].strip())
+            if error is not None:
+                self._warnings.append(f'{name}: {error}')
                 continue
-            if isinstance(result, (str, int, float)):
+            if isinstance(result, (str, int, float)) and not isinstance(
+                    result, bool):
                 actor.attrs[attr] = str(result)
 
     def _expand_includes(self, actor) -> None:
