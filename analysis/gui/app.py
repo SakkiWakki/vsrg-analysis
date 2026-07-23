@@ -138,6 +138,13 @@ def _apply_default_gl_format():
 
 
 def main():
+    # Shrink the GIL switch interval (default 5ms). Background compile
+    # sweeps (NotITG lazy replay) share the interpreter with the render
+    # thread, and CPython's handoff favors the thread that just dropped
+    # the GIL: at 5ms a saturated render thread starves a sweep ~1000x
+    # (frozen visuals, live audio). Measured on gat2 worst-case: 0.5ms
+    # buys the sweep ~10x for a few percent of render-thread throughput.
+    sys.setswitchinterval(0.0005)
     _apply_default_gl_format()
     # ``AA_ShareOpenGLContexts`` makes every QOpenGLWidget share its GL
     # context with the global one. Needed so our future GL web-texture
