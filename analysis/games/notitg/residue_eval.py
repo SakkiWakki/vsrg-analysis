@@ -23,6 +23,7 @@ what they touch.
 """
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass, field
 
 from analysis.games.notitg.lua_api import _SCALAR_GETTERS
@@ -53,6 +54,16 @@ class _GameState:
 
 
 _GAMESTATE = _GameState()
+
+
+class _GlobalsView:
+    """`_G[name]` dynamic-global indexing (the walking rig's
+    `_G['gat_pos'..i]` idiom): indexes resolve exactly like bare
+    symbols."""
+    __slots__ = ()
+
+
+_G_VIEW = _GlobalsView()
 
 
 class _ActorRef:
@@ -101,13 +112,19 @@ class LaneSurface:
     guesswork."""
 
     def __init__(self, names_to_rec, actors, action_lanes, tables, out,
-                 host_env=None):
+                 host_env=None, global_sets=None):
         self._names = names_to_rec          # actor global -> rec_id
         self._actors = actors               # rec_id -> SimActor (load state)
         self._lanes = action_lanes          # rec_id -> {prop: [lane]}
         self._tables = tables               # table global -> _MemberTable
         self._out = out                     # EvaluatedResidue
         self._host_env = host_env           # post-load globals (scalars)
+        # name -> ([t...], [value...]) step timelines from handler
+        # global writes; consulted before the post-load fallback.
+        self._global_steps = {
+            name: ([t for t, _v in sorted(rows)],
+                   [v for _t, v in sorted(rows)])
+            for name, rows in (global_sets or {}).items()}
         self.now = 0.0
         self.beat = 0.0
         self.player = 1
@@ -118,6 +135,8 @@ class LaneSurface:
     def symbol(self, name: str):
         if name == 'GAMESTATE':
             return _GAMESTATE
+        if name == '_G':
+            return _G_VIEW
         table = self._tables.get(name)
         if table is not None:
             return table
@@ -131,6 +150,11 @@ class LaneSurface:
         post-load-values approximation the action lowering documents. A
         global the body itself writes overlays through the store first,
         so this only serves load-time constants."""
+        steps = self._global_steps.get(name)
+        if steps is not None:
+            i = bisect_right(steps[0], self.now) - 1
+            if i >= 0:
+                return steps[1][i]
         if self._host_env is None:
             return UNRESOLVED
         try:
@@ -177,6 +201,8 @@ class LaneSurface:
         return float(rest) if isinstance(rest, (int, float)) else UNRESOLVED
 
     def index(self, base, key):
+        if base is _G_VIEW and isinstance(key, str):
+            return self.symbol(key)
         if isinstance(base, _MemberTable) and isinstance(key, (int, float)):
             members = base.members_at(self.now)
             i = int(key)
@@ -293,8 +319,8 @@ def _rewrite_field(value):
             return value
 
 
-def evaluate_residue(live, registrations, player: int = 1
-                     ) -> EvaluatedResidue | None:
+def evaluate_residue(live, registrations, player: int = 1,
+                     global_sets=None) -> EvaluatedResidue | None:
     """Evaluate the Update body over its residue windows against the
     lane world. `registrations` is schedule_lower's {table: [(t,
     rec_id)]}. Returns None when there is no body or no windows."""
@@ -319,7 +345,8 @@ def evaluate_residue(live, registrations, player: int = 1
 
     out = EvaluatedResidue()
     surface = LaneSurface(names_to_rec, env._actors, action_lanes,
-                          tables, out, host_env=env._host.env)
+                          tables, out, host_env=env._host.env,
+                          global_sets=global_sets)
     surface.player = player
     store = _DictStore()
     interp = Interpreter(surface, store=store)

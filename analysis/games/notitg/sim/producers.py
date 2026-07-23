@@ -392,7 +392,9 @@ def _attach_evaluated_residue(live, preview) -> str:
     from analysis.games.notitg import residue_eval, schedule_lower
 
     try:
-        result = residue_eval.evaluate_residue(live, preview.registrations)
+        result = residue_eval.evaluate_residue(
+            live, preview.registrations,
+            global_sets=preview.global_sets)
     except Exception as exc:
         return f'; residue eval failed: {exc}'
     if result is None:

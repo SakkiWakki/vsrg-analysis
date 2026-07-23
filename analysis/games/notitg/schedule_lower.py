@@ -58,6 +58,7 @@ class PreviewCompile:
     lanes: dict = field(default_factory=dict)
     applied: list = field(default_factory=list)
     registrations: dict = field(default_factory=dict)
+    global_sets: dict = field(default_factory=dict)
     emissions: dict = field(default_factory=dict)
     lifted_handlers: int = 0
     residue_handlers: int = 0
@@ -70,6 +71,7 @@ class _Handler:
     resets_queue: bool = False
     applied: list = field(default_factory=list)
     registrations: list = field(default_factory=list)
+    global_sets: list = field(default_factory=list)
 
     def segs(self, target):
         return self.by_target.setdefault(target, [])
@@ -104,6 +106,11 @@ def lower_actions(env, player: int = 1, to_beats=None) -> PreviewCompile:
                                  depth)
         if handler is None:
             out.residue_handlers += 1
+            # Registrations and global writes are facts about WHAT FIRES,
+            # not partial pokes - harvest them even from handlers whose
+            # verbs cannot lower, so the residue evaluation knows
+            # membership and section flags regardless.
+            _harvest_side_facts(env, rec_id, body, beat, fire_s, out)
             continue
         out.lifted_handlers += 1
         fires = _fold_handler(rec_id, handler, fire_s, beat, player,
@@ -142,6 +149,9 @@ def _fold_handler(rec_id, handler, fire_s, beat, player,
     for table_name, member in handler.registrations:
         out.registrations.setdefault(table_name, []).append(
             (fire_s, member))
+    for global_name, value in handler.global_sets:
+        out.global_sets.setdefault(global_name, []).append(
+            (fire_s, value))
 
     fires: list = []
     for target, segs in handler.by_target.items():
@@ -230,6 +240,28 @@ def _emission_time(e) -> float:
             return e.t
 
 
+def _harvest_side_facts(env, rec_id, body, beat, fire_s, out) -> None:
+    if not isinstance(body, str) or not body.startswith('%'):
+        return
+    try:
+        stmts, _diags = parse_body(_strip_lua_wrapper(body))
+    except Exception:
+        return
+    for stmt in stmts:
+        match stmt:
+            case ast.ExprStmt(expr=ast.Call(
+                    fn=ast.Field(base=ast.Sym(name='table'), name='insert'),
+                    args=(ast.Sym(name=table_name), ast.Sym(name='self')))):
+                out.registrations.setdefault(table_name, []).append(
+                    (fire_s, rec_id))
+            case ast.Assign(targets=(ast.Sym(name=global_name),),
+                            values=(value_node,)):
+                value = _const_node(env, value_node, beat, fire_s)
+                if value is not None:
+                    out.global_sets.setdefault(global_name, []).append(
+                        (fire_s, value))
+
+
 # -- one handler body -> Schedule pieces --------------------------------
 
 def _lower_handler(env, names, rec_id, body, beat, fire_s,
@@ -278,6 +310,16 @@ def _lua_steps(env, names, rec_id, body, beat, fire_s):
                 # collection. Pure schedule data - membership becomes a
                 # known interval for the residue evaluation.
                 steps.append((rec_id, '__register__', [table_name]))
+            case ast.Assign(targets=(ast.Sym(name=global_name),),
+                            values=(value_node,)):
+                # A handler global write (walk speeds, section flags):
+                # becomes a step timeline the residue evaluation reads
+                # at its exact fire time.
+                value = _const_node(env, value_node, beat, fire_s)
+                if value is None:
+                    return None
+                steps.append((rec_id, '__setglobal__',
+                              [global_name, value]))
             case _:
                 return None
     return steps
@@ -324,6 +366,9 @@ def _apply_verb(env, names, rec_id, target, verb, values, index,
         return True
     if verb == '__register__':
         handler.registrations.append((values[0], target))
+        return True
+    if verb == '__setglobal__':
+        handler.global_sets.append((values[0], values[1]))
         return True
     if verb in ('queuecommand', 'playcommand'):
         return _inline_named(env, names, rec_id, target, values, handler,
