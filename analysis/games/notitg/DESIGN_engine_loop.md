@@ -205,6 +205,53 @@ These interface with the SV engine, the compiled-document clock table
 (axis 5), and the per-map custom buffer as ONE set, not parallel
 systems.
 
+## Schedule IR (2026-07-23 revision; concretizes "Events, not keyframes")
+
+Engine finding that drives this (openitg Actor.cpp, verified directly):
+the WHOLE actor timing framework is an exact schedule algebra, not a
+per-frame mechanism. `UpdateTweening` (Actor.cpp:469) drains the queue
+with exact arithmetic (`min(timeLeft, dt)` + remainder carry), so entry
+boundaries land at exact offsets at ANY frame rate; `Sleep` is a timed
+no-op tween + zero barrier (:1068); `QueueCommand` is a zero-length
+entry with a command fired when it becomes head (:1074, :484-495);
+hibernate is a prefix sleep with leftover carry (:545-554); effect
+clocks snap to beat/time or wrap at period+delay (the LoopClock case,
+:564-593). Frames are observation points; the framework itself has NO
+sequential state. Only chart Lua accumulators are residue (corpus
+census: thin tail; ~47% of body pokes closed-form; painters are
+authored f(beat) curves).
+
+Therefore the compiler's IR is the Schedule (the scheduler formalism
+promoted to compile target):
+
+    Schedule ::= Seg(dur, ease, targets)   -- one queue entry
+               | Seq(parts...)             -- the tween queue
+               | At(t0, body)              -- a mods/mod_actions row
+               | Effect(ast)               -- command at a boundary
+               | Loop(period, body)        -- re-arm fixpoint / effect timer
+               | OnClock(clock, body)      -- beat vs seconds vs timer
+
+Stages: (B) LOWER rows/commands/rigs into Schedule -- mods rows ->
+At(window); mod_actions -> At(Effect(ast)); tween chains -> Seq of Segs
+via the engine fold (zero-dt command guard, hibernate carry, depth-50
+bound); Update rig -> Loop(rearm, body); SetEffect* -> OnClock(Loop).
+(C) EVALUATE Schedule -> per-channel SegmentTimelines: pure folding,
+no environment, cost ~ event count. Effects that lift (f(clock)
+painters, derived-curve composition, chase filters) evaluate to
+closed-form segments; the rest are RESIDUE WITH KNOWN INTERVALS.
+(D) The one LiveSim sweeps ONLY residue intervals (piecewise skip
+elsewhere); reads stay two-layer (swept-exact behind the frontier,
+schedule-evaluated beyond).
+
+Deletes at convergence: the preview-env idea, mandatory whole-chart
+sweeps, perframe special cases, the osc-span side machinery. Mirin's
+declarative front-end becomes just another lowering into Schedule.
+
+Phases: (1) render/schedule.py queue fold (game-agnostic, specced by
+the verbs_tween synthetic axis vs the sim); (2) mod_actions -> lanes at
+compile, cold-seek diff gate; (3) painter/derived lift via requests.py;
+(4) piecewise sweep; (5) effect verbs as OnClock/Loop.
+
 ## Verification
 
 Full suite (~1362) green at every phase; oracle montages structurally
