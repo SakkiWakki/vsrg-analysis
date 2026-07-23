@@ -35,6 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from analysis.games.notitg import update_integrator
+from analysis.games.notitg.lua_api import _SCALAR_GETTERS as _SCALAR_GETTER_PROP
 from analysis.games.notitg.frame_ir import (
     build_frames, effective_window, iter_updates)
 from analysis.games.notitg.flatteners import affine_kernel, route
@@ -63,8 +64,10 @@ class _DriverOnlySurface:
     poke reading a local or non-driver global fails to compile and stays
     evaluation."""
 
-    def __init__(self, inner):
+    def __init__(self, inner, preview_lanes=None, body_written=None):
         self._inner = inner
+        self._preview = preview_lanes or {}
+        self._body_written = body_written or frozenset()
 
     def symbol(self, name):
         if name in _DRIVER_SYMBOLS:
@@ -81,6 +84,19 @@ class _DriverOnlySurface:
         if name in _DRIVER_SYMBOLS:
             return self._inner.clock_reader(name)
         return None
+
+    def method_reader(self, recv, verb):
+        """`other:GetX()` as a curve over the receiver's compiled preview
+        lane - the derived-driver case. Refused when the BODY also writes
+        that property (the preview lane would miss the body's own
+        contribution: a feedback loop, not a derived curve)."""
+        prop = _SCALAR_GETTER_PROP.get(verb)
+        if prop is None or (recv, prop) in self._body_written:
+            return None
+        lanes = self._preview.get(recv, {}).get(prop)
+        if not lanes or len(lanes) != 1:
+            return None
+        return lanes[0].sample
 
 # setter method -> the single scalar property it records (a bulk setter writing
 # a tuple of props is left to evaluation here - the closed form bake covers scalars).
@@ -104,16 +120,22 @@ class UpdatePlan:
     evaluated: int = 0
 
 
-def compile_update(body: str, surface, to_seconds) -> UpdatePlan:
+def compile_update(body: str, surface, to_seconds,
+                   preview_lanes=None) -> UpdatePlan:
     """Route every VarUpdate in `body`; bake the closed-form-routed scalar pokes to
     keyframes over their effective window, and collect the windows of everything
     that stays evaluated. `surface` compiles coefficient channels (a live
     `NotitgGuardSurface` for beat-driven curves); `to_seconds` maps beats to the
-    song-time tick grid."""
+    song-time tick grid. `preview_lanes` ({actor global: {prop: [lane]}})
+    lets derived reads (`other:GetX()`) resolve as curves over already-
+    compiled timelines."""
     frame_root = build_frames(body)
     updates = list(iter_updates(frame_root))
     sole = _sole_writer_props(updates)
-    driver_surface = _DriverOnlySurface(surface)
+    body_written = frozenset(
+        split for update, _frame in updates
+        if (split := _split_actor_prop(update.name)) is not None)
+    driver_surface = _DriverOnlySurface(surface, preview_lanes, body_written)
     plan = UpdatePlan()
     attention_spans = []
     for update, frame in updates:

@@ -231,6 +231,7 @@ class AffineFlattener:
         if value is None:
             return None
         target = _target_sym(update.node)
+        value = _substitute(value, frame, target)
         if target is None:
             a_node, b_node = None, value
         else:
@@ -264,6 +265,58 @@ class AffineFlattener:
 
 
 # -- name resolution up the frame chain --------------------------------------
+
+
+_SUBSTITUTE_DEPTH = 8
+
+
+def _substitute(node: ast.Node, frame: Frame, target: str | None,
+                depth: int = 0) -> ast.Node:
+    """Inline frame bindings into an expression: a bare Sym bound in the
+    frame chain becomes its defining expression (a `local`) or a literal
+    (an unrolled loop variable), recursively, so a poke argument routed
+    through locals still reaches the channel compiler. The recurrence
+    `target` stays a Sym (the self-reference `_split_affine` keys on);
+    unbound names are left for the surface to resolve or refuse."""
+    if depth > _SUBSTITUTE_DEPTH:
+        return node
+    match node:
+        case ast.Sym(name=name) if name != target:
+            bound = _resolve(name, frame)
+            match bound:
+                case bool():
+                    return node
+                case int() | float():
+                    return ast.Num(span=node.span, value=float(bound))
+                case ast.Node():
+                    return _substitute(bound, frame, target, depth + 1)
+                case _:
+                    return node
+        case ast.Unary(op=op, operand=operand):
+            return ast.Unary(span=node.span, op=op,
+                             operand=_substitute(operand, frame, target,
+                                                 depth + 1))
+        case ast.Binary(op=op, left=left, right=right):
+            return ast.Binary(
+                span=node.span, op=op,
+                left=_substitute(left, frame, target, depth + 1),
+                right=_substitute(right, frame, target, depth + 1))
+        case ast.Call(fn=fn, args=args):
+            return ast.Call(span=node.span, fn=fn, args=tuple(
+                _substitute(a, frame, target, depth + 1) for a in args))
+        case ast.Method(recv=recv, name=name, args=args):
+            return ast.Method(
+                span=node.span, name=name,
+                recv=_substitute(recv, frame, target, depth + 1),
+                args=tuple(_substitute(a, frame, target, depth + 1)
+                           for a in args))
+        case ast.Index(base=base, key=key):
+            return ast.Index(
+                span=node.span,
+                base=_substitute(base, frame, target, depth + 1),
+                key=_substitute(key, frame, target, depth + 1))
+        case _:
+            return node
 
 
 def _resolve(name: str, frame: Frame | None):

@@ -1071,7 +1071,8 @@ def _element_timelines(actor, keyframes, sim, rests=None):
         if rec_id is None:
             rec_id = getattr(actor, '_sim_id', None)
         if rec_id is not None:
-            return build_live_timelines(sim, rec_id, rests=rests)
+            from analysis.games.notitg.sim.seg_read import timelines_for
+            return timelines_for(sim, rec_id, rests=rests)
     return build_timelines(rests=rests, keyframes=keyframes)
 
 
@@ -1613,7 +1614,8 @@ def _screen_transform_live(sim):
     screen_id = getattr(sim.env, '_screen_id', None)
     if screen_id is None:
         return None
-    return build_live_timelines(sim, screen_id, rests=_SCREEN_RESTS)
+    from analysis.games.notitg.sim.seg_read import timelines_for
+    return timelines_for(sim, screen_id, rests=_SCREEN_RESTS)
 
 
 def _screen_oscillator_timelines(env, osc_context) -> dict | None:

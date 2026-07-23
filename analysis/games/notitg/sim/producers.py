@@ -128,8 +128,12 @@ def _compile_live(sm_path, end_seconds) -> dict | None:
     # the sweep lands). All hot-swap in place, so instant open pays for none of
     # it: the driver mods fill in, the storyboard gets cheaper, and the full
     # field-instance set appears a few seconds after open.
+    from analysis.games.notitg.sim.seg_read import segtl_enabled
+    shared_sim = live if segtl_enabled() else None
+    preview_note = _attach_preview(live) if shared_sim is not None else ''
     _spawn_background_upgrade(mod_channels, tree, field_instances,
-                             sm_path, end)
+                             sm_path, end, live_sim=shared_sim,
+                             to_seconds=doc.to_seconds)
 
     return {
         'mod_events': declarative, 'mod_channels': mod_channels,
@@ -142,10 +146,12 @@ def _compile_live(sm_path, end_seconds) -> dict | None:
         'aft_bg_visible': None, 'base_field_hidden': None,
         '_live_sim': live,
         'named_actors': 0, 'recorded_keyframes': 0,
-        'warnings': list(live.warnings) + ['lazy replay (VSRG_NOTITG_LAZY): '
-                                           'element tree + declarative mods + '
-                                           'field instances live; driver-applied '
-                                           'mods fill in via background compile'],
+        'warnings': list(live.warnings) + [
+            'lazy replay (VSRG_NOTITG_LAZY): element tree + declarative '
+            'mods + field instances live; driver-applied mods fill in via '
+            'background compile'
+            + ('; segment-timeline reads (VSRG_NOTITG_SEGTL)' + preview_note
+               if segtl_enabled() else '')],
     }
 
 
@@ -173,6 +179,7 @@ class _LiveFieldInstances:
             doc.to_seconds, doc.start_beat, doc.end_seconds)
         self._cache = None
         self._cache_sig = None
+        self._cache_expiry = 0.0
         # The topology source: which actors are proxies/AFTs/fills, their
         # targets, and the NoteField synthetic-child mapping. The PLAYBACK sim
         # only knows the topology GetChild/SetTarget calls have fired UP TO the
@@ -205,12 +212,74 @@ class _LiveFieldInstances:
         # and rebuild every frame (gat oscillates only ~t8-48; the other ~8min
         # reuse the cache). This is why an earlier topology-only cache froze the
         # field - it missed the open-span exception.
+        # In segment-read mode the ONE sim races to the chart end on a
+        # daemon thread while this runs per-frame on the render thread;
+        # a dict resized mid-iteration raises RuntimeError. The rebuild
+        # is a pure read, so on a collision serve the previous frame's
+        # list - the next frame retries (and the sweep is done within
+        # seconds of launch, after which the env is quiescent).
+        self._nudge_sweep()
+        try:
+            return self._build_instances()
+        except RuntimeError:
+            return self._cache or []
+
+    def _nudge_sweep(self) -> None:
+        """A WALL-budgeted slice of the sweep on the render thread (~3ms
+        per frame): a guaranteed frontier floor that no GIL handoff can
+        starve, costing a bounded fraction of the frame regardless of
+        how expensive the chart region is to simulate. Non-blocking: if
+        the worker holds the lock it is already making progress."""
+        import time as _time
+
+        live = self._live
+        lock = getattr(live, 'sweep_lock', None)
+        if lock is None or live.frontier >= live._end_seconds:
+            return
+        live.render_seen = _time.monotonic()
+        if lock.acquire(blocking=False):
+            try:
+                deadline = _time.perf_counter() + 0.003
+                while (_time.perf_counter() < deadline
+                       and live.frontier < live._end_seconds):
+                    live.advance_to(min(live.frontier + 0.02,
+                                        live._end_seconds))
+            finally:
+                lock.release()
+
+    def _build_instances(self):
         env = self._live.env
+        # Before the sweep hands over the topology, a list built from the
+        # RACING env can be torn yet carry the final signature - never
+        # pin it. But rebuilding every frame during the sweep steals
+        # render headroom exactly when the sweep needs it, so pre-handover
+        # frames reuse the last build for a short TTL: a torn list can
+        # survive at most one TTL, and the handover invalidation ends the
+        # regime entirely.
+        import time as _time
+        if self._topology_env is None:
+            now = _time.monotonic()
+            if self._cache is not None and now < self._cache_expiry:
+                return self._cache
+            instances = self._rebuild(env)
+            self._cache = instances
+            self._cache_sig = None
+            self._cache_expiry = now + 0.25
+            return instances
+
         oscillating = self._oscillating(env)
         sig = None if oscillating else self._topology_sig(env)
         if sig is not None and sig == self._cache_sig:
             return self._cache
 
+        instances = self._rebuild(env)
+        # Cache only closed-oscillator frames; an oscillating frame's list holds
+        # a frozen open-span copy and must never be reused.
+        self._cache = instances if not oscillating else None
+        self._cache_sig = sig
+        return instances
+
+    def _rebuild(self, env):
         # Oscillator state is LIVE (playback env); the instance STRUCTURE uses
         # the swept env once available (complete topology) so proxy/AFT/fill
         # copies all appear. rec_ids match between the two sims, so the links'
@@ -226,15 +295,10 @@ class _LiveFieldInstances:
         # env.named_actor_keyframes() here (which re-simplifies every named
         # actor's poke stream, invalidated each tick during playback) was pure
         # per-frame waste, so pass an empty map.
-        instances = _sim_field_instances(
+        return _sim_field_instances(
             self._doc, topology_env, None, osc_context,
             {}, field_oscillators,
             self._mod_channels, t0=self._t0, live_sim=self._live)
-        # Cache only closed-oscillator frames; an oscillating frame's list holds
-        # a frozen open-span copy and must never be reused.
-        self._cache = instances if not oscillating else None
-        self._cache_sig = sig
-        return instances
 
     def _oscillating(self, env) -> bool:
         """Any player field with an OPEN oscillator span (its delta channel
@@ -273,11 +337,45 @@ class _SweptResult:
         self.applied_mods = applied_mods
 
 
+def _attach_preview(live) -> str:
+    """Schedule-lower the staged actions into preview lanes on the live
+    sim's actors (the beyond-frontier read layer). Conservative by
+    construction; a failure just means no preview, never a bad one."""
+    from analysis.games.notitg import schedule_lower
+
+    try:
+        preview = schedule_lower.lower_actions(live.env,
+                                               to_beats=live._to_beats)
+    except Exception as exc:
+        return f'; action preview failed: {exc}'
+    for rec_id, lanes in preview.lanes.items():
+        actor = live.env._actors.get(rec_id)
+        if actor is not None:
+            actor._seg_preview = lanes
+
+    # The Update body's closed-form half fills in body-driven props the
+    # actions never touch; action lanes win where both exist.
+    body_lanes, body_note = schedule_lower.lower_update_body(live)
+    for rec_id, lanes in body_lanes.items():
+        actor = live.env._actors.get(rec_id)
+        if actor is None:
+            continue
+        for prop, lane in lanes.items():
+            actor._seg_preview.setdefault(prop, lane)
+    return (f'; action preview: {preview.lifted_handlers} handlers -> '
+            f'{sum(len(v) for v in preview.lanes.values())} channels '
+            f'({preview.residue_handlers} residue)') + body_note
+
+
 def _spawn_background_upgrade(mod_channels, tree, field_provider,
-                             sm_path, end_seconds):
-    """Background pass on a daemon thread: sweep a SEPARATE LiveSim to the chart
-    end (the playback sim advances during play), then hot-swap three things the
-    instant compile left approximate:
+                             sm_path, end_seconds, live_sim=None,
+                             to_seconds=None):
+    """Background pass on a daemon thread: sweep to the chart end, then
+    hot-swap three things the instant compile left approximate. With
+    `live_sim` (the segment-read default) the sweep advances THAT sim -
+    the one recording sim serves both playback reads (behind its
+    frontier) and this pass; without it (LiveCurve fallback) a separate
+    sweep sim is built so the playback sim stays at the playhead.
 
     1. Driver-injected mods: resolve the applied ApplyGameCommand stream and
        replace `mod_channels`' internals in place (the player holds that exact
@@ -301,13 +399,50 @@ def _spawn_background_upgrade(mod_channels, tree, field_provider,
     from analysis.games.notitg.sim.loop import LiveSim
 
     def worker():
-        doc = load_chart(sm_path)
-        if doc is None:
-            return
-        sweep = LiveSim(doc.root, doc.to_seconds, doc.start_beat, end_seconds,
-                        rng_seed=doc.rng_seed, song_dir=doc.lua_dir.parent,
-                        use_compiled_body=_compiled_body_flag())
-        sweep.advance_to(end_seconds)
+        if live_sim is not None:
+            sweep = live_sim
+            sweep_seconds = to_seconds
+        else:
+            doc = load_chart(sm_path)
+            if doc is None:
+                return
+            sweep = LiveSim(doc.root, doc.to_seconds, doc.start_beat,
+                            end_seconds, rng_seed=doc.rng_seed,
+                            song_dir=doc.lua_dir.parent,
+                            use_compiled_body=_compiled_body_flag())
+            sweep_seconds = doc.to_seconds
+        # Chunked advance with progress to stderr: on a loaded machine
+        # the sweep can take minutes, and "still compiling to X" vs
+        # "broken" must be decidable from the terminal.
+        import sys
+        import time as _time
+        chunk_start = _time.monotonic()
+        last_print = 0.0
+        lock = getattr(sweep, 'sweep_lock', None)
+        while sweep.now < end_seconds:
+            # While frames are rendering, the render-thread nudge owns
+            # the sweep: a starved worker holding the lock through a
+            # slow chunk would lock the healthy thread out of its own
+            # floor (measured as a 0x inversion). The worker drives only
+            # when no frame has arrived recently (launch, pause, menu).
+            if (lock is not None and
+                    _time.monotonic() - getattr(sweep, 'render_seen', 0.0)
+                    < 0.5):
+                _time.sleep(0.05)
+                continue
+            target = min(sweep.now + 0.25, end_seconds)
+            if lock is not None:
+                with lock:
+                    sweep.advance_to(target)
+                _time.sleep(0.001)
+            else:
+                sweep.advance_to(target)
+            if sweep.now - last_print >= 30.0 or sweep.now >= end_seconds:
+                last_print = sweep.now
+                print(f'[notitg] background compile: {sweep.now:.0f}s '
+                      f'/ {end_seconds:.0f}s '
+                      f'({_time.monotonic() - chunk_start:.0f}s elapsed)',
+                      file=sys.stderr)
         # Re-read the declarative mods from the SWEPT env, not the load-time
         # capture: some charts populate their mods/mods2 tables from the Update
         # BODY (e.g. a beat-gated ApplyModifiers loop), so at load the table is
@@ -315,7 +450,7 @@ def _spawn_background_upgrade(mod_channels, tree, field_provider,
         # table entries carry their own beat/time windows, so reading the fully
         # populated table once at the end preserves the time-windowing.
         swept_declarative = modfile._normalize_mod_events(
-            _TableView(sweep.env), doc.to_seconds)
+            _TableView(sweep.env), sweep_seconds)
         applied = _mod_events(_SweptResult(sweep.env.applied_mods))
         full = _compile_channels(swept_declarative + applied)
         # Swap the resolved channels/players into the object the player holds.
@@ -356,6 +491,7 @@ def _freeze_static_timelines(tree, swept_env) -> None:
     Mutates each element's `timelines` dict in place (the frozen Element
     dataclass holds a mutable dict), so the live storyboard effect - which
     samples timelines every frame - sees the cheaper constants immediately."""
+    from analysis.games.notitg.sim.seg_read import SegCurve
     from analysis.player.render.effects.timeline import EventTimeline
     from analysis.player.render.storyboard.model import LiveCurve
 
@@ -372,7 +508,7 @@ def _freeze_static_timelines(tree, swept_env) -> None:
         for element in elements:
             timelines = element.timelines
             for prop, curve in list(timelines.items()):
-                if not isinstance(curve, LiveCurve):
+                if not isinstance(curve, (LiveCurve, SegCurve)):
                     continue
                 poked = poked_for(curve._rec_id)
                 # Unknown actor (never created by chart end) - leave live rather
@@ -694,8 +830,8 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
         elif getattr(actor, '_aft_fill', False):
             kind, player = 'fill', 0
             if live_sim is not None:
-                from analysis.player.render.storyboard.model import LiveCurve
-                color = LiveCurve(live_sim, rec_id, 'color', (1.0, 1.0, 1.0))
+                from analysis.games.notitg.sim.seg_read import curve_for
+                color = curve_for(live_sim, rec_id, 'color', (1.0, 1.0, 1.0))
             else:
                 color = EventTimeline(
                     (actor_keyframes.get(rec_id) or {}).get('color', []),

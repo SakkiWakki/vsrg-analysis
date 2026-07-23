@@ -366,6 +366,28 @@ class LiveSim:
         self.env = env
         self._t = self._load_s
         self._next_body_t = self._load_s
+        # Guards concurrent advancement: the background sweep holds it
+        # per chunk, and the render thread's per-frame nudge tries it
+        # non-blocking (advance_to is not reentrant).
+        import threading
+        self.sweep_lock = threading.Lock()
+        # Monotonic time of the last rendered frame's nudge attempt: the
+        # background worker parks while rendering is live, so the
+        # render-thread nudge owns the sweep without lock contention.
+        self.render_seen = 0.0
+        # Evaluated (non-closed-form) beat windows of the Update body,
+        # set by the schedule lowering when it runs; empty until then.
+        self.residue_windows: list = []
+        # Bodyless charts sweep by hopping between activity points
+        # (action fires + queue boundaries) instead of ticking - exact
+        # by the queue fold's dt-independence. False forces the tick
+        # grid (differential testing).
+        self.hop_enabled = True
+        # The published read frontier for passive readers (SegCurve):
+        # bumped only AFTER a tick's pokes are fully recorded, so a
+        # concurrent reader clamping to it never sees a half-recorded
+        # tick. `_t` itself moves BEFORE the tick body runs.
+        self.frontier = self._load_s
         # Cleared on every (re)build so a post-reset advance to the same `t`
         # re-simulates (the fast path must never short-circuit a fresh env).
         self._last_advance_t = None
@@ -396,6 +418,9 @@ class LiveSim:
         if end < self._t - self._step:
             self.reset()
             end = min(max(target_t, self._load_s), self._end_seconds)
+        if self._body is None and self.hop_enabled:
+            self._advance_by_hops(end)
+            return
         # Advance whole ticks. `run_declarative`'s loop is: target = min(t+step,
         # END); run_body if next_body_t <= target; snap target to next_body_t.
         # Here END is the far chart end (grid never depends on the call), and we
@@ -419,9 +444,54 @@ class LiveSim:
                 self.env.run_update_body(self._body, name=self._body_name,
                                          rec_id=self._update_rec)
                 self._next_body_t = self._t + self._body_step
+            self.frontier = self._t
+
+    def _advance_by_hops(self, end: float) -> None:
+        """Bodyless sweep: jump between activity points - the next
+        scheduled action and the earliest queue-entry boundary - instead
+        of ticking. Exact for the queue machinery (the fold consumes
+        arbitrary dt with remainder carry), and every queue-borne
+        command fires on a hop landing at ITS boundary, so handlers read
+        the correct clock. An open effect oscillator caps the hop at the
+        tick step (span magnitude sampling stays tick-dense)."""
+        env = self.env
+        while self._t < end:
+            wake = end
+            staged = env._staged_actions
+            if env._next_action < len(staged):
+                wake = min(wake, staged[env._next_action][0])
+            for rec_id in env._queued:
+                actor = env._actors[rec_id]
+                if actor._tweens:
+                    wake = min(wake, actor._now + actor._tweens[0].left)
+                if actor._osc_open is not None:
+                    wake = min(wake, self._t + self._step)
+            # Floor the hop so a zero-period self-requeue chain cannot
+            # spin: one queue pass per hop (the engine's one-pass-per-
+            # update rule) at up to 8x tick resolution.
+            wake = max(wake, self._t + self._step / 8.0)
+            if wake > end:
+                break
+
+            self._t = min(wake, end)
+            env.fire_mod_actions_until(self._t)
+            env.set_time(self._t, self._to_beats(self._t))
+            env.drain(self._t)
+            self.frontier = self._t
 
     def reset(self):
         self._build()
+
+    def wait_for(self, t: float, timeout: float = 120.0) -> None:
+        """Block until the recording frontier reaches `t`. For tests and
+        batch consumers that need exact values at `t`; frame-rate readers
+        should keep sampling (clamped to the frontier) and never block."""
+        import time as _time
+
+        target = min(float(t), self._end_seconds)
+        deadline = _time.monotonic() + timeout
+        while self.frontier < target and _time.monotonic() < deadline:
+            _time.sleep(0.01)
 
     @property
     def now(self):

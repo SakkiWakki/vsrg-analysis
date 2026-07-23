@@ -100,7 +100,19 @@ def _lower(node: ast.Node, surface: Surface) -> _Reader | None:
         case ast.Binary(op=op, left=left, right=right):
             return _lower_binary(op, _lower(left, surface),
                                  _lower(right, surface))
+        case ast.Method(recv=ast.Sym(name=recv), name=verb, args=()):
+            return _lower_method(recv, verb, surface)
     return None
+
+
+def _lower_method(recv: str, verb: str, surface: Surface) -> _Reader | None:
+    """A zero-arg getter (`other:GetX()`) -> a time-varying reader, when
+    the surface can serve the receiver's property as a CURVE (the
+    derived-driver case: one actor's poke argument reading another
+    actor's compiled timeline). Surfaces without the hook - or refusing
+    the read - leave the subtree uncompilable, never a stale snapshot."""
+    hook = getattr(surface, 'method_reader', None)
+    return hook(recv, verb) if hook is not None else None
 
 
 def _lower_math(fn, args: tuple, surface: Surface) -> _Reader | None:

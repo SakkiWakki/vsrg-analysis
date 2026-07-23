@@ -116,13 +116,13 @@ def link_live_timelines(sim, rec_id, rests=None) -> dict:
     reading the live sim's actor at draw time (same key set + rests, so
     `TransformChannel` samples it identically). Covers the scalar link props and
     the tuple ones (rotation_order token, quat)."""
-    from analysis.player.render.storyboard.model import LiveCurve
+    from analysis.games.notitg.sim.seg_read import curve_for
 
     merged = {**_LINK_RESTS, **(rests or {})}
-    timelines = {prop: LiveCurve(sim, rec_id, prop, rest)
+    timelines = {prop: curve_for(sim, rec_id, prop, rest)
                  for prop, rest in merged.items()}
     for prop, rest in _TUPLE_LINK_RESTS.items():
-        timelines[prop] = LiveCurve(sim, rec_id, prop, rest)
+        timelines[prop] = curve_for(sim, rec_id, prop, rest)
     return timelines
 
 

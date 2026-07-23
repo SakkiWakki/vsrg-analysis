@@ -59,6 +59,7 @@ from analysis.games.notitg.lua_api import (
     _SCALAR_SETTERS, _SIZE_AXIS_SETTERS, _SIZE_PAIR_SETTERS, _TWEEN_EASING,
     _as_float, _as_int)
 from analysis.games.notitg.recording_actor import KIND_DEFAULTS
+from analysis.player.render.segment_timeline import SegmentTimeline
 from analysis.games.notitg.sim import verb_surface
 from analysis.player.render import transform3d
 from analysis.player.render.expr.eval_tree import eval_number
@@ -323,6 +324,17 @@ class SimActor:
         self._ease_start: dict = {}
         self._head_begin_t = 0.0
         self._frames: dict = {}
+        # The seekable read substrate: every emission mirrors into
+        # per-lane SegmentTimelines (numeric) or a step token channel
+        # (text / rotation_order), so readers evaluate value-at-any-t
+        # without the sim being AT t. prop -> [SegmentTimeline per
+        # tuple component] / prop -> ([t], [values]).
+        self._seg: dict = {}
+        self._seg_tokens: dict = {}
+        # Whole-chart declarative lanes from the schedule lowering
+        # (schedule_lower.lower_actions); readers fall to these beyond
+        # the sweep frontier.
+        self._seg_preview: dict = {}
         # Natural (unzoomed) size, m_size (openitg Actor.cpp:82). Only
         # SetWidth/SetHeight move it in the sim (a real sprite's texture
         # size is a render-time fact); GetWidth/GetHeight and the fit verbs
@@ -1147,8 +1159,42 @@ class SimActor:
         self._frames.setdefault(prop, []).append(
             Keyframe(t, values, dur, ease_id, start=start))
         self._kf_cache = None
+        self._seg_emit(t, prop, values, dur, ease_id, start)
         if self._driven:
             self._track_driven(t)
+
+    def _seg_emit(self, t, prop, values, dur, ease_id, start) -> None:
+        if not all(isinstance(v, (int, float)) for v in values):
+            ts, vals = self._seg_tokens.setdefault(prop, ([], []))
+            ts.append(t)
+            vals.append(values)
+            return
+
+        lanes = self._seg.setdefault(prop, [])
+        while len(lanes) < len(values):
+            lanes.append(self._new_lane(prop, len(lanes)))
+        # Collapse-eligibility mirrors simplify_instants._plain_instant
+        # exactly: only single-value no-ease-from instants may join a
+        # corridor run; everything else is structural and recorded
+        # verbatim, so the lanes reproduce the batch pipeline.
+        if dur > 0.0 and start is not None:
+            for lane, v0, v1 in zip(lanes, start, values):
+                lane.add_ramp(t, t + dur, v0, v1, ease_id)
+        elif len(values) == 1 and start is None:
+            lanes[0].poke(t, values[0])
+        else:
+            for lane, v in zip(lanes, values):
+                lane.add_hold(t, v)
+
+    def _new_lane(self, prop, i) -> SegmentTimeline:
+        rest = _rest(prop)
+        if isinstance(rest, tuple):
+            rest = rest[i] if i < len(rest) else 0.0
+        lane = SegmentTimeline(rest=float(rest))
+        # Frontier gating belongs to the reader (it clamps queries to
+        # the recording sim's clock); the lane itself is writer-truth.
+        lane.frontier = float('inf')
+        return lane
 
     def _track_driven(self, t: float) -> None:
         spans = self._driven_spans
