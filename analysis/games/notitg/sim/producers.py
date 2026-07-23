@@ -354,7 +354,8 @@ def _attach_preview(live) -> str:
 
     try:
         preview = schedule_lower.lower_actions(live.env,
-                                               to_beats=live._to_beats)
+                                               to_beats=live._to_beats,
+                                               to_seconds=live._to_seconds)
     except Exception as exc:
         return f'; action preview failed: {exc}'
     for rec_id, lanes in preview.lanes.items():
@@ -394,7 +395,8 @@ def _attach_evaluated_residue(live, preview) -> str:
     try:
         result = residue_eval.evaluate_residue(
             live, preview.registrations,
-            global_sets=preview.global_sets)
+            global_sets=preview.global_sets,
+            seed_pokes=preview.seed_pokes)
     except Exception as exc:
         return f'; residue eval failed: {exc}'
     if result is None:

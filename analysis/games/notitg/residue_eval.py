@@ -58,7 +58,7 @@ _GAMESTATE = _GameState()
 
 class _GlobalsView:
     """`_G[name]` dynamic-global indexing (the walking rig's
-    `_G['gat_pos'..i]` idiom): indexes resolve exactly like bare
+    `_G['holder'..i]` idiom): indexes resolve exactly like bare
     symbols."""
     __slots__ = ()
 
@@ -112,7 +112,7 @@ class LaneSurface:
     guesswork."""
 
     def __init__(self, names_to_rec, actors, action_lanes, tables, out,
-                 host_env=None, global_sets=None):
+                 host_env=None, global_sets=None, seed_pokes=None):
         self._names = names_to_rec          # actor global -> rec_id
         self._actors = actors               # rec_id -> SimActor (load state)
         self._lanes = action_lanes          # rec_id -> {prop: [lane]}
@@ -125,6 +125,12 @@ class LaneSurface:
             name: ([t for t, _v in sorted(rows)],
                    [v for _t, v in sorted(rows)])
             for name, rows in (global_sets or {}).items()}
+        # (rec_id, prop) -> step timeline of harvested instant setters
+        # from residue handlers (data-holder placement the lanes lack).
+        self._seed_steps = {
+            channel: ([t for t, _v in sorted(rows)],
+                      [v for _t, v in sorted(rows)])
+            for channel, rows in (seed_pokes or {}).items()}
         self.now = 0.0
         self.beat = 0.0
         self.player = 1
@@ -146,7 +152,7 @@ class LaneSurface:
         return self._host_scalar(name)
 
     def _host_scalar(self, name: str):
-        """A post-load global scalar (gat_splitm and friends): the same
+        """A post-load global scalar (section flags and friends): the same
         post-load-values approximation the action lowering documents. A
         global the body itself writes overlays through the store first,
         so this only serves load-time constants."""
@@ -192,6 +198,11 @@ class LaneSurface:
         lanes = self._lanes.get(rec_id, {}).get(prop)
         if lanes and len(lanes) == 1:
             return lanes[0].sample(self.now)
+        seeds = self._seed_steps.get((rec_id, prop))
+        if seeds is not None:
+            i = bisect_right(seeds[0], self.now) - 1
+            if i >= 0:
+                return seeds[1][i]
         actor = self._actors.get(rec_id)
         current = None if actor is None else actor._current.get(prop)
         if isinstance(current, (int, float)) \
@@ -320,7 +331,8 @@ def _rewrite_field(value):
 
 
 def evaluate_residue(live, registrations, player: int = 1,
-                     global_sets=None) -> EvaluatedResidue | None:
+                     global_sets=None,
+                     seed_pokes=None) -> EvaluatedResidue | None:
     """Evaluate the Update body over its residue windows against the
     lane world. `registrations` is schedule_lower's {table: [(t,
     rec_id)]}. Returns None when there is no body or no windows."""
@@ -346,7 +358,7 @@ def evaluate_residue(live, registrations, player: int = 1,
     out = EvaluatedResidue()
     surface = LaneSurface(names_to_rec, env._actors, action_lanes,
                           tables, out, host_env=env._host.env,
-                          global_sets=global_sets)
+                          global_sets=global_sets, seed_pokes=seed_pokes)
     surface.player = player
     store = _DictStore()
     interp = Interpreter(surface, store=store)

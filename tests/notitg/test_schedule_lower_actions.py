@@ -112,7 +112,7 @@ def test_global_argument_resolves_from_post_load_env():
 
 
 def test_unliftable_lua_statement_makes_whole_handler_residue():
-    body = '%function(self) self:x(50); if foo then self:y(1) end end'
+    body = '%function(self) self:x(50); rig_helper(self) end'
     env = _StubEnv([(1.0, 4.0, 'Go')], {'Go': [(1, body)]})
     env.actor(1)
     out = lower_actions(env)
@@ -222,3 +222,116 @@ def test_queuemessage_without_to_beats_is_residue():
     out = lower_actions(env)
     assert out.residue_handlers == 1
     assert 2 not in out.lanes
+
+
+class _NamedEnv(_StubEnv):
+    NAMES: dict = {}
+
+    def named_actor_ids(self):
+        return dict(self.NAMES)
+
+
+def _named_env(names, actions, message_commands, **kwargs):
+    env = _NamedEnv(actions, message_commands, **kwargs)
+    _NamedEnv.NAMES = names
+    for rec_id in names:
+        env.actor(rec_id)
+    return env
+
+
+def test_mod_message_closure_defers_at_its_beat():
+    body = ('%function(self) mod_message(10, function() '
+            'holder:x(8); holder:sleep(1.0); holder:linear(1.0); '
+            'holder:x(2) end) end')
+    env = _named_env({7: 'holder'}, [(1.0, 4.0, 'Go')],
+                     {'Go': [(1, body)]})
+    env.actor(1)
+    out = lower_actions(env, to_seconds=lambda beat: beat * 0.5)
+    lane = out.lanes[7]['x'][0]
+    assert lane.sample(5.0) == pytest.approx(8.0)
+    assert lane.sample(5.9) == pytest.approx(8.0)
+    assert lane.sample(6.5) == pytest.approx(5.0)
+    assert lane.sample(7.5) == pytest.approx(2.0)
+
+
+def test_mod_message_string_broadcasts_at_its_beat():
+    body = "%function(self) mod_message(10, 'Later') end"
+    env = _StubEnv([(1.0, 4.0, 'Go')],
+                   {'Go': [(1, body)], 'Later': [(2, 'x,42')]})
+    env.actor(1)
+    env.actor(2)
+    out = lower_actions(env, to_seconds=lambda beat: beat * 0.5)
+    lane = out.lanes[2]['x'][0]
+    assert lane.sample(4.9) == 0.0
+    assert lane.sample(5.0) == pytest.approx(42.0)
+
+
+def test_mod_message_without_to_seconds_is_residue():
+    body = "%function(self) mod_message(10, 'Later') end"
+    env = _StubEnv([(1.0, 4.0, 'Go')],
+                   {'Go': [(1, body)], 'Later': [(2, 'x,42')]})
+    env.actor(1)
+    env.actor(2)
+    out = lower_actions(env)
+    assert out.residue_handlers >= 1
+    assert 2 not in out.lanes
+
+
+def test_const_local_resolves_args_and_captures_into_closures():
+    body = ('%function(self) local m = 0.5 '
+            'self:linear(m*2); self:x(4); '
+            'mod_message(10, function() self:x(m*100) end) end')
+    env = _StubEnv([(1.0, 4.0, 'Go')], {'Go': [(1, body)]})
+    env.actor(1)
+    out = lower_actions(env, to_seconds=lambda beat: beat * 0.5)
+    lane = out.lanes[1]['x'][0]
+    assert lane.sample(1.5) == pytest.approx(2.0)
+    assert lane.sample(2.0) == pytest.approx(4.0)
+    assert lane.sample(5.0) == pytest.approx(50.0)
+
+
+def test_const_condition_picks_the_live_branch():
+    body = ('%function(self) if nvidia then self:x(1) '
+            'else self:x(2) end end')
+    for host, want in (({'nvidia': True}, 1.0), ({}, 2.0)):
+        env = _StubEnv([(1.0, 4.0, 'Go')], {'Go': [(1, body)]},
+                       host_globals=host)
+        env.actor(1)
+        out = lower_actions(env)
+        assert out.lanes[1]['x'][0].sample(2.0) == pytest.approx(want)
+
+
+def test_literal_for_unrolls_with_dynamic_global_receivers():
+    body = ("%function(self) for i=1,2 do "
+            "_G['pos'..i]:x(-160+(240*i)) end end")
+    env = _named_env({4: 'pos1', 5: 'pos2'}, [(1.0, 4.0, 'Go')],
+                     {'Go': [(1, body)]})
+    env.actor(1)
+    out = lower_actions(env)
+    assert out.lanes[4]['x'][0].sample(2.0) == pytest.approx(80.0)
+    assert out.lanes[5]['x'][0].sample(2.0) == pytest.approx(320.0)
+
+
+def test_residue_handler_harvests_seeds_and_deferrals():
+    body = ('%function(self) holder:x(5); rig_helper(self); '
+            "mod_message(10, function() holder:y(9) end) end")
+    env = _named_env({7: 'holder'}, [(1.0, 4.0, 'Go')],
+                     {'Go': [(1, body)]})
+    env.actor(1)
+    out = lower_actions(env, to_seconds=lambda beat: beat * 0.5)
+    assert out.residue_handlers == 1
+    assert out.seed_pokes == {(7, 'x'): [(1.0, 5.0)]}
+    assert out.lanes[7]['y'][0].sample(5.0) == pytest.approx(9.0)
+
+
+def test_load_body_yields_deferrals_and_registrations_only():
+    body = ('%function(self) self:x(999); table.insert(crew, self); '
+            "mod_message(10, function() holder:x(3) end) end")
+    env = _named_env({7: 'holder'}, [], {})
+    env.actor(1)
+    env._load_bodies = [(1, body)]
+    env._load_seconds = 0.25
+    out = lower_actions(env, to_seconds=lambda beat: beat * 0.5)
+    assert out.registrations == {'crew': [(0.25, 1)]}
+    assert 1 not in out.lanes            # executed state, not re-lowered
+    assert out.lanes[7]['x'][0].sample(5.0) == pytest.approx(3.0)

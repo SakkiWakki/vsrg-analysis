@@ -59,10 +59,20 @@ class PreviewCompile:
     applied: list = field(default_factory=list)
     registrations: dict = field(default_factory=dict)
     global_sets: dict = field(default_factory=dict)
+    seed_pokes: dict = field(default_factory=dict)
     emissions: dict = field(default_factory=dict)
     lifted_handlers: int = 0
     residue_handlers: int = 0
     residue_actions: int = 0
+
+
+@dataclass(slots=True)
+class _DeferredBody:
+    """A mod_message closure riding the task heap: its parsed statements
+    plus the const upvalues it captured from the enclosing body (`local
+    m_bl = 60/150` then `linear(m_bl*32)` inside the closure)."""
+    stmts: tuple
+    frame: dict
 
 
 @dataclass(slots=True)
@@ -72,17 +82,20 @@ class _Handler:
     applied: list = field(default_factory=list)
     registrations: list = field(default_factory=list)
     global_sets: list = field(default_factory=list)
+    deferred: list = field(default_factory=list)
 
     def segs(self, target):
         return self.by_target.setdefault(target, [])
 
 
-def lower_actions(env, player: int = 1, to_beats=None) -> PreviewCompile:
+def lower_actions(env, player: int = 1, to_beats=None,
+                  to_seconds=None) -> PreviewCompile:
     """Lower every liftable staged action into per-actor preview lanes.
     Call after `load_actors` + `prepare_mod_actions`; reads only, the
     env is never advanced or mutated. `to_beats` (seconds -> beat) lets
-    queuemessage rebroadcasts resolve their clock; without it they are
-    residue."""
+    queuemessage rebroadcasts resolve their clock; `to_seconds` (beat ->
+    seconds) lets `mod_message` deferrals schedule; without them those
+    paths are residue."""
     out = PreviewCompile()
     emissions: dict = {}
     state: dict = {}
@@ -100,23 +113,41 @@ def lower_actions(env, player: int = 1, to_beats=None) -> PreviewCompile:
             heapq.heappush(tasks, (fire_s, order, beat, rec_id, body, 0))
             order += 1
 
+    # Load-run bodies (Init/On) already executed into post-load state,
+    # so their setters and globals must not re-lower - but the FUTURE
+    # they scheduled is invisible to that state: mod_message deferrals
+    # and collection registrations are schedule facts only these bodies
+    # hold.
+    load_s = getattr(env, '_load_seconds', 0.0)
+    for rec_id, body in getattr(env, '_load_bodies', ()):
+        deferred = _load_schedule_facts(env, names, rec_id, body,
+                                        load_s, out)
+        order = _push_deferred(env, deferred, tasks, order, 0,
+                               to_seconds, out)
+
     while tasks:
         fire_s, _n, beat, rec_id, body, depth = heapq.heappop(tasks)
         handler = _lower_handler(env, names, rec_id, body, beat, fire_s,
                                  depth)
         if handler is None:
             out.residue_handlers += 1
-            # Registrations and global writes are facts about WHAT FIRES,
-            # not partial pokes - harvest them even from handlers whose
-            # verbs cannot lower, so the residue evaluation knows
-            # membership and section flags regardless.
-            _harvest_side_facts(env, rec_id, body, beat, fire_s, out)
+            # Registrations, global writes, deferrals and instant
+            # constant setters are facts about WHAT FIRES, not partial
+            # pokes - harvest them even from handlers whose other verbs
+            # cannot lower, so the residue evaluation knows membership,
+            # section flags and data-holder placement regardless.
+            deferred = _harvest_side_facts(env, names, rec_id, body,
+                                           beat, fire_s, out)
+            order = _push_deferred(env, deferred, tasks, order, depth,
+                                   to_seconds, out)
             continue
         out.lifted_handlers += 1
         fires = _fold_handler(rec_id, handler, fire_s, beat, player,
                               emissions, state, queue_end, out, env)
         order = _queue_broadcasts(env, fires, tasks, order, depth,
                                   to_beats, beat, out)
+        order = _push_deferred(env, handler.deferred, tasks, order,
+                               depth, to_seconds, out)
 
     out.emissions = emissions
     for rec_id, per_prop in emissions.items():
@@ -138,6 +169,28 @@ def _queue_broadcasts(env, fires, tasks, order, depth, to_beats,
         for rec_id, body in handlers:
             heapq.heappush(tasks,
                            (fire.t, order, beat, rec_id, body, depth + 1))
+            order += 1
+    return order
+
+
+def _push_deferred(env, rows, tasks, order, depth, to_seconds, out) -> int:
+    """`mod_message(beat, payload)` deferrals onto the task heap: a
+    string payload broadcasts that message's handlers at the beat, a
+    closure payload becomes an anonymous handler (its parsed statements
+    ride the heap directly in place of a body string)."""
+    for b, rec_id, payload in rows:
+        if to_seconds is None or depth >= _MAX_COMMAND_DEPTH:
+            out.residue_handlers += 1
+            continue
+        fire_s = to_seconds(b)
+        if isinstance(payload, str):
+            for handler_rec, body in env._message_commands.get(payload, ()):
+                heapq.heappush(tasks, (fire_s, order, b, handler_rec,
+                                       body, depth + 1))
+                order += 1
+        else:
+            heapq.heappush(tasks, (fire_s, order, b, rec_id, payload,
+                                   depth + 1))
             order += 1
     return order
 
@@ -240,26 +293,84 @@ def _emission_time(e) -> float:
             return e.t
 
 
-def _harvest_side_facts(env, rec_id, body, beat, fire_s, out) -> None:
+def _harvest_side_facts(env, names, rec_id, body, beat, fire_s,
+                        out) -> list:
+    """Residue handlers still yield FACTS: registrations, global
+    writes, mod_message deferrals and instantaneous constant setters
+    all run unconditionally at fire time regardless of the verbs around
+    them that cannot lower. The tolerant walk skips what it cannot read
+    and never enters conditional bodies. Setter facts become seed pokes
+    only for targets with no tween verb in the same handler (a tween
+    chain reorders; the deferral path lowers those exactly). Returns
+    the deferred rows for the task heap."""
+    stmts = _handler_stmts(body)
+    if stmts is None:
+        return []
+    frame = dict(body.frame) if isinstance(body, _DeferredBody) else {}
+    steps: list = []
+    _walk_steps(env, names, rec_id, stmts, beat, fire_s, steps,
+                strict=False, frame=frame)
+
+    deferred: list = []
+    tweened = {target for target, verb, _v in steps
+               if verb == 'sleep' or verb in _SIM_TWEEN_EASING}
+    for target, verb, values in steps:
+        match verb:
+            case '__register__':
+                out.registrations.setdefault(values[0], []).append(
+                    (fire_s, target))
+            case '__setglobal__':
+                out.global_sets.setdefault(values[0], []).append(
+                    (fire_s, values[1]))
+            case '__defer__':
+                deferred.append((values[0], target, values[1]))
+            case _ if target not in tweened:
+                targets = _setter_targets(verb, values)
+                for prop, value in (targets or {}).items():
+                    if isinstance(value, float):
+                        out.seed_pokes.setdefault(
+                            (target, prop), []).append((fire_s, value))
+    return deferred
+
+
+def _load_schedule_facts(env, names, rec_id, body, load_s, out) -> list:
+    """Deferrals and registrations out of an already-executed load body
+    (tolerant walk); setter and global facts are deliberately dropped -
+    the post-load state is their exact result, while a harvested step
+    could pin a value the rest of the load pass overwrote."""
+    stmts = _handler_stmts(body)
+    if stmts is None:
+        return []
+    steps: list = []
+    _walk_steps(env, names, rec_id, stmts, 0.0, load_s, steps,
+                strict=False, frame={})
+
+    deferred: list = []
+    for target, verb, values in steps:
+        match verb:
+            case '__register__':
+                out.registrations.setdefault(values[0], []).append(
+                    (load_s, target))
+            case '__defer__':
+                deferred.append((values[0], target, values[1]))
+    return deferred
+
+
+def _handler_stmts(body):
+    """A handler body as parsed statements: deferred closures ride the
+    task heap pre-parsed, %-Lua strings parse here, classic strings have
+    no Lua statement form."""
+    if isinstance(body, _DeferredBody):
+        return body.stmts
+    if isinstance(body, tuple):
+        return body
     if not isinstance(body, str) or not body.startswith('%'):
-        return
+        return None
     try:
         stmts, _diags = parse_body(_strip_lua_wrapper(body))
     except Exception:
-        return
-    for stmt in stmts:
-        match stmt:
-            case ast.ExprStmt(expr=ast.Call(
-                    fn=ast.Field(base=ast.Sym(name='table'), name='insert'),
-                    args=(ast.Sym(name=table_name), ast.Sym(name='self')))):
-                out.registrations.setdefault(table_name, []).append(
-                    (fire_s, rec_id))
-            case ast.Assign(targets=(ast.Sym(name=global_name),),
-                            values=(value_node,)):
-                value = _const_node(env, value_node, beat, fire_s)
-                if value is not None:
-                    out.global_sets.setdefault(global_name, []).append(
-                        (fire_s, value))
+        return None
+    return stmts
 
 
 # -- one handler body -> Schedule pieces --------------------------------
@@ -269,11 +380,12 @@ def _lower_handler(env, names, rec_id, body, beat, fire_s,
     """One message/named-command body -> its per-target Schedules, or
     None when any verb or argument is outside the lowered subset (the
     whole handler is then residue: partial lowering would reorder)."""
-    if depth > _MAX_COMMAND_DEPTH or not isinstance(body, str):
+    if depth > _MAX_COMMAND_DEPTH \
+            or not isinstance(body, (str, tuple, _DeferredBody)):
         return None
-    steps = _lua_steps(env, names, rec_id, body, beat, fire_s) \
-        if body.startswith('%') \
-        else _classic_steps(env, rec_id, body, beat, fire_s)
+    steps = _classic_steps(env, rec_id, body, beat, fire_s) \
+        if isinstance(body, str) and not body.startswith('%') \
+        else _lua_steps(env, names, rec_id, body, beat, fire_s)
     if steps is None:
         return None
 
@@ -286,43 +398,235 @@ def _lower_handler(env, names, rec_id, body, beat, fire_s,
 
 
 def _lua_steps(env, names, rec_id, body, beat, fire_s):
-    """A %-Lua body as (target, verb, resolved-args) steps: a flat chain
-    of method calls on `self` or on globals bound to actors."""
-    try:
-        stmts, _diags = parse_body(_strip_lua_wrapper(body))
-    except Exception:
+    """A %-Lua body (or a deferred closure's pre-parsed statements) as
+    (target, verb, resolved-args) steps: a flat chain of method calls
+    on `self` or on globals bound to actors, plus the statement forms
+    that lower as schedule data."""
+    stmts = _handler_stmts(body)
+    if stmts is None:
         return None
+    frame = dict(body.frame) if isinstance(body, _DeferredBody) else {}
+    steps: list = []
+    if _walk_steps(env, names, rec_id, stmts, beat, fire_s, steps,
+                   strict=True, frame=frame):
+        return steps
+    return None
 
-    steps = []
+
+def _walk_steps(env, names, rec_id, stmts, beat, fire_s, steps,
+                strict, frame) -> bool:
+    """Statements -> steps. Strict mode fails the whole walk on the
+    first statement outside the lowered subset (the lifting contract:
+    partial lowering would reorder); tolerant mode skips it and keeps
+    walking (the harvest contract: statements that provably execute at
+    fire time, so a conditional body is entered only when its condition
+    resolves constant). `frame` carries const local bindings forward
+    (None entries poison rebound-non-const names)."""
     for stmt in stmts:
-        match stmt:
-            case ast.ExprStmt(expr=ast.Method(recv=ast.Sym(name=recv),
-                                              name=verb, args=args)):
-                target = rec_id if recv == 'self' else names.get(recv)
-                if target is None:
-                    return None
-                values = [_const_node(env, a, beat, fire_s) for a in args]
-                steps.append((target, verb, values))
-            case ast.ExprStmt(expr=ast.Call(
-                    fn=ast.Field(base=ast.Sym(name='table'), name='insert'),
-                    args=(ast.Sym(name=table_name), ast.Sym(name='self')))):
-                # A registration: the actor enrolls itself in a driver
-                # collection. Pure schedule data - membership becomes a
-                # known interval for the residue evaluation.
-                steps.append((rec_id, '__register__', [table_name]))
-            case ast.Assign(targets=(ast.Sym(name=global_name),),
-                            values=(value_node,)):
-                # A handler global write (walk speeds, section flags):
-                # becomes a step timeline the residue evaluation reads
-                # at its exact fire time.
-                value = _const_node(env, value_node, beat, fire_s)
-                if value is None:
-                    return None
-                steps.append((rec_id, '__setglobal__',
-                              [global_name, value]))
-            case _:
+        if not _step_from(env, names, rec_id, stmt, beat, fire_s, steps,
+                          strict, frame) and strict:
+            return False
+    return True
+
+
+def _step_from(env, names, rec_id, stmt, beat, fire_s, steps,
+               strict, frame) -> bool:
+    match stmt:
+        case ast.ExprStmt(expr=ast.Method(recv=recv, name=verb,
+                                          args=args)):
+            target = _recv_target(env, names, rec_id, recv, beat, fire_s,
+                                  frame)
+            if target is None:
+                return False
+            values = [_const_node(env, a, beat, fire_s, frame)
+                      for a in args]
+            steps.append((target, verb, values))
+            return True
+        case ast.ExprStmt(expr=ast.Call(
+                fn=ast.Field(base=ast.Sym(name='table'), name='insert'),
+                args=(ast.Sym(name=table_name), ast.Sym(name='self')))):
+            # A registration: the actor enrolls itself in a driver
+            # collection. Pure schedule data - membership becomes a
+            # known interval for the residue evaluation.
+            steps.append((rec_id, '__register__', [table_name]))
+            return True
+        case ast.ExprStmt(expr=ast.Call(fn=ast.Sym(name='mod_message'),
+                                        args=(beat_node, payload,
+                                              *_flags))):
+            # The template's deferred scheduler: run a closure (or
+            # broadcast a message) when the chart reaches a beat. Pure
+            # schedule data - the payload re-enters the task heap at
+            # its resolved fire time.
+            fire_beat = _const_node(env, beat_node, beat, fire_s, frame)
+            if not isinstance(fire_beat, float):
+                return False
+            match payload:
+                case ast.Str(value=message):
+                    steps.append((rec_id, '__defer__',
+                                  [fire_beat, message]))
+                case ast.FuncExpr(params=(), body=closure_body):
+                    steps.append((rec_id, '__defer__',
+                                  [fire_beat, _DeferredBody(
+                                      closure_body, dict(frame))]))
+                case _:
+                    return False
+            return True
+        case ast.Assign(targets=(ast.Sym(),),
+                        values=(ast.Sym(name='self'),)):
+            # Load-time naming (`holder = self`): the env already owns
+            # the binding, so this is a schedule no-op.
+            return True
+        case ast.Assign(targets=(ast.Sym(name=global_name),),
+                        values=(value_node,)):
+            # A handler global write (walk speeds, section flags):
+            # becomes a step timeline the residue evaluation reads
+            # at its exact fire time.
+            value = _const_node(env, value_node, beat, fire_s, frame)
+            if value is None:
+                return False
+            steps.append((rec_id, '__setglobal__', [global_name, value]))
+            return True
+        case ast.Local(names=local_names, values=values):
+            # Const locals join the frame (the `local m_bl = 60/150`
+            # tween-length idiom); a non-const initializer poisons its
+            # name so later references refuse instead of resolving to a
+            # stale global of the same name.
+            resolved = [_const_node(env, v, beat, fire_s, frame)
+                        for v in values]
+            resolved += [None] * (len(local_names) - len(resolved))
+            for name, value in zip(local_names, resolved):
+                frame[name] = value
+            return strict is False or None not in resolved
+        case ast.If(cond=cond, body=body, elifs=elifs, orelse=orelse):
+            # A fire-time-const condition makes one branch the
+            # unconditional path (the `if hw_flag then` hardware
+            # fork) - the same post-load approximation arguments use.
+            for branch_cond, branch_body in ((cond, body), *elifs):
+                truth = _const_cond(env, branch_cond, beat, fire_s,
+                                    frame)
+                if truth is None:
+                    return False
+                if truth:
+                    return _walk_steps(env, names, rec_id, branch_body,
+                                       beat, fire_s, steps, strict,
+                                       frame)
+            return _walk_steps(env, names, rec_id, orelse, beat, fire_s,
+                               steps, strict, frame)
+        case ast.NumericFor(var=var, start=start, stop=stop,
+                            step=step_node, body=loop_body):
+            return _unroll_for(env, names, rec_id, var, start, stop,
+                               step_node, loop_body, beat, fire_s,
+                               steps, strict, frame)
+        case _:
+            return False
+
+
+_UNROLL_CAP = 256
+
+
+def _unroll_for(env, names, rec_id, var, start, stop, step_node,
+                loop_body, beat, fire_s, steps, strict, frame) -> bool:
+    """A literal-bounded numeric for unrolls to its iterations with the
+    loop variable substituted (the `for i=1,4 do _G['holder'..i]...`
+    placement idiom). A body that rebinds the variable refuses - the
+    per-statement substitution cannot model the shadow."""
+    lo = _const_node(env, start, beat, fire_s, frame)
+    hi = _const_node(env, stop, beat, fire_s, frame)
+    inc = 1.0 if step_node is None \
+        else _const_node(env, step_node, beat, fire_s, frame)
+    if not (isinstance(lo, float) and isinstance(hi, float)
+            and isinstance(inc, float)) or inc == 0.0:
+        return False
+    if any(isinstance(s, (ast.Local, ast.FuncDef)) for s in loop_body):
+        return False
+
+    count = int((hi - lo) / inc) + 1 if (hi - lo) * inc >= 0 else 0
+    if count > _UNROLL_CAP:
+        return False
+    ok = True
+    for k in range(count):
+        unrolled = tuple(_subst_var(s, var, lo + k * inc)
+                         for s in loop_body)
+        ok = _walk_steps(env, names, rec_id, unrolled, beat, fire_s,
+                         steps, strict, frame) and ok
+    return ok
+
+
+def _recv_target(env, names, rec_id, recv, beat, fire_s, frame):
+    match recv:
+        case ast.Sym(name='self'):
+            return rec_id
+        case ast.Sym(name=name):
+            return names.get(name)
+        case ast.Index(base=ast.Sym(name='_G'), key=key_node):
+            name = _const_node(env, key_node, beat, fire_s, frame)
+            return names.get(name) if isinstance(name, str) else None
+        case _:
+            return None
+
+
+def _const_cond(env, node, beat, fire_s, frame):
+    """A condition's fire-time truth value, or None when unknowable.
+    Lua truth: nil and false are falsy, everything else (0 included)
+    is truthy."""
+    match node:
+        case ast.Sym(name=name):
+            if name in frame:
+                return None if frame[name] is None else True
+            try:
+                host = env._host.env
+                value = host[name] if name in host else None
+            except Exception:
                 return None
-    return steps
+            if value is None or value is False:
+                return False
+            return True
+        case ast.Unary(op='not', operand=inner):
+            truth = _const_cond(env, inner, beat, fire_s, frame)
+            return None if truth is None else not truth
+        case _:
+            value = _const_node(env, node, beat, fire_s, frame)
+            return True if value is not None else None
+
+
+def _subst_var(node, var: str, value: float):
+    """The loop variable as a literal throughout a statement tree,
+    stopping at scopes that rebind it (an inner `for` over the same
+    name keeps its own body; its bounds still see the outer value)."""
+    match node:
+        case ast.Sym(name=name) if name == var:
+            return ast.Num(span=node.span, value=float(value))
+        case ast.NumericFor(var=inner) if inner == var:
+            return ast.NumericFor(
+                span=node.span, var=inner,
+                start=_subst_var(node.start, var, value),
+                stop=_subst_var(node.stop, var, value),
+                step=None if node.step is None
+                else _subst_var(node.step, var, value),
+                body=node.body)
+        case ast.FuncExpr(params=params) if var in params:
+            return node
+        case ast.Node():
+            fields = {}
+            changed = False
+            for name in node.__dataclass_fields__:
+                old = getattr(node, name)
+                new = _subst_field(old, var, value)
+                fields[name] = new
+                changed = changed or new is not old
+            return type(node)(**fields) if changed else node
+        case _:
+            return node
+
+
+def _subst_field(field_value, var, value):
+    match field_value:
+        case ast.Node():
+            return _subst_var(field_value, var, value)
+        case tuple():
+            return tuple(_subst_field(v, var, value) for v in field_value)
+        case _:
+            return field_value
 
 
 def _classic_steps(env, rec_id, body, beat, fire_s):
@@ -369,6 +673,9 @@ def _apply_verb(env, names, rec_id, target, verb, values, index,
         return True
     if verb == '__setglobal__':
         handler.global_sets.append((values[0], values[1]))
+        return True
+    if verb == '__defer__':
+        handler.deferred.append((values[0], rec_id, values[1]))
         return True
     if verb in ('queuecommand', 'playcommand'):
         return _inline_named(env, names, rec_id, target, values, handler,
@@ -460,19 +767,22 @@ def _const_arg(env, arg, beat, fire_s):
             return arg
 
 
-def _const_node(env, node, beat, fire_s):
-    """The value a node provably evaluates to AT FIRE TIME: clock reads
-    and post-load globals are constants here, which is what makes
-    fire-time lowering so much more liftable than generic lifting."""
+def _const_node(env, node, beat, fire_s, frame=None):
+    """The value a node provably evaluates to AT FIRE TIME: clock reads,
+    const locals in `frame`, and post-load globals are constants here,
+    which is what makes fire-time lowering so much more liftable than
+    generic lifting."""
     match node:
         case ast.Num(value=v):
             return float(v)
         case ast.Str(value=s):
             return s
         case ast.Unary(op='-', operand=inner):
-            v = _const_node(env, inner, beat, fire_s)
+            v = _const_node(env, inner, beat, fire_s, frame)
             return -v if isinstance(v, float) else None
         case ast.Sym(name=name):
+            if frame is not None and name in frame:
+                return frame[name]
             return _global_number(env, name)
         case ast.Method(recv=ast.Sym(name='GAMESTATE'), name=getter):
             match getter:
@@ -483,12 +793,12 @@ def _const_node(env, node, beat, fire_s):
                 case _:
                     return None
         case ast.Binary(op='..', left=left, right=right):
-            a = _concat_part(env, left, beat, fire_s)
-            b = _concat_part(env, right, beat, fire_s)
+            a = _concat_part(env, left, beat, fire_s, frame)
+            b = _concat_part(env, right, beat, fire_s, frame)
             return a + b if a is not None and b is not None else None
         case ast.Binary(op=op, left=left, right=right):
-            a = _const_node(env, left, beat, fire_s)
-            b = _const_node(env, right, beat, fire_s)
+            a = _const_node(env, left, beat, fire_s, frame)
+            b = _const_node(env, right, beat, fire_s, frame)
             if isinstance(a, float) and isinstance(b, float):
                 return _arith(op, a, b)
             return None
@@ -506,8 +816,8 @@ def _global_number(env, name):
     return None
 
 
-def _concat_part(env, node, beat, fire_s):
-    value = _const_node(env, node, beat, fire_s)
+def _concat_part(env, node, beat, fire_s, frame=None):
+    value = _const_node(env, node, beat, fire_s, frame)
     match value:
         case str():
             return value

@@ -153,6 +153,7 @@ class SimEnvironment:
         self._tables: dict = {}
         self._named_commands: dict = {}
         self._message_commands: dict = {}
+        self._load_bodies: list = []
         self._labels: dict = {}
         self._xml_dirs: dict = {}
         self._children: dict = {}
@@ -598,6 +599,7 @@ class SimEnvironment:
             self._host.env[var] = self._tables[rec_id]
         value = actor.attrs.get('InitCommand', '')
         if value.startswith('%'):
+            self._load_bodies.append((rec_id, value))
             self._run_lua_body(rec_id, _strip_lua_wrapper(value),
                                f'{self._label(rec_id)}.InitCommand',
                                load=True)
@@ -720,6 +722,7 @@ class SimEnvironment:
         rec_id = self._id_for(actor)
         value = actor.attrs.get(attr, '')
         if value.startswith('%'):
+            self._load_bodies.append((rec_id, value))
             self._run_lua_body(rec_id, _strip_lua_wrapper(value),
                                f'{self._label(rec_id)}.{attr}', load=True)
         elif value:
