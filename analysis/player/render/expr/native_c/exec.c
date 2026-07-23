@@ -109,10 +109,26 @@ int cexec_run(CExecState *st, CValue self_val) {
         PUSH(fe->global_get(fe->ctx, st->names[ops[pc].a])); pc++; NEXT();
     }
     OP(STORE_GLOBAL) {
-        fe->global_set(fe->ctx, st->names[ops[pc].a], POP()); pc++; NEXT();
+        fe->global_set(fe->ctx, st->names[ops[pc].a], POP());
+        if (st->trim) st->trim->memo_epoch++;
+        pc++; NEXT();
     }
     OP(LOAD_SYMBOL) {
-        PUSH(fe->symbol(fe->ctx, st->names[ops[pc].a])); pc++; NEXT();
+        int id = ops[pc].a;
+        CTrim *tr = st->trim;
+        if (tr && tr->stable[id] == 2) { PUSH(tr->memo_val[id]); pc++; NEXT(); }
+        if (tr && tr->memo_gen[id] == tr->memo_epoch) {
+            PUSH(tr->memo_val[id]); pc++; NEXT();
+        }
+        CValue sv = fe->symbol(fe->ctx, st->names[id]);
+        if (tr) {
+            tr->memo_val[id] = sv; tr->memo_gen[id] = tr->memo_epoch;
+            /* handle values dangle across runs (the host clears its
+             * registry per tick); only self-contained values (numbers,
+             * arena tables/strings) may cache forever. */
+            if (tr->stable[id] == 1 && !cv_is_handle(sv)) tr->stable[id] = 2;
+        }
+        PUSH(sv); pc++; NEXT();
     }
     OP(BINARY) {
         CValue b = POP(), a = POP();
@@ -151,11 +167,23 @@ int cexec_run(CExecState *st, CValue self_val) {
     }
     OP(GETTER) {
         int argc = ops[pc].b;
+        int vid = ops[pc].a;
         CValue *args = &st->regs[sp - argc];
         CValue recv = st->regs[sp - argc - 1];
-        CValue r = fe->getter(fe->ctx, recv, st->names[ops[pc].a], args, argc);
+        CTrim *tr = st->trim;
+        if (tr && tr->clock_recv_set && argc == 0 && recv == tr->clock_recv
+                && (vid == tr->clock_beat_id || vid == tr->clock_time_id)) {
+            sp -= 1;
+            PUSH(vid == tr->clock_beat_id ? tr->clock_beat : tr->clock_time);
+            pc++; NEXT();
+        }
+        CValue r = fe->getter(fe->ctx, recv, st->names[vid], args, argc);
         sp -= argc + 1;
         CHECK_ABORT();
+        if (tr && !tr->clock_recv_set && argc == 0 && cv_is_handle(recv)
+                && (vid == tr->clock_beat_id || vid == tr->clock_time_id)) {
+            tr->clock_recv = recv; tr->clock_recv_set = 1;
+        }
         PUSH(r); pc++; NEXT();
     }
     OP(METHOD) {  /* same shape as GETTER for now (GetChild/GetShader) */
@@ -164,6 +192,7 @@ int cexec_run(CExecState *st, CValue self_val) {
         CValue recv = st->regs[sp - argc - 1];
         CValue r = fe->getter(fe->ctx, recv, st->names[ops[pc].a], args, argc);
         sp -= argc + 1;
+        if (st->trim) st->trim->memo_epoch++;
         PUSH(r); pc++; NEXT();
     }
     OP(CALL_SYM) {
@@ -171,6 +200,7 @@ int cexec_run(CExecState *st, CValue self_val) {
         CValue *args = &st->regs[sp - argc];
         CValue r = fe->call(fe->ctx, st->names[ops[pc].a], args, argc);
         sp -= argc;
+        if (st->trim) st->trim->memo_epoch++;
         CHECK_ABORT();
         PUSH(r); pc++; NEXT();
     }
@@ -209,6 +239,7 @@ int cexec_run(CExecState *st, CValue self_val) {
         CValue recv = st->regs[sp - argc - 1];
         fe->poke(fe->ctx, recv, st->names[ops[pc].a], args, argc);
         sp -= argc + 1;
+        if (st->trim) st->trim->memo_epoch++;
         CHECK_ABORT();
         pc++; NEXT();
     }
@@ -217,8 +248,10 @@ int cexec_run(CExecState *st, CValue self_val) {
         CValue key = POP(), base = POP(), value = POP();
         if (cv_is_table(base))
             carena_table_set(st->arena, cv_payload(base), key, value);
-        else
+        else {
             fe->set_index(fe->ctx, base, key, value);
+            if (st->trim) st->trim->memo_epoch++;
+        }
         pc++; NEXT();
     }
     OP(SET_FIELD) {
@@ -227,8 +260,10 @@ int cexec_run(CExecState *st, CValue self_val) {
         uint64_t sid = carena_intern(st->arena, nm, strlen(nm));
         if (cv_is_table(base))
             carena_table_set(st->arena, cv_payload(base), cv_str(sid), value);
-        else
+        else {
             fe->set_index(fe->ctx, base, cv_str(sid), value);
+            if (st->trim) st->trim->memo_epoch++;
+        }
         pc++; NEXT();
     }
     OP(POP) { sp--; pc++; NEXT(); }
@@ -269,6 +304,7 @@ int cexec_run(CExecState *st, CValue self_val) {
     }
     OP(FALLBACK) {
         CValue r = fe->fallback(fe->ctx, ops[pc].a, st->frame, st->nslots);
+        if (st->trim) st->trim->memo_epoch++;
         PUSH(r); pc++; NEXT();
     }
     OP(NUMFOR_TEST) {
@@ -291,8 +327,10 @@ int cexec_run(CExecState *st, CValue self_val) {
         CValue v = POP(), t = POP();
         if (cv_is_table(t))
             carena_table_append(st->arena, cv_payload(t), v);
-        else
+        else {
             fe->table_insert(fe->ctx, t, v);   /* host table */
+            if (st->trim) st->trim->memo_epoch++;
+        }
         pc++; NEXT();
     }
     OP(CALL_VALUE) {  /* stack: fn, args... */
@@ -300,6 +338,7 @@ int cexec_run(CExecState *st, CValue self_val) {
         CValue *args = &st->regs[sp - argc];
         CValue fn = st->regs[sp - argc - 1];
         CValue r = fe->call_value(fe->ctx, fn, args, argc);
+        if (st->trim) st->trim->memo_epoch++;
         sp -= argc + 1;
         CHECK_ABORT();
         PUSH(r); pc++; NEXT();

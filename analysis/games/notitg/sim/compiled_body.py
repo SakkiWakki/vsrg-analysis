@@ -231,7 +231,8 @@ class OpStreamCompiledBody:
         table = self._env._tables.get(self._rec_id)
         if table is None:
             return
+        env = self._env
         try:
-            self._cbody.run(table)
+            self._cbody.run(table, beat=env._beat, t=env._now)
         except Exception as exc:
-            self._env._record_fault(self._name, exc)
+            env._record_fault(self._name, exc)

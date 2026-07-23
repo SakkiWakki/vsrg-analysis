@@ -63,6 +63,23 @@ typedef struct CFrontier {
     int    (*aborted)(void *ctx);
 } CFrontier;
 
+/* Crossing trim: per-run symbol memo + cross-run stable cache + the
+ * clock-getter fast path. Symbols are stable between HOST-MUTATING
+ * crossings (poke/method/call/fallback/global-store), so LOAD_SYMBOL
+ * re-resolves only after one; `stable` entries (engine singletons,
+ * snapshotted tables - flagged 1 by the host, promoted to 2 on first
+ * resolution) never re-cross. GETTER of the clock verbs on the learned
+ * GAMESTATE handle returns host-preloaded values. */
+typedef struct {
+    CValue   *memo_val;             /* [nnames] */
+    uint32_t *memo_gen;
+    uint32_t  memo_epoch;
+    uint8_t  *stable;               /* 0 no, 1 wanted, 2 cached */
+    int clock_beat_id, clock_time_id;   /* name-pool verb ids, -1 unset */
+    CValue clock_recv;  int clock_recv_set;
+    CValue clock_beat, clock_time;
+} CTrim;
+
 /* Execution state for one body, persisted across ticks (the frame's globals /
  * accumulators live host-side behind the frontier; the slot frame is cleared
  * each tick except slot 0 = self). */
@@ -74,6 +91,7 @@ typedef struct {
     CFrontier   *fe;
     CValue      *frame;  int nslots;      /* slot array (self at [0]) */
     CValue      *regs;   int reg_cap;     /* eval register stack */
+    CTrim       *trim;                    /* NULL = trim disabled */
 } CExecState;
 
 /* Run the body once (one tick). `self_val` is rebound into slot 0; other slots

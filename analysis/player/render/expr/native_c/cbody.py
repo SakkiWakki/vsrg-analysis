@@ -32,7 +32,14 @@ def _load_lib():
     if _LIB is not None:
         return _LIB
     so = os.path.join(os.path.dirname(__file__), 'libcbody.so')
-    lib = ctypes.CDLL(so)
+    # PyDLL, not CDLL: every call keeps the GIL. A CDLL released it per
+    # call, so each of the ~20 frontier crossings + ~8 marshalling calls
+    # per tick paid a release/reacquire; against a busy render thread
+    # each reacquire waits on the switch interval (a GIL convoy measured
+    # at ~1700x sweep slowdown, frozen-visuals-with-live-audio). Holding
+    # the GIL through cbody_run gives the same scheduling profile as the
+    # lupa path: short C stretches inside normal thread quanta.
+    lib = ctypes.PyDLL(so)
     u64 = ctypes.c_uint64
     lib.cbody_new.restype = ctypes.c_void_p
     lib.cbody_new.argtypes = [ctypes.c_int, ctypes.c_int]
@@ -49,6 +56,9 @@ def _load_lib():
     lib.cbody_str.argtypes = [ctypes.c_void_p, u64, ctypes.POINTER(ctypes.c_int)]
     lib.cbody_intern.restype = u64
     lib.cbody_intern.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+    lib.cbody_mark_stable.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    lib.cbody_set_clock_ids.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+    lib.cbody_set_clock.argtypes = [ctypes.c_void_p, ctypes.c_double, ctypes.c_double]
     lib.cbody_frame_get.restype = u64
     lib.cbody_frame_get.argtypes = [ctypes.c_void_p, ctypes.c_int]
     lib.cbody_frame_set.argtypes = [ctypes.c_void_p, ctypes.c_int, u64]
@@ -133,6 +143,8 @@ class CompiledBodyC:
         for i, nm in enumerate(ser['names']):
             e = nm.encode('utf-8', 'surrogatepass')
             self._lib.cbody_set_name(self._b, i, e, len(e))
+        self._name_id = {nm: i for i, nm in enumerate(ser['names'])}
+        self._clock_wired = False
 
         # handle registry: id -> python object (non-scalar values crossing out)
         self._handles: dict[int, object] = {}
@@ -267,6 +279,14 @@ class CompiledBodyC:
                 if cv is _SNAP_MISS:
                     cv = self._snapshot_symbol(nm)
                     self._snap_cache[nm] = cv
+                    if cv is not None:
+                        # A LANDED arena snapshot is self-contained, so
+                        # the C side may cache this symbol forever. A
+                        # driver symbol (beat) or non-table global never
+                        # reaches here - those stay per-tick.
+                        name_id = self._name_id.get(nm)
+                        if name_id is not None:
+                            self._lib.cbody_mark_stable(self._b, name_id)
                 if cv is not None:
                     return cv
             r = surf.symbol(nm)
@@ -390,7 +410,14 @@ class CompiledBodyC:
         for i in range(1, n + 1):
             yield (lib.cbody_num(float(i)), lib.cbody_table_geti(self._b, table_cv, i))
 
-    def run(self, self_table):
+    def run(self, self_table, beat=None, t=None):
+        if beat is not None and t is not None:
+            if not self._clock_wired:
+                self._clock_wired = True
+                self._lib.cbody_set_clock_ids(
+                    self._b, self._name_id.get('GetSongBeat', -1),
+                    self._name_id.get('GetSongTime', -1))
+            self._lib.cbody_set_clock(self._b, float(beat), float(t))
         self._handles.clear(); self._obj_to_handle.clear()
         rc = self._lib.cbody_run(self._b, self._to_cv(self_table))
         return rc

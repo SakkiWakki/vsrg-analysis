@@ -29,6 +29,7 @@ typedef struct {
     CFrontier fe;                  /* filled by Python (callback ptrs + ctx) */
     CValue   *frame;  int nslots;
     CValue   *regs;   int reg_cap;
+    CTrim     trim;                /* crossing trim (see exec.h) */
 } CBody;
 
 /* --- lifecycle ---------------------------------------------------------- */
@@ -50,6 +51,9 @@ void cbody_free(CBody *b) {
     free(b->consts);
     for (int i = 0; i < b->nnames; i++) free(b->names[i]);
     free(b->names);
+    free(b->trim.memo_val);
+    free(b->trim.memo_gen);
+    free(b->trim.stable);
     free(b->frame);
     free(b->regs);
     free(b);
@@ -92,6 +96,12 @@ void cbody_set_const_str(CBody *b, int ci, const char *s, int len) {
 void cbody_set_names(CBody *b, int nnames) {
     b->nnames = nnames;
     b->names = calloc(nnames, sizeof(char *));
+    b->trim.memo_val = calloc(nnames, sizeof(CValue));
+    b->trim.memo_gen = calloc(nnames, sizeof(uint32_t));
+    b->trim.stable = calloc(nnames, sizeof(uint8_t));
+    b->trim.memo_epoch = 1;
+    b->trim.clock_beat_id = -1;
+    b->trim.clock_time_id = -1;
 }
 void cbody_set_name(CBody *b, int ni, const char *s, int len) {
     b->names[ni] = malloc((size_t)len + 1);
@@ -134,7 +144,26 @@ int cbody_run(CBody *b, uint64_t self_val) {
     st.fe = &b->fe;
     st.frame = b->frame; st.nslots = b->nslots;
     st.regs = b->regs; st.reg_cap = b->reg_cap;
+    if (b->trim.memo_val) {
+        b->trim.memo_epoch++;          /* a new tick refetches non-stable */
+        b->trim.clock_recv_set = 0;    /* handle ids are per-tick */
+        st.trim = &b->trim;
+    }
     return cexec_run(&st, (CValue)self_val);
+}
+
+/* --- crossing trim ------------------------------------------------------ */
+void cbody_mark_stable(CBody *b, int name_id) {
+    if (b->trim.stable && name_id >= 0 && name_id < b->nnames)
+        b->trim.stable[name_id] = 1;
+}
+void cbody_set_clock_ids(CBody *b, int beat_id, int time_id) {
+    b->trim.clock_beat_id = beat_id;
+    b->trim.clock_time_id = time_id;
+}
+void cbody_set_clock(CBody *b, double beat, double t) {
+    b->trim.clock_beat = cv_num(beat);
+    b->trim.clock_time = cv_num(t);
 }
 
 /* --- arena string bridge (for the frontier callbacks) ------------------- */
