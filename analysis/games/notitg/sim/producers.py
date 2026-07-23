@@ -131,6 +131,15 @@ def _compile_live(sm_path, end_seconds) -> dict | None:
     from analysis.games.notitg.sim.seg_read import segtl_enabled
     shared_sim = live if segtl_enabled() else None
     preview_note = _attach_preview(live) if shared_sim is not None else ''
+    painter_rows = getattr(live, 'evaluated_applied', None)
+    if painter_rows:
+        # Painter mods (per-frame ApplyModifiers curves) recovered by the
+        # residue evaluation join the instant channel compile; the sweep's
+        # completion swap later replaces this with the exact stream.
+        full = _compile_channels(
+            declarative + _mod_events(_SweptResult(painter_rows)))
+        mod_channels._channels = full._channels
+        mod_channels._players = full._players
     _spawn_background_upgrade(mod_channels, tree, field_instances,
                              sm_path, end, live_sim=shared_sim,
                              to_seconds=doc.to_seconds)
@@ -362,9 +371,53 @@ def _attach_preview(live) -> str:
             continue
         for prop, lane in lanes.items():
             actor._seg_preview.setdefault(prop, lane)
+
+    eval_note = _attach_evaluated_residue(live, preview)
     return (f'; action preview: {preview.lifted_handlers} handlers -> '
             f'{sum(len(v) for v in preview.lanes.values())} channels '
-            f'({preview.residue_handlers} residue)') + body_note
+            f'({preview.residue_handlers} residue)') + body_note + eval_note
+
+
+def _attach_evaluated_residue(live, preview) -> str:
+    """The pure lane-backed evaluation of the residue windows: body
+    pokes over known collection membership become preview emissions,
+    MERGED with the action emissions per channel so a channel driven by
+    both composes in time order. Tainted channels stay sweep-owned.
+
+    OPT-IN (VSRG_NOTITG_LANE_EVAL=1): the gat gate currently passes only
+    5/21 channels against the swept truth - the evaluation ships as
+    default only once channels are verified, never before."""
+    if os.environ.get('VSRG_NOTITG_LANE_EVAL', '').lower() not in _TRUE:
+        return ''
+    from analysis.games.notitg import residue_eval, schedule_lower
+
+    try:
+        result = residue_eval.evaluate_residue(live, preview.registrations)
+    except Exception as exc:
+        return f'; residue eval failed: {exc}'
+    if result is None:
+        return ''
+
+    merged: dict = {}
+    kept = 0
+    for (rec_id, prop), pokes in result.emissions.items():
+        if (rec_id, prop) in result.tainted:
+            continue
+        kept += 1
+        merged.setdefault(rec_id, []).extend(
+            (t, prop, value) for t, value in pokes)
+    for rec_id, extra in merged.items():
+        actor = live.env._actors.get(rec_id)
+        if actor is None:
+            continue
+        events = list(preview.emissions.get(rec_id, ())) + extra
+        actor._seg_preview = schedule_lower._finish_lanes(
+            live.env, rec_id, events)
+
+    live.evaluated_applied = list(result.applied)
+    return (f'; residue eval: {result.ticks} ticks -> {kept} channels '
+            f'({len(result.tainted)} tainted, '
+            f'{len(result.applied)} painter rows)')
 
 
 def _spawn_background_upgrade(mod_channels, tree, field_provider,

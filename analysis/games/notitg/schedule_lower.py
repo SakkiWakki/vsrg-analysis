@@ -57,6 +57,8 @@ class PreviewCompile:
     and action counts for the compile report."""
     lanes: dict = field(default_factory=dict)
     applied: list = field(default_factory=list)
+    registrations: dict = field(default_factory=dict)
+    emissions: dict = field(default_factory=dict)
     lifted_handlers: int = 0
     residue_handlers: int = 0
     residue_actions: int = 0
@@ -67,6 +69,7 @@ class _Handler:
     by_target: dict = field(default_factory=dict)
     resets_queue: bool = False
     applied: list = field(default_factory=list)
+    registrations: list = field(default_factory=list)
 
     def segs(self, target):
         return self.by_target.setdefault(target, [])
@@ -108,6 +111,7 @@ def lower_actions(env, player: int = 1, to_beats=None) -> PreviewCompile:
         order = _queue_broadcasts(env, fires, tasks, order, depth,
                                   to_beats, beat, out)
 
+    out.emissions = emissions
     for rec_id, per_prop in emissions.items():
         out.lanes[rec_id] = _finish_lanes(env, rec_id, per_prop)
     return out
@@ -135,6 +139,9 @@ def _fold_handler(rec_id, handler, fire_s, beat, player,
                   emissions, state, queue_end, out, env) -> list:
     for modstring in handler.applied:
         out.applied.append((fire_s, beat, modstring, player))
+    for table_name, member in handler.registrations:
+        out.registrations.setdefault(table_name, []).append(
+            (fire_s, member))
 
     fires: list = []
     for target, segs in handler.by_target.items():
@@ -185,10 +192,13 @@ def _finish_lanes(env, rec_id, per_prop_emissions) -> dict:
         return lane
 
     for e in sorted(per_prop_emissions, key=_emission_time):
-        if hasattr(e, 't0'):
-            lane_for(e.prop).add_ramp(e.t0, e.t1, e.v0, e.v1, e.ease)
-        else:
-            lane_for(e.prop).add_hold(e.t, e.v)
+        match e:
+            case (t, key, value):
+                lane_for(key).poke(t, value)
+            case _ if hasattr(e, 't0'):
+                lane_for(e.prop).add_ramp(e.t0, e.t1, e.v0, e.v1, e.ease)
+            case _:
+                lane_for(e.prop).add_hold(e.t, e.v)
     for lane in lanes.values():
         lane.finish()
 
@@ -211,7 +221,13 @@ def _lane_rest(actor, key) -> float:
 
 
 def _emission_time(e) -> float:
-    return e.t0 if hasattr(e, 't0') else e.t
+    match e:
+        case (t, _key, _value):
+            return t
+        case _ if hasattr(e, 't0'):
+            return e.t0
+        case _:
+            return e.t
 
 
 # -- one handler body -> Schedule pieces --------------------------------
@@ -255,6 +271,13 @@ def _lua_steps(env, names, rec_id, body, beat, fire_s):
                     return None
                 values = [_const_node(env, a, beat, fire_s) for a in args]
                 steps.append((target, verb, values))
+            case ast.ExprStmt(expr=ast.Call(
+                    fn=ast.Field(base=ast.Sym(name='table'), name='insert'),
+                    args=(ast.Sym(name=table_name), ast.Sym(name='self')))):
+                # A registration: the actor enrolls itself in a driver
+                # collection. Pure schedule data - membership becomes a
+                # known interval for the residue evaluation.
+                steps.append((rec_id, '__register__', [table_name]))
             case _:
                 return None
     return steps
@@ -298,6 +321,9 @@ def _apply_verb(env, names, rec_id, target, verb, values, index,
         if not isinstance(name, str):
             return False
         handler.segs(target).append(Seg(0.0, effect=name))
+        return True
+    if verb == '__register__':
+        handler.registrations.append((values[0], target))
         return True
     if verb in ('queuecommand', 'playcommand'):
         return _inline_named(env, names, rec_id, target, values, handler,
