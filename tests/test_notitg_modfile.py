@@ -743,6 +743,58 @@ def test_tree_split_keeps_straddling_group_on_both_sides():
         assert child.sample('x', 0.0) == (x,)
 
 
+def test_hoisted_background_rides_animated_ancestor_transform():
+    """A hoisted background subtree keeps its ANIMATED ancestors: gat 2's
+    screen2 container half-scales the whole scene (backgrounds included)
+    during cyriak, and a hoist that drops the ancestor left the bg
+    fullscreen - flooding every AFT capture. Identity ancestors (no
+    keyframes) still wrap nothing, so plain hoists keep their shape."""
+    from analysis.games.notitg import modfile
+
+    xml = ('<ActorFrame><children>'
+           '<ActorFrame OnCommand="zoom,0.5"><children>'
+           '<ActorFrame><children>'
+           '<Quad Type="Quad" OnCommand="x,320;y,240"/>'
+           '</children></ActorFrame>'
+           '</children></ActorFrame>'
+           '</children></ActorFrame>')
+    parsed = xml_actors.parse_actor_xml(xml)
+    scaled = parsed.root.children[0]
+    bg = scaled.children[0]
+    bg._background_layer = True
+    for child in bg.children:
+        child._background_layer = True
+    tree = modfile.compile_element_tree(parsed.root, _seconds,
+                                        start_beat=0.0)
+    (wrapped,) = tree
+    assert wrapped.kind == 'group'
+    assert wrapped.sample('scale_x', 0.0) == (0.5,)
+    (inner,) = wrapped.children
+    (quad,) = inner.children
+    assert quad.sample('x', 0.0) == (320.0,)
+
+
+def test_hoisted_background_skips_identity_ancestors():
+    from analysis.games.notitg import modfile
+
+    xml = ('<ActorFrame><children>'
+           '<ActorFrame><children>'
+           '<Quad Type="Quad" OnCommand="x,320"/>'
+           '</children></ActorFrame>'
+           '</children></ActorFrame>')
+    parsed = xml_actors.parse_actor_xml(xml)
+    frame = parsed.root.children[0]
+    frame._background_layer = True
+    for child in frame.children:
+        child._background_layer = True
+    tree = modfile.compile_element_tree(parsed.root, _seconds,
+                                        start_beat=0.0)
+    (element,) = tree
+    # No animated ancestor: the hoisted element is NOT wrapped (its own
+    # group/leaf shape is preserved).
+    assert element.z == modfile._BACKGROUND_Z
+
+
 def test_tree_split_partitions_each_proxy_subtree():
     """A later section splits around ITS OWN first proxy, not just the
     document's: section-internal art preceding the section's copies
@@ -988,6 +1040,22 @@ def test_sprite_manifest_yields_inner_texture(tmp_path):
         '[Sprite]\nTexture=shame_idle.png\nFrame0000=0\n')
     resolved = modfile._resolve_texture_path('idle.sprite', tmp_path)
     assert resolved == str(tmp_path / 'shame_idle.png')
+
+
+def test_xml_include_file_never_becomes_a_sprite(tmp_path):
+    # A section include (`<Layer File="spells.xml"/>`) left childless -
+    # the pre-field split compiles straddling groups once per side, and
+    # one side can filter away every child - must compile to NOTHING.
+    # Treating the existing .xml as a texture made the renderer warn
+    # 'storyboard asset missing/unreadable' on every load attempt
+    # (getfucked2's spells/Neuro/Revolt/Stuxnet shells).
+    from analysis.games.notitg import modfile
+
+    (tmp_path / 'spells.xml').write_text('<Layer/>')
+    parsed = xml_actors.parse_actor_xml(
+        '<Layer File="spells.xml" OnCommand="diffusealpha,1"/>')
+    parsed.root._base_dir = tmp_path
+    assert modfile._leaf_element(parsed.root, 0.0, {}) is None
 
 
 def test_white_texture_stays_a_name(tmp_path):

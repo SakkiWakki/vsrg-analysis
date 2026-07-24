@@ -530,7 +530,7 @@ def _pre_field_split(root):
 
 def _compile_actor(actor, start_time, named_keyframes, fonts, below=None,
                    actor_keyframes=None, osc_context=None, sim=None,
-                   include=None):
+                   include=None, ancestors=()):
     if below is None:
         below = []
     if getattr(actor, '_aft_fill', False):
@@ -543,6 +543,17 @@ def _compile_actor(actor, start_time, named_keyframes, fonts, below=None,
                                            fonts, actor_keyframes, osc_context,
                                            sim)
         if element is not None:
+            # The hoist rips the subtree out of the tree, which loses
+            # any ANIMATED ancestor transform (gat 2's screen2 container
+            # half-scales the whole scene - backgrounds included -
+            # during cyriak; a fullscreen-stuck bg flooded every AFT
+            # capture). Wrap in groups for the ancestors that carry
+            # recorded keyframes; identity ancestors (the common case)
+            # add nothing, keeping the hoisted structure - and gat 1 -
+            # unchanged.
+            element = _wrap_hoisted_ancestors(
+                element, ancestors, start_time, named_keyframes,
+                actor_keyframes, osc_context, sim)
             below.append(element)
         return None
 
@@ -552,7 +563,7 @@ def _compile_actor(actor, start_time, named_keyframes, fonts, below=None,
             continue
         element = _compile_actor(child, start_time, named_keyframes, fonts,
                                  below, actor_keyframes, osc_context, sim,
-                                 include)
+                                 include, ancestors + (actor,))
         if element is not None:
             child_elements.append(element)
 
@@ -572,6 +583,34 @@ def _compile_actor(actor, start_time, named_keyframes, fonts, below=None,
         below.append(_with_z(leaf, _AFT_BACKDROP_Z))
         return None
     return leaf
+
+
+def _wrap_hoisted_ancestors(element, ancestors, start_time, named_keyframes,
+                            actor_keyframes, osc_context, sim):
+    """A hoisted element wrapped in group elements for every ancestor
+    with recorded keyframes, outermost first, so the hoist keeps the
+    ancestor chain's ANIMATED transforms (an identity ancestor - no
+    pokes - wraps nothing, so plain hoists keep their old shape)."""
+    band_z = element.z
+    for ancestor in reversed(ancestors):
+        keyframes = _merged_keyframes(ancestor, start_time, named_keyframes,
+                                      actor_keyframes, osc_context)
+        if sim is None:
+            if not keyframes:
+                continue
+        elif getattr(ancestor, '_recorder_id', None) is None:
+            # Lazy compile runs at LOAD, before playback pokes exist, so
+            # keyframe truthiness says nothing; a recorded ancestor's
+            # group samples LiveCurves at draw time (identity until
+            # poked, so plain hoists stay visually unchanged). Only an
+            # unrecorded ancestor can never animate and is skipped.
+            continue
+        element = _group_element(ancestor, start_time, keyframes,
+                                 (element,), sim)
+    # The band z lives on the TOP-LEVEL element (the renderer bands by
+    # it); wrapping must not strand the hoisted element's band on an
+    # inner node.
+    return element if element.z == band_z else _with_z(element, band_z)
 
 
 # The background band z: below the notes/field (z=0) but a valid
@@ -1457,16 +1496,22 @@ def _fill_size_as_wh(kind, drawable):
 
 def _is_image_asset(asset) -> bool:
     """True when a resolved asset is a real image reference (an existing
-    file or the synthesized `white`), so an untyped `Actor`/`Layer` that
-    loads one - gat's chara sprites, `<Actor File="shame/idle.sprite">` -
-    counts as a Sprite even without a `Type=`."""
+    image file or the synthesized `white`), so an untyped `Actor`/`Layer`
+    that loads one - gat's chara sprites, `<Actor
+    File="shame/idle.sprite">` - counts as a Sprite even without a
+    `Type=`. The suffix check matters: `File=` also names include XMLs
+    and Lua scripts, and an include shell left childless by the
+    pre-field split would otherwise compile as a sprite whose "texture"
+    is the XML file (the renderer then warns about an unreadable asset
+    every load attempt)."""
     if not asset:
         return False
     if asset in _BUILTIN_TEXTURES:
         return True
     # A directory reference (`File="../bg"`, a BGAnimation dir) is
     # include-spliced by _splice_includes, not drawn as a texture.
-    return Path(asset).is_file()
+    path = Path(asset)
+    return path.suffix.lower() in _IMAGE_SUFFIXES and path.is_file()
 
 
 def _element_kind(actor_kind: str, has_text=False, font=None,
