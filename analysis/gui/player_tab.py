@@ -340,7 +340,7 @@ class PlayerTab(QWidget):
         regardless of which call site wrote it (transport button,
         keyboard, scrub grab, end-of-chart, autostart)."""
         paused = self.player.paused
-        self.play_btn.setText('▶' if paused else '⏸')
+        self.play_btn.setText('⏸' if paused else '▶')
         self._sync_audio(force=True)
         _sync_gc_to_playback(not paused)
         self.view.update()
