@@ -1065,3 +1065,24 @@ def test_white_texture_stays_a_name(tmp_path):
                                         ' OnCommand="diffusealpha,1"/>')
     parsed.root._base_dir = tmp_path
     assert modfile._resolve_asset(parsed.root) == 'white'
+
+
+def test_lazy_state_pin_follows_recorded_setstate():
+    # LAZY compile: setstate pokes happen AFTER the element is built, so
+    # the pin must read the live actor's stream as it grows (a baked pin
+    # from load-time keyframes froze getfucked2's toss sheet in
+    # auto-animation forever).
+    from types import SimpleNamespace
+
+    from analysis.games.notitg import modfile
+    from analysis.games.notitg.sim.actor import SimActor
+
+    actor = SimActor(0.0)
+    sim = SimpleNamespace(env=SimpleNamespace(_actors={7: actor}))
+    states = ((0, 999.0), (1, 0.1), (2, 999.0))
+    pin = modfile._state_pin({}, states, 0.0, sim=sim, rec_id=7)
+    assert pin.sample(1.0) == (0,)      # no pokes yet: auto-anim frame 0
+    actor.update_to(438.84)
+    actor.poke('setstate', [1])
+    assert pin.sample(438.85) == (1,)   # restart at the poked state
+    assert pin.sample(439.5) == (2,)    # plays on, holds the 999s state

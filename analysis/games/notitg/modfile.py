@@ -1232,7 +1232,8 @@ def _leaf_element(actor, start_time, named_keyframes, precomputed=None,
     keyframes = precomputed if precomputed is not None \
         else _merged_keyframes(actor, start_time, named_keyframes)
     drawable = _fill_size_as_wh(kind, _drawable_props(keyframes))
-    state_pin = _state_pin(keyframes, states, start_time)
+    state_pin = _state_pin(keyframes, states, start_time, sim=sim,
+                           rec_id=getattr(actor, '_recorder_id', None))
     # A frame pin is real content (a sprite animated purely by
     # setstate/animate pokes), so it keeps an otherwise-untweened actor
     # alive alongside any transform/color keyframes.
@@ -1282,18 +1283,32 @@ _STATE_PROP = 'frame'
 _STATE_PAUSED_PROP = 'frame_paused'
 
 
-def _state_pin(keyframes, states, start_time):
+def _state_pin(keyframes, states, start_time, sim=None, rec_id=None):
     """A `StateAnchors` sampler of the sprite's frame index over time,
     from recorded `setstate`/`animate` pokes, or None when the actor
     never poked its state (the sheet then auto-animates). A `setstate`
     is a RESTART anchor - the state list keeps playing from that state
     (SM `SetState`) - while an `animate(off)` pause holds the anchored
-    frame until resumed."""
+    frame until resumed.
+
+    LAZY (`sim` supplied): the pokes have not HAPPENED at compile time,
+    so a baked pin from the load-time keyframes would freeze every
+    setstate-driven sprite in auto-animation for the whole chart
+    (getfucked2's toss sheet held its pre-throw pose forever). A sheet
+    sprite instead gets a live pin that rebuilds its anchors from the
+    recording actor as the poke stream grows."""
+    if sim is not None:
+        if states and rec_id is not None:
+            return _LiveStatePin(sim, rec_id, states, start_time)
+        return None
     state_kfs = keyframes.get(_STATE_PROP) or ()
     paused_kfs = keyframes.get(_STATE_PAUSED_PROP) or ()
     if not state_kfs and not paused_kfs:
         return None
+    return _state_anchors(state_kfs, paused_kfs, states, start_time)
 
+
+def _state_anchors(state_kfs, paused_kfs, states, start_time):
     events = sorted([(kf.t, _STATE_PROP, kf.values[0]) for kf in state_kfs]
                     + [(kf.t, _STATE_PAUSED_PROP, kf.values[0])
                        for kf in paused_kfs])
@@ -1306,6 +1321,45 @@ def _state_pin(keyframes, states, start_time):
             paused = value != 0.0
         anchors.append((t, state, not paused))
     return sprite_sheet.StateAnchors(anchors, states, t_start=start_time)
+
+
+class _LiveStatePin:
+    """Lazy-path frame-index sampler: `StateAnchors` rebuilt from the
+    live actor's recorded `setstate`/`animate` stream whenever it has
+    grown. Before any poke the anchors are empty and the sheet
+    auto-animates exactly like the baked path with no pin; the renderer
+    samples at the playhead, which the frontier machinery keeps
+    recorded."""
+
+    __slots__ = ('_sim', '_rec_id', '_states', '_t_start', '_count',
+                 '_anchors')
+
+    def __init__(self, sim, rec_id, states, t_start):
+        self._sim = sim
+        self._rec_id = rec_id
+        self._states = states
+        self._t_start = t_start
+        self._count = -1
+        self._anchors = None
+
+    def sample(self, t):
+        actor = self._sim.env._actors.get(self._rec_id)
+        if actor is None:
+            return (sprite_sheet.frame_at_time(self._states,
+                                               t - self._t_start),)
+        frames = actor.keyframes()
+        state_kfs = frames.get(_STATE_PROP) or ()
+        paused_kfs = frames.get(_STATE_PAUSED_PROP) or ()
+        count = len(state_kfs) + len(paused_kfs)
+        if count != self._count:
+            self._count = count
+            self._anchors = (_state_anchors(state_kfs, paused_kfs,
+                                            self._states, self._t_start)
+                             if count else None)
+        if self._anchors is None:
+            return (sprite_sheet.frame_at_time(self._states,
+                                               t - self._t_start),)
+        return self._anchors.sample(t)
 
 
 # StepMania's built-in flat-color texture: the renderer synthesizes it,
