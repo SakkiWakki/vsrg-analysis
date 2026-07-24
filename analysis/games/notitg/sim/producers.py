@@ -521,10 +521,13 @@ def _spawn_background_upgrade(mod_channels, tree, field_provider,
             sweep_seconds = sweep_doc.to_seconds
         # Chunked advance with progress to stderr: on a loaded machine
         # the sweep can take minutes, and "still compiling to X" vs
-        # "broken" must be decidable from the terminal.
+        # "broken" must be decidable from the terminal. Progress keys
+        # on sweep.now, not on this thread's own advances: in-app the
+        # render thread's _nudge_sweep drives the sweep while the
+        # worker parks, and the sweep still has to report.
         import sys
         import time as _time
-        chunk_start = _time.monotonic()
+        sweep_start = _time.monotonic()
         last_print = 0.0
         lock = getattr(sweep, 'sweep_lock', None)
         while sweep.now < end_seconds:
@@ -537,19 +540,19 @@ def _spawn_background_upgrade(mod_channels, tree, field_provider,
                     _time.monotonic() - getattr(sweep, 'render_seen', 0.0)
                     < 0.5):
                 _time.sleep(0.05)
-                continue
-            target = min(sweep.now + 0.25, end_seconds)
-            if lock is not None:
-                with lock:
-                    sweep.advance_to(target)
-                _time.sleep(0.001)
             else:
-                sweep.advance_to(target)
-            if sweep.now - last_print >= 30.0 or sweep.now >= end_seconds:
+                target = min(sweep.now + 0.25, end_seconds)
+                if lock is not None:
+                    with lock:
+                        sweep.advance_to(target)
+                    _time.sleep(0.001)
+                else:
+                    sweep.advance_to(target)
+            if sweep.now - last_print >= 30.0:
                 last_print = sweep.now
                 print(f'[notitg] background compile: {sweep.now:.0f}s '
                       f'/ {end_seconds:.0f}s '
-                      f'({_time.monotonic() - chunk_start:.0f}s elapsed)',
+                      f'({_time.monotonic() - sweep_start:.0f}s elapsed)',
                       file=sys.stderr)
         # Re-read the declarative mods from the SWEPT env, not the load-time
         # capture: some charts populate their mods/mods2 tables from the Update
@@ -603,6 +606,11 @@ def _spawn_background_upgrade(mod_channels, tree, field_provider,
             osc_ctx = _osc_context(sweep.env, sweep_doc, end_seconds)
             screen_shake.channels = modfile._screen_oscillator_timelines(
                 sweep.env, osc_ctx)
+        # Completion signal AFTER the hot-swaps: the channel swap above
+        # is when driver-injected content actually appears on screen.
+        print(f'[notitg] background compile done '
+              f'({_time.monotonic() - sweep_start:.0f}s elapsed)',
+              file=sys.stderr)
 
     threading.Thread(target=worker, daemon=True,
                      name='notitg-lazy-upgrade').start()

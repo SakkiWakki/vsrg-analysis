@@ -1,6 +1,7 @@
 """Native Qt renderer for the embedded replay player."""
 from __future__ import annotations
 
+import math
 import os
 import time
 
@@ -33,15 +34,20 @@ _SCREEN_PREV_SCOPE = 'screen_prev'
 # the instance blits (covers earlier blits, capped by later ones).
 _FILL_SCOPE = 'fill'
 
-# Field captures render with this much extra margin per side (fraction
-# of the window): a proxied/transformed field instance maps the capture
-# boundary into view, and any note a mod pushed past the window would
-# get sliced on that edge. The engine has no such intermediate boundary
-# for proxies (it re-renders through the transform), so the margin
-# hides the divergence for everything but extreme excursions. AFT
-# ('screen') captures deliberately stay window-sized - the engine's AFT
-# texture IS the screen, and its hard edge is chart-visible.
+# Field captures render with extra margin per side: a proxied or
+# transformed field instance maps the capture boundary into view, and
+# any note a mod pushed past that boundary gets sliced flat on the
+# buffer edge. The engine has no such intermediate boundary for proxies
+# (it re-renders through the transform), so the margin must cover the
+# content actually drawn. This fraction of the window is the FLOOR and
+# the growth step; `_field_overscan_margins` widens it to the frame's
+# real mod-displaced note bounds (the candidate y/dx arrays are final
+# before the capture opens), capped at _FIELD_OVERSCAN_MAX_FRAC per
+# side so a runaway excursion cannot demand unbounded capture memory.
+# AFT ('screen') captures deliberately stay window-sized - the engine's
+# AFT texture IS the screen, and its hard edge is chart-visible.
 _FIELD_OVERSCAN_FRAC = 0.25
+_FIELD_OVERSCAN_MAX_FRAC = 1.0
 
 # Debug kill switch: force the pooled-QPixmap capture backend even on a
 # GL host, for A/B comparison against the FBO composite path.
@@ -93,6 +99,78 @@ from analysis.player.render.layers import notes as _notes_layer
 # Re-export so tests / external code can keep importing _NoteView from
 # this module; the implementation lives in layers/notes.py.
 from analysis.player.render.layers.notes import _NoteView  # noqa: F401
+
+
+def _finite_bounds(*arrays):
+    """`(lo, hi)` over the finite values of the given arrays, or None
+    when nothing finite remains. Absent arrays (narrow test ctxs,
+    frames without a mod stash) and NaN entries (non-LN tails) drop
+    out."""
+    lo, hi = math.inf, -math.inf
+    for a in arrays:
+        if a is None or not len(a):
+            continue
+        finite = np.asarray(a, dtype=np.float64)
+        finite = finite[np.isfinite(finite)]
+        if finite.size:
+            lo = min(lo, float(finite.min()))
+            hi = max(hi, float(finite.max()))
+    return (lo, hi) if lo <= hi else None
+
+
+def _overscan_steps(need: int, base: int, window: int) -> int:
+    """The margin covering `need` px, rounded up to whole `base`-sized
+    steps so the pooled capture target (raster pixmap / GL FBO, both
+    reallocated on any size change) keeps a stable size while a mod
+    excursion breathes. Floored at one step, capped at
+    _FIELD_OVERSCAN_MAX_FRAC of the window per side."""
+    if need <= base:
+        return base
+    cap = max(base, int(window * _FIELD_OVERSCAN_MAX_FRAC))
+    return min(-(-need // base) * base, cap)
+
+
+def _field_overscan_margins(ctx):
+    """Per-side capture margins `(mx, my)` for this frame's field
+    captures, sized to the content actually drawn: the candidate y
+    arrays and dx stash hold each note's FINAL mod-displaced position
+    by the time the capture opens (note_mods.apply runs in
+    build_context), so the margins grow beyond the floor exactly when
+    mods push notes past it. Receptor offsets ride along - receptors
+    take the same per-column displacement. Padded by one lane width
+    for the sprite extent around each position."""
+    p = ctx.player
+    base_x = max(1, int(p.W * _FIELD_OVERSCAN_FRAC))
+    base_y = max(1, int(p.H * _FIELD_OVERSCAN_FRAC))
+    pad = float(getattr(ctx, 'lane_w', 0.0))
+    receptors = getattr(ctx, 'receptor_offsets', None) or {}
+
+    receptor_ys = None
+    if receptors.get('dy') is not None:
+        receptor_ys = float(getattr(ctx, 'judge_y', 0.0)) + receptors['dy']
+    y_bounds = _finite_bounds(getattr(ctx, 'candidate_head_y', None),
+                              getattr(ctx, 'candidate_tail_y', None),
+                              getattr(ctx, 'candidate_press_y', None),
+                              receptor_ys)
+    need_y = 0
+    if y_bounds is not None:
+        y_lo, y_hi = y_bounds
+        need_y = math.ceil(max(0.0, -y_lo, y_hi - p.H) + pad)
+
+    # x positions are lane_x(col) + dx; bounding the lane extent by the
+    # global dx range over-covers per column, in the safe direction.
+    dx_bounds = _finite_bounds(getattr(ctx, 'candidate_dx', None),
+                               receptors.get('dx'))
+    need_x = 0
+    if dx_bounds is not None:
+        left, width = _field_layer._field_span(ctx)
+        dx_lo, dx_hi = dx_bounds
+        x_lo = left + min(0.0, dx_lo)
+        x_hi = left + width + max(0.0, dx_hi)
+        need_x = math.ceil(max(0.0, -x_lo, x_hi - p.W) + pad)
+
+    return (_overscan_steps(need_x, base_x, p.W),
+            _overscan_steps(need_y, base_y, p.H))
 
 
 def _precompute_candidate_ys(ctx) -> None:
@@ -214,7 +292,10 @@ class QtPlayerRenderer:
         self._screen_open = False
         # This frame's node-point capture, taken lazily during the
         # instance blits and promoted to `_prev_screen` at composite end.
-        self._field_overscan = (0, 0)
+        # Per-slot field-capture margins ('field' plus any 'field{N}'),
+        # rebuilt each frame from the content bounds; the blit path
+        # shifts by the same amounts (`_overscan_blit`).
+        self._field_overscan = {}
         self._screen_capture = None
         # The host painter bracketed by an open 'post' capture slot
         # (the unified GL shader stage); None outside that window.
@@ -721,12 +802,13 @@ class QtPlayerRenderer:
         slot when this frame carries field instances; returns the
         capture painter or None (no fields, direct painting)."""
         self._field_src = None
+        self._field_overscan = {}
         if (frame is None or not frame.fields or painter is None
                 or getattr(ctx, 'player', None) is None):
             return None
         p = ctx.player
-        mx, my = self._field_overscan = (int(p.W * _FIELD_OVERSCAN_FRAC),
-                                         int(p.H * _FIELD_OVERSCAN_FRAC))
+        mx, my = _field_overscan_margins(ctx)
+        self._field_overscan['field'] = (mx, my)
         capture_painter = self._capture.open('field', painter,
                                              p.W + 2 * mx, p.H + 2 * my)
         if capture_painter is not None:
@@ -761,16 +843,19 @@ class QtPlayerRenderer:
             return
         player = ctx.player
         primary = getattr(player, '_note_mods', None)
-        mx, my = self._field_overscan
         try:
             for number, note_mods in spec.note_mods.items():
+                # Rebuild before opening the slot: this player's margins
+                # come from ITS displaced candidate bounds, not player 1's.
+                player._note_mods = note_mods
+                self._rebuild_note_mods(ctx)
                 slot = f'field{number}'
+                mx, my = _field_overscan_margins(ctx)
+                self._field_overscan[slot] = (mx, my)
                 fp = self._capture.open(slot, painter,
                                         player.W + 2 * mx, player.H + 2 * my)
                 if fp is not None:
                     fp.translate(mx, my)
-                player._note_mods = note_mods
-                self._rebuild_note_mods(ctx)
                 wrapped = self._begin_effect_transform(frame, fp)
                 self._draw_field_layers(ctx, fp, visibility)
                 if wrapped:
@@ -897,15 +982,16 @@ class QtPlayerRenderer:
                            src_box=box, opacity=opacity)
             source = self._field_src
         if scope != _SCREEN_SCOPE and scope != _SCREEN_PREV_SCOPE:
-            transform, box = self._overscan_blit(transform, box)
+            slot = scope if is_player_field else 'field'
+            transform, box = self._overscan_blit(transform, box, slot)
         batch.blit(source, transform=transform, src_box=box,
                    opacity=opacity)
 
-    def _overscan_blit(self, transform, box):
+    def _overscan_blit(self, transform, box, slot):
         """Blit args for an overscanned field source: the window origin
-        sits at (+mx, +my) inside the capture, so the draw shifts back
-        and a source-space clip box shifts forward."""
-        mx, my = self._field_overscan
+        sits at (+mx, +my) inside the slot's capture, so the draw
+        shifts back and a source-space clip box shifts forward."""
+        mx, my = self._field_overscan.get(slot, (0, 0))
         if not mx and not my:
             return transform, box
         offset = QTransform.fromTranslate(-mx, -my)

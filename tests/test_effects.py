@@ -650,3 +650,70 @@ def test_transformed_draw_survives_chart_rect_boundary():
     right = QColor(image.pixel(boundary + 10, 50))
     assert left.red() == 255
     assert right.red() == 255
+
+
+def test_mod_displaced_note_survives_field_capture_top_edge():
+    # Real-painter regression for the horizontal slice: the field
+    # capture used a fixed 25%-of-window margin, so a note a mod pushed
+    # further above the window top was cut flat at the capture buffer
+    # edge, and a transformed instance blit mapped that cut line into
+    # view. Margins now grow to the frame's displaced candidate bounds.
+    import numpy as np
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    from analysis.player.render.qt_renderer import QtPlayerRenderer
+
+    w, h = 400, 300
+    note_y = -250.0
+    image = QImage(w, h, QImage.Format.Format_RGB32)
+    image.fill(QColor(0, 0, 0))
+    painter = QPainter(image)
+
+    player = SimpleNamespace(W=w, H=h, keycount=4)
+    ctx = SimpleNamespace(
+        player=player, chart_rect=(0, 0, w, h), lane_w=40.0, judge_y=260,
+        candidate_head_y=np.array([note_y]),
+        candidate_tail_y=np.array([float('nan')]),
+        candidate_press_y=np.array([note_y]))
+    # An instance transform sliding the field down, carrying the
+    # far-above content back into view (a proxy would do the same).
+    frame = EffectFrame(fields=(
+        (QTransform().translate(0.0, 310.0), 1.0, 'field'),))
+
+    r = QtPlayerRenderer(plugin_manager=SimpleNamespace())
+    fp = r._begin_field_capture(frame, ctx, painter)
+    assert fp is not None
+    fp.fillRect(180, int(note_y) - 10, 40, 20, QColor(255, 255, 255))
+    r._end_field_capture()
+    r._blit_field_instances(frame, ctx, painter)
+    painter.end()
+
+    assert QColor(image.pixel(200, 60)).red() == 255
+
+
+def test_field_overscan_margins_grow_with_displacement_and_cap():
+    import numpy as np
+
+    from analysis.player.render.qt_renderer import _field_overscan_margins
+
+    player = SimpleNamespace(W=400, H=300, keycount=4)
+
+    # No mod stash (any non-NotITG game, narrow ctxs): the floor.
+    rest = SimpleNamespace(player=player)
+    assert _field_overscan_margins(rest) == (100, 75)
+
+    # Displaced ys grow the margin in floor-sized steps.
+    pushed = SimpleNamespace(player=player,
+                             candidate_head_y=np.array([-200.0]))
+    assert _field_overscan_margins(pushed) == (100, 225)
+
+    # A runaway excursion is capped at one window per side.
+    extreme = SimpleNamespace(player=player,
+                              candidate_head_y=np.array([-5000.0]))
+    assert _field_overscan_margins(extreme) == (100, 300)
+
+    # dx displacement past the left window edge grows the x margin.
+    scattered_x = SimpleNamespace(player=player, x0=100.0, lane_w=40.0,
+                                  lane_xs=None,
+                                  candidate_dx=np.array([-400.0]))
+    assert _field_overscan_margins(scattered_x)[0] == 400
