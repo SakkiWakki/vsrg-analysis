@@ -949,6 +949,11 @@ class QtPlayerRenderer:
         The backdrop pixmap, when present, was captured in place of the
         direct background/below-draws, so it is blitted here as the base
         backdrop exactly once."""
+        if os.environ.get('VSRG_DRAWABLE_PIPELINE') == '1':
+            from analysis.player.render.storyboard.pipeline import pipeline_for
+            _pipeline = pipeline_for(ctx.player)
+            if _pipeline is not None and _pipeline.delegate(frame, ctx, painter):
+                return
         from analysis.games.notitg.field_instances import design_box
         design = design_box(ctx.chart_rect)
         box = (design if (self._full_field_capture(frame, ctx)

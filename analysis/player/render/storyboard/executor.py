@@ -10,15 +10,25 @@ device pixels exactly once. It never sees a timeline, a tree, or a game.
 
 Record layout (frozen; mirrors native/src/evaluate.rs):
 
-  U_STRIDE = 8 u32 lanes per op:
-    [kind, a, b, c, blend, shader+1, clip+1, screen_space]
+  U_STRIDE = 10 u32 lanes per op:
+    [kind, a, b, c, blend, shader+1, clip+1, screen_space,
+     uf_offset, uf_count]
       BEGIN: a = drawable id, b = clear mode
-      BLIT:  a = source kind, b = source id, c = frame index
+      BLIT:  a = source kind, b = source id, c = frame index;
+             shader+1/clip+1 are 1-based (0 = none); uf_offset/uf_count
+             window into the third `uf` buffer of sampled uniform values.
       COPY:  a = destination drawable id (source is the OPEN target)
       END:   a = drawable id
   F_STRIDE = 20 f32 lanes per op:
     mat3 row-major [0..9], opacity [9], tint rgb [10..13],
     crop l,t,r,b [13..17], reserved [17..20]
+
+Clip shapes and polyline vertices arrive out-of-band via the ctor
+(``clips`` mirrors the doc's ClipDesc table; ``lines`` seeds polyline
+sources, updated per frame by ``set_lines``). Shader uniform values
+ride the ``uf`` buffer passed to ``execute``; the executor stashes the
+last-seen dict per shader id on ``shader_uniforms`` (raster draws
+unshaded but binds the uniforms).
 
 Clear modes match ClearMode in doc.rs: TransparentBlack=0, OpaqueBlack=1,
 Retain=2. Source kinds and op kinds are the module constants exported by
@@ -36,8 +46,8 @@ from __future__ import annotations
 import logging
 
 import numpy as np
-from PySide6.QtCore import QRectF
-from PySide6.QtGui import QColor, QImage, QPainter, QTransform
+from PySide6.QtCore import QPointF, QRectF
+from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPolygonF, QTransform
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +61,18 @@ _U_C = 3
 _U_BLEND = 4
 _U_SHADER = 5
 _U_CLIP = 6
+_U_SCREEN_SPACE = 7
+_U_UF_OFFSET = 8  # index into the third `uf` buffer (uniform values)
+_U_UF_COUNT = 9   # 0 = the op binds no uniforms
 
 # f32 lane offsets.
 _F_OPACITY = 9
 _F_TINT = 10  # ..13
 _F_CROP = 13  # ..17 (l, t, r, b fractions of the SOURCE logical size)
+
+# Polyline stroke width, in the target's logical units (drawable-ir.md
+# B2: fixed for now; a future width channel would replace this).
+_LINES_WIDTH = 3.0
 
 # Op / source / clear codes (kept in sync with storyboard_native; the
 # module also exports them, but the executor must run without importing
@@ -97,21 +114,55 @@ class RasterExecutor:
         self,
         images: dict[int, QImage],
         drawable_sizes: list[tuple[float, float]],
+        clips: list[tuple] | None = None,
+        lines: dict[int, np.ndarray] | None = None,
     ) -> None:
         self._images = images
         self._sizes = drawable_sizes
         self._targets: dict[int, QImage] = {}
         self._skipped_lanes: set[str] = set()
+        # Clip shapes mirror the doc's ClipDesc table, indexed by ClipId
+        # (the record carries clip+1 on lane 6). Prebuild the QPainterPath
+        # for each shape once; a clipped blit intersects the target's own
+        # bounds with it in TARGET logical space.
+        self._clip_paths: list[QPainterPath] = [
+            _clip_path(shape) for shape in (clips or [])
+        ]
+        # Polyline sources keyed by LinesId (the record's source id on
+        # lane B). Vertices are (n, 2) float arrays in the source's own
+        # logical units; set_lines() swaps them per frame (travelpath).
+        self._lines: dict[int, np.ndarray] = dict(lines or {})
+        # Last-seen sampled uniform VALUES per shader id, introspectable
+        # after execute(): {shader_id: [f32, ...]} in binding order.
+        self.shader_uniforms: dict[int, list[float]] = {}
 
-    def execute(self, u: np.ndarray, f: np.ndarray) -> QImage:
+    def set_lines(self, lines_id: int, verts: np.ndarray) -> None:
+        """Update a polyline source's vertices (n, 2) in its own logical
+        units. Travelpaths feed a new array each frame; a subsequent
+        execute() strokes the latest one under the op's transform."""
+        self._lines[int(lines_id)] = np.asarray(verts, dtype=np.float32).reshape(-1, 2)
+
+    def execute(
+        self,
+        u: np.ndarray,
+        f: np.ndarray,
+        uf: np.ndarray | None = None,
+    ) -> QImage:
         """Run the records; return the screen drawable's image.
 
         Retained targets survive across calls, so calling execute() again
         with the same doc reuses last frame's content for any Retain
         drawable (feedback).
+
+        ``uf`` is the schedule's third flat buffer of sampled shader
+        uniform VALUES; a BLIT's lanes 8/9 give an (offset, count) window
+        into it. Passing it lets the executor stash each shaded op's
+        uniforms per shader id (introspectable via ``shader_uniforms``);
+        the raster reference backend still draws unshaded.
         """
         u = np.ascontiguousarray(u, dtype=np.uint32)
         f = np.ascontiguousarray(f, dtype=np.float32)
+        uf = None if uf is None else np.ascontiguousarray(uf, dtype=np.float32)
         target_stack: list[int] = []
         painter: QPainter | None = None
 
@@ -120,7 +171,7 @@ class RasterExecutor:
                 case _Op.BEGIN:
                     painter = self._begin(u[i], target_stack, painter)
                 case _Op.BLIT:
-                    self._blit(u[i], f[i], target_stack, painter)
+                    self._blit(u[i], f[i], target_stack, painter, uf)
                 case _Op.COPY:
                     self._copy(u[i], target_stack)
                 case _Op.END:
@@ -194,9 +245,11 @@ class RasterExecutor:
         frec: np.ndarray,
         target_stack: list[int],
         painter: QPainter | None,
+        uf: np.ndarray | None,
     ) -> None:
         if painter is None or not target_stack:
             return
+        self._stash_uniforms(urec, uf)
         self._log_skipped_lanes(urec)
 
         src_kind = int(urec[_U_A])
@@ -205,19 +258,57 @@ class RasterExecutor:
         blend = _QT_BLEND.get(int(urec[_U_BLEND]), _QT_BLEND[0])
 
         painter.save()
+        # The clip is in the TARGET's logical space, so apply it under the
+        # identity transform (before the op's mat3), then install the op's
+        # transform for the source geometry.
+        self._apply_clip(painter, urec)
         painter.setTransform(self._qtransform(frec))
         painter.setOpacity(max(0.0, min(1.0, opacity)))
         painter.setCompositionMode(blend)
 
-        if src_kind == _SRC_FILL:
-            self._draw_fill(painter, tint)
-        elif src_kind == _SRC_IMAGE:
-            self._draw_image(painter, urec, frec, tint)
-        elif src_kind == _SRC_DRAWABLE:
-            self._draw_drawable(painter, urec, frec, tint)
-        # Mesh / Lines sources are geometry-bearing; the raster reference
-        # backend leaves them for a later pass.
+        match src_kind:
+            case n if n == _SRC_FILL:
+                self._draw_fill(painter, tint)
+            case n if n == _SRC_IMAGE:
+                self._draw_image(painter, urec, frec, tint)
+            case n if n == _SRC_DRAWABLE:
+                self._draw_drawable(painter, urec, frec, tint)
+            case n if n == _SRC_LINES:
+                self._draw_lines(painter, urec, tint)
+            # Mesh sources are geometry-bearing through a projection; the
+            # raster reference backend leaves them for a later pass.
         painter.restore()
+
+    def _apply_clip(self, painter: QPainter, urec: np.ndarray) -> None:
+        clip_plus_one = int(urec[_U_CLIP])
+        if clip_plus_one == 0:
+            return
+        clip_id = clip_plus_one - 1
+        if not 0 <= clip_id < len(self._clip_paths):
+            if "clip_missing" not in self._skipped_lanes:
+                self._skipped_lanes.add("clip_missing")
+                logger.warning("RasterExecutor: clip id %d has no shape, drawn unclipped", clip_id)
+            return
+        # setClipPath maps through the painter's current transform. The
+        # shape is in target logical units, so clip while still at the
+        # identity target transform (setTransform for the source has not
+        # been called yet at this point).
+        painter.setClipPath(self._clip_paths[clip_id])
+
+    def _stash_uniforms(self, urec: np.ndarray, uf: np.ndarray | None) -> None:
+        shader_plus_one = int(urec[_U_SHADER])
+        count = int(urec[_U_UF_COUNT])
+        if shader_plus_one == 0 or count == 0 or uf is None:
+            return
+        offset = int(urec[_U_UF_OFFSET])
+        if offset + count > uf.shape[0]:
+            if "uf_range" not in self._skipped_lanes:
+                self._skipped_lanes.add("uf_range")
+                logger.warning("RasterExecutor: uniform window out of range, ignored")
+            return
+        self.shader_uniforms[shader_plus_one - 1] = [
+            float(v) for v in uf[offset:offset + count]
+        ]
 
     def _qtransform(self, frec: np.ndarray) -> QTransform:
         # mat3 is row-major [m00 m01 m02; m10 m11 m12; 0 0 1]. QTransform's
@@ -272,6 +363,33 @@ class RasterExecutor:
             return
         self._draw_source_image(painter, source, frec, tint)
 
+    def _draw_lines(
+        self,
+        painter: QPainter,
+        urec: np.ndarray,
+        tint: tuple[float, float, float],
+    ) -> None:
+        lines_id = int(urec[_U_B])
+        verts = self._lines.get(lines_id)
+        if verts is None or len(verts) < 2:
+            # No vertices bound yet (or a degenerate single point): a
+            # travelpath draws nothing until its feed arrives.
+            return
+        # The op's mat3 is already installed on the painter, so the
+        # polyline is stroked in source logical units and rides the same
+        # transform as any other source. Tint is the stroke color.
+        color = QColor.fromRgbF(
+            max(0.0, min(1.0, tint[0])),
+            max(0.0, min(1.0, tint[1])),
+            max(0.0, min(1.0, tint[2])),
+            1.0,
+        )
+        pen = QPen(color, _LINES_WIDTH)
+        pen.setCosmetic(False)
+        painter.setPen(pen)
+        polyline = QPolygonF([QPointF(float(x), float(y)) for x, y in verts])
+        painter.drawPolyline(polyline)
+
     def _draw_source_image(
         self,
         painter: QPainter,
@@ -300,12 +418,26 @@ class RasterExecutor:
         painter.drawImage(target, src, sub)
 
     def _log_skipped_lanes(self, urec: np.ndarray) -> None:
+        # Clip and uniform lanes are now consumed (see _apply_clip /
+        # _stash_uniforms). The shader itself is still not applied - the
+        # raster reference backend draws unshaded but binds the uniforms.
         if int(urec[_U_SHADER]) != 0 and "shader" not in self._skipped_lanes:
             self._skipped_lanes.add("shader")
             logger.warning("RasterExecutor: shader lane not implemented (TODO), drawn unshaded")
-        if int(urec[_U_CLIP]) != 0 and "clip" not in self._skipped_lanes:
-            self._skipped_lanes.add("clip")
-            logger.warning("RasterExecutor: clip lane not implemented (TODO), drawn unclipped")
+
+
+def _clip_path(shape: tuple) -> QPainterPath:
+    """Build a QPainterPath from a ClipDesc-shaped tuple in the target's
+    logical units: ('rect', l, t, r, b) or ('poly', [(x, y), ...])."""
+    path = QPainterPath()
+    match shape:
+        case ("rect", l, t, r, b):
+            path.addRect(QRectF(float(l), float(t), float(r) - float(l), float(b) - float(t)))
+        case ("poly", points):
+            path.addPolygon(QPolygonF([QPointF(float(x), float(y)) for x, y in points]))
+        case _:
+            raise ValueError(f"unknown clip shape: {shape!r}")
+    return path
 
 
 def _is_white(tint: tuple[float, float, float]) -> bool:

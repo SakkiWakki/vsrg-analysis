@@ -149,3 +149,129 @@ def test_frame_with_feeds_ingests_soa_and_matches_static():
     static_blits = u2[u2[:, 0] == sn.OP_BLIT]
     assert [(int(r[1]), int(r[2])) for r in static_blits] == [
         (sn.SRC_DRAWABLE, notes)]
+
+
+# --- wave 2: full link chain, camera projection, schedule lowering -------
+
+def test_linkless_item_transform_is_bit_identical():
+    # Wiring the full-transform path must not perturb linkless items: a
+    # plain translate(10,20) scale(2,3) yields the frozen first-cut mat3.
+    b = sn.DocBuilder(640.0, 480.0)
+    b.item(0, sn.SRC_FILL, 0, x_rest=10.0, y_rest=20.0, sx_rest=2.0, sy_rest=3.0)
+    ev = b.finish()
+    _u, f = _frames(ev, 0.0)
+    blit = f[1]  # after BEGIN
+    # Column-vector record mat3 [a b tx; c d ty; 0 0 1].
+    assert blit[:9].tolist() == [2.0, 0.0, 10.0, 0.0, 3.0, 20.0, 0.0, 0.0, 1.0]
+
+
+def test_item_link_uses_full_compose_chain():
+    # One default link folds through compose_links to the centered
+    # _TO_CONTENT translate; the record carries its column-vector transpose
+    # (tx=-320 in lane 2, ty=-240 in lane 5), and the link alpha multiplies.
+    b = sn.DocBuilder(640.0, 480.0)
+    b.item(0, sn.SRC_FILL, 0, opacity_rest=0.6)
+    b.item_link(0, alpha_rest=0.5)
+    ev = b.finish()
+    u, f = _frames(ev, 0.0)
+    blits = u[u[:, 0] == sn.OP_BLIT]
+    assert len(blits) == 1
+    blit = f[u[:, 0] == sn.OP_BLIT][0]
+    assert blit[0] == pytest.approx(1.0)   # scale x
+    assert blit[4] == pytest.approx(1.0)   # scale y
+    assert blit[2] == pytest.approx(-320.0, abs=1e-2)  # tx
+    assert blit[5] == pytest.approx(-240.0, abs=1e-2)  # ty
+    assert blit[9] == pytest.approx(0.3)   # 0.6 opacity * 0.5 link alpha
+
+
+def test_item_link_hidden_drops_the_item():
+    b = sn.DocBuilder(640.0, 480.0)
+    b.item(0, sn.SRC_FILL, 0)
+    b.item_link(0, hidden_rest=1.0)
+    ev = b.finish()
+    u, _f = _frames(ev, 0.0)
+    assert u[:, 0].tolist() == [sn.OP_BEGIN, sn.OP_END]
+
+
+def test_item_link_flip_swaps_leaf_crop():
+    # A flipped leaf swaps top/bottom crop into the record crop lanes.
+    b = sn.DocBuilder(640.0, 480.0)
+    b.item(0, sn.SRC_FILL, 0)
+    b.item_link(0, crop_t_rest=0.1, crop_b_rest=0.3, flip_base_y=True)
+    ev = b.finish()
+    u, f = _frames(ev, 0.0)
+    blit = f[u[:, 0] == sn.OP_BLIT][0]
+    assert blit[14] == pytest.approx(0.3)  # crop top <- bottom
+    assert blit[16] == pytest.approx(0.1)  # crop bottom <- top
+
+
+def test_item_projection_centered_fov45_is_identity():
+    # A centered fov-45 projection folds to identity on an untransformed
+    # fullscreen item: the record mat3 stays the identity homography.
+    b = sn.DocBuilder(640.0, 480.0)
+    b.item(0, sn.SRC_FILL, 0)
+    # far = eye_distance(45, 640) + 1000 ~= 1772.7 (the item_projection default).
+    b.item_projection(0, fov_rest=45.0, vanish_x_rest=320.0, vanish_y_rest=240.0)
+    ev = b.finish()
+    u, f = _frames(ev, 0.0)
+    m = f[u[:, 0] == sn.OP_BLIT][0][:9]
+    m = m / m[8]  # homographies are scale-free
+    assert m.tolist() == pytest.approx(
+        [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], abs=1e-4)
+
+
+def _seg(dur, prop, value, mode='abs', ease=0):
+    return {'kind': 'Seg', 'dur': dur, 'ease': ease,
+            'targets': [{'prop': prop, 'mode': mode, 'value': value}],
+            'effect': None, 'fire_id': -1}
+
+
+def test_schedule_channel_lowers_a_ramp_and_samples_it():
+    # A single 0 -> 100 ramp over 1s, lowered to a doc channel; sampling it
+    # through an item's opacity-like use is the same fold the Rust lower()
+    # produces (0 at t=0, 50 at t=0.5, 100 held after).
+    b = sn.DocBuilder(640.0, 480.0)
+    node = _seg(1.0, 0, 100.0)
+    cid = b.schedule_channel(node, 0.0, -1.0, 0, state=[(0, 0.0)])
+    assert cid is not None
+    # Bind the channel to an item's x and read it back at three times.
+    b.item(0, sn.SRC_FILL, 0, x_id=cid, x_rest=0.0)
+    ev = b.finish()
+    for t, want in [(0.0, 0.0), (0.5, 50.0), (2.0, 100.0)]:
+        u, f = _frames(ev, t)
+        blit = f[u[:, 0] == sn.OP_BLIT][0]
+        assert blit[2] == pytest.approx(want)  # tx lane = sampled x
+
+
+def test_schedule_channel_absent_prop_returns_none():
+    b = sn.DocBuilder(640.0, 480.0)
+    node = _seg(1.0, 0, 100.0)
+    # The schedule touches prop 0, never prop 5.
+    assert b.schedule_channel(node, 0.0, -1.0, 5, state=[(0, 0.0)]) is None
+
+
+def test_schedule_channel_unrolls_a_loop_to_the_horizon():
+    b = sn.DocBuilder(640.0, 480.0)
+    loop = {'kind': 'Loop', 'period': 2.0, 'body': _seg(1.0, 0, 10.0)}
+    cid = b.schedule_channel(loop, 0.0, 7.0, 0, state=[(0, 0.0)])
+    assert cid is not None
+    b.item(0, sn.SRC_FILL, 0, x_id=cid, x_rest=0.0)
+    ev = b.finish()
+    # First pass ramps 0 -> 10 over [0,1]; midpoint is 5.
+    u, f = _frames(ev, 0.5)
+    assert f[u[:, 0] == sn.OP_BLIT][0][2] == pytest.approx(5.0)
+
+
+def test_schedule_fires_returns_effect_times():
+    b = sn.DocBuilder(640.0, 480.0)
+    # The nested_with_fire fixture: a 2s seg whose effect (a Seq: hibernate
+    # 1s, then a fire seg) joins the queue tail, so it fires after the outer
+    # seg completes (t=2) plus the hibernate (t=3). Matches lower() exactly.
+    fire_seg = {'kind': 'Seg', 'dur': 0.0, 'ease': 0, 'targets': [],
+                'effect': None, 'fire_id': 0}
+    effect = {'kind': 'Seq', 'parts': [{'kind': 'Hibernate', 'dur': 1.0}, fire_seg]}
+    node = {'kind': 'Seg', 'dur': 2.0, 'ease': 0,
+            'targets': [{'prop': 0, 'mode': 'abs', 'value': 5.0}],
+            'effect': effect, 'fire_id': -1}
+    fires = b.schedule_fires(node, 0.0, -1.0, state=[(0, 0.0)])
+    assert fires == pytest.approx([3.0])

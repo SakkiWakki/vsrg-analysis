@@ -297,14 +297,105 @@ fn emit_commands(doc: &DrawableDoc, commands: &[Cmd], t: f32, schedule: &mut Dra
     }
 }
 
+/// The item's placement in the BLIT record's column-vector mat3
+/// convention, plus an alpha multiplier and an optional overriding crop.
+///
+/// Linkless items keep the first-cut TRS bit-identically (alpha 1, no crop
+/// override). A linked item samples each link's ChannelRefs into a
+/// `TransformState`, folds the chain through `transform::compose_links`
+/// (returning None when hidden/degenerate/faint, which drops the item),
+/// TRANSPOSES the resulting row-vector H into the record's column-vector
+/// layout, and carries the chain's alpha + (swapped) leaf crop.
+fn item_transform(
+    doc: &DrawableDoc,
+    item: &Item,
+    t: f32,
+) -> Option<([f32; 9], f32, Option<[f32; 4]>)> {
+    let ch = &doc.channels;
+    if item.links.is_empty() {
+        let (x, y) = (ch.sample(item.transform.x, t), ch.sample(item.transform.y, t));
+        let (sx, sy) = (
+            ch.sample(item.transform.scale_x, t),
+            ch.sample(item.transform.scale_y, t),
+        );
+        let rot = ch.sample(item.transform.rot, t).to_radians();
+        let (c, s) = (rot.cos(), rot.sin());
+        // mat3, column-vector record convention: translate(x, y) * rotate * scale.
+        let mat = [
+            c * sx, -s * sy, x, //
+            s * sx, c * sy, y, //
+            0.0, 0.0, 1.0,
+        ];
+        return Some((mat, 1.0, None));
+    }
+
+    let links: Vec<crate::transform::TransformState> =
+        item.links.iter().map(|l| sample_link(ch, l, t)).collect();
+    let (h, alpha, crop) = crate::transform::compose_links(&links, item.flip_base_y)?;
+    // compose_links returns row-vector H (translation in the bottom row,
+    // indices 6/7); the BLIT record is column-vector (M @ p), so transpose.
+    let mat = [
+        h[0], h[3], h[6], //
+        h[1], h[4], h[7], //
+        h[2], h[5], h[8],
+    ];
+    Some((mat, alpha, Some(crop)))
+}
+
+/// Sample one link's channel refs into a `transform::TransformState`.
+fn sample_link(
+    ch: &ChannelTable,
+    link: &crate::doc::LinkRef,
+    t: f32,
+) -> crate::transform::TransformState {
+    crate::transform::TransformState {
+        x: ch.sample(link.x, t),
+        y: ch.sample(link.y, t),
+        zoom_x: ch.sample(link.zoom_x, t),
+        zoom_y: ch.sample(link.zoom_y, t),
+        rot: ch.sample(link.rot, t),
+        skew_x: ch.sample(link.skew_x, t),
+        skew_y: ch.sample(link.skew_y, t),
+        base_scale_x: ch.sample(link.base_scale_x, t),
+        base_scale_y: ch.sample(link.base_scale_y, t),
+        halign: ch.sample(link.halign, t),
+        valign: ch.sample(link.valign, t),
+        hidden: ch.sample(link.hidden, t),
+        alpha: ch.sample(link.alpha, t),
+        crop: [
+            ch.sample(link.crop[0], t),
+            ch.sample(link.crop[1], t),
+            ch.sample(link.crop[2], t),
+            ch.sample(link.crop[3], t),
+        ],
+        natural_w: ch.sample(link.natural_w, t),
+        natural_h: ch.sample(link.natural_h, t),
+    }
+}
+
 fn emit_item(doc: &DrawableDoc, item: &Item, t: f32, schedule: &mut DrawSchedule) {
     let ch: &ChannelTable = &doc.channels;
     if ch.sample(item.visible, t) < 0.5 {
         return;
     }
-    let opacity = ch.sample(item.opacity, t);
+
+    // The item's placement: the full leaf-link chain when present (its H,
+    // alpha, and crop win), else the first-cut TRS. Both land in the BLIT
+    // record's column-vector mat3 convention.
+    let (mut mat, alpha_mul, link_crop) = match item_transform(doc, item, t) {
+        Some(triple) => triple,
+        None => return, // hidden / degenerate / faint link chain
+    };
+    let opacity = ch.sample(item.opacity, t) * alpha_mul;
     if opacity < 1.0 / 255.0 {
         return;
+    }
+
+    // A per-item camera projection folds the 2D mat3 onto the z=0 design
+    // plane and back to a projective mat3 (row/col collapse; see camera.rs).
+    if let Some(cam) = item.projection {
+        let p = cam.matrix(ch, t);
+        mat = crate::camera::fold_projection(&mat, &p);
     }
 
     let (src_kind, src_id, src_aux) = match item.source {
@@ -315,28 +406,21 @@ fn emit_item(doc: &DrawableDoc, item: &Item, t: f32, schedule: &mut DrawSchedule
         Source::Lines(l) => (SRC_LINES, l, 0),
     };
 
-    let (x, y) = (ch.sample(item.transform.x, t), ch.sample(item.transform.y, t));
-    let (sx, sy) = (
-        ch.sample(item.transform.scale_x, t),
-        ch.sample(item.transform.scale_y, t),
-    );
-    let rot = ch.sample(item.transform.rot, t).to_radians();
-    let (c, s) = (rot.cos(), rot.sin());
-    // mat3, row-major: translate(x, y) * rotate * scale.
-    let mat = [
-        c * sx, -s * sy, x, //
-        s * sx, c * sy, y, //
-        0.0, 0.0, 1.0,
-    ];
-
     let mut f = [0.0f32; F_STRIDE];
     f[..9].copy_from_slice(&mat);
     f[9] = opacity;
     for (lane, tint) in item.tint.iter().enumerate() {
         f[10 + lane] = ch.sample(*tint, t);
     }
-    for (lane, crop) in item.crop.iter().enumerate() {
-        f[13 + lane] = ch.sample(*crop, t);
+    match link_crop {
+        // The link chain's crop (already top/bottom-swapped under flip)
+        // overrides the item's own crop lanes.
+        Some(crop) => f[13..17].copy_from_slice(&crop),
+        None => {
+            for (lane, crop) in item.crop.iter().enumerate() {
+                f[13 + lane] = ch.sample(*crop, t);
+            }
+        }
     }
 
     let (uniform_offset, uniform_count) = if item.shader.is_some() && !item.uniforms.is_empty() {
@@ -607,5 +691,153 @@ mod tests {
             blit_sources(&schedule),
             vec![(SRC_IMAGE, 1), (SRC_IMAGE, 2), (SRC_DRAWABLE, notes)]
         );
+    }
+
+    /// The f32 mat3 of the first (and only) BLIT op.
+    fn blit_mat(schedule: &DrawSchedule) -> [f32; 9] {
+        let op = (0..schedule.len())
+            .find(|i| schedule.u[i * U_STRIDE] == OP_BLIT)
+            .expect("a blit");
+        let mut m = [0.0f32; 9];
+        m.copy_from_slice(&schedule.f[op * F_STRIDE..op * F_STRIDE + 9]);
+        m
+    }
+
+    fn default_link() -> crate::doc::LinkRef {
+        let s = crate::transform::TransformState::default();
+        let c = ChannelRef::constant;
+        crate::doc::LinkRef {
+            x: c(s.x),
+            y: c(s.y),
+            zoom_x: c(s.zoom_x),
+            zoom_y: c(s.zoom_y),
+            rot: c(s.rot),
+            skew_x: c(s.skew_x),
+            skew_y: c(s.skew_y),
+            base_scale_x: c(s.base_scale_x),
+            base_scale_y: c(s.base_scale_y),
+            halign: c(s.halign),
+            valign: c(s.valign),
+            hidden: c(s.hidden),
+            alpha: c(s.alpha),
+            crop: [c(s.crop[0]), c(s.crop[1]), c(s.crop[2]), c(s.crop[3])],
+            natural_w: c(s.natural_w),
+            natural_h: c(s.natural_h),
+        }
+    }
+
+    #[test]
+    fn linked_item_uses_compose_links_transposed_into_the_record() {
+        // A single default link folds through compose_links to the centered
+        // _TO_CONTENT translate; the record carries its column-vector
+        // transpose (translation in lanes 2/5). compose_links' row-vector H
+        // puts -320/-240 in lanes 6/7; transposed they land at 2/5.
+        let mut doc = DrawableDoc::with_screen([640.0, 480.0]);
+        let mut item = Item::of(Source::Fill);
+        item.links.push(default_link());
+        doc.drawables[0].commands.push(Cmd::Item(item));
+        let schedule = evaluate(&doc, 0.0, &[]);
+        let m = blit_mat(&schedule);
+        // Column-vector affine: x' = m[0]*u + m[1]*v + m[2].
+        assert!((m[0] - 1.0).abs() < 1e-4 && (m[4] - 1.0).abs() < 1e-4);
+        assert!((m[2] - -320.0).abs() < 1e-3, "tx {}", m[2]);
+        assert!((m[5] - -240.0).abs() < 1e-3, "ty {}", m[5]);
+    }
+
+    #[test]
+    fn linked_item_alpha_multiplies_and_hidden_drops() {
+        // Link alpha 0.5 multiplies the item opacity 0.6 -> 0.3.
+        let mut doc = DrawableDoc::with_screen([640.0, 480.0]);
+        let mut faded = default_link();
+        faded.alpha = ChannelRef::constant(0.5);
+        let mut item = Item::of(Source::Fill);
+        item.opacity = ChannelRef::constant(0.6);
+        item.links.push(faded);
+        doc.drawables[0].commands.push(Cmd::Item(item));
+        let schedule = evaluate(&doc, 0.0, &[]);
+        let op = (0..schedule.len())
+            .find(|i| schedule.u[i * U_STRIDE] == OP_BLIT)
+            .unwrap();
+        assert!((schedule.f[op * F_STRIDE + 9] - 0.3).abs() < 1e-4);
+
+        // A hidden link drops the item entirely.
+        let mut doc2 = DrawableDoc::with_screen([640.0, 480.0]);
+        let mut hidden = default_link();
+        hidden.hidden = ChannelRef::constant(1.0);
+        let mut item2 = Item::of(Source::Fill);
+        item2.links.push(hidden);
+        doc2.drawables[0].commands.push(Cmd::Item(item2));
+        let s2 = evaluate(&doc2, 0.0, &[]);
+        assert_eq!(op_kinds(&s2), vec![OP_BEGIN, OP_END]);
+    }
+
+    #[test]
+    fn linked_item_carries_swapped_leaf_crop() {
+        // A flipped leaf swaps top/bottom crop; the record crop lanes 13/16
+        // reflect the swap. Set top=0.1, bottom=0.3 -> flipped top=0.3.
+        let mut doc = DrawableDoc::with_screen([640.0, 480.0]);
+        let mut link = default_link();
+        link.crop = [
+            ChannelRef::constant(0.0),
+            ChannelRef::constant(0.1),
+            ChannelRef::constant(0.0),
+            ChannelRef::constant(0.3),
+        ];
+        let mut item = Item::of(Source::Fill);
+        item.links.push(link);
+        item.flip_base_y = true;
+        doc.drawables[0].commands.push(Cmd::Item(item));
+        let schedule = evaluate(&doc, 0.0, &[]);
+        let op = (0..schedule.len())
+            .find(|i| schedule.u[i * U_STRIDE] == OP_BLIT)
+            .unwrap();
+        // crop lanes: [13] l, [14] t, [15] r, [16] b.
+        assert!((schedule.f[op * F_STRIDE + 14] - 0.3).abs() < 1e-4);
+        assert!((schedule.f[op * F_STRIDE + 16] - 0.1).abs() < 1e-4);
+    }
+
+    #[test]
+    fn projection_on_untransformed_fullscreen_leaves_the_mat_unchanged() {
+        // A centered fov-45 projection folds to identity on a fullscreen
+        // linkless item, so the record mat3 stays the first-cut identity.
+        let mut doc = DrawableDoc::with_screen([640.0, 480.0]);
+        let far = crate::camera::eye_distance(45.0, 640.0) + crate::camera::FAR_SLACK;
+        let mut item = Item::of(Source::Fill);
+        item.projection = Some(crate::doc::CameraRef {
+            fov_deg: ChannelRef::constant(45.0),
+            vanish_x: ChannelRef::constant(320.0),
+            vanish_y: ChannelRef::constant(240.0),
+            far: ChannelRef::constant(far),
+            w: 640.0,
+            h: 480.0,
+        });
+        doc.drawables[0].commands.push(Cmd::Item(item));
+        let schedule = evaluate(&doc, 0.0, &[]);
+        let m = blit_mat(&schedule);
+        let s = m[8];
+        let want = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        for i in 0..9 {
+            assert!((m[i] / s - want[i]).abs() < 1e-4, "mat[{i}] = {}", m[i]);
+        }
+    }
+
+    #[test]
+    fn linkless_item_stays_bit_identical() {
+        // The first-cut TRS record must be untouched by the wiring: a plain
+        // translate(10, 20) scale(2, 3) item yields the exact same mat3 the
+        // pre-wave-2 emit produced.
+        let mut doc = DrawableDoc::with_screen([640.0, 480.0]);
+        let mut item = Item::of(Source::Fill);
+        item.transform = crate::doc::TransformRef {
+            x: ChannelRef::constant(10.0),
+            y: ChannelRef::constant(20.0),
+            scale_x: ChannelRef::constant(2.0),
+            scale_y: ChannelRef::constant(3.0),
+            rot: ChannelRef::constant(0.0),
+        };
+        doc.drawables[0].commands.push(Cmd::Item(item));
+        let schedule = evaluate(&doc, 0.0, &[]);
+        let m = blit_mat(&schedule);
+        assert_eq!(m, [2.0, 0.0, 10.0, 0.0, 3.0, 20.0, 0.0, 0.0, 1.0]);
     }
 }

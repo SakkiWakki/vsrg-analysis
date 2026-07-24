@@ -4,6 +4,7 @@
 //! construction is allowed here (once per chart); nothing per-frame
 //! touches these structures except reads.
 
+use crate::camera::Mat4;
 use crate::channels::{ChannelRef, ChannelTable};
 
 pub const SCREEN: u32 = 0; // drawables[0] is always the screen (root)
@@ -83,10 +84,73 @@ impl TransformRef {
     }
 }
 
+/// One channel-backed link of the full leaf-link transform chain: the
+/// 17 scalars `transform::TransformState` folds, each a `ChannelRef`
+/// sampled per frame. An `Item` carrying a non-empty `links` list uses
+/// the full `transform::compose_links` path (halign/valign anchors,
+/// base-scale flip cancel, crop-under-flip, multi-link parent
+/// composition) in place of the first-cut TRS. Field order tracks
+/// field_compose._LINK_RESTS / TransformState.
+#[derive(Clone, Copy, Debug)]
+pub struct LinkRef {
+    pub x: ChannelRef,
+    pub y: ChannelRef,
+    pub zoom_x: ChannelRef,
+    pub zoom_y: ChannelRef,
+    pub rot: ChannelRef,
+    pub skew_x: ChannelRef,
+    pub skew_y: ChannelRef,
+    pub base_scale_x: ChannelRef,
+    pub base_scale_y: ChannelRef,
+    pub halign: ChannelRef,
+    pub valign: ChannelRef,
+    pub hidden: ChannelRef,
+    pub alpha: ChannelRef,
+    pub crop: [ChannelRef; 4], // l, t, r, b
+    pub natural_w: ChannelRef,
+    pub natural_h: ChannelRef,
+}
+
+/// A channel-backed camera projection attached to an item (Item.projection
+/// in the type sheet): the fov / vanish / far a `camera::design_projection`
+/// is built from each frame. The resulting mat4 folds the item's 2D
+/// transform onto the z=0 design plane and back to a projective mat3
+/// homography written to the BLIT record (see evaluate.rs::fold_projection).
+#[derive(Clone, Copy, Debug)]
+pub struct CameraRef {
+    pub fov_deg: ChannelRef,
+    pub vanish_x: ChannelRef,
+    pub vanish_y: ChannelRef,
+    pub far: ChannelRef,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl CameraRef {
+    /// Build the design projection mat4 for the sampled fov/vanish/far.
+    pub fn matrix(&self, table: &ChannelTable, t: f32) -> Mat4 {
+        let fov = table.sample(self.fov_deg, t);
+        let vanish = [table.sample(self.vanish_x, t), table.sample(self.vanish_y, t)];
+        let far = table.sample(self.far, t);
+        crate::camera::design_projection(fov, self.w, self.h, vanish, far)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Item {
     pub source: Source,
     pub transform: TransformRef,
+    /// Full leaf-link transform chain (root-first). Empty = use the
+    /// first-cut `transform` TRS bit-identically; non-empty routes through
+    /// `transform::compose_links`, whose H replaces the TRS mat3, whose
+    /// alpha multiplies opacity, and whose crop supplies the crop lanes.
+    pub links: Vec<LinkRef>,
+    /// Mirror the leaf link's vertical source axis (AFT capture
+    /// compensation); only consulted when `links` is non-empty.
+    pub flip_base_y: bool,
+    /// Optional per-item camera projection folded onto the item's mat3
+    /// (None = the parent's/no projection, a plain 2D blit).
+    pub projection: Option<CameraRef>,
     pub space: Space,
     pub opacity: ChannelRef,
     pub tint: [ChannelRef; 3],
@@ -107,6 +171,9 @@ impl Item {
         Item {
             source,
             transform: TransformRef::identity(),
+            links: Vec::new(),
+            flip_base_y: false,
+            projection: None,
             space: Space::Scene,
             opacity: ChannelRef::constant(1.0),
             tint: [ChannelRef::constant(1.0); 3],

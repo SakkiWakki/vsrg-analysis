@@ -369,6 +369,45 @@ fn dot_col(m: &Mat4, p: [f32; 3], c: usize) -> f64 {
         + at(m, 3, c) as f64
 }
 
+/// Fold an item's 2D transform (the BLIT record's column-vector mat3
+/// `[a b tx; c d ty; 0 0 1]`, mapping source `(u,v,1)` to a design-plane
+/// point that rides the z=0 plane) through a design projection `p` into a
+/// single projective mat3 homography in the SAME record convention.
+///
+/// Derivation (row/col collapse). `p` is row-vector: `[X Y Z 1] @ p`. Only
+/// the z=0 plane is relevant, so `Z=0` kills p's row 2. Reading out the
+/// projected `(px', py', w')` picks p's OUTPUT columns 0, 1, 3; the plane
+/// point's `(X, Y, 1)` selects p's INPUT rows 0, 1, 3. Hence the projection
+/// collapses to a column-vector 3x3 `pc[i][j] = p[row_j][col_i]` (the
+/// {0,1,3}x{0,1,3} submatrix, TRANSPOSED because p is row-vector but the
+/// record is column-vector). The item's own affine `a` is already
+/// column-vector, so the composed record homography is the plain 3x3
+/// product `pc @ a`. `(u,v,1)` maps to `(px', py', w')`, and the executor's
+/// QTransform does the homogeneous divide.
+pub fn fold_projection(a: &[f32; 9], p: &Mat4) -> [f32; 9] {
+    // Rows {0,1,3} and columns {0,1,3} of p, transposed to column-vector.
+    let idx = [0usize, 1, 3];
+    let mut pc = [0.0f32; 9];
+    for (i, &out_col) in idx.iter().enumerate() {
+        for (j, &in_row) in idx.iter().enumerate() {
+            pc[i * 3 + j] = at(p, in_row, out_col);
+        }
+    }
+    // pc @ a, both column-vector 3x3 (f64 accumulate: the projection's
+    // pixel-scale entries otherwise lose the centered-identity cancellation).
+    let mut out = [0.0f32; 9];
+    for r in 0..3 {
+        for c in 0..3 {
+            let mut sum = 0.0f64;
+            for k in 0..3 {
+                sum += pc[r * 3 + k] as f64 * a[k * 3 + c] as f64;
+            }
+            out[r * 3 + c] = sum as f32;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     //! Fixture parity. `fixtures/camera_cases.json` is written by the REAL
@@ -688,5 +727,31 @@ mod tests {
         let corner = project(&m, [640.0, 480.0, 0.0]);
         assert!((corner[0] - 640.0).abs() <= 1e-2);
         assert!((corner[1] - 480.0).abs() <= 1e-2);
+    }
+
+    #[test]
+    fn fold_projection_of_untransformed_fullscreen_is_identity() {
+        // A fov-45 centered projection folded onto the identity 2D affine
+        // (a fullscreen item whose source units are design pixels) must be
+        // the identity homography within 1e-4 - the z=0 design plane maps
+        // 1:1 under the centered frustum, so folding adds nothing.
+        let (w, h) = (640.0f32, 480.0f32);
+        let far = eye_distance(45.0, w) + FAR_SLACK;
+        let p = design_projection(45.0, w, h, [w / 2.0, h / 2.0], far);
+        let identity_affine = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let folded = fold_projection(&identity_affine, &p);
+        // Homographies are scale-free; normalize by the (2,2) entry.
+        let s = folded[8];
+        assert!(s.abs() > 1e-6, "degenerate homogeneous scale {s}");
+        let norm: Vec<f32> = folded.iter().map(|v| v / s).collect();
+        let want = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        for i in 0..9 {
+            assert!(
+                (norm[i] - want[i]).abs() <= 1e-4,
+                "fold entry {i}: got {} want {}",
+                norm[i],
+                want[i]
+            );
+        }
     }
 }
