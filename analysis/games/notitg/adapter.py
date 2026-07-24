@@ -263,12 +263,17 @@ class NotitgAdapter(EtternaAdapter):
         from analysis.games.notitg.field_instances import (
             NotitgFieldInstances, NotitgScreenCamera)
         from analysis.games.notitg.shader_bridge import (
-            chart_shader_effect, notitg_shader_effects)
+            ChartShaderEffect, chart_shader_effect, notitg_shader_effects)
         compiled = self._compiled_modfile(replay)
         if not compiled:
             return []
         effects = list(notitg_shader_effects(compiled.get('shader_flags')))
-        chart_shaders = chart_shader_effect(compiled.get('chart_shaders'))
+        # The lazy compile hands over a live effect object (passes swap
+        # in when the background sweep lands); the eager compile hands
+        # over the entry list to build here.
+        entry = compiled.get('chart_shaders')
+        chart_shaders = entry if isinstance(entry, ChartShaderEffect) \
+            else chart_shader_effect(entry)
         if chart_shaders is not None:
             effects.append(chart_shaders)
         base_hidden = compiled.get('base_field_hidden')
@@ -296,8 +301,16 @@ class NotitgAdapter(EtternaAdapter):
             if field_3d is not None:
                 effects.append(field_3d)
         screen_transform = compiled.get('screen_transform')
-        if screen_transform:
-            effects.append(NotitgScreenCamera(screen_transform))
+        screen_shake = compiled.get('screen_oscillator')
+        if isinstance(screen_shake, dict):
+            # Eager compile hands plain delta channels; the camera reads
+            # a `.channels` holder either way (the lazy handle fills in
+            # post-sweep).
+            from analysis.games.notitg.sim.producers import ScreenShakeHandle
+            screen_shake = ScreenShakeHandle(screen_shake)
+        if screen_transform or screen_shake is not None:
+            effects.append(NotitgScreenCamera(screen_transform,
+                                              oscillator=screen_shake))
         if instances:
             effects.append(NotitgFieldInstances(
                 instances, base_hidden=base_hidden,

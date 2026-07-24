@@ -140,9 +140,19 @@ def _compile_live(sm_path, end_seconds) -> dict | None:
             declarative + _mod_events(_SweptResult(painter_rows)))
         mod_channels._channels = full._channels
         mod_channels._players = full._players
+    # The chart's own fragment-shader passes need the swept uniform +
+    # visibility channels, so open hands the renderer an EMPTY live
+    # effect and the sweep swaps the real passes in (adapter recognizes
+    # the prebuilt object; previously the lazy path hardcoded [] and
+    # every shader moment silently rendered as nothing).
+    from analysis.games.notitg.shader_bridge import ChartShaderEffect
+    chart_shaders = ChartShaderEffect(())
+    screen_shake = ScreenShakeHandle()
     _spawn_background_upgrade(mod_channels, tree, field_instances,
                              sm_path, end, live_sim=shared_sim,
-                             to_seconds=doc.to_seconds)
+                             to_seconds=doc.to_seconds, doc=doc,
+                             chart_shaders=chart_shaders,
+                             screen_shake=screen_shake)
 
     return {
         'mod_events': declarative, 'mod_channels': mod_channels,
@@ -150,8 +160,8 @@ def _compile_live(sm_path, end_seconds) -> dict | None:
         'elements': [], 'tree': tree,
         'has_background': modfile._has_background_actors(tree, sm_path),
         'field_instances': field_instances, 'screen_transform': screen_transform,
-        'screen_oscillator': None, 'field_oscillators': [],
-        'field_vanish': None, 'chart_shaders': [],
+        'screen_oscillator': screen_shake, 'field_oscillators': [],
+        'field_vanish': None, 'chart_shaders': chart_shaders,
         'aft_bg_visible': None, 'base_field_hidden': None,
         '_live_sim': live,
         'named_actors': 0, 'recorded_keyframes': 0,
@@ -427,9 +437,23 @@ def _attach_evaluated_residue(live, preview) -> str:
             f'{len(result.applied)} painter rows)')
 
 
+class ScreenShakeHandle:
+    """The screen's oscillator-delta channels for the lazy path: None
+    until the background sweep computes them (the delta needs the swept
+    effect spans + oscillator context). The screen camera samples
+    `.channels` every frame, so the shake appears at handover without
+    the adapter rebuilding anything."""
+
+    __slots__ = ('channels',)
+
+    def __init__(self, channels=None):
+        self.channels = channels
+
+
 def _spawn_background_upgrade(mod_channels, tree, field_provider,
                              sm_path, end_seconds, live_sim=None,
-                             to_seconds=None):
+                             to_seconds=None, doc=None,
+                             chart_shaders=None, screen_shake=None):
     """Background pass on a daemon thread: sweep to the chart end, then
     hot-swap three things the instant compile left approximate. With
     `live_sim` (the segment-read default) the sweep advances THAT sim -
@@ -459,18 +483,20 @@ def _spawn_background_upgrade(mod_channels, tree, field_provider,
     from analysis.games.notitg.sim.loop import LiveSim
 
     def worker():
+        sweep_doc = doc
         if live_sim is not None:
             sweep = live_sim
             sweep_seconds = to_seconds
         else:
-            doc = load_chart(sm_path)
-            if doc is None:
+            sweep_doc = load_chart(sm_path)
+            if sweep_doc is None:
                 return
-            sweep = LiveSim(doc.root, doc.to_seconds, doc.start_beat,
-                            end_seconds, rng_seed=doc.rng_seed,
-                            song_dir=doc.lua_dir.parent,
+            sweep = LiveSim(sweep_doc.root, sweep_doc.to_seconds,
+                            sweep_doc.start_beat, end_seconds,
+                            rng_seed=sweep_doc.rng_seed,
+                            song_dir=sweep_doc.lua_dir.parent,
                             use_compiled_body=_compiled_body_flag())
-            sweep_seconds = doc.to_seconds
+            sweep_seconds = sweep_doc.to_seconds
         # Chunked advance with progress to stderr: on a loaded machine
         # the sweep can take minutes, and "still compiling to X" vs
         # "broken" must be decidable from the terminal.
@@ -527,6 +553,20 @@ def _spawn_background_upgrade(mod_channels, tree, field_provider,
             # the provider the swept env as its complete topology source.
             _mark_aft_fills(field_provider._doc, sweep.env)
             field_provider.set_topology_source(sweep.env)
+        if chart_shaders is not None and sweep_doc is not None:
+            # The chart's Frag= passes: harvest against the swept env
+            # (uniform pokes and hidden windows now recorded) and swap
+            # into the live effect the renderer already holds.
+            from analysis.games.notitg import shader_bridge
+            actor_keyframes = {rec_id: actor.keyframes()
+                               for rec_id, actor in sweep.env._actors.items()}
+            entries = _chart_shaders(sweep_doc, sweep.env, actor_keyframes)
+            chart_shaders.swap_passes(
+                shader_bridge._build_chart_passes(entries))
+        if screen_shake is not None and sweep_doc is not None:
+            osc_ctx = _osc_context(sweep.env, sweep_doc, end_seconds)
+            screen_shake.channels = modfile._screen_oscillator_timelines(
+                sweep.env, osc_ctx)
 
     threading.Thread(target=worker, daemon=True,
                      name='notitg-lazy-upgrade').start()

@@ -298,6 +298,15 @@ class ChartShaderEffect:
     def __bool__(self):
         return bool(self._passes)
 
+    def swap_passes(self, passes) -> None:
+        """Replace the pass set in place - the lazy compile hands the
+        renderer an EMPTY effect at open and the background sweep swaps
+        the real passes in once the uniform/visibility channels exist
+        (the same hot-swap contract as ModChannels._channels). A single
+        tuple rebind, so a mid-frame reader sees old or new, never a
+        mix."""
+        self._passes = tuple(passes)
+
     def at(self, ctx) -> EffectFrame | None:
         t = ctx.t_now
         out = []

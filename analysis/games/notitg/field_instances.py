@@ -265,20 +265,31 @@ class NotitgScreenCamera:
     the design centre; we conjugate it by the design map so it pivots on
     the mapped centre in screen space."""
 
-    def __init__(self, timelines):
+    def __init__(self, timelines, oscillator=None):
         self._tl = timelines
+        # A `.channels` holder ({prop: sampleable} or None): the screen's
+        # effect-oscillator jitter delta (`screen:vibrate()` +
+        # per-frame effectmagnitude - the datamosh scene shake), summed
+        # onto the camera translation. A holder, not a dict, so the
+        # lazy path's background sweep can fill it in after open.
+        self._osc = oscillator
 
     def __bool__(self):
-        return self._tl is not None
+        return self._tl is not None or self._osc is not None
 
     def at(self, ctx) -> EffectFrame | None:
-        if self._tl is None:
-            return None
         t = float(ctx.t_now)
-        sx = self._tl['scale_x'].sample(t)[0]
-        sy = self._tl['scale_y'].sample(t)[0]
-        tx = self._tl['x'].sample(t)[0]
-        ty = self._tl['y'].sample(t)[0]
+        tl = self._tl
+        sx = tl['scale_x'].sample(t)[0] if tl else 1.0
+        sy = tl['scale_y'].sample(t)[0] if tl else 1.0
+        tx = tl['x'].sample(t)[0] if tl else 0.0
+        ty = tl['y'].sample(t)[0] if tl else 0.0
+        shake = getattr(self._osc, 'channels', None)
+        if shake:
+            x_delta = shake.get('x')
+            y_delta = shake.get('y')
+            tx += x_delta.sample(t)[0] if x_delta is not None else 0.0
+            ty += y_delta.sample(t)[0] if y_delta is not None else 0.0
         if sx == 1.0 and sy == 1.0 and tx == 0.0 and ty == 0.0:
             return None
         kx, ky, ox, oy = _design_map(ctx.chart_rect)
