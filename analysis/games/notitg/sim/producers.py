@@ -929,6 +929,9 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
     aft_nodes = {sim.aft_texture_name: rec_id
                  for rec_id, sim in env.actors.items() if sim.is_aft}
     chain_graph = _aft_chain_graph(doc, env, aft_nodes, proxy_players)
+    node_by_id = {rec_id: name for name, rec_id in aft_nodes.items()}
+    slot_nodes = _chain_slot_nodes(chain_graph, aft_nodes)
+    seen_actors: dict = {}
 
     instances = []
     base_players = _base_players(mod_channels)
@@ -958,18 +961,31 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
         sim = env.actors.get(rec_id)
         if sim is None:
             continue
+        seen_actors[rec_id] = actor
+        node_name = node_by_id.get(rec_id)
+        if node_name is not None:
+            inst = _node_instance(node_name, actor, chain_graph, slot_nodes,
+                                  seen_actors, parents, env, actor_keyframes,
+                                  osc_context, live_sim, t0)
+            if inst is not None:
+                instances.append(inst)
+            continue
         aft_order = None
         aft_live = None
         color = None
         capture_source = None
         if sim.aft_source:
-            if actor.attrs.get('Frag'):
-                # A Frag= sampler draws its capture THROUGH its shader:
-                # that draw is the chart_shaders fullscreen pass (see
-                # _chart_shaders), never a plain blit. Emitting it as
-                # one papers the raw capture over everything drawn
-                # before it in the composite (gat 2's horizon sampler
-                # went visible at t~218 and erased the afthell rig).
+            if actor.attrs.get('Frag') and _fullscreen_identity_draw(sim):
+                # A fullscreen-identity Frag= sampler draws its capture
+                # THROUGH its shader as the chart_shaders fullscreen
+                # pass (see _chart_shaders); a plain blit would paper
+                # the raw capture over everything drawn before it. A
+                # TRANSFORMED sampler compiles no pass, so it KEEPS the
+                # plain blit: the AFT curtain idiom blacks out the raw
+                # scene expecting the sampler to redraw the capture on
+                # top (kecak/afthell showed bare curtain without this),
+                # and the raw transformed blit approximates that until
+                # the per-actor shader tier draws it shaded.
                 continue
             kind, player = 'aft', 0
             node = aft_nodes.get(sim.aft_source)
@@ -1031,8 +1047,65 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
                                       aft_live=aft_live, color=color)
         if capture_source is not None:
             inst['capture_source'] = capture_source
+        if kind == 'aft':
+            # The sampler's DIRECT source node: the entry point of the
+            # stage-fold walk (a chain consumer composes every stage
+            # transform down to the chain root's snapshot slot).
+            inst['aft_node'] = sim.aft_source
         instances.append(inst)
     return instances
+
+
+def _chain_slot_nodes(graph, aft_nodes) -> frozenset:
+    """The AFT node names the composed-capture path materializes as
+    at-position snapshot slots: every resolved chain's ROOT plus every
+    feedback node. Isolating (stage) nodes never materialize - their
+    transforms fold into consumers at sample time - and nodes outside
+    any chain stay on the legacy single-screen path (gat 1 unchanged).
+    A feedback node's slot doubles as its previous-frame source: slots
+    update at the node's document position, so a sampler drawn BEFORE
+    it reads last frame's content (the recursion leg) and the snapshot
+    then captures the composite including that blit."""
+    stage_nodes = {name for name in aft_nodes if graph.capture_of(name)}
+    roots = set()
+    for name in stage_nodes:
+        node = name
+        while graph.capture_of(node):
+            node = graph.capture_of(node)
+        roots.add(node)
+    return frozenset(roots | set(graph.feedback))
+
+
+def _node_instance(name, actor, graph, slot_nodes, seen_actors, parents,
+                   env, actor_keyframes, osc_context, live_sim, t0):
+    """The composed-capture instance for one AFT node actor: 'capture'
+    (an at-position snapshot slot) for chain roots and feedback nodes,
+    'stage' (the captured sprite's transform, folded into consumers at
+    sample time) for isolating nodes, None for nodes outside any chain
+    (the legacy single-screen path). A 'capture' instance carries the
+    NODE's own chain, so its hidden/alpha gate the slot update exactly
+    like the engine's capture-only-while-drawn; a 'stage' instance
+    carries the captured SPRITE's chain (it is what the node's texture
+    contains)."""
+    upstream = graph.capture_of(name)
+    if upstream is not None:
+        sprite = seen_actors.get(graph.stage_of(name))
+        if sprite is None:
+            return None
+        chain = _chain(sprite, parents)
+        links = [_instance_link(link_actor, env, actor_keyframes,
+                                osc_context, live_sim)
+                 for link_actor in reversed(chain)]
+        inst = field_compose.instance(name, 'stage', 0, links, t0=t0)
+        inst['source'] = upstream
+        return inst
+    if name not in slot_nodes:
+        return None
+    chain = _chain(actor, parents)
+    links = [_instance_link(link_actor, env, actor_keyframes,
+                            osc_context, live_sim)
+             for link_actor in reversed(chain)]
+    return field_compose.instance(name, 'capture', 0, links, t0=t0)
 
 
 def _aft_chain_graph(doc, env, aft_nodes, proxy_players):
@@ -1176,6 +1249,8 @@ def _chart_shaders(doc, env, actor_keyframes) -> list:
         if frag_path is None:
             continue
         frames = actor_keyframes.get(rec_id, {})
+        if not _fullscreen_identity_draw(sim, frames):
+            continue
         uniforms = {prop[len('uniform:'):]: _uniform_events(kfs)
                     for prop, kfs in frames.items()
                     if prop.startswith('uniform:')}
@@ -1186,6 +1261,46 @@ def _chart_shaders(doc, env, actor_keyframes) -> list:
             'windows': _visibility_events(frames.get('hidden')),
         })
     return passes
+
+
+# Per-channel values compatible with a fullscreen-identity draw: any
+# other value means the quad covers a different region than the frame
+# (rotated, scaled, skewed, cropped). base_scale_y additionally allows
+# -1, the universal AFT flip-cancel idiom (basezoomy(-1) uprights the
+# GL-flipped capture; our capture is already upright, so the net draw
+# is identity - every corpus AFT sampler pokes it). Position channels
+# are deliberately absent: a translated fullscreen quad still shows the
+# whole capture, so a position shake compiles to an unshaken pass - an
+# approximation, not a wrong region.
+_FULLSCREEN_ALLOWED = {
+    'rotation': (0.0,), 'rotation_x': (0.0,), 'rotation_y': (0.0,),
+    'scale_x': (1.0,), 'scale_y': (1.0,),
+    'base_scale_x': (1.0,), 'base_scale_y': (1.0, -1.0),
+    'skew_x': (0.0,), 'skew_y': (0.0,),
+    'crop_top': (0.0,), 'crop_bottom': (0.0,),
+    'crop_left': (0.0,), 'crop_right': (0.0,),
+}
+
+
+def _fullscreen_identity_draw(sim, frames) -> bool:
+    """Whether a Frag= capture sampler's DRAW stays fullscreen-identity,
+    the condition for compiling it to a fullscreen pass: the pass output
+    replaces the whole frame, so it is only faithful when the actor
+    draws the frame back over itself unchanged. A sampler the chart
+    transforms or oscillates is a picture-in-picture element; as a pass
+    it would paint over the entire scene, so it is skipped - that draw
+    belongs to the per-actor shader tier (composed captures).
+
+    Examples: getfucked2's horizon sampler bounces at 0.8 zoom with
+    rotation (chart t 134-161/218-260 - as a pass it blacked out both
+    windows) while its monitor sampler stays untransformed and keeps
+    its fullscreen pass."""
+    if getattr(sim, '_osc_spans', ()) or getattr(sim, '_osc_open', None):
+        return False
+    return not any(value not in allowed
+                   for prop, allowed in _FULLSCREEN_ALLOWED.items()
+                   for kf in frames.get(prop, ())
+                   for value in kf.values)
 
 
 def _resolve_frag(actor, frag) -> Path | None:

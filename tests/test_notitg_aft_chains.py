@@ -164,6 +164,83 @@ def _afts(instances):
     return [i for i in instances if i['kind'] == 'aft']
 
 
+def test_chain_emits_capture_and_stage_instances():
+    """A 2-stage chain compiles to the composed-capture instance set:
+    the ROOT node materializes as an at-position 'capture' slot, the
+    isolating node becomes a fold-at-consume 'stage' record carrying
+    its captured sprite's transform, and every sampler is stamped with
+    its direct source for the fold walk."""
+    insts = _instances(
+        '<ActorFrame><children>'
+        '<ActorFrameTexture InitCommand="%function(self) self:Create() end"'
+        ' Var="capA"/>'
+        '<Sprite InitCommand="%function(self)'
+        '  self:SetTexture(capA:GetTexture()) end" Var="s0"/>'
+        '<ActorFrameTexture InitCommand="%function(self) self:Create() end"'
+        ' Var="capB"/>'
+        '<Sprite InitCommand="%function(self)'
+        '  self:SetTexture(capB:GetTexture()) end" Var="s1"/>'
+        '</children></ActorFrame>')
+    (capture,) = [i for i in insts if i['kind'] == 'capture']
+    (stage,) = [i for i in insts if i['kind'] == 'stage']
+    consumers = [i for i in insts if i['kind'] == 'aft']
+    assert stage['source'] == capture['name']
+    assert {c['aft_node'] for c in consumers} \
+        == {capture['name'], stage['name']}
+    # Document order: the root's slot snapshots before its sampler
+    # draws, and the stage record precedes the stage's consumers.
+    kinds = [i['kind'] for i in insts]
+    assert kinds == ['capture', 'aft', 'stage', 'aft']
+
+
+def test_stage_chain_folds_into_consumer_entry():
+    """The effect folds a consumer's stage chain at sample time: the
+    entry blits the ROOT slot under the composed transform (stage first,
+    then consumer - render-once/consume-many, no materialization), and
+    its extra keys the root so the renderer serves the slot."""
+    from types import SimpleNamespace
+
+    from PySide6.QtCore import QPointF
+
+    from analysis.games.notitg import field_compose
+
+    def link(x):
+        from analysis.player.render.effects.timeline import Keyframe
+        return field_compose.link_timelines(
+            {'x': [Keyframe(0.0, (x,), 0.0, 0)],
+             'y': [Keyframe(0.0, (240.0,), 0.0, 0)]})
+
+    capture = field_compose.instance('rootA', 'capture', 0, [link(320.0)])
+    stage = field_compose.instance('nodeB', 'stage', 0, [link(330.0)])
+    stage['source'] = 'rootA'
+    consumer = field_compose.instance('s1', 'aft', 0, [link(325.0)])
+    consumer['aft_node'] = 'nodeB'
+
+    effect = NotitgFieldInstances([capture, stage, consumer])
+    ctx = SimpleNamespace(t_now=1.0, chart_rect=(0, 0, 640, 480))
+    frame = effect.at(ctx)
+    by_scope = {entry[2]: entry for entry in frame.fields}
+    assert by_scope['capture'][3] == 'rootA'
+    entry = by_scope['screen']
+    assert entry[3] == ('rootA', True)
+    # Stage shifts +10, consumer +5: the folded blit lands +15.
+    mapped = entry[0].map(QPointF(320.0, 240.0))
+    assert (mapped.x(), mapped.y()) == pytest.approx((335.0, 240.0))
+
+
+def test_chainless_aft_emits_no_capture_instance():
+    # gat 1: one whole-screen AFT + consumer -> the legacy single-screen
+    # path, no capture/stage instances at all.
+    insts = _instances(
+        '<ActorFrame><children>'
+        '<ActorFrameTexture InitCommand="%function(self) self:Create() end"'
+        ' Var="capA"/>'
+        '<Sprite InitCommand="%function(self)'
+        '  self:SetTexture(capA:GetTexture()) end" Var="s0"/>'
+        '</children></ActorFrame>')
+    assert {i['kind'] for i in insts} == {'aft'}
+
+
 def test_frag_sampler_emits_no_plain_blit():
     # A Frag= capture sampler draws THROUGH its shader - that draw is
     # the chart_shaders fullscreen pass, so no plain aft instance:

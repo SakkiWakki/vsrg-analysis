@@ -33,6 +33,12 @@ _SCREEN_PREV_SCOPE = 'screen_prev'
 # An AFT-rig curtain quad: a flat color fill at its tree position among
 # the instance blits (covers earlier blits, capped by later ones).
 _FILL_SCOPE = 'fill'
+# A chain-involved AFT node: snapshot the in-progress composite into the
+# node's named slot at this entry's position. Slots retain across frames
+# (a hidden node's entry vanishes and the slot freezes - the engine's
+# preserve-texture); a feedback node's earlier-drawn samplers read the
+# not-yet-updated slot = last frame's content, the recursion leg.
+_CAPTURE_SCOPE = 'capture'
 
 # Field captures render with extra margin per side: a proxied or
 # transformed field instance maps the capture boundary into view, and
@@ -318,6 +324,13 @@ class QtPlayerRenderer:
         # Preserve-texture freezes: the last capture each AFT source
         # blitted while its node was visible, held across hidden frames.
         self._aft_frozen: dict = {}
+        # Per-node composed-capture slots: chain-involved AFT nodes
+        # snapshot the in-progress composite here at their own tree
+        # position ('capture' entries); consumers keyed on a slot name
+        # blit it instead of the whole-screen capture. Retained across
+        # frames (a hidden node freezes its slot; a feedback node's
+        # pre-drawn samplers read last frame's content).
+        self._aft_slots: dict = {}
         self._frame_stats = FrameStats()
         # Set by GL hosts (PlayerCanvas); frames whose effects carry
         # shader passes route chart painting through it. None = raster
@@ -675,7 +688,8 @@ class QtPlayerRenderer:
         frame's 'screen_prev' ones."""
         if frame is None or not frame.fields:
             return False
-        return any(_field_scope(entry) in (_SCREEN_SCOPE, _SCREEN_PREV_SCOPE)
+        return any(_field_scope(entry) in (_SCREEN_SCOPE, _SCREEN_PREV_SCOPE,
+                                           _CAPTURE_SCOPE)
                    for entry in frame.fields)
 
     def _abort_frame_captures(self) -> None:
@@ -727,6 +741,9 @@ class QtPlayerRenderer:
         for handle in self._aft_frozen.values():
             self._capture.release(handle)
         self._aft_frozen.clear()
+        for handle in self._aft_slots.values():
+            self._capture.release(handle)
+        self._aft_slots.clear()
         self._field_src = None
         self._player_field_src = {}
         self._backdrop_src = None
@@ -751,11 +768,15 @@ class QtPlayerRenderer:
             self._capture.release(self._prev_screen)
             self._prev_screen = None
             self._prev_screen_t = None
-            # Retained freezes predate the jump too; they re-prime from
-            # the next frame their source node draws.
+            # Retained freezes and composed-capture slots predate the
+            # jump too; they re-prime from the next frame their source
+            # node draws.
             for handle in self._aft_frozen.values():
                 self._capture.release(handle)
             self._aft_frozen.clear()
+            for handle in self._aft_slots.values():
+                self._capture.release(handle)
+            self._aft_slots.clear()
 
     def _begin_screen_composite(self, frame, ctx, painter):
         """Redirect the whole chart region into an offscreen pixmap when
@@ -978,9 +999,13 @@ class QtPlayerRenderer:
             batch.fill(extra or (1.0, 1.0, 1.0), opacity,
                        crop=_field_crop(entry))
             return
+        if scope == _CAPTURE_SCOPE:
+            self._take_aft_slot(extra)
+            return
         if scope == _SCREEN_SCOPE and not self._screen_open:
             return
-        if scope == _SCREEN_PREV_SCOPE and self._prev_screen is None:
+        if (scope == _SCREEN_PREV_SCOPE and self._prev_screen is None
+                and self._aft_slot_of(extra) is None):
             return
         crop = _field_crop(entry)
         if crop is not None:
@@ -1004,11 +1029,33 @@ class QtPlayerRenderer:
                 batch.blit(self._backdrop_src, transform=transform,
                            src_box=box, opacity=opacity)
             source = self._field_src
+        if source is None:
+            return
         if scope != _SCREEN_SCOPE and scope != _SCREEN_PREV_SCOPE:
             slot = scope if is_player_field else 'field'
             transform, box = self._overscan_blit(transform, box, slot)
         batch.blit(source, transform=transform, src_box=box,
                    opacity=opacity)
+
+    def _take_aft_slot(self, name) -> None:
+        """Snapshot the in-progress composite into a chain node's slot
+        at the node's own entry position (the engine captures at the
+        node's draw position - unlike the single node-point
+        _screen_capture, every chain node gets its own at-position
+        content). The old handle is released; the new one persists until
+        the node next draws, a seek, or a backend switch (the engine's
+        preserve-texture). A hidden node emits no entry, so its slot
+        freezes by simply not reaching here."""
+        if not self._screen_open or not isinstance(name, str):
+            return
+        self._capture.release(self._aft_slots.get(name))
+        self._aft_slots[name] = self._capture.snapshot('screen')
+
+    def _aft_slot_of(self, extra):
+        """The composed-capture slot handle an extra keys, or None."""
+        if not isinstance(extra, tuple) or len(extra) != 2:
+            return None
+        return self._aft_slots.get(extra[0])
 
     def _overscan_blit(self, transform, box, slot):
         """Blit args for an overscanned field source: the window origin
@@ -1036,6 +1083,12 @@ class QtPlayerRenderer:
         if extra is None:
             return live_capture
         name, live = extra
+        slot = self._aft_slots.get(name)
+        if slot is not None:
+            # A composed-capture slot: at-position content the node's
+            # own 'capture' entry maintains (update-on-live is the
+            # slot's job, so the freeze retention below never applies).
+            return slot
         if live:
             frozen = self._aft_frozen.get(name)
             if frozen is not live_capture:

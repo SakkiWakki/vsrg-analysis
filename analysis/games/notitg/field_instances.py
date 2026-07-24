@@ -80,6 +80,12 @@ _AFT_PREV_SCOPE = 'screen_prev'
 # An AFT-rig curtain quad blitted at its tree position (covers the
 # proxies under it; samplers above it stay visible).
 _FILL_SCOPE = 'fill'
+# A chain-involved AFT node: the renderer snapshots the in-progress
+# composite into the node's named slot at this entry's position (the
+# engine captures at the node's draw position). Slots retain across
+# frames - a hidden node's entry vanishes and the slot freezes, and a
+# feedback node's earlier-drawn samplers read last frame's content.
+_CAPTURE_SCOPE = 'capture'
 
 _IDENTITY_H = np.eye(3)
 
@@ -134,6 +140,43 @@ def design_box(chart_rect) -> QRectF:
     matching _design_map: under the stretch fit it IS the chart region -
     the engine clips at its render-target edge."""
     return QRectF(*chart_rect)
+
+
+def _fold_stage_chain(stages, slots, inst, H, alpha, crop, extra):
+    """Fold an aft consumer's stage chain into its blit.
+
+    Pure-transform stages never materialize: every consumer of the same
+    chain blits the ROOT node's snapshot slot under the composed
+    homography (render-once/consume-many - textures are immutable, so
+    sharing is free; only an effect-baking stage would fork a copy).
+    Walks the consumer's direct source through the sampled `stages`
+    (row-vector composition: content passes the innermost stage first),
+    multiplying alphas. The innermost stage's crop survives as the
+    source clip; the consumer's own crop and outer stage crops are
+    mid-chain clips a single blit cannot express - dropped here, and
+    restored only where a stage materializes (the shader tier).
+
+    Returns the folded `(H, alpha, crop, extra)`: extra keys the ROOT
+    slot when the walk lands on a materialized snapshot node, else the
+    legacy (capture_source-or-name, live) pair untouched - the gat 1
+    whole-screen path, byte-identical."""
+    node = inst.get('aft_node')
+    folded = False
+    while node in stages:
+        H_s, alpha_s, crop_s, source = stages[node]
+        H = H_s @ H
+        alpha *= alpha_s
+        crop = crop_s
+        node = source
+        folded = True
+    if node in slots and extra is not None:
+        return H, alpha, crop, (node, extra[1])
+    if folded and extra is not None:
+        # Chain resolved but its root slot is absent this frame (the
+        # root node never went live): keep the composed transform, key
+        # the root so the renderer's retained slot (if any) serves it.
+        return H, alpha, crop, (node, extra[1])
+    return H, alpha, crop, extra
 
 
 def _screen_transform(H, kx, ky, ox, oy) -> QTransform | None:
@@ -199,17 +242,38 @@ class NotitgFieldInstances:
         kx, ky, ox, oy = _design_map(ctx.chart_rect)
 
         entries = []
+        stages = {}
+        slots = set()
         for inst in instances:
-            if inst['kind'] == 'player' and base_hidden:
+            kind = inst['kind']
+            if kind == 'stage':
+                # An isolating AFT node: record its captured sprite's
+                # sampled transform for the fold below; never a draw of
+                # its own. Hidden this frame -> absent -> consumers fall
+                # to the legacy screen path (frozen-content chains are a
+                # renderer-retention concern, not a transform one).
+                sampled = inst['transform'].at(t)
+                if sampled is not None:
+                    stages[inst['name']] = (
+                        *sampled, inst['transform'].crop_at(t),
+                        inst['source'])
+                continue
+            if kind == 'player' and base_hidden:
                 continue
             sampled = inst['transform'].at(t)
             if sampled is None:
                 continue
             H, alpha = sampled
+            extra = self._extra(inst, t)
+            crop = inst['transform'].crop_at(t)
+            if kind == 'capture':
+                slots.add(inst['name'])
+            elif kind == 'aft':
+                H, alpha, crop, extra = _fold_stage_chain(
+                    stages, slots, inst, H, alpha, crop, extra)
             entries.append((_screen_transform(H, kx, ky, ox, oy),
                             min(1.0, alpha), self._scope(inst),
-                            self._extra(inst, t),
-                            inst['transform'].crop_at(t)))
+                            extra, crop))
 
         spec = self._player_fields_spec
         if spec is not None and spec.note_mods:
@@ -244,6 +308,8 @@ class NotitgFieldInstances:
     def _scope(self, inst) -> str:
         if inst['kind'] == 'fill':
             return _FILL_SCOPE
+        if inst['kind'] == 'capture':
+            return _CAPTURE_SCOPE
         if inst['kind'] == 'aft':
             return (_AFT_PREV_SCOPE if inst.get('aft_order') == 'pre'
                     else _AFT_SCOPE)
@@ -277,6 +343,10 @@ class NotitgFieldInstances:
                 live = inst.get('aft_live')
                 key = inst.get('capture_source') or inst['name']
                 return (key, live is None or live.sample(t)[0] >= 0.5)
+            case 'capture':
+                # The slot name the renderer snapshots the in-progress
+                # composite into at this entry's position.
+                return inst['name']
         return None
 
 

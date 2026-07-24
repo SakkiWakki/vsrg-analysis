@@ -175,6 +175,86 @@ def test_screen_prev_skipped_first_frame_then_feeds_back():
     assert QColor(image2.pixel(80, 75)).blue() > 80
 
 
+# -- composed-capture slots (chain-involved AFT nodes) --------------------
+
+def test_capture_entry_snapshots_slot_at_position():
+    """A 'capture' entry snapshots the in-progress composite into its
+    named slot at ITS position: a curtain fill after it never enters
+    the slot, and a consumer keyed on the slot blits the pre-curtain
+    content over the curtain (the isolation rig)."""
+    from PySide6.QtGui import QTransform
+
+    r = _renderer()
+    ctx = _ctx(1.0)
+    image, painter = _host()
+    frame = EffectFrame(fields=(
+        (None, 1.0, 'capture', 'nodeA'),
+        (None, 1.0, 'fill', (1.0, 0.0, 0.0)),
+        (QTransform.fromScale(0.25, 0.25), 1.0, 'screen',
+         ('nodeA', True)),
+    ))
+    r._sync_prev_screen(ctx)
+    target = r._begin_screen_composite(frame, ctx, painter)
+    target.fillRect(0, 0, 160, 150, QColor(10, 200, 30))
+    r._field_pixmap = None
+    r._blit_field_instances(frame, ctx, target)
+    r._end_screen_composite(painter, ctx)
+    painter.end()
+    assert 'nodeA' in r._aft_slots
+    # Consumer landing area (top-left quarter): pre-curtain green.
+    assert QColor(image.pixel(20, 18)).green() > 150
+    # Outside it: the red curtain that followed the snapshot.
+    assert QColor(image.pixel(120, 100)).red() > 150
+
+
+def test_feedback_sampler_reads_last_frames_slot():
+    """A sampler drawn BEFORE its node's capture entry reads the slot
+    from LAST frame (the recursion leg): frame 1 skips (no slot yet)
+    and captures green; frame 2's sampler carries that green even
+    though nothing painted green this frame."""
+    r = _renderer()
+    frame = EffectFrame(fields=(
+        (None, 1.0, 'screen_prev', ('nodeA', True)),
+        (None, 1.0, 'capture', 'nodeA'),
+    ))
+
+    ctx = _ctx(1.0)
+    image, painter = _host()
+    r._sync_prev_screen(ctx)
+    target = r._begin_screen_composite(frame, ctx, painter)
+    target.fillRect(0, 0, 160, 150, QColor(10, 200, 30))
+    r._field_pixmap = None
+    r._blit_field_instances(frame, ctx, target)
+    r._end_screen_composite(painter, ctx)
+    painter.end()
+
+    ctx2 = _ctx(1.008)
+    image2, painter2 = _host()
+    r._sync_prev_screen(ctx2)
+    target2 = r._begin_screen_composite(frame, ctx2, painter2)
+    r._field_pixmap = None
+    r._blit_field_instances(frame, ctx2, target2)
+    r._end_screen_composite(painter2, ctx2)
+    painter2.end()
+    assert QColor(image2.pixel(80, 75)).green() > 150
+
+
+def test_seek_drops_aft_slots():
+    r = _renderer()
+    ctx = _ctx(1.0)
+    image, painter = _host()
+    frame = EffectFrame(fields=((None, 1.0, 'capture', 'nodeA'),))
+    r._sync_prev_screen(ctx)
+    target = r._begin_screen_composite(frame, ctx, painter)
+    r._field_pixmap = None
+    r._blit_field_instances(frame, ctx, target)
+    r._end_screen_composite(painter, ctx)
+    painter.end()
+    assert 'nodeA' in r._aft_slots
+    r._sync_prev_screen(_ctx(50.0))
+    assert r._aft_slots == {}
+
+
 # -- crop on instance blits (AFT sampler croptop/... pokes) ---------------
 
 def _crop_blit_image(crop):
