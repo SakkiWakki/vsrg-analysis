@@ -743,6 +743,35 @@ def test_tree_split_keeps_straddling_group_on_both_sides():
         assert child.sample('x', 0.0) == (x,)
 
 
+def test_tree_split_partitions_each_proxy_subtree():
+    """A later section splits around ITS OWN first proxy, not just the
+    document's: section-internal art preceding the section's copies
+    compiles into the below band even though an earlier section already
+    holds the document's first ActorProxy (multi-song documents)."""
+    from analysis.games.notitg import modfile
+
+    xml = ('<ActorFrame><children>'
+           '<ActorFrame><children>'
+           '<Quad Type="Quad" OnCommand="x,1"/>'
+           '<ActorProxy/>'
+           '</children></ActorFrame>'
+           '<ActorFrame><children>'
+           '<Quad Type="Quad" OnCommand="x,2"/>'
+           '<ActorProxy/>'
+           '<Quad Type="Quad" OnCommand="x,3"/>'
+           '</children></ActorFrame>'
+           '</children></ActorFrame>')
+    parsed = xml_actors.parse_actor_xml(xml)
+    tree = modfile.compile_element_tree(parsed.root, _seconds,
+                                        start_beat=0.0)
+    unders = [e for e in tree if e.z == modfile._PRE_FIELD_Z]
+    overs = [e for e in tree if e.z == 0]
+    assert sorted(g.children[0].sample('x', 0.0) for g in unders) \
+        == [(1.0,), (2.0,)]
+    (over,) = overs
+    assert over.children[0].sample('x', 0.0) == (3.0,)
+
+
 # -- resilience -----------------------------------------------------------
 
 def test_compile_never_raises_on_missing_lua(tmp_path):

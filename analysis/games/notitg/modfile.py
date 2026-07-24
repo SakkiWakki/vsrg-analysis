@@ -437,11 +437,12 @@ def compile_element_tree(root, to_seconds, start_beat, named_keyframes=None,
     'background behind the notefield, foreground in front' draw order is
     honoured (the StoryboardEffect only bands top-level elements).
 
-    Documents with notefield copies additionally SPLIT around the first
-    ActorProxy (see _pre_field_split): content preceding every copy in
-    document order compiles into the pre-field below band, content at or
-    after the first copy stays above, so an opaque backdrop early in the
-    tree cannot paint over the field composite the copies land in."""
+    Documents with notefield copies additionally SPLIT each proxy-holding
+    subtree around ITS first ActorProxy (see _pre_field_split): content
+    preceding that copy in its own subtree compiles into the pre-field
+    below band, content at or after it stays above, so an opaque backdrop
+    early in a section cannot paint over the field composite the
+    section's copies land in."""
     start_time = to_seconds(start_beat)
     named_keyframes = named_keyframes or {}
 
@@ -472,38 +473,59 @@ def compile_element_tree(root, to_seconds, start_beat, named_keyframes=None,
 
 def _pre_field_split(root):
     """`(pre, straddling)` actor-id sets partitioning the document around
-    its first notefield copy, or None when it has no ActorProxy.
+    its notefield copies, or None when it has no ActorProxy.
 
     The engine draws the modfile tree in document order with the player
     fields under the WHOLE tree; a copy (ActorProxy) re-renders field
-    content at its own tree position, so actors drawn before the first
-    copy sit under all field content while later ones can cover it. The
-    renderer composites every field copy at one point between the
-    storyboard's below and above bands, so the document splits there:
-    `pre` holds actors whose whole subtree precedes the first ActorProxy
-    (compiled into the pre-field below band), `straddling` holds that
-    proxy's ancestors (groups with content on both sides, compiled once
-    per side with the same recorded animation).
+    content at its own tree position, so actors drawn before a copy sit
+    under its field content while later ones can cover it. The renderer
+    composites every field copy at one point between the storyboard's
+    below and above bands, so EACH proxy-holding subtree splits at its
+    own first copy (a multi-song document keeps every section's art
+    under that section's copies, not just the first section's): `pre`
+    holds actors whose whole subtree precedes the first ActorProxy of
+    their enclosing subtree (compiled into the pre-field below band),
+    `straddling` holds every ancestor of a copy (groups with content on
+    both sides, compiled once per side with the same recorded
+    animation).
 
     Background-layer subtrees stay atomic: they hoist wholesale to their
     own band, so the walk never descends into one."""
+    contains = {}
+
+    def scan(actor):
+        found = actor.kind == 'ActorProxy'
+        if not found and not getattr(actor, '_background_layer', False):
+            for child in actor.children:
+                if scan(child):
+                    found = True
+        contains[id(actor)] = found
+        return found
+
     pre, straddling = set(), set()
 
-    def walk(actor):
-        if actor.kind == 'ActorProxy':
-            return True
-        if not getattr(actor, '_background_layer', False):
-            for child in actor.children:
-                if walk(child):
-                    straddling.add(id(actor))
-                    return True
+    def claim(actor):
         pre.add(id(actor))
-        return False
+        for child in actor.children:
+            claim(child)
+
+    def split(children):
+        proxied = [child for child in children if contains[id(child)]]
+        for child in children:
+            if child is proxied[0]:
+                break
+            claim(child)
+        for child in proxied:
+            if child.kind != 'ActorProxy':
+                straddling.add(id(child))
+                split(child.children)
 
     for child in root.children:
-        if walk(child):
-            return pre, straddling
-    return None
+        scan(child)
+    if not any(contains[id(child)] for child in root.children):
+        return None
+    split(root.children)
+    return pre, straddling
 
 
 def _compile_actor(actor, start_time, named_keyframes, fonts, below=None,
@@ -561,8 +583,8 @@ _BACKGROUND_Z = -100
 # proxies).
 _AFT_BACKDROP_Z = -50
 
-# The pre-field band: foreground content that precedes the first
-# notefield copy in document order (see _pre_field_split). Above the
+# The pre-field band: foreground content that precedes its subtree's
+# first notefield copy in document order (see _pre_field_split). Above the
 # BGCHANGES background band but under the AFT rigs' backdrops, matching
 # engine tree order (bg layer, then the tree up to the copies, then the
 # rig backdrops right before the copies themselves).
