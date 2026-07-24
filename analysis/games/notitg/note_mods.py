@@ -91,7 +91,7 @@ import numpy as np
 from analysis.games.etterna.sm_chart import beat_to_time
 from analysis.player.render.mods.arrow_effects import (
     ARROW_SIZE, accel_y_offset, column_offsets, note_offsets,
-    receptor_alpha_from_dark, receptor_offsets, reverse_fractions,
+    receptor_dark_alpha, receptor_offsets, reverse_fractions,
     tiny_spacing)
 
 _ACTIVE_EPS = 1e-4
@@ -291,6 +291,7 @@ class NotitgNoteMods:
         ctx.candidate_rot_x = offs.rot_x
         ctx.candidate_rot_y = offs.rot_y
         ctx.candidate_glow = offs.glow
+        ctx.candidate_glow_rgb = offs.glow_rgb
 
         self._stash_hold_body_samples(ctx, percents, cols, idx, head_off,
                                       tail_off, scale, ppe, t)
@@ -623,15 +624,18 @@ class NotitgNoteMods:
     def _receptor_offsets(self, ctx, percents, keycount, scale, t, judge_y) -> dict:
         """Per-column receptor mods in OUR pixel space. `receptor_offsets`
         evaluates the pipeline at y_offset = 0 over one note per column;
-        dx/dy convert from engine px by `scale`, rotation/zoom/alpha are
+        dx/dy convert from engine px by `scale`, rotation/zoom are
         unitless. The reverse family adds a per-column vertical shift (the
-        receptor slides to its mirrored/centered position), and dark
-        multiplies the receptor mark alpha (note visibility is untouched)."""
+        receptor slides to its mirrored/centered position). Visibility is
+        the dark family ALONE (`receptor_dark_alpha`, engine-exact per the
+        ReceptorArrowRow decompile): the stealth/glow appearance terms the
+        y=0 pipeline computes never apply to receptors, so a stealthed
+        field keeps its receptor marks."""
         cols = np.arange(keycount, dtype=np.int64)
         offs = receptor_offsets(percents, cols, t_now=t,
                                 beat_now=self._beat_at(t), keycount=keycount)
         dy = offs.dy * scale + self._receptor_reverse_dy(ctx, percents, cols, judge_y)
-        alpha = offs.alpha_mult * receptor_alpha_from_dark(percents.get('dark', 0.0))
+        alpha = receptor_dark_alpha(percents, cols)
         dx = self._tiny_compressed_dx(percents, cols, offs.dx, keycount, scale)
         return {
             'dx': dx, 'dy': dy,

@@ -1045,6 +1045,37 @@ def stealthglow_amount(percent, y_pos, past_receptors=False):
     return np.where(y < 0.0, 0.0, glow)
 
 
+_STEALTHGLOW_RGB = ('red', 'green', 'blue')
+
+
+def stealthglow_rgb(percents, cols, keycount):
+    """Per-note glow tint from the stealthglow rgb companions
+    (`stealthglow|r|g|b` pipe args -> stealthglowred/green/blue channels,
+    `stealthglow<i>|..` -> the numbered stealthglow<i>red.. per column).
+
+    GetRedDiff / GetGreenDiff / GetBlueDiff (ArrowEffects.clean.c
+    @004ec850 / 004ebcb0 / 004eba60): each channel is the per-column
+    value + the global value, ADDITIVE - the stealth-family column fold.
+    Returns an (n, 3) rgb array aligned with `cols`, or None when every
+    channel rests at 0: the engine's zero-diff branch draws the glow
+    untinted (NoteDisplay's diffuse block selects plain (1,1,1)), which
+    is also this port's rest identity."""
+    cols = np.asarray(cols)
+    out = np.zeros((cols.shape[0], 3), dtype=np.float64)
+    driven = False
+    for k, channel in enumerate(_STEALTHGLOW_RGB):
+        total = float(percents.get('stealthglow' + channel, 0.0))
+        col_val = np.zeros(keycount, dtype=np.float64)
+        for c in range(keycount):
+            value = percents.get(f'stealthglow{c}{channel}')
+            if value is not None:
+                col_val[c] = float(value)
+        values = total + col_val[cols]
+        driven = driven or bool(np.any(values != 0.0))
+        out[:, k] = values
+    return out if driven else None
+
+
 def alpha_from_visible(visible):
     """GetAlpha (ArrowEffects.cpp:486-494): a hard 0/1 cutoff at 0.5. We
     return the raw visibility as a float multiplier for smooth 2D
@@ -1133,12 +1164,23 @@ def shrink_zoom(shrink_mult, shrink_linear, y_offset, arrow_size=ARROW_SIZE):
     return mult, add
 
 
-def receptor_alpha_from_dark(dark_percent):
-    """NotITG dark: hides the RECEPTORS (docs: "Hides the receptors, while
-    keeping the ... flashes when tapping"). It is receptor-only, so it
-    never enters note visibility; the receptor layer multiplies its mark
-    alpha by this. 100% dark = invisible receptors, clamped to [0, 1]."""
-    return float(np.clip(1.0 - dark_percent, 0.0, 1.0))
+def receptor_dark_alpha(percents, cols):
+    """Per-column receptor visibility: the dark family and ONLY the dark
+    family.
+
+    NotITG's receptor update (refs/notitg/decompile ReceptorArrowRow.c,
+    the per-column loop @0053b390) sets each receptor's base alpha to
+    clamp01((1 - dark - dark_col) * (1 - fadeToFail)) - the stock
+    ReceptorArrowRow::Update formula with the fork's per-column dark<i>
+    added in. The stealth/stealthglow appearance path
+    (ArrowGetPercentVisible) is never consulted for receptors, so a
+    fully stealthed field keeps its receptors on screen; hiding them is
+    what `dark` exists for. fadeToFail is a fail-animation ramp this
+    port does not model. Returns one alpha per entry of `cols`, clamped
+    to [0, 1]."""
+    cols = np.asarray(cols)
+    alpha = np.clip(1.0 - column_add(percents, 'dark', cols), 0.0, 1.0)
+    return np.broadcast_to(alpha, cols.shape).astype(np.float64)
 
 
 @dataclass(frozen=True)
@@ -1165,6 +1207,9 @@ class NoteOffsets:
     # rendered as glow). None = no glow (unmodded notes pay nothing and the
     # consumer keeps its plain draw).
     glow: np.ndarray = None
+    # Per-note glow tint, (n, 3) rgb from the stealthglow color
+    # companions (`stealthglow_rgb`). None = untinted glow.
+    glow_rgb: np.ndarray = None
 
 
 def _get(p, name):
@@ -1528,15 +1573,16 @@ def note_offsets(percents: dict, cols: np.ndarray, y_offset: np.ndarray,
     # but never move it through the hidden/sudden windows.
     vis_y = y_offset + _tipsy_dy(percents, cols, t_now, keycount, arrow_size)
     alpha = _alpha(percents, cols, vis_y, t_now)
-    glow = None
+    glow = glow_rgb = None
     if _active(percents, 'stealthglow', keycount):
         glow = stealthglow_amount(
             column_add(percents, 'stealthglow', cols), vis_y,
             past_receptors=bool(_get(percents, 'stealthpastreceptors')))
+        glow_rgb = stealthglow_rgb(percents, cols, keycount)
 
     return NoteOffsets(dx=dx, dy=dy, rotation_deg=rotation,
                        alpha_mult=alpha, zoom=zoom, z=z, rot_x=rot_x,
-                       rot_y=rot_y, glow=glow)
+                       rot_y=rot_y, glow=glow, glow_rgb=glow_rgb)
 
 
 def receptor_offsets(percents: dict, cols: np.ndarray, t_now: float,

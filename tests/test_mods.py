@@ -330,6 +330,47 @@ def test_sudden_hides_far_notes():
     assert r.alpha_mult[0] == pytest.approx(0.0)
 
 
+# --- stealthglow rgb companions --------------------------------------
+
+def test_stealthglow_without_rgb_channels_has_no_tint():
+    r = note_offsets({'stealthglow': 1.0}, np.array([0, 1]), np.zeros(2),
+                     t_now=0.0, beat_now=0.0, keycount=4)
+    assert r.glow is not None
+    assert r.glow_rgb is None
+
+
+def test_stealthglow_rgb_channels_tint_the_glow():
+    p = {'stealthglow': 1.0, 'stealthglowred': 1.0,
+         'stealthglowgreen': 0.25, 'stealthglowblue': 0.5}
+    r = note_offsets(p, np.array([0, 3]), np.zeros(2),
+                     t_now=0.0, beat_now=0.0, keycount=4)
+    assert r.glow_rgb.shape == (2, 3)
+    np.testing.assert_allclose(r.glow_rgb[0], [1.0, 0.25, 0.5])
+    np.testing.assert_allclose(r.glow_rgb[1], [1.0, 0.25, 0.5])
+
+
+def test_stealthglow_rgb_per_column_adds_to_global():
+    # GetRedDiff (ArrowEffects.clean.c @004ec850): per-column value +
+    # global value, ADDITIVE - same fold as the stealth column variants.
+    p = {'stealthglow': 1.0, 'stealthglowred': 0.25,
+         'stealthglow1red': 0.5}
+    r = note_offsets(p, np.array([0, 1]), np.zeros(2),
+                     t_now=0.0, beat_now=0.0, keycount=4)
+    assert r.glow_rgb[0][0] == pytest.approx(0.25)
+    assert r.glow_rgb[1][0] == pytest.approx(0.75)
+
+
+def test_stealthglow_all_zero_rgb_stays_untinted():
+    # All-zero diffs render untinted (NoteDisplay diffuse block: zero
+    # diffs select the plain (1,1,1) path), so rest-valued channels must
+    # not tint.
+    p = {'stealthglow': 1.0, 'stealthglowred': 0.0,
+         'stealthglowgreen': 0.0, 'stealthglowblue': 0.0}
+    r = note_offsets(p, np.array([0]), np.zeros(1),
+                     t_now=0.0, beat_now=0.0, keycount=4)
+    assert r.glow_rgb is None
+
+
 # --- per-column NotITG variants -------------------------------------
 
 def test_numbered_drunk_variant_overrides_one_column():
@@ -560,9 +601,22 @@ def test_tiny_spacing_gates_at_one():
 
 
 def test_dark_hides_receptor_alpha():
-    assert ae.receptor_alpha_from_dark(0.0) == 1.0
-    assert ae.receptor_alpha_from_dark(1.0) == 0.0
-    assert ae.receptor_alpha_from_dark(0.4) == pytest.approx(0.6)
+    cols = np.arange(4)
+    np.testing.assert_allclose(ae.receptor_dark_alpha({}, cols), 1.0)
+    np.testing.assert_allclose(
+        ae.receptor_dark_alpha({'dark': 1.0}, cols), 0.0)
+    np.testing.assert_allclose(
+        ae.receptor_dark_alpha({'dark': 0.4}, cols), 0.6)
+
+
+def test_dark_per_column_adds_to_global():
+    # ReceptorArrowRow.c @0053b390: base alpha =
+    # clamp01((1 - dark - dark_col) * (1 - fadeToFail)); the column
+    # variant ADDS to the global, and the product clamps at [0, 1].
+    a = ae.receptor_dark_alpha({'dark': 0.25, 'dark2': 0.5}, np.arange(4))
+    np.testing.assert_allclose(a, [0.75, 0.75, 0.25, 0.75])
+    over = ae.receptor_dark_alpha({'dark': 0.8, 'dark0': 0.8}, np.arange(2))
+    np.testing.assert_allclose(over, [0.0, 0.2], atol=1e-12)
 
 
 # --- note_mods reverse/centered remap (fake-ctx integration) ---------

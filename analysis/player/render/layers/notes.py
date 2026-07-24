@@ -20,8 +20,8 @@ Public API:
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import (QBrush, QPainter, QPainterPath, QPainterPathStroker,
-                           QTransform)
+from PySide6.QtGui import (QBrush, QColor, QPainter, QPainterPath,
+                           QPainterPathStroker, QPixmap, QTransform)
 
 import math
 from dataclasses import dataclass
@@ -83,6 +83,9 @@ class _NoteView:
     # the note still renders as an additive glow at this strength. 0 = no
     # glow (unmodded notes keep their plain draw).
     glow: float = 0.0
+    # Glow tint (r, g, b) from the stealthglow color companions, or None
+    # for the untinted glow (noteskin colors, today's exact draw).
+    glow_rgb: tuple | None = None
     # Per-note mod rotation (deg) / zoom (multiplier), applied about the
     # head center. Defaults are the identity so unmodded notes pay
     # nothing; LN bodies/tails keep their position (only the head sprite
@@ -259,6 +262,7 @@ def _build(ctx, i, pos) -> _NoteView | None:
     mod_rx = getattr(ctx, 'candidate_rot_x', None)
     mod_ry = getattr(ctx, 'candidate_rot_y', None)
     mod_glow = getattr(ctx, 'candidate_glow', None)
+    mod_glow_rgb = getattr(ctx, 'candidate_glow_rgb', None)
     return _NoteView(
         i=i, col=col,
         y=head_y, y_end=y_end,
@@ -269,6 +273,8 @@ def _build(ctx, i, pos) -> _NoteView | None:
                if mod_alpha is not None else 1.0),
         glow=(float(mod_glow[pos])
               if mod_glow is not None else 0.0),
+        glow_rgb=(tuple(mod_glow_rgb[pos])
+                  if mod_glow_rgb is not None else None),
         rotation_deg=float(mod_rot[pos]) if mod_rot is not None else 0.0,
         zoom=float(mod_zoom[pos]) if mod_zoom is not None else 1.0,
         z=float(mod_z[pos]) if mod_z is not None else 0.0,
@@ -330,6 +336,7 @@ class _StreamView:
     head_in_window: bool
     alpha: float = 1.0
     glow: float = 0.0
+    glow_rgb: tuple | None = None
     rotation_deg: float = 0.0
     zoom: float = 1.0
     z: float = 0.0
@@ -351,6 +358,7 @@ def _build_stream_views(ctx) -> list:
     mod_dx = getattr(ctx, 'candidate_dx', None)
     mod_alpha = getattr(ctx, 'candidate_alpha', None)
     mod_glow = getattr(ctx, 'candidate_glow', None)
+    mod_glow_rgb = getattr(ctx, 'candidate_glow_rgb', None)
     mod_rot = getattr(ctx, 'candidate_rot_deg', None)
     mod_zoom = getattr(ctx, 'candidate_zoom', None)
     mod_z = getattr(ctx, 'candidate_z', None)
@@ -373,6 +381,8 @@ def _build_stream_views(ctx) -> list:
             alpha=(float(display_alpha(mod_alpha[pos]))
                    if mod_alpha is not None else 1.0),
             glow=at(mod_glow, pos, 0.0),
+            glow_rgb=(tuple(mod_glow_rgb[pos])
+                      if mod_glow_rgb is not None else None),
             rotation_deg=at(mod_rot, pos, 0.0),
             zoom=at(mod_zoom, pos, 1.0),
             z=at(mod_z, pos, 0.0),
@@ -438,11 +448,21 @@ def _draw_view(ctx, painter, n, draw_fn) -> None:
         draw_fn(ctx, painter, n)
     # stealthglow: the fill is hidden (alpha->0) but an additive glow pass
     # keeps the note visible as light. Rest (glow 0) never reaches here, so
-    # an unmodded note is unchanged.
+    # an unmodded note is unchanged. The rgb companions tint ONLY this
+    # pass: `ctx.glow_tint` is live for its duration and the sprite blit
+    # sites swap in the tinted pixmap (`_glow_tinted`); the fill pass
+    # above never sees it.
     if glowing:
         painter.setOpacity(base_opacity * n.glow)
         painter.setCompositionMode(QPainter.CompositionMode_Plus)
-        draw_fn(ctx, painter, n)
+        if n.glow_rgb is None:
+            draw_fn(ctx, painter, n)
+        else:
+            ctx.glow_tint = n.glow_rgb
+            try:
+                draw_fn(ctx, painter, n)
+            finally:
+                ctx.glow_tint = None
     painter.restore()
 
 
@@ -612,6 +632,9 @@ def _draw_stream_sprite(ctx, painter, v) -> None:
             pm = ctx.sprite_cache.get('lift', ctx, col=v.col)
         case _nm.KIND_FAKE:
             pm = ctx.sprite_cache.get('fake', ctx, col=v.col)
+    tint = getattr(ctx, 'glow_tint', None)
+    if tint is not None:
+        pm = _glow_tinted(pm, tint)
     painter.drawPixmap(
         QPointF(float(v.lx), float(v.y - pm.height() / 2)), pm)
 
@@ -803,6 +826,46 @@ def _clip_body_samples(xs, ys, top, bot, alphas=None):
     if alphas is None:
         return np.asarray(out_x), np.asarray(out_y)
     return np.asarray(out_x), np.asarray(out_y), np.asarray(out_a)
+
+
+# Tinted glow sprites, keyed (pm.cacheKey(), quantized rgb). Quantizing
+# to 1/32 steps bounds the key space for animated tints while staying
+# finer than the additive pass resolves visually; the size cap sheds
+# entries whose sprite pixmap was invalidated (a stale cacheKey never
+# matches again).
+_GLOW_TINT_STEP = 1.0 / 32.0
+_GLOW_TINT_CACHE: dict = {}
+_GLOW_TINT_CACHE_MAX = 256
+
+
+def _glow_tinted(pm, rgb):
+    """A copy of `pm` with its color multiplied by `rgb`, alpha kept:
+    the stealthglow rgb companions tint the additive glow pass with the
+    sprite's own shape. Multiply folds the tint into the sprite pixels;
+    DestinationIn restores the original alpha the opaque tint fill
+    flattened."""
+    quant = tuple(int(round(min(max(c, 0.0), 1.0) / _GLOW_TINT_STEP))
+                  for c in rgb)
+    key = (pm.cacheKey(), quant)
+    cached = _GLOW_TINT_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    tinted = QPixmap(pm.size())
+    tinted.fill(Qt.transparent)
+    painter = QPainter(tinted)
+    painter.drawPixmap(0, 0, pm)
+    painter.setCompositionMode(QPainter.CompositionMode_Multiply)
+    painter.fillRect(tinted.rect(),
+                     QColor.fromRgbF(*(q * _GLOW_TINT_STEP for q in quant)))
+    painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+    painter.drawPixmap(0, 0, pm)
+    painter.end()
+
+    if len(_GLOW_TINT_CACHE) >= _GLOW_TINT_CACHE_MAX:
+        _GLOW_TINT_CACHE.clear()
+    _GLOW_TINT_CACHE[key] = tinted
+    return tinted
 
 
 # pm.cacheKey() -> the sprite's central body color; one pixel read per
@@ -1053,6 +1116,9 @@ def _draw_head(ctx, painter, n) -> bool:
     if n.is_tick and state == 'normal':
         state = 'tick'
     pm = ctx.sprite_cache.get(sprite_name, ctx, col=n.col, state=state)
+    tint = getattr(ctx, 'glow_tint', None)
+    if tint is not None:
+        pm = _glow_tinted(pm, tint)
     _blit_lane_pixmap(ctx, painter, pm, n.lx, y - pm.height() / 2, n.col)
     return True
 

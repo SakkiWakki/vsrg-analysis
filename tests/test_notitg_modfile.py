@@ -421,6 +421,48 @@ def test_note_mods_stashes_rotation_zoom_and_receptor_offsets():
     assert np.any(receptors['rotation_deg'] != 0.0)
 
 
+def _receptor_alpha_for(modstring):
+    import types
+
+    import numpy as np
+
+    from analysis.games.notitg.mod_channels import compile_mod_channels
+    from analysis.games.notitg.note_mods import NotitgNoteMods
+
+    channels = compile_mod_channels(
+        [{'t_start': 0.0, 't_end': 100.0, 'modstring': modstring,
+          'player': None}])
+    mods = NotitgNoteMods(channels, [(0.0, 120.0)])
+    player = types.SimpleNamespace(
+        columns=np.array([], dtype=np.int64), keycount=4,
+        notes=types.SimpleNamespace(noterows_list=[]))
+    ctx = types.SimpleNamespace(
+        candidates=[], t_now=5.0, player=player,
+        lane_w=64.0, judge_y=400.0, chart_rect=(0.0, 0.0, 400.0, 800.0),
+        candidate_head_y=np.zeros(0), candidate_tail_y=np.zeros(0),
+        candidate_press_y=np.zeros(0))
+    mods.apply(ctx)
+    return ctx.receptor_offsets['alpha']
+
+
+def test_receptor_alpha_ignores_stealth_family():
+    # Engine truth (refs/notitg/decompile ReceptorArrowRow.c @0053b390):
+    # receptor base alpha = clamp01((1 - dark - dark_col) *
+    # (1 - fadeToFail)). The stealth/stealthglow appearance path never
+    # reaches receptors, so a fully stealthed field keeps them visible.
+    import numpy as np
+
+    alpha = _receptor_alpha_for('*-1 100 stealth, *-1 100 stealthglow')
+    np.testing.assert_allclose(alpha, 1.0)
+
+
+def test_receptor_alpha_darkens_per_column():
+    import numpy as np
+
+    alpha = _receptor_alpha_for('*-1 100 dark0, *-1 50 dark2')
+    np.testing.assert_allclose(alpha, [0.0, 1.0, 0.5, 1.0])
+
+
 # -- recording actor: SM tween model --------------------------------------
 
 def test_recording_actor_chained_tweens_accumulate():
