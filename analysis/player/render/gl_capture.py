@@ -473,6 +473,20 @@ class GLCaptureBackend:
             contract = notitg_compat.translate(glsl, uv_source='varying')
             entry = _build_program(contract, ('u_mat', 'u_tex',
                                               'u_resolution', 'u_opacity'))
+            if entry is None:
+                # The chart authored desktop GLSL 1.20 (implicit
+                # int->float casts); an ES context rejects it. Retry with
+                # integer literals promoted to floats - only after the
+                # faithful source failed, so a strictly-valid shader is
+                # never rewritten.
+                relaxed = notitg_compat.translate(
+                    notitg_compat.promote_int_literals(glsl),
+                    uv_source='varying')
+                entry = _build_program(relaxed, ('u_mat', 'u_tex',
+                                                 'u_resolution', 'u_opacity'))
+                if entry is not None:
+                    print(f'[gl_capture] per-actor frag {frag_path} built '
+                          'after int-literal promotion')
         except (OSError, ValueError) as exc:
             print(f'[gl_capture] per-actor frag {frag_path} skipped: {exc}')
         if entry is None and frag_path is not None:

@@ -366,6 +366,40 @@ def test_register_notitg_frag_translates():
     assert '#define sampler0 u_tex' in library.source('chart:fish')
 
 
+# ── int-literal promotion (GLSL 1.20 implicit casts vs ES) -----------
+
+def test_promote_int_literals_in_float_arithmetic():
+    # monitor.frag's exact failure: `10*(-0.1+...)` is legal desktop
+    # GLSL 1.20 (implicit int->float) but rejected under ES.
+    out = notitg_compat.promote_int_literals(
+        'uv.y += 10*(-0.1+0.2*rand(beat))/fAmt;')
+    assert out == 'uv.y += 10.0*(-0.1+0.2*rand(beat))/fAmt;'
+
+
+def test_promote_leaves_float_literals_alone():
+    src = 'float x = 0.5 + 43758.5453 + .25 + 2e3;'
+    assert notitg_compat.promote_int_literals(src) == src
+
+
+def test_promote_skips_int_contexts():
+    # (Constructor args like `ivec2(0, 0)` MAY promote - explicit
+    # constructors convert, so `ivec2(0.0, 0.0)` stays legal ES.)
+    src = ('#define SAMPLES 16\n'
+           'int counter = 3;\n'
+           'void main() {\n'
+           '  for (int i = 0; i < SAMPLES; i++) {\n'
+           '    v += data[2] * weight(i);\n'
+           '  }\n'
+           '  x = 7*y;\n'
+           '}\n')
+    out = notitg_compat.promote_int_literals(src)
+    assert '#define SAMPLES 16\n' in out          # preproc untouched
+    assert 'int counter = 3;' in out              # int declaration
+    assert 'for (int i = 0; i < SAMPLES; i++)' in out
+    assert 'data[2]' in out                       # array index
+    assert 'x = 7.0*y;' in out                    # float context promoted
+
+
 # ── custom uniform coercion -------------------------------------------
 
 def test_uniform_floats_coercions():

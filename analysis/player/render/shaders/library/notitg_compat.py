@@ -264,6 +264,62 @@ def translate_vert(glsl: str) -> str:
     return _VERT_PREAMBLE + body + _VERT_WRAPPER
 
 
+# NotITG compiles chart shaders as desktop GLSL 1.20, which has
+# implicit int->float conversion; GLSL ES (the dialect Qt picks under
+# Wayland/EGL and ANGLE) has NONE, so corpus-legal arithmetic like
+# monitor.frag's `10*(-0.1+0.2*rand(beat))` fails to compile. The
+# promotion pass rewrites integer literals to floats EXCEPT where an
+# int is required or meaningful: preprocessor lines (#define loop
+# bounds), array indices/sizes (inside [ ]), for-loop headers (int
+# counters compared against their bounds), and statements declaring
+# int/uint/bool scalars or vectors. It runs only as a RETRY after the
+# faithful translation fails to build, so a shader that compiles
+# strictly is never rewritten.
+_INT_TOKEN_RE = re.compile(r'(?<![\w.])(\d+)(?![\w.])')
+_INT_DECL_STMT_RE = re.compile(
+    r'\b(?:int|uint|bool|[iub]vec[234])\b[^;(){}]*;')
+_FOR_HEADER_RE = re.compile(r'\bfor\s*\(')
+_PREPROC_LINE_RE = re.compile(r'^[ \t]*#.*$', re.MULTILINE)
+
+
+def promote_int_literals(glsl: str) -> str:
+    """`glsl` with bare integer literals promoted to float literals,
+    int-typed contexts left alone (see the section comment above)."""
+    protected = bytearray(len(glsl))
+
+    def shield(start, end):
+        protected[start:end] = b'\1' * (end - start)
+
+    for pattern in (_PREPROC_LINE_RE, _INT_DECL_STMT_RE):
+        for m in pattern.finditer(glsl):
+            shield(*m.span())
+    for m in _FOR_HEADER_RE.finditer(glsl):
+        shield(m.start(), _closing_paren(glsl, m.end() - 1))
+    depth = 0
+    for i, ch in enumerate(glsl):
+        if ch == '[':
+            depth += 1
+        if depth:
+            protected[i] = 1
+        if ch == ']':
+            depth = max(0, depth - 1)
+    return _INT_TOKEN_RE.sub(
+        lambda m: m.group(0) if protected[m.start()] else m.group(0) + '.0',
+        glsl)
+
+
+def _closing_paren(src: str, open_idx: int) -> int:
+    depth = 0
+    for i in range(open_idx, len(src)):
+        if src[i] == '(':
+            depth += 1
+        elif src[i] == ')':
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return len(src)
+
+
 def translate(glsl: str, uv_source: str = 'fragcoord') -> str:
     """Return a contract-compliant fragment shader for the raw NotITG
     chart frag `glsl`. Raises ValueError if it declares no sampler0
