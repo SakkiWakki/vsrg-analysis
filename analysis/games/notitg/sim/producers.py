@@ -20,6 +20,8 @@ Deliberately NOT reproduced from the harvest path:
 from __future__ import annotations
 
 import os
+import re
+from functools import lru_cache
 from pathlib import Path
 
 from analysis.games.notitg import aft_chains, field_compose, modfile
@@ -1072,7 +1074,8 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
                 if resolved is not None:
                     frag_path = str(resolved)
                     frag_uniforms = _uniform_curves(sim, rec_id, live_sim,
-                                                    actor_keyframes)
+                                                    actor_keyframes,
+                                                    frag_path)
             if live_sim is not None:
                 from analysis.games.notitg.sim.seg_read import curve_for
                 color = curve_for(live_sim, rec_id, 'color', (1.0, 1.0, 1.0))
@@ -1168,19 +1171,64 @@ def _z_sort_group(chain, links, env):
     return None, None
 
 
-def _uniform_curves(sim, rec_id, live_sim, actor_keyframes) -> dict:
+def _uniform_curves(sim, rec_id, live_sim, actor_keyframes,
+                    frag_path) -> dict:
     """{uniform name: value timeline} from the actor's recorded
-    `GetShader():uniform*` pokes (rest 0.0, the engine default)."""
-    names = [prop[len('uniform:'):] for prop in sim.keyframes()
-             if prop.startswith('uniform:')]
+    `GetShader():uniform*` pokes. The REST value is the .frag's own
+    declared initializer when it has one (GLSL 1.2 allows
+    `uniform float pixelSize = 0.00001;` and NotITG honours it; the
+    translation strips initializers for ES compatibility, and a 0.0
+    rest turned lumikey's pre-poke frames into floor(x/0) NaN black -
+    "notes only appear when the pixelation activates"), else 0.0."""
+    defaults = _frag_uniform_defaults(frag_path)
+    names = {prop[len('uniform:'):] for prop in sim.keyframes()
+             if prop.startswith('uniform:')} | set(defaults)
     if live_sim is not None:
         from analysis.games.notitg.sim.seg_read import curve_for
-        return {name: curve_for(live_sim, rec_id, f'uniform:{name}', (0.0,))
-                for name in names}
+        out = {}
+        for name in names:
+            curve = curve_for(live_sim, rec_id, f'uniform:{name}',
+                              (defaults.get(name, 0.0),))
+            kfs = sim.keyframes().get(f'uniform:{name}')
+            if name in defaults and kfs:
+                # A live lane seeds 0.0 before its first poke, ignoring
+                # the passed rest - pin the declared default until then.
+                curve = _RestUntil(curve, kfs[0].t, defaults[name])
+            out[name] = curve
+        return out
     frames = actor_keyframes.get(rec_id) or {}
     return {name: EventTimeline(frames.get(f'uniform:{name}', []),
-                                rest=(0.0,))
+                                rest=(defaults.get(name, 0.0),))
             for name in names}
+
+
+class _RestUntil:
+    """A sampleable returning `rest` before `first_t`, the wrapped curve
+    after."""
+
+    def __init__(self, curve, first_t, rest):
+        self._curve = curve
+        self._first_t = first_t
+        self._rest = (rest,)
+
+    def sample(self, t):
+        if t < self._first_t:
+            return self._rest
+        return self._curve.sample(t)
+
+
+@lru_cache(maxsize=64)
+def _frag_uniform_defaults(frag_path) -> dict:
+    """{name: value} for every scalar uniform the .frag declares WITH an
+    initializer."""
+    try:
+        src = Path(frag_path).read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return {}
+    pattern = re.compile(
+        r'^\s*uniform\s+(?:float|int)\s+([A-Za-z_]\w*)\s*=\s*'
+        r'([-+]?[\d.]+(?:[eE][-+]?\d+)?)\s*;', re.MULTILINE)
+    return {name: float(value) for name, value in pattern.findall(src)}
 
 
 def _chain_slot_nodes(graph, aft_nodes, consumed) -> frozenset:
