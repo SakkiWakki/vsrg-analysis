@@ -144,12 +144,18 @@ class SegmentTimeline:
             self._start_run(t, v)
             return
 
-        dt = t - self._run_th
-        if dt <= 0.0:
+        # A poke not strictly after the LAST accepted point is a
+        # zero-tween chain step (structural): seal and restart, exactly
+        # as `simplify_instants` breaks its run there. Guarding only
+        # against the run head would let a duplicate write at the tail
+        # count as a third sample and upgrade a two-point step pair into
+        # a ramp bridging the whole gap.
+        if t <= self._run_tl:
             self._seal_run()
             self._start_run(t, v)
             return
 
+        dt = t - self._run_th
         slope = (v - self._run_vh) / dt
         if not self._run_lo <= slope <= self._run_hi:
             self._seal_run()

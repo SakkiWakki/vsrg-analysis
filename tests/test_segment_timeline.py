@@ -258,6 +258,37 @@ def test_same_time_pokes_break_runs_without_loss():
     assert tl.sample(1.5) == 9.0
 
 
+def test_same_time_pair_at_run_tail_keeps_step_semantics():
+    """A duplicate write at the run TAIL (playcommand handlers on one
+    actor often re-set a property at the same clock) is a zero-tween
+    chain step: it must NOT count as a third corridor sample, or a
+    sparse two-point step pair collapses into a ramp bridging the whole
+    gap (a `hidden` flip smeared over 8 seconds)."""
+    pokes = [(2.0, 0.0), (10.0, 1.0), (10.0, 1.0)]
+
+    online = _online_timeline(pokes, 0.0)
+    for t in (3.0, 6.0, 9.9):
+        assert online.sample(t) == 0.0
+    assert online.sample(10.0) == 1.0
+    assert online.sample(11.0) == 1.0
+
+    batch = _batch_timeline(pokes, 0.0)
+    for t in (3.0, 6.0, 9.9):
+        assert batch.sample(t)[0] == 0.0
+    assert batch.sample(11.0)[0] == 1.0
+
+
+def test_same_time_pair_at_run_tail_last_value_wins():
+    pokes = [(2.0, 0.0), (10.0, 1.0), (10.0, 0.0), (12.0, 0.0)]
+
+    online = _online_timeline(pokes, 0.0)
+    batch = _batch_timeline(pokes, 0.0)
+    for t in (6.0, 10.0, 11.0, 13.0):
+        assert online.sample(t) == batch.sample(t)[0]
+    assert online.sample(6.0) == 0.0
+    assert online.sample(11.0) == 0.0
+
+
 def test_out_of_order_segment_start_asserts():
     tl = SegmentTimeline()
     tl.add_ramp(5.0, 6.0, 0.0, 1.0)

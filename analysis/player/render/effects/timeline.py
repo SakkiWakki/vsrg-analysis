@@ -81,13 +81,18 @@ def simplify_instants(frames):
         # Grow the run while the chord from `head` to each new point
         # reproduces every interior point to SIMPLIFY_EPS: each accepted
         # point narrows the feasible slope corridor, and a point is
-        # accepted only when its own chord slope lies inside it.
+        # accepted only when its own chord slope lies inside it. A point
+        # not strictly after its predecessor is a zero-tween chain step
+        # (structural), so it breaks the run wherever it appears - not
+        # only at the head, or a duplicate write at the run tail would
+        # count as a third sample and upgrade a two-point step pair into
+        # a ramp bridging the whole gap.
         j = i + 1
         lo, hi = float('-inf'), float('inf')
         while j < n and _plain_instant(frames[j]):
-            dt = frames[j].t - head.t
-            if dt <= 0.0:
+            if frames[j].t <= frames[j - 1].t:
                 break
+            dt = frames[j].t - head.t
             slope = (frames[j].values[0] - head.values[0]) / dt
             if not lo <= slope <= hi:
                 break
