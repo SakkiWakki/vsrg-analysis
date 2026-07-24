@@ -1,0 +1,1740 @@
+[
+ {
+  "name": "single_ramp",
+  "node": {
+   "kind": "Seg",
+   "dur": 1.0,
+   "ease": 0,
+   "targets": [
+    {
+     "prop": 0,
+     "mode": "abs",
+     "value": 100.0
+    }
+   ],
+   "effect": null,
+   "fire_id": -1
+  },
+  "t0": 0.0,
+  "horizon": null,
+  "state": [
+   [
+    0,
+    0.0
+   ]
+  ],
+  "expected_props": [
+   {
+    "prop": 0,
+    "ts": [
+     0.0,
+     1.0
+    ],
+    "vals": [
+     0.0,
+     100.0
+    ],
+    "durs": [
+     1.0,
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": []
+ },
+ {
+  "name": "ramp_unseeded",
+  "node": {
+   "kind": "Seg",
+   "dur": 2.0,
+   "ease": 0,
+   "targets": [
+    {
+     "prop": 1,
+     "mode": "abs",
+     "value": 50.0
+    }
+   ],
+   "effect": null,
+   "fire_id": -1
+  },
+  "t0": 0.0,
+  "horizon": null,
+  "state": [],
+  "expected_props": [
+   {
+    "prop": 1,
+    "ts": [
+     0.0,
+     2.0
+    ],
+    "vals": [
+     0.0,
+     50.0
+    ],
+    "durs": [
+     2.0,
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": []
+ },
+ {
+  "name": "zero_dur_hold",
+  "node": {
+   "kind": "Seg",
+   "dur": 0.0,
+   "ease": 0,
+   "targets": [
+    {
+     "prop": 0,
+     "mode": "abs",
+     "value": 42.0
+    }
+   ],
+   "effect": null,
+   "fire_id": -1
+  },
+  "t0": 0.0,
+  "horizon": null,
+  "state": [
+   [
+    0,
+    1.0
+   ]
+  ],
+  "expected_props": [
+   {
+    "prop": 0,
+    "ts": [
+     0.0
+    ],
+    "vals": [
+     42.0
+    ],
+    "durs": [
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": []
+ },
+ {
+  "name": "unchanged_noop",
+  "node": {
+   "kind": "Seg",
+   "dur": 1.0,
+   "ease": 0,
+   "targets": [
+    {
+     "prop": 0,
+     "mode": "abs",
+     "value": 5.0
+    }
+   ],
+   "effect": null,
+   "fire_id": -1
+  },
+  "t0": 0.0,
+  "horizon": null,
+  "state": [
+   [
+    0,
+    5.0
+   ]
+  ],
+  "expected_props": [],
+  "expected_fires": []
+ },
+ {
+  "name": "ramp_ease",
+  "node": {
+   "kind": "Seg",
+   "dur": 1.5,
+   "ease": 2,
+   "targets": [
+    {
+     "prop": 2,
+     "mode": "abs",
+     "value": 90.0
+    }
+   ],
+   "effect": null,
+   "fire_id": -1
+  },
+  "t0": 0.0,
+  "horizon": null,
+  "state": [
+   [
+    2,
+    0.0
+   ]
+  ],
+  "expected_props": [
+   {
+    "prop": 2,
+    "ts": [
+     0.0,
+     1.5
+    ],
+    "vals": [
+     0.0,
+     90.0
+    ],
+    "durs": [
+     1.5,
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": []
+ },
+ {
+  "name": "seq_two_ramps",
+  "node": {
+   "kind": "Seq",
+   "parts": [
+    {
+     "kind": "Seg",
+     "dur": 1.0,
+     "ease": 0,
+     "targets": [
+      {
+       "prop": 0,
+       "mode": "abs",
+       "value": 100.0
+      }
+     ],
+     "effect": null,
+     "fire_id": -1
+    },
+    {
+     "kind": "Seg",
+     "dur": 1.0,
+     "ease": 0,
+     "targets": [
+      {
+       "prop": 0,
+       "mode": "abs",
+       "value": 0.0
+      }
+     ],
+     "effect": null,
+     "fire_id": -1
+    }
+   ]
+  },
+  "t0": 0.0,
+  "horizon": null,
+  "state": [
+   [
+    0,
+    0.0
+   ]
+  ],
+  "expected_props": [
+   {
+    "prop": 0,
+    "ts": [
+     0.0,
+     1.0,
+     2.0
+    ],
+    "vals": [
+     0.0,
+     100.0,
+     0.0
+    ],
+    "durs": [
+     1.0,
+     1.0,
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": []
+ },
+ {
+  "name": "seq_hibernate_between",
+  "node": {
+   "kind": "Seq",
+   "parts": [
+    {
+     "kind": "Seg",
+     "dur": 1.0,
+     "ease": 0,
+     "targets": [
+      {
+       "prop": 0,
+       "mode": "abs",
+       "value": 10.0
+      }
+     ],
+     "effect": null,
+     "fire_id": -1
+    },
+    {
+     "kind": "Hibernate",
+     "dur": 2.0
+    },
+    {
+     "kind": "Seg",
+     "dur": 1.0,
+     "ease": 0,
+     "targets": [
+      {
+       "prop": 0,
+       "mode": "abs",
+       "value": 20.0
+      }
+     ],
+     "effect": null,
+     "fire_id": -1
+    }
+   ]
+  },
+  "t0": 0.0,
+  "horizon": null,
+  "state": [
+   [
+    0,
+    0.0
+   ]
+  ],
+  "expected_props": [
+   {
+    "prop": 0,
+    "ts": [
+     0.0,
+     1.0,
+     3.0,
+     4.0
+    ],
+    "vals": [
+     0.0,
+     10.0,
+     10.0,
+     20.0
+    ],
+    "durs": [
+     1.0,
+     0.0,
+     1.0,
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": []
+ },
+ {
+  "name": "leading_hibernate",
+  "node": {
+   "kind": "Seq",
+   "parts": [
+    {
+     "kind": "Hibernate",
+     "dur": 3.0
+    },
+    {
+     "kind": "Seg",
+     "dur": 1.0,
+     "ease": 0,
+     "targets": [
+      {
+       "prop": 1,
+       "mode": "abs",
+       "value": 5.0
+      }
+     ],
+     "effect": null,
+     "fire_id": -1
+    }
+   ]
+  },
+  "t0": 0.0,
+  "horizon": null,
+  "state": [
+   [
+    1,
+    0.0
+   ]
+  ],
+  "expected_props": [
+   {
+    "prop": 1,
+    "ts": [
+     3.0,
+     4.0
+    ],
+    "vals": [
+     0.0,
+     5.0
+    ],
+    "durs": [
+     1.0,
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": []
+ },
+ {
+  "name": "multi_prop_seg",
+  "node": {
+   "kind": "Seg",
+   "dur": 1.0,
+   "ease": 0,
+   "targets": [
+    {
+     "prop": 0,
+     "mode": "abs",
+     "value": 10.0
+    },
+    {
+     "prop": 1,
+     "mode": "abs",
+     "value": 20.0
+    },
+    {
+     "prop": 2,
+     "mode": "abs",
+     "value": 30.0
+    }
+   ],
+   "effect": null,
+   "fire_id": -1
+  },
+  "t0": 0.0,
+  "horizon": null,
+  "state": [
+   [
+    0,
+    0.0
+   ],
+   [
+    1,
+    0.0
+   ],
+   [
+    2,
+    0.0
+   ]
+  ],
+  "expected_props": [
+   {
+    "prop": 0,
+    "ts": [
+     0.0,
+     1.0
+    ],
+    "vals": [
+     0.0,
+     10.0
+    ],
+    "durs": [
+     1.0,
+     0.0
+    ]
+   },
+   {
+    "prop": 1,
+    "ts": [
+     0.0,
+     1.0
+    ],
+    "vals": [
+     0.0,
+     20.0
+    ],
+    "durs": [
+     1.0,
+     0.0
+    ]
+   },
+   {
+    "prop": 2,
+    "ts": [
+     0.0,
+     1.0
+    ],
+    "vals": [
+     0.0,
+     30.0
+    ],
+    "durs": [
+     1.0,
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": []
+ },
+ {
+  "name": "add_relative",
+  "node": {
+   "kind": "Seg",
+   "dur": 1.0,
+   "ease": 0,
+   "targets": [
+    {
+     "prop": 0,
+     "mode": "add",
+     "value": 15.0
+    }
+   ],
+   "effect": null,
+   "fire_id": -1
+  },
+  "t0": 0.0,
+  "horizon": null,
+  "state": [
+   [
+    0,
+    5.0
+   ]
+  ],
+  "expected_props": [
+   {
+    "prop": 0,
+    "ts": [
+     0.0,
+     1.0
+    ],
+    "vals": [
+     5.0,
+     20.0
+    ],
+    "durs": [
+     1.0,
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": []
+ },
+ {
+  "name": "add_unseeded",
+  "node": {
+   "kind": "Seg",
+   "dur": 1.0,
+   "ease": 0,
+   "targets": [
+    {
+     "prop": 2,
+     "mode": "add",
+     "value": 45.0
+    }
+   ],
+   "effect": null,
+   "fire_id": -1
+  },
+  "t0": 0.0,
+  "horizon": null,
+  "state": [],
+  "expected_props": [
+   {
+    "prop": 2,
+    "ts": [
+     0.0,
+     1.0
+    ],
+    "vals": [
+     0.0,
+     45.0
+    ],
+    "durs": [
+     1.0,
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": []
+ },
+ {
+  "name": "add_zero_noop",
+  "node": {
+   "kind": "Seg",
+   "dur": 1.0,
+   "ease": 0,
+   "targets": [
+    {
+     "prop": 0,
+     "mode": "add",
+     "value": 0.0
+    }
+   ],
+   "effect": null,
+   "fire_id": -1
+  },
+  "t0": 0.0,
+  "horizon": null,
+  "state": [
+   [
+    0,
+    7.0
+   ]
+  ],
+  "expected_props": [],
+  "expected_fires": []
+ },
+ {
+  "name": "chained_adds",
+  "node": {
+   "kind": "Seq",
+   "parts": [
+    {
+     "kind": "Seg",
+     "dur": 1.0,
+     "ease": 0,
+     "targets": [
+      {
+       "prop": 0,
+       "mode": "add",
+       "value": 10.0
+      }
+     ],
+     "effect": null,
+     "fire_id": -1
+    },
+    {
+     "kind": "Seg",
+     "dur": 1.0,
+     "ease": 0,
+     "targets": [
+      {
+       "prop": 0,
+       "mode": "add",
+       "value": 10.0
+      }
+     ],
+     "effect": null,
+     "fire_id": -1
+    },
+    {
+     "kind": "Seg",
+     "dur": 1.0,
+     "ease": 0,
+     "targets": [
+      {
+       "prop": 0,
+       "mode": "add",
+       "value": -5.0
+      }
+     ],
+     "effect": null,
+     "fire_id": -1
+    }
+   ]
+  },
+  "t0": 0.0,
+  "horizon": null,
+  "state": [
+   [
+    0,
+    0.0
+   ]
+  ],
+  "expected_props": [
+   {
+    "prop": 0,
+    "ts": [
+     0.0,
+     1.0,
+     2.0,
+     3.0
+    ],
+    "vals": [
+     0.0,
+     10.0,
+     20.0,
+     15.0
+    ],
+    "durs": [
+     1.0,
+     1.0,
+     1.0,
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": []
+ },
+ {
+  "name": "opaque_fire",
+  "node": {
+   "kind": "Seg",
+   "dur": 1.0,
+   "ease": 0,
+   "targets": [
+    {
+     "prop": 0,
+     "mode": "abs",
+     "value": 5.0
+    }
+   ],
+   "effect": null,
+   "fire_id": 0
+  },
+  "t0": 0.0,
+  "horizon": null,
+  "state": [
+   [
+    0,
+    0.0
+   ]
+  ],
+  "expected_props": [
+   {
+    "prop": 0,
+    "ts": [
+     0.0,
+     1.0
+    ],
+    "vals": [
+     0.0,
+     5.0
+    ],
+    "durs": [
+     1.0,
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": [
+   0.0
+  ]
+ },
+ {
+  "name": "command_fire_only",
+  "node": {
+   "kind": "Seg",
+   "dur": 0.0,
+   "ease": 0,
+   "targets": [],
+   "effect": null,
+   "fire_id": 0
+  },
+  "t0": 0.0,
+  "horizon": null,
+  "state": [],
+  "expected_props": [],
+  "expected_fires": [
+   0.0
+  ]
+ },
+ {
+  "name": "nested_schedule_tail",
+  "node": {
+   "kind": "Seq",
+   "parts": [
+    {
+     "kind": "Seg",
+     "dur": 1.0,
+     "ease": 0,
+     "targets": [
+      {
+       "prop": 0,
+       "mode": "abs",
+       "value": 10.0
+      }
+     ],
+     "effect": {
+      "kind": "Seg",
+      "dur": 1.0,
+      "ease": 0,
+      "targets": [
+       {
+        "prop": 1,
+        "mode": "abs",
+        "value": 99.0
+       }
+      ],
+      "effect": null,
+      "fire_id": -1
+     },
+     "fire_id": -1
+    },
+    {
+     "kind": "Seg",
+     "dur": 1.0,
+     "ease": 0,
+     "targets": [
+      {
+       "prop": 0,
+       "mode": "abs",
+       "value": 20.0
+      }
+     ],
+     "effect": null,
+     "fire_id": -1
+    }
+   ]
+  },
+  "t0": 0.0,
+  "horizon": null,
+  "state": [
+   [
+    0,
+    0.0
+   ],
+   [
+    1,
+    0.0
+   ]
+  ],
+  "expected_props": [
+   {
+    "prop": 0,
+    "ts": [
+     0.0,
+     1.0,
+     2.0
+    ],
+    "vals": [
+     0.0,
+     10.0,
+     20.0
+    ],
+    "durs": [
+     1.0,
+     1.0,
+     0.0
+    ]
+   },
+   {
+    "prop": 1,
+    "ts": [
+     2.0,
+     3.0
+    ],
+    "vals": [
+     0.0,
+     99.0
+    ],
+    "durs": [
+     1.0,
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": []
+ },
+ {
+  "name": "nested_with_fire",
+  "node": {
+   "kind": "Seg",
+   "dur": 2.0,
+   "ease": 0,
+   "targets": [
+    {
+     "prop": 0,
+     "mode": "abs",
+     "value": 5.0
+    }
+   ],
+   "effect": {
+    "kind": "Seq",
+    "parts": [
+     {
+      "kind": "Hibernate",
+      "dur": 1.0
+     },
+     {
+      "kind": "Seg",
+      "dur": 0.0,
+      "ease": 0,
+      "targets": [],
+      "effect": null,
+      "fire_id": 0
+     }
+    ]
+   },
+   "fire_id": -1
+  },
+  "t0": 0.0,
+  "horizon": null,
+  "state": [
+   [
+    0,
+    0.0
+   ]
+  ],
+  "expected_props": [
+   {
+    "prop": 0,
+    "ts": [
+     0.0,
+     2.0
+    ],
+    "vals": [
+     0.0,
+     5.0
+    ],
+    "durs": [
+     2.0,
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": [
+   3.0
+  ]
+ },
+ {
+  "name": "loop_unroll",
+  "node": {
+   "kind": "Loop",
+   "period": 2.0,
+   "body": {
+    "kind": "Seg",
+    "dur": 1.0,
+    "ease": 0,
+    "targets": [
+     {
+      "prop": 0,
+      "mode": "abs",
+      "value": 10.0
+     }
+    ],
+    "effect": null,
+    "fire_id": -1
+   }
+  },
+  "t0": 0.0,
+  "horizon": 7.0,
+  "state": [
+   [
+    0,
+    0.0
+   ]
+  ],
+  "expected_props": [
+   {
+    "prop": 0,
+    "ts": [
+     0.0,
+     1.0
+    ],
+    "vals": [
+     0.0,
+     10.0
+    ],
+    "durs": [
+     1.0,
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": []
+ },
+ {
+  "name": "loop_pingpong",
+  "node": {
+   "kind": "Loop",
+   "period": 2.0,
+   "body": {
+    "kind": "Seq",
+    "parts": [
+     {
+      "kind": "Seg",
+      "dur": 1.0,
+      "ease": 0,
+      "targets": [
+       {
+        "prop": 0,
+        "mode": "abs",
+        "value": 100.0
+       }
+      ],
+      "effect": null,
+      "fire_id": -1
+     },
+     {
+      "kind": "Seg",
+      "dur": 1.0,
+      "ease": 0,
+      "targets": [
+       {
+        "prop": 0,
+        "mode": "abs",
+        "value": 0.0
+       }
+      ],
+      "effect": null,
+      "fire_id": -1
+     }
+    ]
+   }
+  },
+  "t0": 0.0,
+  "horizon": 6.5,
+  "state": [
+   [
+    0,
+    0.0
+   ]
+  ],
+  "expected_props": [
+   {
+    "prop": 0,
+    "ts": [
+     0.0,
+     1.0,
+     2.0,
+     3.0,
+     4.0,
+     5.0,
+     6.0,
+     7.0
+    ],
+    "vals": [
+     0.0,
+     100.0,
+     0.0,
+     100.0,
+     0.0,
+     100.0,
+     0.0,
+     100.0
+    ],
+    "durs": [
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": []
+ },
+ {
+  "name": "loop_period_fill",
+  "node": {
+   "kind": "Loop",
+   "period": 3.0,
+   "body": {
+    "kind": "Seg",
+    "dur": 1.0,
+    "ease": 0,
+    "targets": [
+     {
+      "prop": 2,
+      "mode": "add",
+      "value": 90.0
+     }
+    ],
+    "effect": null,
+    "fire_id": -1
+   }
+  },
+  "t0": 0.0,
+  "horizon": 8.0,
+  "state": [
+   [
+    2,
+    0.0
+   ]
+  ],
+  "expected_props": [
+   {
+    "prop": 2,
+    "ts": [
+     0.0,
+     1.0,
+     3.0,
+     4.0,
+     6.0,
+     7.0
+    ],
+    "vals": [
+     0.0,
+     90.0,
+     90.0,
+     180.0,
+     180.0,
+     270.0
+    ],
+    "durs": [
+     1.0,
+     0.0,
+     1.0,
+     0.0,
+     1.0,
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": []
+ },
+ {
+  "name": "loop_after_leadin",
+  "node": {
+   "kind": "Seq",
+   "parts": [
+    {
+     "kind": "Seg",
+     "dur": 1.0,
+     "ease": 0,
+     "targets": [
+      {
+       "prop": 0,
+       "mode": "abs",
+       "value": 5.0
+      }
+     ],
+     "effect": null,
+     "fire_id": -1
+    },
+    {
+     "kind": "Loop",
+     "period": 2.0,
+     "body": {
+      "kind": "Seg",
+      "dur": 1.0,
+      "ease": 0,
+      "targets": [
+       {
+        "prop": 0,
+        "mode": "add",
+        "value": 1.0
+       }
+      ],
+      "effect": null,
+      "fire_id": -1
+     }
+    }
+   ]
+  },
+  "t0": 0.0,
+  "horizon": 6.0,
+  "state": [
+   [
+    0,
+    0.0
+   ]
+  ],
+  "expected_props": [
+   {
+    "prop": 0,
+    "ts": [
+     0.0,
+     1.0,
+     2.0,
+     3.0,
+     4.0,
+     5.0,
+     6.0
+    ],
+    "vals": [
+     0.0,
+     5.0,
+     6.0,
+     6.0,
+     7.0,
+     7.0,
+     8.0
+    ],
+    "durs": [
+     1.0,
+     1.0,
+     0.0,
+     1.0,
+     0.0,
+     1.0,
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": []
+ },
+ {
+  "name": "t0_offset",
+  "node": {
+   "kind": "Seg",
+   "dur": 1.0,
+   "ease": 0,
+   "targets": [
+    {
+     "prop": 0,
+     "mode": "abs",
+     "value": 10.0
+    }
+   ],
+   "effect": null,
+   "fire_id": -1
+  },
+  "t0": 5.0,
+  "horizon": null,
+  "state": [
+   [
+    0,
+    0.0
+   ]
+  ],
+  "expected_props": [
+   {
+    "prop": 0,
+    "ts": [
+     5.0,
+     6.0
+    ],
+    "vals": [
+     0.0,
+     10.0
+    ],
+    "durs": [
+     1.0,
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": []
+ },
+ {
+  "name": "horizon_truncates",
+  "node": {
+   "kind": "Seq",
+   "parts": [
+    {
+     "kind": "Seg",
+     "dur": 1.0,
+     "ease": 0,
+     "targets": [
+      {
+       "prop": 0,
+       "mode": "abs",
+       "value": 10.0
+      }
+     ],
+     "effect": null,
+     "fire_id": -1
+    },
+    {
+     "kind": "Seg",
+     "dur": 1.0,
+     "ease": 0,
+     "targets": [
+      {
+       "prop": 0,
+       "mode": "abs",
+       "value": 20.0
+      }
+     ],
+     "effect": null,
+     "fire_id": -1
+    },
+    {
+     "kind": "Seg",
+     "dur": 1.0,
+     "ease": 0,
+     "targets": [
+      {
+       "prop": 0,
+       "mode": "abs",
+       "value": 30.0
+      }
+     ],
+     "effect": null,
+     "fire_id": -1
+    }
+   ]
+  },
+  "t0": 0.0,
+  "horizon": 1.5,
+  "state": [
+   [
+    0,
+    0.0
+   ]
+  ],
+  "expected_props": [
+   {
+    "prop": 0,
+    "ts": [
+     0.0,
+     1.0,
+     2.0
+    ],
+    "vals": [
+     0.0,
+     10.0,
+     20.0
+    ],
+    "durs": [
+     1.0,
+     1.0,
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": []
+ },
+ {
+  "name": "negative_dur_clamp",
+  "node": {
+   "kind": "Seg",
+   "dur": -3.0,
+   "ease": 0,
+   "targets": [
+    {
+     "prop": 0,
+     "mode": "abs",
+     "value": 9.0
+    }
+   ],
+   "effect": null,
+   "fire_id": -1
+  },
+  "t0": 0.0,
+  "horizon": null,
+  "state": [
+   [
+    0,
+    0.0
+   ]
+  ],
+  "expected_props": [
+   {
+    "prop": 0,
+    "ts": [
+     0.0
+    ],
+    "vals": [
+     9.0
+    ],
+    "durs": [
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": []
+ },
+ {
+  "name": "negative_hibernate_clamp",
+  "node": {
+   "kind": "Seq",
+   "parts": [
+    {
+     "kind": "Hibernate",
+     "dur": -2.0
+    },
+    {
+     "kind": "Seg",
+     "dur": 1.0,
+     "ease": 0,
+     "targets": [
+      {
+       "prop": 0,
+       "mode": "abs",
+       "value": 4.0
+      }
+     ],
+     "effect": null,
+     "fire_id": -1
+    }
+   ]
+  },
+  "t0": 0.0,
+  "horizon": null,
+  "state": [
+   [
+    0,
+    0.0
+   ]
+  ],
+  "expected_props": [
+   {
+    "prop": 0,
+    "ts": [
+     0.0,
+     1.0
+    ],
+    "vals": [
+     0.0,
+     4.0
+    ],
+    "durs": [
+     1.0,
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": []
+ },
+ {
+  "name": "deep_mixed",
+  "node": {
+   "kind": "Seq",
+   "parts": [
+    {
+     "kind": "Seg",
+     "dur": 0.5,
+     "ease": 0,
+     "targets": [
+      {
+       "prop": 0,
+       "mode": "abs",
+       "value": 1.0
+      },
+      {
+       "prop": 1,
+       "mode": "abs",
+       "value": 2.0
+      }
+     ],
+     "effect": null,
+     "fire_id": -1
+    },
+    {
+     "kind": "Seg",
+     "dur": 0.0,
+     "ease": 0,
+     "targets": [
+      {
+       "prop": 2,
+       "mode": "abs",
+       "value": 45.0
+      }
+     ],
+     "effect": null,
+     "fire_id": -1
+    },
+    {
+     "kind": "Hibernate",
+     "dur": 0.25
+    },
+    {
+     "kind": "Seg",
+     "dur": 1.0,
+     "ease": 0,
+     "targets": [
+      {
+       "prop": 0,
+       "mode": "add",
+       "value": 3.0
+      },
+      {
+       "prop": 3,
+       "mode": "abs",
+       "value": 2.0
+      }
+     ],
+     "effect": null,
+     "fire_id": -1
+    },
+    {
+     "kind": "Seg",
+     "dur": 1.0,
+     "ease": 0,
+     "targets": [
+      {
+       "prop": 4,
+       "mode": "abs",
+       "value": 0.0
+      }
+     ],
+     "effect": null,
+     "fire_id": 0
+    }
+   ]
+  },
+  "t0": 0.0,
+  "horizon": null,
+  "state": [
+   [
+    0,
+    0.0
+   ],
+   [
+    1,
+    0.0
+   ],
+   [
+    2,
+    0.0
+   ],
+   [
+    3,
+    1.0
+   ],
+   [
+    4,
+    1.0
+   ]
+  ],
+  "expected_props": [
+   {
+    "prop": 0,
+    "ts": [
+     0.0,
+     0.5,
+     0.75,
+     1.75
+    ],
+    "vals": [
+     0.0,
+     1.0,
+     1.0,
+     4.0
+    ],
+    "durs": [
+     0.5,
+     0.0,
+     1.0,
+     0.0
+    ]
+   },
+   {
+    "prop": 1,
+    "ts": [
+     0.0,
+     0.5
+    ],
+    "vals": [
+     0.0,
+     2.0
+    ],
+    "durs": [
+     0.5,
+     0.0
+    ]
+   },
+   {
+    "prop": 2,
+    "ts": [
+     0.5
+    ],
+    "vals": [
+     45.0
+    ],
+    "durs": [
+     0.0
+    ]
+   },
+   {
+    "prop": 3,
+    "ts": [
+     0.75,
+     1.75
+    ],
+    "vals": [
+     1.0,
+     2.0
+    ],
+    "durs": [
+     1.0,
+     0.0
+    ]
+   },
+   {
+    "prop": 4,
+    "ts": [
+     1.75,
+     2.75
+    ],
+    "vals": [
+     1.0,
+     0.0
+    ],
+    "durs": [
+     1.0,
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": [
+   1.75
+  ]
+ },
+ {
+  "name": "multi_fire_order",
+  "node": {
+   "kind": "Seq",
+   "parts": [
+    {
+     "kind": "Seg",
+     "dur": 1.0,
+     "ease": 0,
+     "targets": [],
+     "effect": null,
+     "fire_id": 0
+    },
+    {
+     "kind": "Seg",
+     "dur": 1.0,
+     "ease": 0,
+     "targets": [],
+     "effect": null,
+     "fire_id": 0
+    },
+    {
+     "kind": "Seg",
+     "dur": 0.0,
+     "ease": 0,
+     "targets": [],
+     "effect": null,
+     "fire_id": 0
+    }
+   ]
+  },
+  "t0": 0.0,
+  "horizon": null,
+  "state": [],
+  "expected_props": [],
+  "expected_fires": [
+   0.0,
+   1.0,
+   2.0
+  ]
+ },
+ {
+  "name": "loop_fires_each_pass",
+  "node": {
+   "kind": "Loop",
+   "period": 2.0,
+   "body": {
+    "kind": "Seg",
+    "dur": 0.0,
+    "ease": 0,
+    "targets": [],
+    "effect": null,
+    "fire_id": 0
+   }
+  },
+  "t0": 0.0,
+  "horizon": 5.0,
+  "state": [],
+  "expected_props": [],
+  "expected_fires": [
+   0.0,
+   2.0,
+   4.0
+  ]
+ },
+ {
+  "name": "repeat_hold_same_value",
+  "node": {
+   "kind": "Seq",
+   "parts": [
+    {
+     "kind": "Seg",
+     "dur": 0.0,
+     "ease": 0,
+     "targets": [
+      {
+       "prop": 0,
+       "mode": "abs",
+       "value": 3.0
+      }
+     ],
+     "effect": null,
+     "fire_id": -1
+    },
+    {
+     "kind": "Seg",
+     "dur": 0.0,
+     "ease": 0,
+     "targets": [
+      {
+       "prop": 0,
+       "mode": "abs",
+       "value": 3.0
+      }
+     ],
+     "effect": null,
+     "fire_id": -1
+    }
+   ]
+  },
+  "t0": 0.0,
+  "horizon": null,
+  "state": [
+   [
+    0,
+    0.0
+   ]
+  ],
+  "expected_props": [
+   {
+    "prop": 0,
+    "ts": [
+     0.0
+    ],
+    "vals": [
+     3.0
+    ],
+    "durs": [
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": []
+ },
+ {
+  "name": "ramp_then_hold_same",
+  "node": {
+   "kind": "Seq",
+   "parts": [
+    {
+     "kind": "Seg",
+     "dur": 1.0,
+     "ease": 0,
+     "targets": [
+      {
+       "prop": 0,
+       "mode": "abs",
+       "value": 10.0
+      }
+     ],
+     "effect": null,
+     "fire_id": -1
+    },
+    {
+     "kind": "Seg",
+     "dur": 0.0,
+     "ease": 0,
+     "targets": [
+      {
+       "prop": 0,
+       "mode": "abs",
+       "value": 10.0
+      }
+     ],
+     "effect": null,
+     "fire_id": -1
+    }
+   ]
+  },
+  "t0": 0.0,
+  "horizon": null,
+  "state": [
+   [
+    0,
+    0.0
+   ]
+  ],
+  "expected_props": [
+   {
+    "prop": 0,
+    "ts": [
+     0.0,
+     1.0
+    ],
+    "vals": [
+     0.0,
+     10.0
+    ],
+    "durs": [
+     1.0,
+     0.0
+    ]
+   }
+  ],
+  "expected_fires": []
+ }
+]

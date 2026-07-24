@@ -38,6 +38,26 @@ pub enum Source {
     Lines(u32),
 }
 
+/// A shader program the doc can attach to items (attach point #1) or
+/// to composed-drawable blits (attach point #2). `uniform_names`
+/// indexes the per-item `uniforms` list: a `(name_idx, ChannelRef)`
+/// binds a uniform by its position in this vector.
+#[derive(Clone, Debug)]
+pub struct ShaderDesc {
+    pub frag: String,
+    pub vert: Option<String>,
+    pub uniform_names: Vec<String>,
+}
+
+/// A clip shape in the target drawable's logical units (Item.clip).
+/// Extensible per the type sheet's ClipDesc vocabulary; Mesh clips are
+/// deferred until the mesh tier lands.
+#[derive(Clone, Debug)]
+pub enum ClipDesc {
+    Rect([f32; 4]), // l, t, r, b
+    Polygon(Vec<[f32; 2]>),
+}
+
 /// Channel-backed 2D placement. First cut: translate/scale/rotate
 /// about the item origin; the full TransformChannel semantics
 /// (halign/valign anchors, crop-under-flip, base-scale flip cancel)
@@ -73,8 +93,12 @@ pub struct Item {
     pub blend: Blend,
     pub crop: [ChannelRef; 4], // l, t, r, b fractions
     pub visible: ChannelRef,   // >= 0.5 draws
-    pub shader: Option<u32>,   // ShaderId; uniforms ride shader tables later
-    pub clip: Option<u32>,     // ClipId
+    pub shader: Option<u32>,   // ShaderId into DrawableDoc.shaders
+    /// Per-item shader uniform bindings: (uniform_names index, channel).
+    /// Sampled each frame; the values ride the schedule's uniform buffer
+    /// (see evaluate.rs). Empty when no shader / no bound uniforms.
+    pub uniforms: Vec<(u16, ChannelRef)>,
+    pub clip: Option<u32>,     // ClipId into DrawableDoc.clips
     pub z: Option<ChannelRef>, // local sort key, read inside SortSpan only
 }
 
@@ -90,6 +114,7 @@ impl Item {
             crop: [ChannelRef::constant(0.0); 4],
             visible: ChannelRef::constant(1.0),
             shader: None,
+            uniforms: Vec::new(),
             clip: None,
             z: None,
         }
@@ -124,6 +149,8 @@ pub struct Drawable {
 #[derive(Default)]
 pub struct DrawableDoc {
     pub drawables: Vec<Drawable>,
+    pub shaders: Vec<ShaderDesc>,
+    pub clips: Vec<ClipDesc>,
     pub channels: ChannelTable,
 }
 
@@ -138,6 +165,18 @@ impl DrawableDoc {
             dynamic: false,
         });
         doc
+    }
+
+    pub fn add_shader(&mut self, shader: ShaderDesc) -> u32 {
+        let id = self.shaders.len() as u32;
+        self.shaders.push(shader);
+        id
+    }
+
+    pub fn add_clip(&mut self, clip: ClipDesc) -> u32 {
+        let id = self.clips.len() as u32;
+        self.clips.push(clip);
+        id
     }
 
     pub fn add_drawable(&mut self, size: [f32; 2], persistent: bool, dynamic: bool) -> u32 {
