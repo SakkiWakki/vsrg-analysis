@@ -228,9 +228,12 @@ def test_stage_chain_folds_into_consumer_entry():
     assert (mapped.x(), mapped.y()) == pytest.approx((335.0, 240.0))
 
 
-def test_chainless_aft_emits_no_capture_instance():
-    # gat 1: one whole-screen AFT + consumer -> the legacy single-screen
-    # path, no capture/stage instances at all.
+def test_consumed_whole_screen_node_gets_at_position_slot():
+    # Every CONSUMED whole-screen AFT node materializes an at-position
+    # capture slot (the engine captures at the node's draw position -
+    # the cyriak cascade and gat 1's trail feedback both depend on a
+    # sampler's blit re-entering its node's next capture). The consumer
+    # keys the node's slot.
     insts = _instances(
         '<ActorFrame><children>'
         '<ActorFrameTexture InitCommand="%function(self) self:Create() end"'
@@ -238,7 +241,18 @@ def test_chainless_aft_emits_no_capture_instance():
         '<Sprite InitCommand="%function(self)'
         '  self:SetTexture(capA:GetTexture()) end" Var="s0"/>'
         '</children></ActorFrame>')
-    assert {i['kind'] for i in insts} == {'aft'}
+    (capture,) = [i for i in insts if i['kind'] == 'capture']
+    (consumer,) = [i for i in insts if i['kind'] == 'aft']
+    assert consumer['aft_node'] == capture['name']
+
+
+def test_unconsumed_aft_node_emits_nothing():
+    insts = _instances(
+        '<ActorFrame><children>'
+        '<ActorFrameTexture InitCommand="%function(self) self:Create() end"'
+        ' Var="capA"/>'
+        '</children></ActorFrame>')
+    assert insts == []
 
 
 def test_quad_translation_samples_the_varying_uv():
@@ -415,10 +429,11 @@ def test_chain_consumer_carries_capture_source():
     assert consumers['s1'] == src_a
 
 
-def test_chain_freeze_key_is_upstream_source():
-    # A chain consumer keys its preserve-texture freeze on the shared
-    # upstream node, so co-consumers of one chain node share its retained
-    # isolated capture; a non-chain consumer keys on its own name.
+def test_freeze_key_is_the_source_node():
+    # Every consumer keys its slot/freeze on its SOURCE NODE (the
+    # engine's preserve-texture identity is per node, not per sampler):
+    # a chain consumer keys the shared isolated upstream, a whole-screen
+    # consumer keys its own node's at-position slot.
     afts = _afts(_instances(
         '<ActorFrame><children>'
         '<ActorFrameTexture InitCommand="%function(self) self:Create() end"'
@@ -433,8 +448,8 @@ def test_chain_freeze_key_is_upstream_source():
     eff = NotitgFieldInstances(afts)
     keys = {i['name']: eff._extra(i, 0.0)[0] for i in afts}
     src_a = _aft_node_name(afts, 'capA')
-    assert keys['s0'] == 's0'          # whole-screen: own name
-    assert keys['s1'] == src_a         # chain: upstream source node
+    assert keys['s0'] == src_a         # whole-screen: its node's slot
+    assert keys['s1'] == src_a         # chain: shared upstream source
 
 
 def _aft_node_name(afts, var_prefix):

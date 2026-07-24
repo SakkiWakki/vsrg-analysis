@@ -930,7 +930,9 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
                  for rec_id, sim in env.actors.items() if sim.is_aft}
     chain_graph = _aft_chain_graph(doc, env, aft_nodes, proxy_players)
     node_by_id = {rec_id: name for name, rec_id in aft_nodes.items()}
-    slot_nodes = _chain_slot_nodes(chain_graph, aft_nodes)
+    consumed_sources = {a.aft_source for a in env.actors.values()
+                        if a.aft_source}
+    slot_nodes = _chain_slot_nodes(chain_graph, aft_nodes, consumed_sources)
     seen_actors: dict = {}
 
     instances = []
@@ -1116,16 +1118,24 @@ def _uniform_curves(sim, rec_id, live_sim, actor_keyframes) -> dict:
             for name in names}
 
 
-def _chain_slot_nodes(graph, aft_nodes) -> frozenset:
+def _chain_slot_nodes(graph, aft_nodes, consumed) -> frozenset:
     """The AFT node names the composed-capture path materializes as
-    at-position snapshot slots: every resolved chain's ROOT plus every
-    feedback node. Isolating (stage) nodes never materialize - their
-    transforms fold into consumers at sample time - and nodes outside
-    any chain stay on the legacy single-screen path (gat 1 unchanged).
-    A feedback node's slot doubles as its previous-frame source: slots
-    update at the node's document position, so a sampler drawn BEFORE
-    it reads last frame's content (the recursion leg) and the snapshot
-    then captures the composite including that blit."""
+    at-position snapshot slots: every CONSUMED whole-screen node (plus
+    every resolved chain's root and every feedback node). Isolating
+    (stage) nodes never materialize - their transforms fold into
+    consumers at sample time.
+
+    At-position slots ARE the engine capture semantics: each node
+    captures the composite as of its own draw position, so a multi-node
+    cascade (gat 2's cyriak rig: 402 self-feeds via a pre sampler, 405
+    carries it into 409, 409 self-feeds via three more, 410 feeds the
+    visible copies) composes correctly - the single node-point capture
+    could never contain a sampler's own blit, which is why the
+    recursion rendered one level deep. A slot doubles as its node's
+    previous-frame source: it updates at the node's document position,
+    so a sampler drawn BEFORE the node reads last frame's content (the
+    recursion/trail leg) and the snapshot then captures the composite
+    including that blit."""
     stage_nodes = {name for name in aft_nodes if graph.capture_of(name)}
     roots = set()
     for name in stage_nodes:
@@ -1133,7 +1143,9 @@ def _chain_slot_nodes(graph, aft_nodes) -> frozenset:
         while graph.capture_of(node):
             node = graph.capture_of(node)
         roots.add(node)
-    return frozenset(roots | set(graph.feedback))
+    screen_nodes = {name for name in consumed
+                    if name in aft_nodes and name not in stage_nodes}
+    return frozenset(roots | set(graph.feedback) | screen_nodes)
 
 
 def _node_instance(name, actor, graph, slot_nodes, seen_actors, parents,

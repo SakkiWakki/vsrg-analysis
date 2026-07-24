@@ -365,7 +365,13 @@ class NotitgFieldInstances:
                     else (1.0, 1.0, 1.0)
             case 'aft':
                 live = inst.get('aft_live')
-                key = inst.get('capture_source') or inst['name']
+                # Freeze/slot key: the isolated upstream for chain
+                # consumers, else the sampler's SOURCE NODE (its slot /
+                # preserve-texture identity - the engine freezes per
+                # node, not per sampler), else the sampler name (a
+                # source outside the node set, the last-resort key).
+                key = (inst.get('capture_source') or inst.get('aft_node')
+                       or inst['name'])
                 live_now = live is None or live.sample(t)[0] >= 0.5
                 frag = inst.get('frag')
                 color = inst.get('color')
