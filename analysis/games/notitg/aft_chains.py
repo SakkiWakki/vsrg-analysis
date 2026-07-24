@@ -25,41 +25,78 @@ order and decides, for each AFT node, WHAT it captures:
   live player/proxy field - not a clean single-source isolation).
 - an upstream node NAME: the node captures exactly one blit sprite that
   itself draws an upstream AFT, with no other field content in between -
-  a 2-stage chain node isolating that upstream capture.
+  a chain node isolating that upstream capture. `stage_of` returns the
+  captured sprite's rec_id (the render side re-draws that sprite, with
+  its own transform, into the node's slot).
 
 The result annotates each 'aft' field instance with `captures` (an
 upstream node name or None = 'screen'). None is the gat 1 path exactly,
 so a single-AFT chart stays byte-identical.
 
-# Scope
+# Depth and cycles
 
-Only the 2-STAGE case is resolved to an isolated named capture (it
-covers gat 2's actual consumed chains). A deeper (3+) ping-pong or a
-chain feeding a Polygon/crumple.vert vertex target needs the GL executor
-(arbitrary N render targets + vertex-stage sampling), out of this
-compile graph's reach; those nodes still emit an isolated capture but
-their name is recorded in `unresolved_depth` for logging.
+Chains resolve TRANSITIVELY up to `MAX_CHAIN_DEPTH` links (a defensive
+cap - the composed-capture evaluator recurses the chain, and a
+degenerate topology must not turn that into unbounded work). A node
+whose chain exceeds the cap DEMOTES to a whole-screen capture and is
+listed in `depth_capped` for logging - never silently.
+
+A node on a capture CYCLE (a sprite drawing the node's own texture is
+captured back into it - gat 2's cyriak recursion - or a longer loop) is
+FEEDBACK: previous-frame content re-entering this frame's capture. Pure
+same-frame composition cannot express it; those nodes are listed in
+`feedback`, demoted to whole-screen until the render side's persistent
+ping-pong targets consume the classification.
+
+`unresolved_depth` = depth_capped + feedback: everything the pure
+composed-capture path cannot resolve.
 """
 from __future__ import annotations
+
+# Maximum chain links resolved to isolated captures. Real charts nest
+# 2-3 (gat 2's deepest consumed chain is 3); the cap only guards
+# degenerate topologies from turning the evaluator's recursion into
+# unbounded per-frame work.
+MAX_CHAIN_DEPTH = 6
 
 
 class AftChainGraph:
     """The resolved capture source of every AFT node in draw order.
 
-    `capture_of(name)` returns the upstream node NAME a stage-2 AFT
-    isolates, or None when the node captures the whole `screen` (stage-1,
-    mixed content). `unresolved_depth` lists chain nodes fed by a further
-    upstream chain stage (a 3+ deep ping-pong the compile graph isolates
-    only one level of), for logging."""
+    `capture_of(name)` returns the upstream node NAME the AFT isolates,
+    or None when the node captures the whole `screen` (stage-1, mixed
+    content, depth-capped, or feedback). `stage_of(name)` returns the
+    rec_id of the blit sprite captured into an isolating node (None for
+    whole-screen nodes). `depth_of(name)` is the node's resolved chain
+    depth (0 = whole-screen)."""
 
-    def __init__(self, capture_by_node, unresolved_depth):
+    def __init__(self, capture_by_node, stage_by_node, depths,
+                 feedback, depth_capped):
         self._capture = dict(capture_by_node)
-        self.unresolved_depth = tuple(unresolved_depth)
+        self._stage = dict(stage_by_node)
+        self._depths = dict(depths)
+        self.feedback = frozenset(feedback)
+        self.depth_capped = tuple(depth_capped)
 
     def capture_of(self, node_name):
         """The upstream node name this AFT isolates, or None for a
         whole-screen capture."""
         return self._capture.get(node_name)
+
+    def stage_of(self, node_name):
+        """The rec_id of the blit sprite an isolating node captures."""
+        return self._stage.get(node_name)
+
+    def depth_of(self, node_name) -> int:
+        """Resolved chain depth: 0 = whole-screen, 1 = isolates a
+        whole-screen node, ..."""
+        return self._depths.get(node_name, 0)
+
+    @property
+    def unresolved_depth(self):
+        """Nodes the pure composed-capture path cannot resolve: chains
+        past MAX_CHAIN_DEPTH plus feedback cycles."""
+        return tuple(self.depth_capped) + tuple(sorted(self.feedback))
 
 
 def build_chain_graph(aft_nodes, blit_sources, draw_order,
@@ -80,7 +117,7 @@ def build_chain_graph(aft_nodes, blit_sources, draw_order,
     Otherwise it captures the screen (None)."""
     node_names = frozenset(aft_nodes.values())
     capture_by_node = {}
-    unresolved_depth = []
+    stage_by_node = {}
     pending_blits: list = []
     saw_screen_content = False
     for rec_id in draw_order:
@@ -93,14 +130,20 @@ def build_chain_graph(aft_nodes, blit_sources, draw_order,
             upstream = _isolated_upstream(
                 pending_blits, saw_screen_content, blit_sources, node_names)
             capture_by_node[node_name] = upstream
-            if upstream is not None and _fed_by_chain(upstream, blit_sources):
-                unresolved_depth.append(node_name)
+            if upstream is not None:
+                stage_by_node[node_name] = pending_blits[0]
             pending_blits = []
             saw_screen_content = False
             continue
         if rec_id in blit_sources:
             pending_blits.append(rec_id)
-    return AftChainGraph(capture_by_node, unresolved_depth)
+
+    depths, feedback, depth_capped = _resolve(capture_by_node)
+    for name in feedback | set(depth_capped):
+        capture_by_node[name] = None
+        stage_by_node.pop(name, None)
+    return AftChainGraph(capture_by_node, stage_by_node, depths,
+                         feedback, depth_capped)
 
 
 def _isolated_upstream(pending_blits, saw_screen_content, blit_sources,
@@ -113,9 +156,48 @@ def _isolated_upstream(pending_blits, saw_screen_content, blit_sources,
     return upstream if upstream in node_names else None
 
 
+def _resolve(capture_by_node):
+    """Transitive chain depths from the one-level capture links, with
+    cycle and depth-cap classification.
+
+    Walks each node's upstream chain: a repeat visit marks every node on
+    the loop as feedback; a chain longer than MAX_CHAIN_DEPTH marks the
+    too-deep tail nodes depth-capped. Both classes demote to
+    whole-screen (depth 0) - the callers' pre-chain behavior - so the
+    composed evaluator only ever sees pure, bounded chains."""
+    depths = {}
+    feedback = set()
+    depth_capped = []
+
+    def depth(name, trail):
+        if name in depths:
+            return depths[name]
+        if name in trail:
+            feedback.update(trail[trail.index(name):])
+            return 0
+        upstream = capture_by_node.get(name)
+        if upstream is None:
+            depths[name] = 0
+            return 0
+        d = depth(upstream, trail + [name])
+        if name in feedback:
+            return 0
+        depths[name] = d + 1
+        return depths[name]
+
+    for name in capture_by_node:
+        depth(name, [])
+    for name in sorted(depths):
+        if depths[name] > MAX_CHAIN_DEPTH:
+            depth_capped.append(name)
+    for name in feedback | set(depth_capped):
+        depths[name] = 0
+    return depths, feedback, depth_capped
+
+
 def _fed_by_chain(upstream_name, blit_sources) -> bool:
     """Whether the isolated upstream AFT is itself the target of a blit
-    that another chain stage captures - a 3+ deep ping-pong. Best-effort
-    structural signal for logging, never a correctness gate: the one
-    isolated level is still emitted."""
+    that another chain stage captures. Retained as a structural helper
+    for diagnostics; the transitive `_resolve` supersedes it as the
+    depth authority."""
     return any(src == upstream_name for src in blit_sources.values())

@@ -73,10 +73,10 @@ def test_multiple_blits_before_aft_is_not_isolated():
     assert graph.capture_of('aftC') is None
 
 
-def test_deep_chain_flagged_unresolved():
-    # aftA -> sprite20 -> aftB -> sprite40 -> aftC: aftC isolates aftB,
-    # and aftB is itself fed by a chain stage (sprite40 targets it),
-    # so aftC is recorded as an unresolved deep chain.
+def test_deep_chain_resolves_transitively():
+    # aftA -> sprite20 -> aftB -> sprite40 -> aftC: every link resolves
+    # with its transitive depth; nothing is unresolved (the composed
+    # evaluator walks the chain in document order).
     graph = build_chain_graph(
         aft_nodes={10: 'aftA', 30: 'aftB', 50: 'aftC'},
         blit_sources={20: 'aftA', 40: 'aftB'},
@@ -84,7 +84,67 @@ def test_deep_chain_flagged_unresolved():
         screen_content_ids=set())
     assert graph.capture_of('aftB') == 'aftA'
     assert graph.capture_of('aftC') == 'aftB'
-    assert 'aftC' in graph.unresolved_depth
+    assert (graph.depth_of('aftA'), graph.depth_of('aftB'),
+            graph.depth_of('aftC')) == (0, 1, 2)
+    assert graph.unresolved_depth == ()
+
+
+def test_isolating_node_records_its_stage_sprite():
+    graph = build_chain_graph(
+        aft_nodes={10: 'aftA', 30: 'aftB'},
+        blit_sources={20: 'aftA'},
+        draw_order=[10, 20, 30],
+        screen_content_ids=set())
+    assert graph.stage_of('aftB') == 20
+    assert graph.stage_of('aftA') is None
+
+
+def test_self_capture_cycle_is_feedback():
+    # A sprite drawing aftA's own texture captured back into aftA (the
+    # cyriak recursion): previous-frame content re-entering the capture.
+    # Classified feedback + demoted to whole-screen until the persistent
+    # ping-pong targets consume it.
+    graph = build_chain_graph(
+        aft_nodes={30: 'aftA'},
+        blit_sources={20: 'aftA'},
+        draw_order=[20, 30],
+        screen_content_ids=set())
+    assert graph.feedback == {'aftA'}
+    assert graph.capture_of('aftA') is None
+    assert graph.stage_of('aftA') is None
+    assert 'aftA' in graph.unresolved_depth
+
+
+def test_two_node_capture_loop_is_feedback():
+    # aftA captures a blit of aftB while aftB captures a blit of aftA -
+    # a two-frame ping-pong loop; both are feedback.
+    graph = build_chain_graph(
+        aft_nodes={30: 'aftA', 50: 'aftB'},
+        blit_sources={20: 'aftB', 40: 'aftA'},
+        draw_order=[20, 30, 40, 50],
+        screen_content_ids=set())
+    assert graph.feedback == {'aftA', 'aftB'}
+    assert graph.capture_of('aftA') is None
+    assert graph.capture_of('aftB') is None
+
+
+def test_chain_past_depth_cap_demotes_to_screen():
+    # A 1+MAX_CHAIN_DEPTH+1 ladder: nodes at depth <= cap resolve, the
+    # one past it demotes to whole-screen and is reported, never silent.
+    from analysis.games.notitg.aft_chains import MAX_CHAIN_DEPTH
+
+    n = MAX_CHAIN_DEPTH + 2
+    aft_nodes = {i * 10: f'aft{i}' for i in range(n)}
+    blit_sources = {i * 10 - 5: f'aft{i - 1}' for i in range(1, n)}
+    draw_order = sorted(list(aft_nodes) + list(blit_sources))
+    graph = build_chain_graph(aft_nodes, blit_sources, draw_order,
+                              screen_content_ids=set())
+    deepest, capped = f'aft{n - 2}', f'aft{n - 1}'
+    assert graph.depth_of(deepest) == MAX_CHAIN_DEPTH
+    assert graph.capture_of(deepest) == f'aft{n - 3}'
+    assert graph.capture_of(capped) is None
+    assert graph.depth_capped == (capped,)
+    assert capped in graph.unresolved_depth
 
 
 # ---- end-to-end harvest through producers ------------------------------
