@@ -24,10 +24,13 @@
 //!
 //! `frame_with_feeds` takes flat SoA feed buffers (FROZEN strides in
 //! evaluate.rs): u32 stride 4 `[source_kind, source_id, frame, flags]`
-//! (flags bit0 additive, bit1 screen_space, bit2 has_z); f32 stride 14
-//! `[x, y, sx, sy, rot, opacity, r, g, b, crop_l, crop_t, crop_r,
-//! crop_b, z]`. `feed_ids` / `feed_item_counts` are parallel; the lane
-//! buffers concatenate items in that same order.
+//! (flags bit0 additive, bit1 screen_space, bit2 has_z); f32 stride 18
+//! (feed v2) `[m00, m01, m02, m10, m11, m12, m20, m21, m22, opacity,
+//! r, g, b, crop_l, crop_t, crop_r, crop_b, z]` - the mat3 in the BLIT
+//! record's column-vector layout, written to the record verbatim
+//! (homographies included; the game side resolves the full homography).
+//! `feed_ids` / `feed_item_counts` are parallel; the lane buffers
+//! concatenate items in that same order.
 
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;

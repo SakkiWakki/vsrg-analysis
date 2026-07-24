@@ -230,10 +230,15 @@ def _unpack_feed(result) -> tuple:
     """Normalize the bridge's feed_frame return to
     ``(feed_ids, counts, feed_u, feed_f)``.
 
-    The B3 bridge returns a 5-tuple whose trailing element is a coverage
-    dict (diagnostics, not needed to draw); an earlier 4-tuple form omits
-    it. Either way the first four members are the two id/count lists and
-    the two feed buffers (bytes or numpy arrays - see _feed_bytes)."""
+    The bridge returns a 5-tuple whose trailing element is a coverage dict
+    (diagnostics, not needed to draw); an earlier 4-tuple form omits it.
+    Either way the first four members are the two id/count lists and the
+    two feed buffers (bytes or numpy arrays - see _feed_bytes). Under feed
+    v2 the id/count lists are per-INTER-CAPTURE-SEGMENT (the bridge splits
+    the screen's entry stream at capture positions), and the feed f32
+    stride is 18 (a mat3 crossing verbatim); both are consumed generically
+    here - the evaluator getters (feed_f_stride, frame_with_feeds) carry
+    the stride and segment routing, so this stays layout-agnostic."""
     feed_ids, counts, feed_u, feed_f = result[0], result[1], result[2], result[3]
     return feed_ids, counts, feed_u, feed_f
 

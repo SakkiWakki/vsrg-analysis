@@ -148,6 +148,13 @@ pub struct Item {
     /// Mirror the leaf link's vertical source axis (AFT capture
     /// compensation); only consulted when `links` is non-empty.
     pub flip_base_y: bool,
+    /// A dynamic-feed item's pre-sampled mat3, already in the BLIT
+    /// record's column-vector layout (feed v2). When present it is
+    /// written to the record verbatim - the game side (bridge) has
+    /// already resolved the full homography, so no TRS/link folding
+    /// happens. Static (doc-built) items leave this None and go through
+    /// the TRS or link chain.
+    pub fed_mat: Option<[f32; 9]>,
     /// Optional per-item camera projection folded onto the item's mat3
     /// (None = the parent's/no projection, a plain 2D blit).
     pub projection: Option<CameraRef>,
@@ -173,6 +180,7 @@ impl Item {
             transform: TransformRef::identity(),
             links: Vec::new(),
             flip_base_y: false,
+            fed_mat: None,
             projection: None,
             space: Space::Scene,
             opacity: ChannelRef::constant(1.0),

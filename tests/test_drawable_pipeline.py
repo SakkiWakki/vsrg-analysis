@@ -81,23 +81,22 @@ def _fake_bridge(fed_color=(1.0, 0.0, 0.0), raise_on_feed=False,
                 raise RuntimeError("synthetic feed failure")
             notes = id_maps['dynamic_id']
             fu = 4
-            ff = 14
+            ff = 18
             u = np.zeros((1, fu), dtype=np.uint32)
             f = np.zeros((1, ff), dtype=np.float32)
             # One fed fill item covering the whole 640x480 screen, opaque.
-            # Feed f32 layout is TRS: [tx, ty, sx, sy, rot, opacity, tint..].
+            # Feed v2 f32 layout: mat3 lanes 0..9 (column-vector), then
+            # opacity, tint, crop, z. The mat3 scales the unit fill quad to
+            # 640x480: m00=640 (x' = 640*u), m11=480 (y' = 480*v).
             u[0] = [sn.SRC_FILL, 0, 0, 0]
-            f[0, 0] = 0.0     # tx
-            f[0, 1] = 0.0     # ty
-            f[0, 2] = 640.0   # sx (scale the unit fill quad to full width)
-            f[0, 3] = 480.0   # sy (full height)
-            f[0, 4] = 0.0     # rot
-            f[0, 5] = 1.0     # opacity
-            f[0, 6:9] = fed_color  # tint rgb
+            f[0, 0] = 640.0   # m00 (scale unit quad to full width)
+            f[0, 4] = 480.0   # m11 (full height)
+            f[0, 8] = 1.0     # m22 (homogeneous)
+            f[0, 9] = 1.0     # opacity
+            f[0, 10:13] = fed_color  # tint rgb
             if bytes_feed:
                 # The real B3 shape: serialized buffers + a coverage dict.
-                coverage = {'translated': 1, 'skipped_projective': 0,
-                            'total': 1}
+                coverage = {'translated': 1, 'total': 1, 'stale': False}
                 return [notes], [1], u.tobytes(), f.tobytes(), coverage
             return [notes], [1], u, f
 

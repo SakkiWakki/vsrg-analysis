@@ -111,19 +111,23 @@ def test_frame_with_feeds_ingests_soa_and_matches_static():
     b.item(0, sn.SRC_DRAWABLE, notes)
     ev = b.finish()
 
-    # Two fed items in the frozen SoA layout: u32 stride 4, f32 stride 14.
+    # Two fed items in the frozen feed v2 SoA layout: u32 stride 4, f32
+    # stride 18 (mat3 lanes 0..9, then opacity, tint, crop, z).
     fu = ev.feed_u_stride
     ff = ev.feed_f_stride
-    assert (fu, ff) == (4, 14)
+    assert (fu, ff) == (4, 18)
     ADDITIVE = 1
     u = np.zeros((2, fu), dtype=np.uint32)
     f = np.zeros((2, ff), dtype=np.float32)
-    # item 0: image 5, additive, opacity 0.5, positioned at (10, 20).
+    # item 0: image 5, additive, opacity 0.5, mat3 translate(10, 20) in the
+    # record's column-vector layout (tx/ty in lanes 2/5).
     u[0] = [sn.SRC_IMAGE, 5, 0, ADDITIVE]
-    f[0, :6] = [10.0, 20.0, 1.0, 1.0, 0.0, 0.5]
-    # item 1: image 6, plain, opacity 1.0.
+    f[0, :9] = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
+    f[0, 9] = 0.5   # opacity
+    # item 1: image 6, plain, identity mat3, opacity 1.0.
     u[1] = [sn.SRC_IMAGE, 6, 0, 0]
-    f[1, :6] = [0.0, 0.0, 1.0, 1.0, 0.0, 1.0]
+    f[1, :9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    f[1, 9] = 1.0   # opacity
 
     u_raw, f_raw, _uf_raw, n = ev.frame_with_feeds(
         0.0, [notes], [2], u.tobytes(), f.tobytes())
@@ -136,11 +140,11 @@ def test_frame_with_feeds_ingests_soa_and_matches_static():
         (sn.SRC_IMAGE, 5), (sn.SRC_IMAGE, 6), (sn.SRC_DRAWABLE, notes)]
     # The additive flag reached the blit's blend lane (lane 4).
     assert blits[0][4] == 1 and blits[1][4] == 0
-    # The fed position/opacity survived: item 0's mat3 tx/ty = 10/20,
-    # opacity 0.5 (f lane 9).
+    # The fed mat3/opacity survived verbatim: item 0's mat3 tx/ty = 10/20
+    # (record lanes 2/5), opacity 0.5 (f lane 9).
     fed0 = fu_out[uu[:, 0] == sn.OP_BLIT][0]
-    assert fed0[2] == pytest.approx(10.0)   # mat[0][2] = x
-    assert fed0[5] == pytest.approx(20.0)   # mat[1][2] = y
+    assert fed0[2] == pytest.approx(10.0)   # mat[0][2] = tx
+    assert fed0[5] == pytest.approx(20.0)   # mat[1][2] = ty
     assert fed0[9] == pytest.approx(0.5)    # opacity
 
     # frame() with no feeds leaves the dynamic drawable empty (only the

@@ -79,10 +79,14 @@ pub struct Feed<'a> {
 ///   [source_kind, source_id, frame, flags]
 /// flags bit0 = additive, bit1 = screen_space, bit2 = has_z.
 pub const FEED_U_STRIDE: usize = 4;
-/// f32 lanes per fed item (FROZEN):
-///   [x, y, sx, sy, rot, opacity, r, g, b, crop_l, crop_t, crop_r,
-///    crop_b, z]
-pub const FEED_F_STRIDE: usize = 14;
+/// f32 lanes per fed item (FEED V2, drawable-port-wave3.md C1): the
+/// mat3 crosses NATIVE - column-vector RECORD convention (translation
+/// in lanes 2/5, exactly the BLIT record's f-lanes 0..9), so a fed mat3
+/// is written to the BLIT record verbatim (homographies included). No
+/// affine decomposition, no projective skip.
+///   [m00, m01, m02, m10, m11, m12, m20, m21, m22,
+///    opacity, r, g, b, crop_l, crop_t, crop_r, crop_b, z]
+pub const FEED_F_STRIDE: usize = 18;
 
 const FEED_FLAG_ADDITIVE: u32 = 1;
 const FEED_FLAG_SCREEN: u32 = 1 << 1;
@@ -90,7 +94,9 @@ const FEED_FLAG_HAS_Z: u32 = 1 << 2;
 
 /// Decode one fed item's flat SoA lanes into an `Item`. Fed values are
 /// already sampled scalars, so every channel is a constant (rest-only)
-/// ChannelRef - no doc channel lookups happen for fed items.
+/// ChannelRef - no doc channel lookups happen for fed items. The fed
+/// mat3 rides `fed_mat` (already in the record's column-vector layout);
+/// emit_item writes it to the BLIT record verbatim.
 fn feed_item(u: &[u32], f: &[f32]) -> Item {
     let (source_kind, source_id, frame, flags) = (u[0], u[1], u[2], u[3]);
     let source = match source_kind {
@@ -104,24 +110,20 @@ fn feed_item(u: &[u32], f: &[f32]) -> Item {
         _ => Source::Fill,
     };
     let mut item = Item::of(source);
-    item.transform = crate::doc::TransformRef {
-        x: ChannelRef::constant(f[0]),
-        y: ChannelRef::constant(f[1]),
-        scale_x: ChannelRef::constant(f[2]),
-        scale_y: ChannelRef::constant(f[3]),
-        rot: ChannelRef::constant(f[4]),
-    };
-    item.opacity = ChannelRef::constant(f[5]);
+    let mut mat = [0.0f32; 9];
+    mat.copy_from_slice(&f[0..9]);
+    item.fed_mat = Some(mat);
+    item.opacity = ChannelRef::constant(f[9]);
     item.tint = [
-        ChannelRef::constant(f[6]),
-        ChannelRef::constant(f[7]),
-        ChannelRef::constant(f[8]),
-    ];
-    item.crop = [
-        ChannelRef::constant(f[9]),
         ChannelRef::constant(f[10]),
         ChannelRef::constant(f[11]),
         ChannelRef::constant(f[12]),
+    ];
+    item.crop = [
+        ChannelRef::constant(f[13]),
+        ChannelRef::constant(f[14]),
+        ChannelRef::constant(f[15]),
+        ChannelRef::constant(f[16]),
     ];
     item.blend = if flags & FEED_FLAG_ADDITIVE != 0 {
         crate::doc::Blend::Additive
@@ -133,7 +135,7 @@ fn feed_item(u: &[u32], f: &[f32]) -> Item {
     } else {
         crate::doc::Space::Scene
     };
-    item.z = (flags & FEED_FLAG_HAS_Z != 0).then(|| ChannelRef::constant(f[13]));
+    item.z = (flags & FEED_FLAG_HAS_Z != 0).then(|| ChannelRef::constant(f[17]));
     item
 }
 
@@ -312,6 +314,12 @@ fn item_transform(
     t: f32,
 ) -> Option<([f32; 9], f32, Option<[f32; 4]>)> {
     let ch = &doc.channels;
+    // A dynamic-feed item carries its mat3 pre-resolved (feed v2): write
+    // it verbatim, alpha 1 (the feed's opacity lane already holds the
+    // chain alpha), crop from the item's own crop lanes.
+    if let Some(mat) = item.fed_mat {
+        return Some((mat, 1.0, None));
+    }
     if item.links.is_empty() {
         let (x, y) = (ch.sample(item.transform.x, t), ch.sample(item.transform.y, t));
         let (sx, sy) = (
@@ -623,13 +631,21 @@ mod tests {
     #[test]
     fn parse_feeds_decodes_frozen_soa_layout() {
         // Two fed items: an additive image and a screen-space fill w/ z.
+        // Feed v2: f32 lanes 0..9 are the mat3 in the record's
+        // column-vector layout, written to the BLIT record verbatim.
         let u: Vec<u32> = vec![
             SRC_IMAGE, 5, 3, FEED_FLAG_ADDITIVE, // item 0
             SRC_FILL, 0, 0, FEED_FLAG_SCREEN | FEED_FLAG_HAS_Z, // item 1
         ];
+        // item 0 mat3: scale(2, 0.5) translate(10, 20) column-vector; item 1
+        // mat3: a projective row (m20/m21 non-zero) proving homographies
+        // cross verbatim, not just affine.
         let f: Vec<f32> = vec![
-            10.0, 20.0, 2.0, 0.5, 45.0, 0.75, 1.0, 0.5, 0.25, 0.1, 0.2, 0.3, 0.4, 0.0, // 0
-            0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 9.0, // 1
+            // m00..m22, opacity, r, g, b, crop l/t/r/b, z
+            2.0, 0.0, 10.0, 0.0, 0.5, 20.0, 0.0, 0.0, 1.0, //
+            0.75, 1.0, 0.5, 0.25, 0.1, 0.2, 0.3, 0.4, 0.0, // 0
+            1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.001, 0.002, 1.0, //
+            1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 9.0, // 1
         ];
         let feeds = parse_feeds(&[7], &[2], &u, &f);
         assert_eq!(feeds.len(), 1);
@@ -644,13 +660,21 @@ mod tests {
         assert!(matches!(items[0].blend, crate::doc::Blend::Additive));
         assert!(matches!(items[0].space, crate::doc::Space::Scene));
         assert!(items[0].z.is_none());
+        assert_eq!(
+            items[0].fed_mat,
+            Some([2.0, 0.0, 10.0, 0.0, 0.5, 20.0, 0.0, 0.0, 1.0])
+        );
 
         assert!(matches!(items[1].source, Source::Fill));
         assert!(matches!(items[1].space, crate::doc::Space::Screen));
         assert!(items[1].z.is_some());
+        // The projective row rides verbatim through parse into the item.
+        assert_eq!(items[1].fed_mat.unwrap()[6], 0.001);
+        assert_eq!(items[1].fed_mat.unwrap()[7], 0.002);
 
         // Fed items feed the same emit path: frame() over a dynamic
-        // drawable consuming this feed produces the two blits in order.
+        // drawable consuming this feed produces the two blits in order,
+        // and item 0's fed mat3 lands in the BLIT record verbatim.
         let mut doc = DrawableDoc::with_screen([640.0, 480.0]);
         let dyn_id = doc.add_drawable([640.0, 480.0], false, true);
         doc.drawables[0]
@@ -663,6 +687,13 @@ mod tests {
         let schedule = evaluate(&doc, 0.0, &borrowed);
         let srcs = blit_sources(&schedule);
         assert_eq!(srcs, vec![(SRC_IMAGE, 5), (SRC_FILL, 0), (SRC_DRAWABLE, dyn_id)]);
+        // The first BLIT's record mat3 equals item 0's fed mat3.
+        let op = (0..schedule.len())
+            .find(|i| schedule.u[i * U_STRIDE] == OP_BLIT)
+            .unwrap();
+        let mut m = [0.0f32; 9];
+        m.copy_from_slice(&schedule.f[op * F_STRIDE..op * F_STRIDE + 9]);
+        assert_eq!(m, [2.0, 0.0, 10.0, 0.0, 0.5, 20.0, 0.0, 0.0, 1.0]);
     }
 
     #[test]
