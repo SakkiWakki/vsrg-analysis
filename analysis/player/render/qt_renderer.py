@@ -952,7 +952,13 @@ class QtPlayerRenderer:
         if os.environ.get('VSRG_DRAWABLE_PIPELINE') == '1':
             from analysis.player.render.storyboard.pipeline import pipeline_for
             _pipeline = pipeline_for(ctx.player)
-            if _pipeline is not None and _pipeline.delegate(frame, ctx, painter):
+            # Hand this frame's live field captures (the transparent
+            # field-layers pixmap + any per-player field{N} captures) to
+            # the pipeline as the field-scope drawables' content, so its
+            # SRC_DRAWABLE blits draw real notes over the painted backdrop.
+            captures = {'field': self._field_src, **self._player_field_src}
+            if (_pipeline is not None
+                    and _pipeline.delegate(frame, ctx, painter, captures)):
                 return
         from analysis.games.notitg.field_instances import design_box
         design = design_box(ctx.chart_rect)

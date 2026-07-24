@@ -279,3 +279,66 @@ def test_schedule_fires_returns_effect_times():
             'effect': effect, 'fire_id': -1}
     fires = b.schedule_fires(node, 0.0, -1.0, state=[(0, 0.0)])
     assert fires == pytest.approx([3.0])
+
+
+# --- wave 4: event-driven reactions (spliced Schedule fragments) ---------
+
+
+def _opacity(evaluator, t, kinds, times, columns, strengths):
+    """The single BLIT op's opacity lane through frame_with_events."""
+    u_raw, f_raw, _uf, n = evaluator.frame_with_events(
+        t, kinds, times, columns, strengths)
+    u = np.frombuffer(u_raw, dtype=np.uint32).reshape(n, evaluator.u_stride)
+    f = np.frombuffer(f_raw, dtype=np.float32).reshape(n, evaluator.f_stride)
+    return f[u[:, 0] == sn.OP_BLIT][0][9]
+
+
+def _opacity_ramp():
+    # A 0 -> 1 opacity ramp over 1s (eases off the seeded base at te).
+    return {'kind': 'Seg', 'dur': 1.0, 'ease': 0,
+            'targets': [{'prop': sn.PROP_OPACITY, 'mode': 'abs', 'value': 1.0}],
+            'effect': None, 'fire_id': -1}
+
+
+def test_reaction_press_ramps_opacity_after_the_event():
+    b = sn.DocBuilder(640.0, 480.0)
+    b.item(0, sn.SRC_FILL, 0, opacity_rest=0.4)
+    b.item_reaction(0, sn.EV_PRESS, -1, _opacity_ramp(), sn.PROP_OPACITY)
+    ev = b.finish()
+
+    press = ([sn.EV_PRESS], [1.0], [-1], [1.0])
+    # Before the press: the base opacity (0.4) rules.
+    assert _opacity(ev, 0.5, *press) == pytest.approx(0.4)
+    # After: the ramp eases 0.4 -> 1.0 over [1, 2]; midpoint 1.5 -> 0.7.
+    assert _opacity(ev, 1.5, *press) == pytest.approx(0.7)
+    assert _opacity(ev, 2.5, *press) == pytest.approx(1.0)
+
+
+def test_reaction_base_channel_rules_with_no_event():
+    b = sn.DocBuilder(640.0, 480.0)
+    b.item(0, sn.SRC_FILL, 0, opacity_rest=0.4)
+    b.item_reaction(0, sn.EV_PRESS, -1, _opacity_ramp(), sn.PROP_OPACITY)
+    ev = b.finish()
+    # No events this frame: the base channel is untouched.
+    assert _opacity(ev, 1.5, [], [], [], []) == pytest.approx(0.4)
+
+
+def test_reaction_second_event_resplices():
+    b = sn.DocBuilder(640.0, 480.0)
+    b.item(0, sn.SRC_FILL, 0, opacity_rest=0.4)
+    b.item_reaction(0, sn.EV_PRESS, -1, _opacity_ramp(), sn.PROP_OPACITY)
+    ev = b.finish()
+    # Two presses; the later (te=5) wins - the fresh ramp reads 0.7 at 5.5,
+    # not the held 1.0 of the first press.
+    two = ([sn.EV_PRESS, sn.EV_PRESS], [1.0, 5.0], [-1, -1], [1.0, 1.0])
+    assert _opacity(ev, 5.5, *two) == pytest.approx(0.7)
+
+
+def test_reaction_column_filter_respected():
+    b = sn.DocBuilder(640.0, 480.0)
+    b.item(0, sn.SRC_FILL, 0, opacity_rest=0.4)
+    b.item_reaction(0, sn.EV_PRESS, 3, _opacity_ramp(), sn.PROP_OPACITY)
+    ev = b.finish()
+    # A column-1 press is filtered out; a column-3 press fires.
+    assert _opacity(ev, 2.0, [sn.EV_PRESS], [1.0], [1], [1.0]) == pytest.approx(0.4)
+    assert _opacity(ev, 2.0, [sn.EV_PRESS], [1.0], [3], [1.0]) == pytest.approx(1.0)

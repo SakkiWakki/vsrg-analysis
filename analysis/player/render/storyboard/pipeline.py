@@ -141,8 +141,15 @@ class DrawablePipeline:
     def healthy(self) -> bool:
         return not self._disabled
 
-    def delegate(self, frame, ctx, painter) -> bool:
+    def delegate(self, frame, ctx, painter, field_captures=None) -> bool:
         """Render the chart region through the Drawable core and blit it.
+
+        ``field_captures`` maps a field scope ('field', 'field2', ...) to
+        the renderer's LIVE capture handle for that scope this frame (the
+        transparent field-layers pixmap and any per-player captures). Their
+        pixels become the doc's field-scope drawables' content, so
+        SRC_DRAWABLE field blits draw real notes. None = no field content
+        this frame (the composite still runs; field drawables read empty).
 
         Returns True when the frame was drawn (the caller must then skip
         the normal path); False when the pipeline is disabled or could
@@ -151,14 +158,15 @@ class DrawablePipeline:
         if self._disabled:
             return False
         try:
-            return self._delegate(frame, ctx, painter)
+            return self._delegate(frame, ctx, painter, field_captures)
         except Exception:
             self._disable("frame render failed")
             return False
 
-    def _delegate(self, frame, ctx, painter) -> bool:
+    def _delegate(self, frame, ctx, painter, field_captures) -> bool:
         if not self._ensure_built():
             return False
+        self._ingest_field_captures(field_captures)
         t = float(ctx.t_now)
         feed_ids, counts, feed_u, feed_f = _unpack_feed(
             self._bridge.feed_frame(self._compiled, t, self._id_maps))
@@ -167,6 +175,25 @@ class DrawablePipeline:
             return False
         self._blit(painter, ctx, image)
         return True
+
+    def _ingest_field_captures(self, field_captures) -> None:
+        """Feed each live field capture into its mapped field drawable's
+        content. A scope with no drawable in the doc (or no capture this
+        frame) is skipped; a non-QImage handle (a GL capture texture) is
+        converted when it can be, else skipped - the raster executor is a
+        QImage backend, so only QImage-convertible captures ingest."""
+        if not field_captures:
+            return
+        fields = self._id_maps.get('fields') if isinstance(self._id_maps, dict) else None
+        if not fields:
+            return
+        for scope, handle in field_captures.items():
+            drawable_id = fields.get(scope)
+            if drawable_id is None:
+                continue
+            image = _as_qimage(handle)
+            if image is not None:
+                self._executor.set_drawable_image(drawable_id, image)
 
     def _ensure_built(self) -> bool:
         """Cross Seam A once: build the doc + evaluator + executor. A
@@ -179,12 +206,18 @@ class DrawablePipeline:
         if evaluator is None:
             self._disable("bridge produced no evaluator")
             return False
-        from analysis.player.render.storyboard.executor import RasterExecutor
+        from analysis.player.render.storyboard.executor import (
+            RasterExecutor, CLEAR_TRANSPARENT, SCREEN_ID)
         self._evaluator = evaluator
         self._id_maps = id_maps
         self._executor = RasterExecutor(
             _images_of(id_maps),
             _drawable_sizes_of(id_maps, evaluator))
+        # The screen root is minted OpaqueBlack (DocBuilder has no clear
+        # arg; that opaque clear IS the black-chart-region baseline). Make
+        # it TransparentBlack so the composed image overlays the backdrop
+        # the renderer already painted, instead of covering it.
+        self._executor.set_clear(SCREEN_ID, CLEAR_TRANSPARENT)
         return True
 
     def _evaluate(self, t, feed_ids, counts, feed_u, feed_f):
@@ -258,6 +291,27 @@ def _as_feed_bytes(buf, stride: int, dtype) -> bytes:
     if buf is not None and getattr(buf, 'size', 0) > 0:
         return np.ascontiguousarray(buf, dtype=dtype).tobytes()
     return np.zeros((0, stride), dtype=dtype).tobytes()
+
+
+def _as_qimage(handle):
+    """A QImage view of a renderer capture handle, or None when it cannot
+    be one. Raster captures are QPixmaps (``.toImage()``); a handle that is
+    already a QImage passes through; anything else (a GL texture handle) has
+    no cheap CPU image and is skipped - the raster executor is a QImage
+    backend, so those scopes simply carry no content this frame."""
+    if handle is None:
+        return None
+    from PySide6.QtGui import QImage
+    if isinstance(handle, QImage):
+        return handle
+    to_image = getattr(handle, 'toImage', None)
+    if callable(to_image):
+        try:
+            image = to_image()
+        except Exception:
+            return None
+        return image if isinstance(image, QImage) else None
+    return None
 
 
 def _images_of(id_maps) -> dict:

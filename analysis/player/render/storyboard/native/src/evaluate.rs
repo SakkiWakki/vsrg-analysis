@@ -12,14 +12,31 @@
 //! The output is flat fixed-width SoA records (no per-op objects) so
 //! the schedule crosses Seam B as two buffers.
 
+use std::collections::HashMap;
+
 use crate::channels::{ChannelRef, ChannelTable};
-use crate::doc::{Cmd, DrawableDoc, Item, Source, SCREEN};
+use crate::doc::{
+    Cmd, DrawableDoc, Item, Reaction, Source, PROP_FRAME, PROP_OPACITY, PROP_TINT_B, PROP_TINT_G,
+    PROP_TINT_R, PROP_ZOOM, SCREEN,
+};
+use crate::schedule::{lower, LoweredProp};
 
 /// Op kinds in the u32 record.
 pub const OP_BEGIN: u32 = 0;
 pub const OP_BLIT: u32 = 1;
 pub const OP_COPY: u32 = 2;
 pub const OP_END: u32 = 3;
+
+/// Event kinds (the type sheet's `EventKind`): the already-decided input
+/// classes a Reaction may trigger on. Values are stable wire constants
+/// (Python passes them in the SoA `event_kinds` array; a reaction's
+/// `trigger_kind` matches against them).
+pub const EV_PRESS: u32 = 0;
+pub const EV_RELEASE: u32 = 1;
+pub const EV_HIT: u32 = 2;
+pub const EV_MISS: u32 = 3;
+pub const EV_CLICK: u32 = 4;
+pub const EV_FRAMETICK: u32 = 5;
 
 /// Source kinds in the u32 record.
 pub const SRC_IMAGE: u32 = 0;
@@ -73,6 +90,134 @@ impl DrawSchedule {
 pub struct Feed<'a> {
     pub drawable: u32,
     pub items: &'a [Item],
+}
+
+/// One already-decided input event this frame carries (Press/Hit/... -
+/// the authoring layer's gameplay reaction, reduced to data at the
+/// boundary). `kind` matches a reaction's trigger; `column` is filtered
+/// against the reaction's column_filter (-1 = any); `time` is when it
+/// arrived (the lowering `t0`); `strength` is reserved for reactions that
+/// scale by hit strength (unused this wave, carried for the frozen SoA).
+#[derive(Clone, Copy, Debug)]
+pub struct Event {
+    pub kind: u32,
+    pub time: f32,
+    pub column: i32,
+    pub strength: f32,
+}
+
+/// The reaction lowering cache: a fragment lowered once per (reaction id,
+/// event time) into its target prop's breakpoint run. `evaluate` shares
+/// one across the frame so a re-spliced or repeated reaction pays the
+/// fold at most once per distinct arrival time (the Evaluator keeps it
+/// across frames - a Press at te=1.0 lowers once, ever). Keyed by
+/// (reaction id, event-time bits) so equal float times collide exactly.
+pub type ReactionCache = HashMap<(u32, u32), Option<LoweredProp>>;
+
+/// Resolve the reactions active on `item` at time `t` into per-prop
+/// value overrides. For each reaction, the latest matching event with
+/// `time <= t` (engine queue-append: last one wins) selects an arrival
+/// `te`; the fragment lowers from the property's base value at `te`,
+/// seeding `state` so the ramp eases off the live base. The lowered run
+/// is sampled at `t` and returned keyed by prop. When two reactions on
+/// the same item target the same prop, the later-declared one wins
+/// (document order, matching insertion-is-truth).
+fn reaction_overrides(
+    item: &Item,
+    events: &[Event],
+    cache: &mut ReactionCache,
+    t: f32,
+    base: &dyn Fn(u32, f32) -> f32,
+) -> Vec<(u32, f32)> {
+    let mut overrides: Vec<(u32, f32)> = Vec::new();
+    for reaction in &item.reactions {
+        let Some(te) = latest_matching_event(reaction, events, t) else {
+            continue;
+        };
+        let key = (reaction.id, te.to_bits());
+        let lowered = cache
+            .entry(key)
+            .or_insert_with(|| lower_reaction_prop(reaction, te, base(reaction.prop, te)));
+        let Some(prop) = lowered else { continue };
+        let value = sample_lowered(prop, t);
+        set_override(&mut overrides, reaction.prop, value);
+    }
+    overrides
+}
+
+/// The item's base value for a spliced prop at the event time `te` - the
+/// seed the reaction's ramp eases off (engine: the tween starts from the
+/// property's live value). opacity folds in the link-chain alpha, tints
+/// sample their channels, zoom's base is 1.0 (a multiplier, no scale
+/// channel to read), frame reads the image's sheet-frame channel.
+fn reaction_base_value(item: &Item, ch: &ChannelTable, prop: u32, te: f32, alpha_mul: f32) -> f32 {
+    match prop {
+        PROP_OPACITY => ch.sample(item.opacity, te) * alpha_mul,
+        PROP_TINT_R => ch.sample(item.tint[0], te),
+        PROP_TINT_G => ch.sample(item.tint[1], te),
+        PROP_TINT_B => ch.sample(item.tint[2], te),
+        PROP_ZOOM => 1.0,
+        PROP_FRAME => match item.source {
+            Source::Image { frame, .. } => ch.sample(frame, te),
+            _ => 0.0,
+        },
+        _ => 0.0,
+    }
+}
+
+/// The time of the latest event (largest `time <= t`) matching this
+/// reaction's kind and column filter, or None if none has arrived yet.
+fn latest_matching_event(reaction: &Reaction, events: &[Event], t: f32) -> Option<f32> {
+    events
+        .iter()
+        .filter(|e| {
+            e.kind == reaction.trigger_kind
+                && e.time <= t
+                && (reaction.column_filter < 0 || reaction.column_filter == e.column)
+        })
+        .map(|e| e.time)
+        .fold(None, |acc, te| Some(acc.map_or(te, |a: f32| a.max(te))))
+}
+
+/// Lower a reaction's fragment at `t0 = te`, seeding the target prop's
+/// base value, and keep only that prop's breakpoint run (the fragment may
+/// touch several; a reaction splices exactly one). Unbounded horizon: a
+/// reaction fragment is a finite command tween, never a Loop.
+fn lower_reaction_prop(reaction: &Reaction, te: f32, base: f32) -> Option<LoweredProp> {
+    let out = lower(&reaction.fragment, te, f32::INFINITY, &[(reaction.prop, base)]);
+    out.props
+        .into_iter()
+        .find(|(k, _)| *k == reaction.prop)
+        .map(|(_, prop)| prop)
+}
+
+/// Sample a lowered breakpoint run at `t` (the channel-table ease: rest
+/// before the first breakpoint = the first value, hold/ramp within).
+fn sample_lowered(prop: &LoweredProp, t: f32) -> f32 {
+    let (ts, vals, durs) = (&prop.ts, &prop.vals, &prop.durs);
+    if ts.is_empty() || t < ts[0] {
+        return vals.first().copied().unwrap_or(0.0);
+    }
+    let i = ts.partition_point(|&bt| bt <= t) - 1;
+    let (v0, dur) = (vals[i], durs[i]);
+    if dur <= 0.0 || i + 1 >= vals.len() {
+        return v0;
+    }
+    let frac = ((t - ts[i]) / dur).clamp(0.0, 1.0);
+    v0 + (vals[i + 1] - v0) * frac
+}
+
+/// Insert or replace a prop override (later reaction on the same prop
+/// wins - document order).
+fn set_override(overrides: &mut Vec<(u32, f32)>, prop: u32, value: f32) {
+    match overrides.iter_mut().find(|(k, _)| *k == prop) {
+        Some(slot) => slot.1 = value,
+        None => overrides.push((prop, value)),
+    }
+}
+
+fn find_override(overrides: &[(u32, f32)], prop: u32) -> Option<f32> {
+    overrides.iter().find(|(k, _)| *k == prop).map(|(_, v)| *v)
 }
 
 /// u32 lanes per fed item (FROZEN, drawable-port-wave1.md A5):
@@ -172,9 +317,25 @@ pub fn parse_feeds(
 }
 
 pub fn evaluate(doc: &DrawableDoc, t: f32, feeds: &[Feed]) -> DrawSchedule {
+    let mut cache = ReactionCache::new();
+    evaluate_with_events(doc, t, feeds, &[], &mut cache)
+}
+
+/// The full per-frame fold with input events. Reactions on any item
+/// splice their lowered fragment over the named prop for events that have
+/// arrived by `t` (see reaction_overrides); `cache` is the Evaluator's
+/// persistent lowering cache so each (reaction, arrival time) folds once.
+/// The event-free `evaluate` is the same fold with an empty event slice.
+pub fn evaluate_with_events(
+    doc: &DrawableDoc,
+    t: f32,
+    feeds: &[Feed],
+    events: &[Event],
+    cache: &mut ReactionCache,
+) -> DrawSchedule {
     let mut schedule = DrawSchedule::default();
     for id in eval_order(doc, feeds) {
-        emit_drawable(doc, id, t, feeds, &mut schedule);
+        emit_drawable(doc, id, t, feeds, events, cache, &mut schedule);
     }
     schedule
 }
@@ -230,11 +391,14 @@ fn commands_of<'a>(doc: &'a DrawableDoc, feeds: &'a [Feed], id: u32) -> &'a [Cmd
     &drawable.commands
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_drawable(
     doc: &DrawableDoc,
     id: u32,
     t: f32,
     feeds: &[Feed],
+    events: &[Event],
+    cache: &mut ReactionCache,
     schedule: &mut DrawSchedule,
 ) {
     let drawable = &doc.drawables[id as usize];
@@ -250,20 +414,27 @@ fn emit_drawable(
     schedule.op(OP_BEGIN, id, drawable.clear as u32);
     if drawable.dynamic {
         for item in feed_items {
-            emit_item(doc, item, t, schedule);
+            emit_item(doc, item, t, events, cache, schedule);
         }
     } else {
-        emit_commands(doc, &drawable.commands, t, schedule);
+        emit_commands(doc, &drawable.commands, t, events, cache, schedule);
     }
     schedule.op(OP_END, id, 0);
 }
 
-fn emit_commands(doc: &DrawableDoc, commands: &[Cmd], t: f32, schedule: &mut DrawSchedule) {
+fn emit_commands(
+    doc: &DrawableDoc,
+    commands: &[Cmd],
+    t: f32,
+    events: &[Event],
+    cache: &mut ReactionCache,
+    schedule: &mut DrawSchedule,
+) {
     let mut i = 0usize;
     while i < commands.len() {
         match &commands[i] {
             Cmd::Item(item) => {
-                emit_item(doc, item, t, schedule);
+                emit_item(doc, item, t, events, cache, schedule);
                 i += 1;
             }
             Cmd::Snapshot { into } => {
@@ -288,7 +459,7 @@ fn emit_commands(doc: &DrawableDoc, commands: &[Cmd], t: f32, schedule: &mut Dra
                 keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
                 for (_, j) in keyed {
                     match &commands[j] {
-                        Cmd::Item(item) => emit_item(doc, item, t, schedule),
+                        Cmd::Item(item) => emit_item(doc, item, t, events, cache, schedule),
                         Cmd::Snapshot { into } => schedule.op(OP_COPY, *into, 0),
                         Cmd::SortSpan { .. } => {} // nested spans: forbid for now
                     }
@@ -381,7 +552,14 @@ fn sample_link(
     }
 }
 
-fn emit_item(doc: &DrawableDoc, item: &Item, t: f32, schedule: &mut DrawSchedule) {
+fn emit_item(
+    doc: &DrawableDoc,
+    item: &Item,
+    t: f32,
+    events: &[Event],
+    cache: &mut ReactionCache,
+    schedule: &mut DrawSchedule,
+) {
     let ch: &ChannelTable = &doc.channels;
     if ch.sample(item.visible, t) < 0.5 {
         return;
@@ -394,20 +572,44 @@ fn emit_item(doc: &DrawableDoc, item: &Item, t: f32, schedule: &mut DrawSchedule
         Some(triple) => triple,
         None => return, // hidden / degenerate / faint link chain
     };
-    let opacity = ch.sample(item.opacity, t) * alpha_mul;
+
+    // Event-driven property splices: a reaction whose event has arrived
+    // by `t` overrides its base draw property with its lowered fragment.
+    // Base values are the same scalars this emit samples below, evaluated
+    // lazily so the reaction's ramp eases off the live base at the event.
+    let overrides = if item.reactions.is_empty() {
+        Vec::new()
+    } else {
+        let base = |prop: u32, te: f32| reaction_base_value(item, ch, prop, te, alpha_mul);
+        reaction_overrides(item, events, cache, t, &base)
+    };
+    let over = |prop: u32, base: f32| find_override(&overrides, prop).unwrap_or(base);
+
+    let opacity = over(PROP_OPACITY, ch.sample(item.opacity, t) * alpha_mul);
     if opacity < 1.0 / 255.0 {
         return;
     }
 
     // A per-item camera projection folds the 2D mat3 onto the z=0 design
     // plane and back to a projective mat3 (row/col collapse; see camera.rs).
+    // A spliced zoom is a uniform scale multiplier folded first (pre-
+    // projection), so perspective sees the scaled quad.
+    if let Some(zoom) = find_override(&overrides, PROP_ZOOM) {
+        for m in mat.iter_mut().take(6) {
+            *m *= zoom;
+        }
+    }
     if let Some(cam) = item.projection {
         let p = cam.matrix(ch, t);
         mat = crate::camera::fold_projection(&mat, &p);
     }
 
     let (src_kind, src_id, src_aux) = match item.source {
-        Source::Image { image, frame } => (SRC_IMAGE, image, ch.sample(frame, t) as u32),
+        Source::Image { image, frame } => (
+            SRC_IMAGE,
+            image,
+            over(PROP_FRAME, ch.sample(frame, t)) as u32,
+        ),
         Source::Drawable(d) => (SRC_DRAWABLE, d, 0),
         Source::Mesh(m) => (SRC_MESH, m, 0),
         Source::Fill => (SRC_FILL, 0, 0),
@@ -417,8 +619,9 @@ fn emit_item(doc: &DrawableDoc, item: &Item, t: f32, schedule: &mut DrawSchedule
     let mut f = [0.0f32; F_STRIDE];
     f[..9].copy_from_slice(&mat);
     f[9] = opacity;
+    let tint_props = [PROP_TINT_R, PROP_TINT_G, PROP_TINT_B];
     for (lane, tint) in item.tint.iter().enumerate() {
-        f[10 + lane] = ch.sample(*tint, t);
+        f[10 + lane] = over(tint_props[lane], ch.sample(*tint, t));
     }
     match link_crop {
         // The link chain's crop (already top/bottom-swapped under flip)
@@ -870,5 +1073,124 @@ mod tests {
         let schedule = evaluate(&doc, 0.0, &[]);
         let m = blit_mat(&schedule);
         assert_eq!(m, [2.0, 0.0, 10.0, 0.0, 3.0, 20.0, 0.0, 0.0, 1.0]);
+    }
+
+    // --- wave 4: event-driven reaction splices -------------------------
+
+    use crate::doc::{Reaction, PROP_OPACITY, PROP_ZOOM};
+    use crate::schedule::{Node, Target};
+
+    /// A one-segment ramp fragment on `prop`: 0..value linearly over `dur`.
+    fn ramp_reaction(id: u32, kind: u32, column_filter: i32, prop: u32, dur: f32, value: f32) -> Reaction {
+        Reaction {
+            id,
+            trigger_kind: kind,
+            column_filter,
+            fragment: Node::seg(dur, 0, vec![(prop, Target::Abs(value))]),
+            prop,
+        }
+    }
+
+    fn opacity_of(schedule: &DrawSchedule) -> f32 {
+        let op = (0..schedule.len())
+            .find(|i| schedule.u[i * U_STRIDE] == OP_BLIT)
+            .expect("a blit");
+        schedule.f[op * F_STRIDE + 9]
+    }
+
+    #[test]
+    fn reaction_base_channel_rules_before_the_event() {
+        // An opacity reaction ramps 0 -> 1 over 1s on a Press. Before the
+        // press arrives, the item's base opacity (0.4) rules unchanged.
+        let mut doc = DrawableDoc::with_screen([640.0, 480.0]);
+        let mut item = Item::of(Source::Fill);
+        item.opacity = ChannelRef::constant(0.4);
+        item.reactions.push(ramp_reaction(0, EV_PRESS, -1, PROP_OPACITY, 1.0, 1.0));
+        doc.drawables[0].commands.push(Cmd::Item(item));
+
+        let mut cache = ReactionCache::new();
+        // No events: base rules.
+        let s = evaluate_with_events(&doc, 0.5, &[], &[], &mut cache);
+        assert!((opacity_of(&s) - 0.4).abs() < 1e-4);
+        // Event at te=1.0 but sampled at t=0.5 (before it): base still rules.
+        let ev = [Event { kind: EV_PRESS, time: 1.0, column: -1, strength: 1.0 }];
+        let s = evaluate_with_events(&doc, 0.5, &[], &ev, &mut cache);
+        assert!((opacity_of(&s) - 0.4).abs() < 1e-4);
+    }
+
+    #[test]
+    fn reaction_ramps_the_prop_after_the_event() {
+        // Press at te=1.0; the 0->1-over-1s ramp eases off the base (0.4)
+        // at te and reaches 1.0 by te+1. Midpoint te+0.5 = 0.7.
+        let mut doc = DrawableDoc::with_screen([640.0, 480.0]);
+        let mut item = Item::of(Source::Fill);
+        item.opacity = ChannelRef::constant(0.4);
+        item.reactions.push(ramp_reaction(0, EV_PRESS, -1, PROP_OPACITY, 1.0, 1.0));
+        doc.drawables[0].commands.push(Cmd::Item(item));
+
+        let mut cache = ReactionCache::new();
+        let ev = [Event { kind: EV_PRESS, time: 1.0, column: -1, strength: 1.0 }];
+        let s = evaluate_with_events(&doc, 1.5, &[], &ev, &mut cache);
+        assert!((opacity_of(&s) - 0.7).abs() < 1e-4, "mid-ramp {}", opacity_of(&s));
+        let s = evaluate_with_events(&doc, 2.5, &[], &ev, &mut cache);
+        assert!((opacity_of(&s) - 1.0).abs() < 1e-4, "held {}", opacity_of(&s));
+    }
+
+    #[test]
+    fn second_event_resplices_from_the_new_time() {
+        // A later Press re-splices: the ramp restarts from te2, easing off
+        // the base again. At te2+0.5 the fresh ramp reads 0.7, not the held
+        // 1.0 of the first press.
+        let mut doc = DrawableDoc::with_screen([640.0, 480.0]);
+        let mut item = Item::of(Source::Fill);
+        item.opacity = ChannelRef::constant(0.4);
+        item.reactions.push(ramp_reaction(0, EV_PRESS, -1, PROP_OPACITY, 1.0, 1.0));
+        doc.drawables[0].commands.push(Cmd::Item(item));
+
+        let mut cache = ReactionCache::new();
+        let ev = [
+            Event { kind: EV_PRESS, time: 1.0, column: -1, strength: 1.0 },
+            Event { kind: EV_PRESS, time: 5.0, column: -1, strength: 1.0 },
+        ];
+        // Latest press (te=5) wins; at t=5.5 the fresh ramp reads 0.7.
+        let s = evaluate_with_events(&doc, 5.5, &[], &ev, &mut cache);
+        assert!((opacity_of(&s) - 0.7).abs() < 1e-4, "resplice {}", opacity_of(&s));
+    }
+
+    #[test]
+    fn column_filter_gates_the_reaction() {
+        // The reaction only fires on column 3; a column-1 press is ignored.
+        let mut doc = DrawableDoc::with_screen([640.0, 480.0]);
+        let mut item = Item::of(Source::Fill);
+        item.opacity = ChannelRef::constant(0.4);
+        item.reactions.push(ramp_reaction(0, EV_PRESS, 3, PROP_OPACITY, 1.0, 1.0));
+        doc.drawables[0].commands.push(Cmd::Item(item));
+
+        let mut cache = ReactionCache::new();
+        let wrong = [Event { kind: EV_PRESS, time: 1.0, column: 1, strength: 1.0 }];
+        let s = evaluate_with_events(&doc, 2.0, &[], &wrong, &mut cache);
+        assert!((opacity_of(&s) - 0.4).abs() < 1e-4, "filtered out");
+        let right = [Event { kind: EV_PRESS, time: 1.0, column: 3, strength: 1.0 }];
+        let s = evaluate_with_events(&doc, 2.0, &[], &right, &mut cache);
+        assert!((opacity_of(&s) - 1.0).abs() < 1e-4, "matched");
+    }
+
+    #[test]
+    fn zoom_reaction_scales_the_mat3() {
+        // A zoom reaction (base 1.0) ramps to 2.0 over 1s; at te+1 the mat3
+        // scale lanes are doubled. Item is scale-2, so 2 * 2 = 4.
+        let mut doc = DrawableDoc::with_screen([640.0, 480.0]);
+        let mut item = Item::of(Source::Fill);
+        item.transform.scale_x = ChannelRef::constant(2.0);
+        item.transform.scale_y = ChannelRef::constant(2.0);
+        item.reactions.push(ramp_reaction(0, EV_HIT, -1, PROP_ZOOM, 1.0, 2.0));
+        doc.drawables[0].commands.push(Cmd::Item(item));
+
+        let mut cache = ReactionCache::new();
+        let ev = [Event { kind: EV_HIT, time: 0.0, column: -1, strength: 1.0 }];
+        let s = evaluate_with_events(&doc, 1.0, &[], &ev, &mut cache);
+        let m = blit_mat(&s);
+        assert!((m[0] - 4.0).abs() < 1e-4, "sx {}", m[0]);
+        assert!((m[4] - 4.0).abs() < 1e-4, "sy {}", m[4]);
     }
 }

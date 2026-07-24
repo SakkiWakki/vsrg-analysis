@@ -6,8 +6,40 @@
 
 use crate::camera::Mat4;
 use crate::channels::{ChannelRef, ChannelTable};
+use crate::schedule::Node;
 
 pub const SCREEN: u32 = 0; // drawables[0] is always the screen (root)
+
+/// The draw properties a `Reaction` may splice onto (this wave). Each
+/// names one sampled scalar in `emit_item`: opacity multiplies the BLIT
+/// record opacity lane, the tint channels multiply the tint lanes, zoom
+/// is a uniform scale multiplier folded onto the item's mat3, and frame
+/// overrides the image src_aux (sheet frame) lane. The u32 value is the
+/// `prop` key the reaction's Schedule fragment targets and is keyed off
+/// by evaluate.rs when it looks up the lowered run.
+pub const PROP_OPACITY: u32 = 0;
+pub const PROP_TINT_R: u32 = 1;
+pub const PROP_TINT_G: u32 = 2;
+pub const PROP_TINT_B: u32 = 3;
+pub const PROP_ZOOM: u32 = 4;
+pub const PROP_FRAME: u32 = 5;
+
+/// One event-driven drawing response attached to an `Item`. On a frame
+/// carrying an event whose kind == `trigger_kind` and whose column
+/// passes `column_filter` (-1 = any), the `fragment` Schedule lowers at
+/// `t0 = event time` and its `prop` breakpoint run splices over the
+/// item's base property value for t >= that event time. The latest
+/// matching event wins (engine queue-append semantics). `id` is a stable
+/// per-reaction key (assigned at build) the evaluator caches lowerings
+/// against, paired with the event time.
+#[derive(Clone, Debug)]
+pub struct Reaction {
+    pub id: u32,
+    pub trigger_kind: u32,
+    pub column_filter: i32,
+    pub fragment: Node,
+    pub prop: u32,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClearMode {
@@ -171,6 +203,11 @@ pub struct Item {
     pub uniforms: Vec<(u16, ChannelRef)>,
     pub clip: Option<u32>,     // ClipId into DrawableDoc.clips
     pub z: Option<ChannelRef>, // local sort key, read inside SortSpan only
+    /// Event-driven drawing responses: on a matching event, a reaction's
+    /// Schedule fragment lowers at the event time and splices over the
+    /// named draw property. Empty for items with no reactions (the common
+    /// case); never consulted unless the frame carries events.
+    pub reactions: Vec<Reaction>,
 }
 
 impl Item {
@@ -192,6 +229,7 @@ impl Item {
             uniforms: Vec::new(),
             clip: None,
             z: None,
+            reactions: Vec::new(),
         }
     }
 }
@@ -227,6 +265,9 @@ pub struct DrawableDoc {
     pub shaders: Vec<ShaderDesc>,
     pub clips: Vec<ClipDesc>,
     pub channels: ChannelTable,
+    /// Monotonic counter minting stable per-reaction ids (the lowering
+    /// cache key); bumped once per `item_reaction` at build.
+    pub reaction_count: u32,
 }
 
 impl DrawableDoc {
@@ -251,6 +292,13 @@ impl DrawableDoc {
     pub fn add_clip(&mut self, clip: ClipDesc) -> u32 {
         let id = self.clips.len() as u32;
         self.clips.push(clip);
+        id
+    }
+
+    /// Mint the next stable reaction id.
+    pub fn next_reaction_id(&mut self) -> u32 {
+        let id = self.reaction_count;
+        self.reaction_count += 1;
         id
     }
 

@@ -26,7 +26,8 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtGui import QColor, QImage
 
-from analysis.player.render.storyboard.executor import RasterExecutor
+from analysis.player.render.storyboard.executor import (  # noqa: E402
+    CLEAR_OPAQUE, CLEAR_TRANSPARENT, RasterExecutor, SCREEN_ID)
 
 
 def _frames(evaluator, t):
@@ -312,3 +313,74 @@ def test_shader_uniform_channel_ramp_arrives_time_sampled():
 
     assert ex_a.shader_uniforms[sh][0] == pytest.approx(1.0, abs=0.1)
     assert ex_b.shader_uniforms[sh][0] == pytest.approx(3.0, abs=0.1)
+
+
+# --- D1 additions: set_clear override + set_drawable_image ingestion ---
+
+
+def _screen_only_doc(w, h):
+    """A doc whose screen root (id 0) just draws a fullscreen white image,
+    so the ONLY thing that decides a background pixel's color is the
+    screen's clear mode."""
+    b = sn.DocBuilder(float(w), float(h))
+    b.item(0, sn.SRC_IMAGE, 0, sx_rest=float(w), sy_rest=float(h))
+    return b.finish()
+
+
+def test_set_clear_makes_the_screen_transparent_off_the_content():
+    # The screen root is minted OpaqueBlack: a corner the fullscreen image
+    # does not fully cover is opaque black by default. set_clear to
+    # TransparentBlack makes that same corner transparent (alpha 0) - the
+    # black-chart-region fix in miniature (the composite overlays instead
+    # of covering).
+    ev = _screen_only_doc(4, 4)
+    # A 2x2 image placed only over the top-left quadrant leaves the rest
+    # to the clear color. Shrink the fullscreen blit to a 2x2 sub-quad by
+    # rewriting its mat3 scale so (3,3) is uncovered.
+    u, f = _frames(ev, 0.0)
+    f = f.copy()
+    for i in range(u.shape[0]):
+        if u[i, 0] == sn.OP_BLIT and u[i, 1] == sn.SRC_IMAGE:
+            f[i, 0] = 2.0   # m00: cover only 2 px wide
+            f[i, 4] = 2.0   # m11: cover only 2 px tall
+    images = {0: _solid(1, 1, QColor(255, 255, 255, 255))}
+
+    opaque = RasterExecutor(dict(images), [(4.0, 4.0)])
+    opaque.set_clear(SCREEN_ID, CLEAR_OPAQUE)
+    scr_op = opaque.execute(u, f)
+    assert _alpha(scr_op, 3, 3) == 255           # opaque clear
+    assert _rgb(scr_op, 3, 3) == (0, 0, 0)       # ...and black
+
+    transparent = RasterExecutor(dict(images), [(4.0, 4.0)])
+    transparent.set_clear(SCREEN_ID, CLEAR_TRANSPARENT)
+    scr_tr = transparent.execute(u, f)
+    assert _alpha(scr_tr, 3, 3) == 0             # uncovered corner: clear
+    assert _rgb(scr_tr, 0, 0) == (255, 255, 255)  # the image still draws
+
+
+def test_set_drawable_image_feeds_command_less_field_drawable():
+    # A command-less field drawable (non-persistent, non-dynamic) carries
+    # no content of its own; the screen reads it via SRC_DRAWABLE. Feeding
+    # a QImage with set_drawable_image makes that blit draw the fed pixels;
+    # un-seeding drops them (the drawable is non-persistent - it holds only
+    # what is fed this frame).
+    b = sn.DocBuilder(4.0, 4.0)
+    field = b.drawable(4.0, 4.0, False, False)   # command-less field scope
+    b.item(0, sn.SRC_DRAWABLE, field, sx_rest=1.0, sy_rest=1.0)
+    ev = b.finish()
+
+    ex = RasterExecutor({}, [(4.0, 4.0), (4.0, 4.0)])
+    ex.set_clear(SCREEN_ID, CLEAR_TRANSPARENT)
+    u, f = _frames(ev, 0.0)
+
+    # No content yet: the field read resolves to nothing, screen stays clear.
+    assert _alpha(ex.execute(u, f), 2, 2) == 0
+
+    content = _solid(4, 4, QColor(0, 200, 0, 255))
+    ex.set_drawable_image(field, content)
+    fed = ex.execute(u, f)
+    assert _rgb(fed, 2, 2) == (0, 200, 0)        # the fed field pixels show
+
+    # Un-seed: the stale target is dropped, the field reads empty again.
+    ex.set_drawable_image(field, None)
+    assert _alpha(ex.execute(u, f), 2, 2) == 0

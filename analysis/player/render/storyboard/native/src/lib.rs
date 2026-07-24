@@ -47,10 +47,13 @@ use crate::doc::{
     Blend, CameraRef, ClipDesc, Cmd, DrawableDoc, Item, LinkRef, ShaderDesc, Source, Space,
     TransformRef,
 };
+use crate::doc::Reaction;
 use crate::evaluate::{
-    evaluate, parse_feeds, Feed, FEED_F_STRIDE, FEED_U_STRIDE, F_STRIDE, U_STRIDE,
+    evaluate_with_events, parse_feeds, Event, Feed, ReactionCache, FEED_F_STRIDE, FEED_U_STRIDE,
+    F_STRIDE, U_STRIDE,
 };
 use crate::schedule::{lower, LoweredProp, Node, Target};
+use std::cell::RefCell;
 
 /// Decode a (id, rest) pair from Python: id < 0 means "no channel".
 fn chan(id: i64, rest: f32) -> ChannelRef {
@@ -201,6 +204,39 @@ impl DocBuilder {
     /// Set a clip on the last-pushed item without a shader.
     fn item_clip(&mut self, target: u32, clip_id: u32) {
         self.last_item(target).clip = Some(clip_id);
+    }
+
+    /// Attach an event-driven drawing reaction to the item most recently
+    /// pushed onto `target`. On a frame whose events include one of kind
+    /// `trigger_kind` passing `column_filter` (-1 = any column), the
+    /// Schedule fragment `node` (A2 fixture shape) lowers at the event
+    /// time and splices its `prop` breakpoint run over the item's base
+    /// draw property for t >= that time (latest matching event wins).
+    /// `prop` is one of the PROP_* constants (opacity / tint_r,g,b / zoom
+    /// / frame). Panics if the last command isn't an Item.
+    #[pyo3(signature = (target, trigger_kind, column_filter, node, prop))]
+    fn item_reaction(
+        &mut self,
+        target: u32,
+        trigger_kind: u32,
+        column_filter: i32,
+        node: &Bound<'_, PyAny>,
+        prop: u32,
+    ) -> PyResult<()> {
+        let fragment = node_from_py(node)?;
+        let id = self
+            .doc
+            .as_mut()
+            .expect("builder already finished")
+            .next_reaction_id();
+        self.last_item(target).reactions.push(Reaction {
+            id,
+            trigger_kind,
+            column_filter,
+            fragment,
+            prop,
+        });
+        Ok(())
     }
 
     /// Append one link of the full leaf-link transform chain (root-first)
@@ -454,6 +490,7 @@ impl DocBuilder {
     fn finish(&mut self) -> Evaluator {
         Evaluator {
             doc: self.doc.take().expect("builder already finished"),
+            reaction_cache: RefCell::new(ReactionCache::new()),
         }
     }
 }
@@ -480,6 +517,10 @@ impl DocBuilder {
 #[pyclass(unsendable)]
 struct Evaluator {
     doc: DrawableDoc,
+    /// Persistent reaction lowering cache: a (reaction id, event-time)
+    /// fragment lowers once, ever (a Press at te=1.0 folds a single time
+    /// across all frames that see it). RefCell because `frame` is `&self`.
+    reaction_cache: RefCell<ReactionCache>,
 }
 
 #[pymethods]
@@ -495,7 +536,28 @@ impl Evaluator {
         py: Python<'py>,
         t: f32,
     ) -> (Bound<'py, PyBytes>, Bound<'py, PyBytes>, Bound<'py, PyBytes>, usize) {
-        self.emit(py, t, &[])
+        self.emit(py, t, &[], &[])
+    }
+
+    /// Same as `frame`, but carries this frame's input events (SoA
+    /// parallel arrays; additive alongside frame/frame_with_feeds). An
+    /// item's reactions splice their lowered Schedule fragment over the
+    /// named prop when a matching event (kind + column filter) has arrived
+    /// by `t`, latest wins. `event_kinds[i]` / `event_times[i]` /
+    /// `event_columns[i]` / `event_strengths[i]` are the i-th event's
+    /// fields (column -1 = no column; strength reserved this wave).
+    #[pyo3(signature = (t, event_kinds, event_times, event_columns, event_strengths))]
+    fn frame_with_events<'py>(
+        &self,
+        py: Python<'py>,
+        t: f32,
+        event_kinds: Vec<u32>,
+        event_times: Vec<f32>,
+        event_columns: Vec<i32>,
+        event_strengths: Vec<f32>,
+    ) -> (Bound<'py, PyBytes>, Bound<'py, PyBytes>, Bound<'py, PyBytes>, usize) {
+        let events = build_events(&event_kinds, &event_times, &event_columns, &event_strengths);
+        self.emit(py, t, &[], &events)
     }
 
     /// Same as `frame`, but injects dynamic-drawable command feeds parsed
@@ -522,7 +584,7 @@ impl Evaluator {
                 items: &fi.items,
             })
             .collect();
-        self.emit(py, t, &feeds)
+        self.emit(py, t, &feeds, &[])
     }
 
     #[getter]
@@ -556,8 +618,10 @@ impl Evaluator {
         py: Python<'py>,
         t: f32,
         feeds: &[Feed],
+        events: &[Event],
     ) -> (Bound<'py, PyBytes>, Bound<'py, PyBytes>, Bound<'py, PyBytes>, usize) {
-        let schedule = evaluate(&self.doc, t, feeds);
+        let mut cache = self.reaction_cache.borrow_mut();
+        let schedule = evaluate_with_events(&self.doc, t, feeds, events, &mut cache);
         let n = schedule.len();
         let u_bytes = PyBytes::new(py, bytemuck_cast_u32(&schedule.u));
         let f_bytes = PyBytes::new(py, bytemuck_cast_f32(&schedule.f));
@@ -588,6 +652,25 @@ fn cast_bytes_f32(b: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+/// Zip the SoA event arrays into `Event`s. The four arrays are parallel;
+/// the shortest bounds the count so a short array never reads past its
+/// end (defensive at the Python boundary).
+fn build_events(kinds: &[u32], times: &[f32], columns: &[i32], strengths: &[f32]) -> Vec<Event> {
+    let n = kinds
+        .len()
+        .min(times.len())
+        .min(columns.len())
+        .min(strengths.len());
+    (0..n)
+        .map(|i| Event {
+            kind: kinds[i],
+            time: times[i],
+            column: columns[i],
+            strength: strengths[i],
+        })
+        .collect()
+}
+
 #[pymodule]
 fn storyboard_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DocBuilder>()?;
@@ -601,5 +684,17 @@ fn storyboard_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("OP_BLIT", evaluate::OP_BLIT)?;
     m.add("OP_COPY", evaluate::OP_COPY)?;
     m.add("OP_END", evaluate::OP_END)?;
+    m.add("EV_PRESS", evaluate::EV_PRESS)?;
+    m.add("EV_RELEASE", evaluate::EV_RELEASE)?;
+    m.add("EV_HIT", evaluate::EV_HIT)?;
+    m.add("EV_MISS", evaluate::EV_MISS)?;
+    m.add("EV_CLICK", evaluate::EV_CLICK)?;
+    m.add("EV_FRAMETICK", evaluate::EV_FRAMETICK)?;
+    m.add("PROP_OPACITY", doc::PROP_OPACITY)?;
+    m.add("PROP_TINT_R", doc::PROP_TINT_R)?;
+    m.add("PROP_TINT_G", doc::PROP_TINT_G)?;
+    m.add("PROP_TINT_B", doc::PROP_TINT_B)?;
+    m.add("PROP_ZOOM", doc::PROP_ZOOM)?;
+    m.add("PROP_FRAME", doc::PROP_FRAME)?;
     Ok(())
 }

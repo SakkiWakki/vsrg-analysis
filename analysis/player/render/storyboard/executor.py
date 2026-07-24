@@ -87,6 +87,13 @@ _OP_BEGIN, _OP_BLIT, _OP_COPY, _OP_END = _Op.BEGIN, _Op.BLIT, _Op.COPY, _Op.END
 _SRC_IMAGE, _SRC_DRAWABLE, _SRC_MESH, _SRC_FILL, _SRC_LINES = 0, 1, 2, 3, 4
 _CLEAR_TRANSPARENT, _CLEAR_OPAQUE, _CLEAR_RETAIN = 0, 1, 2
 
+# Public aliases for callers that drive set_clear / target the screen root
+# (the pipeline overrides the screen's clear). Mirror ClearMode / the root
+# DrawableId without reaching for the private names.
+CLEAR_TRANSPARENT, CLEAR_OPAQUE, CLEAR_RETAIN = (
+    _CLEAR_TRANSPARENT, _CLEAR_OPAQUE, _CLEAR_RETAIN)
+SCREEN_ID = _SCREEN_ID
+
 _QT_BLEND = {
     0: QPainter.CompositionMode.CompositionMode_SourceOver,  # Blend::SourceOver
     1: QPainter.CompositionMode.CompositionMode_Plus,        # Blend::Additive
@@ -120,6 +127,22 @@ class RasterExecutor:
         self._images = images
         self._sizes = drawable_sizes
         self._targets: dict[int, QImage] = {}
+        # Per-drawable clear-mode overrides (drawable_id -> ClearMode code).
+        # The doc's BEGIN carries a clear mode, but a caller with no clear
+        # arg at doc-build (DocBuilder exposes none) sets it here; the
+        # override wins over the record's mode. The pipeline uses this to
+        # make the screen composite TRANSPARENT so its blit overlays the
+        # normally-painted backdrop instead of covering it opaque black.
+        self._clear_override: dict[int, int] = {}
+        # Per-frame injected content: DrawableId -> QImage source, applied
+        # into the target table at execute() start so SRC_DRAWABLE blits of
+        # command-less drawables (the field-scope drawables the pipeline
+        # feeds the renderer's live field capture into) read real pixels.
+        # `_last_injected` tracks the ids seeded last run so an un-seeded id
+        # drops its stale target instead of retaining it (command-less
+        # field drawables are non-persistent - they carry only what is fed).
+        self._injected: dict[int, QImage] = {}
+        self._last_injected: set[int] = set()
         self._skipped_lanes: set[str] = set()
         # Clip shapes mirror the doc's ClipDesc table, indexed by ClipId
         # (the record carries clip+1 on lane 6). Prebuild the QPainterPath
@@ -142,6 +165,37 @@ class RasterExecutor:
         execute() strokes the latest one under the op's transform."""
         self._lines[int(lines_id)] = np.asarray(verts, dtype=np.float32).reshape(-1, 2)
 
+    def set_clear(self, drawable_id: int, mode: int) -> None:
+        """Override the clear mode a drawable's BEGIN op applies, keyed by
+        DrawableId. `mode` is a ClearMode code (TransparentBlack=0,
+        OpaqueBlack=1, Retain=2). Set once and it holds across execute()
+        calls; the override wins over the record's own clear.
+
+        This is the pipeline-side knob the spec calls for: DocBuilder
+        exposes no clear arg, so the screen root (id 0) is minted with the
+        engine-AFT OpaqueBlack default. The pipeline sets it TransparentBlack
+        so the composed screen image overlays the normally-painted backdrop
+        rather than covering it with opaque black (the black-chart-region
+        baseline)."""
+        self._clear_override[int(drawable_id)] = int(mode)
+
+    def set_drawable_image(self, drawable_id: int, image: QImage) -> None:
+        """Seed a drawable's target content with `image`, keyed by
+        DrawableId. Applied at the next execute()'s start (and every one
+        after, until re-set), so a SRC_DRAWABLE blit of `drawable_id` reads
+        these pixels.
+
+        This is how the pipeline hands the renderer's LIVE field capture
+        (the transparent field-layers pixmap, plus per-player field{N}
+        captures) into the doc's command-less field drawables: those
+        drawables carry no items of their own, so without injected content a
+        field-scope blit would resolve to nothing. `image` is a QImage in
+        the drawable's logical size; a None un-seeds it."""
+        if image is None:
+            self._injected.pop(int(drawable_id), None)
+        else:
+            self._injected[int(drawable_id)] = image
+
     def execute(
         self,
         u: np.ndarray,
@@ -163,6 +217,16 @@ class RasterExecutor:
         u = np.ascontiguousarray(u, dtype=np.uint32)
         f = np.ascontiguousarray(f, dtype=np.float32)
         uf = None if uf is None else np.ascontiguousarray(uf, dtype=np.float32)
+        # Seed injected content BEFORE the walk so command-less field
+        # drawables (never a BEGIN target) carry this frame's live capture
+        # for any SRC_DRAWABLE blit that reads them. An id seeded last run
+        # but not this one drops its stale target - a command-less field
+        # drawable is non-persistent, so an unfed scope reads empty.
+        for drawable_id in self._last_injected - self._injected.keys():
+            self._targets.pop(drawable_id, None)
+        for drawable_id, image in self._injected.items():
+            self._targets[drawable_id] = image
+        self._last_injected = set(self._injected.keys())
         target_stack: list[int] = []
         painter: QPainter | None = None
 
@@ -194,7 +258,7 @@ class RasterExecutor:
         if painter is not None:
             painter.end()
         drawable_id = int(rec[_U_A])
-        clear = int(rec[_U_B])
+        clear = self._clear_override.get(drawable_id, int(rec[_U_B]))
         img = self._targets.get(drawable_id)
         if img is None:
             img = self._alloc(drawable_id)
