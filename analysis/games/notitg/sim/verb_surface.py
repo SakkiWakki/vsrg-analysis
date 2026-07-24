@@ -309,6 +309,33 @@ DEFERRED: dict = {
                       '(ascii.frag samplerAscii)',
     'texcoordvelocity': 'UV scroll animation - needs a texcoord offset '
                         'channel on the element',
+    # Per-player notefield shader binds (LunaPlayer<Player> fork
+    # additions: SetArrowShader @0x00533740, SetHoldShader @0x00533aa0,
+    # SetReceptorShader @0x00535a40, Clear* @0x005278xx, Get* variants;
+    # Government Knows' signature tier). A RageShaderProgram is stored
+    # on the Player and the note/hold/receptor draws render through it
+    # - the per-NOTE sibling of the per-actor shaded-blit tier. The
+    # draw-site consumption is not in the extracted decompile yet; pin
+    # it before building (addresses are trustworthy, adjacent callee
+    # names are not).
+    'SetArrowShader': 'per-player arrow shader bind @0x00533740 - '
+                      'per-note shader tier, not built',
+    'SetHoldShader': 'per-player hold shader bind @0x00533aa0 - '
+                     'per-note shader tier, not built',
+    'SetReceptorShader': 'per-player receptor shader bind @0x00535a40 - '
+                         'per-note shader tier, not built',
+    'ClearArrowShader': 'per-player arrow shader unbind @0x00527870',
+    'ClearHoldShader': 'per-player hold shader unbind @0x005278e0',
+    'ClearReceptorShader': 'per-player receptor shader unbind @0x00527950',
+    # Runtime notedata injection (Player::PushNoteData @0x0052dc60: the
+    # Lua thunk parses an SM notedata STRING plus (bool, float, float);
+    # PushNoteDataTime is the COMDAT-folded time variant). The chart
+    # rewrites the player's notes mid-song; our note streams are
+    # compiled from the .sm ahead of time, so injection needs a
+    # note-stream mutation path.
+    'PushNoteData': 'runtime notedata injection @0x0052dc60 - compiled '
+                    'note streams cannot mutate yet',
+    'PushNoteDataTime': 'time-variant of PushNoteData @0x0052de20',
     'SetDrawMode': 'polygon mesh draw mode - the crumple.vert mesh tier',
     'SetNumVertices': 'polygon mesh vertex count - see SetDrawMode',
     'SetVertexPosition': 'polygon mesh vertex write - see SetDrawMode',
