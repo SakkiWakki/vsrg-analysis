@@ -199,6 +199,18 @@ _MAX_PATH_POINTS = 64
 # grid is 1152 vertices; the cap only guards runaway allocations.
 _MAX_MESH_VERTICES = 65536
 
+# SetDrawMode primitive spellings, normalized at record time. Library
+# census (2026-07-24): Quads 107, fan 39, triangles 26, linestrip 25,
+# quadstrip 6, strip 3 - case-insensitive short names dominate.
+_MESH_MODE_ALIASES = {
+    'triangles': 'triangles',
+    'quads': 'quads',
+    'quadstrip': 'quadstrip',
+    'strip': 'trianglestrip', 'trianglestrip': 'trianglestrip',
+    'fan': 'trianglefan', 'trianglefan': 'trianglefan',
+    'linestrip': 'linestrip',
+}
+
 # The sim dispatches off verb_surface's generated tables (the full actor
 # verb surface), which are supersets of lua_api's harvest-path tables: the
 # scalar table adds zbias / basezoomz / skewy / the per-axis rotation
@@ -920,7 +932,8 @@ class SimActor:
         match verb:
             case 'SetDrawMode':
                 if isinstance(args[0] if args else None, str):
-                    self.mesh_mode = args[0].strip().lower()
+                    token = args[0].strip().lower()
+                    self.mesh_mode = _MESH_MODE_ALIASES.get(token, token)
                 return True
             case 'SetNumVertices':
                 n = _as_int(args[0] if args else None)

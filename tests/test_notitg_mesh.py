@@ -196,3 +196,25 @@ def test_gl_crumple_vert_program_builds(gl):
     program, _locs = entry
     assert program.uniformLocation('amp') != -1
     assert program.uniformLocation('samplerRandom') != -1
+
+
+def test_draw_mode_aliases_normalize_at_record():
+    # Library census: Quads/fan/strip/linestrip spellings dominate.
+    for token, expected in (('Quads', 'quads'), ('fan', 'trianglefan'),
+                            ('Strip', 'trianglestrip'),
+                            ('LineStrip', 'linestrip'),
+                            ('QuadStrip', 'quadstrip')):
+        a = SimActor()
+        a.poke('SetDrawMode', [token])
+        assert a.mesh_mode == expected, token
+
+
+def test_quadstrip_payload_maps_to_triangle_strip():
+    a = SimActor()
+    a.poke('SetDrawMode', ['QuadStrip'])
+    a.poke('SetNumVertices', [4])
+    for i in range(4):
+        a.poke('SetVertexPosition', [i, float(i), 0.0, 0.0])
+    payload = _mesh_payload(a, _FakeXmlActor())
+    assert payload['mode'] == 'trianglestrip'
+    assert len(payload['vertices']) == 4
