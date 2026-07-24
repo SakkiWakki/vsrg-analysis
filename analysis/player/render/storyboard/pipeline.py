@@ -178,7 +178,8 @@ class DrawablePipeline:
         if not self._ensure_built(painter):
             return False
         self._apply_resolution(ctx, painter)
-        self._ingest_field_captures(field_captures, overscan)
+        self._ingest_field_captures(field_captures, overscan,
+                                    ctx.chart_rect)
         t = float(ctx.t_now)
         feed_ids, counts, feed_u, feed_f = _unpack_feed(
             self._bridge.feed_frame(self._compiled, t, self._id_maps))
@@ -208,7 +209,8 @@ class DrawablePipeline:
         self._executor.set_resolution_scale(
             max(chart_w / _SCREEN_W, chart_h / _SCREEN_H))
 
-    def _ingest_field_captures(self, field_captures, overscan=None) -> None:
+    def _ingest_field_captures(self, field_captures, overscan=None,
+                               chart_rect=None) -> None:
         """Bind each live field capture into its mapped field drawable's
         content. A scope with no drawable in the doc (or no capture this
         frame) is skipped. The captures are the renderer's GL capture
@@ -225,9 +227,10 @@ class DrawablePipeline:
             if drawable_id is None:
                 continue
             self._bind_capture(drawable_id, handle,
-                               (overscan or {}).get(scope))
+                               (overscan or {}).get(scope), chart_rect)
 
-    def _bind_capture(self, drawable_id, handle, margins=None) -> None:
+    def _bind_capture(self, drawable_id, handle, margins=None,
+                      chart_rect=None) -> None:
         """Bind one renderer capture handle as ``drawable_id``'s content.
         A GL capture handle resolves to (texture id, pixel w, h) and binds
         via the GL executor; None / an unresolvable handle un-binds the
@@ -238,16 +241,23 @@ class DrawablePipeline:
             self._executor.set_drawable_texture(drawable_id, 0, 0, 0)
             return
         texture_id, w_px, h_px = resolved
-        # An overscanned capture's window origin sits at (+mx, +my) in
-        # the capture (qt_renderer._overscan_blit); the drawable's
-        # logical box corresponds to the inset sub-rect, expressed here
-        # as texture fractions off the handle's LOGICAL size.
+        # The capture is WINDOW-sized plus overscan margins, with its
+        # window origin at (+mx, +my) (qt_renderer._begin_field_capture:
+        # `open(slot, painter, p.W + 2mx, p.H + 2my)` then
+        # `translate(mx, my)`). The drawable's logical box corresponds to
+        # the CHART RECT within that window - margins-only mapping
+        # compressed the sidebar into the field box (the off-center bug).
         uv_rect = None
         mx, my = margins or (0, 0)
         lw = float(getattr(handle, 'w', 0) or 0)
         lh = float(getattr(handle, 'h', 0) or 0)
-        if (mx or my) and lw > 0 and lh > 0:
-            uv_rect = (mx / lw, my / lh, (lw - mx) / lw, (lh - my) / lh)
+        if lw > 0 and lh > 0:
+            cx, cy, cw, chh = (chart_rect if chart_rect is not None
+                               else (0.0, 0.0, lw - 2 * mx, lh - 2 * my))
+            uv_rect = ((mx + cx) / lw, (my + cy) / lh,
+                       (mx + cx + cw) / lw, (my + cy + chh) / lh)
+            if uv_rect == (0.0, 0.0, 1.0, 1.0):
+                uv_rect = None
         self._executor.set_drawable_texture(drawable_id, texture_id,
                                             w_px, h_px, uv_rect)
 
