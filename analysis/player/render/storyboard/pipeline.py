@@ -250,6 +250,15 @@ class DrawablePipeline:
         # TransparentBlack so the composed screen presents OVER the backdrop
         # the renderer already painted, instead of covering it.
         self._executor.set_clear(SCREEN_ID, CLEAR_TRANSPARENT)
+        # Segment and field drawables are SLICES of the one screen surface,
+        # not independent screens: their doc-minted OpaqueBlack clears made
+        # every fullscreen segment blit an opaque slab that buried all
+        # earlier segments' content (the black chart region). They must
+        # composite as transparent overlays.
+        for segment_id in id_maps.get('segments') or ():
+            self._executor.set_clear(segment_id, CLEAR_TRANSPARENT)
+        for field_id in (id_maps.get('fields') or {}).values():
+            self._executor.set_clear(field_id, CLEAR_TRANSPARENT)
         return True
 
     def _schedule(self, t, feed_ids, counts, feed_u, feed_f):

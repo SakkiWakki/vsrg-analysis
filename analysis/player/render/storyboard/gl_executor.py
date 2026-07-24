@@ -517,6 +517,15 @@ class GLExecutor:
             return None
         gf = QOpenGLContext.currentContext().extraFunctions()
         _set_sample_params(gf, fbo.texture())
+        # A fresh FBO's contents are undefined; a drawable can be SAMPLED
+        # before any BEGIN targets it (a segment with no feed items this
+        # frame), so it must read as empty, not garbage.
+        prev = int(gf.glGetIntegerv(GL_FRAMEBUFFER_BINDING))
+        fbo.bind()
+        gf.glClearColor(0.0, 0.0, 0.0, 0.0)
+        gf.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT
+                   | GL_STENCIL_BUFFER_BIT)
+        gf.glBindFramebuffer(GL_FRAMEBUFFER, prev)
         self._targets[drawable_id] = fbo
         return fbo
 
