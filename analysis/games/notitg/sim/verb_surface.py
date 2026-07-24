@@ -84,6 +84,14 @@ SCALAR_SETTERS['basezoom'] = (_BASEZOOM['x'], _BASEZOOM['y'])
 SCALAR_SETTERS['basezoomz'] = 'base_scale_z'
 SCALAR_SETTERS['skewy'] = _SKEW['y']
 
+# Anchor fractions (SetHorizAlign/SetVertAlign; 0.5 = centered rest).
+# AFT band rigs re-anchor sampler sprites at RUNTIME (cropbottom 0.5 +
+# valign 0.75 keeps the surviving top half in place), so these record as
+# scalars; `align(f)` is the both-axes shorthand.
+SCALAR_SETTERS['halign'] = 'halign'
+SCALAR_SETTERS['valign'] = 'valign'
+SCALAR_SETTERS['align'] = ('halign', 'valign')
+
 
 # -- mechanism 2: relative adds ----------------------------------------------
 # AddX(v) = SetX(GetDestX()+v) - onto the DESTINATION (Actor.h:117). The
@@ -217,9 +225,8 @@ IGNORED: dict = {
     'GetHidden': 'visibility readback - the sim answers GetHidden via '
                  'its own read path when a chart needs it',
     'customtexturerect': 'custom UV rect - sheet cropping already sets UVs',
-    'align': 'shorthand for halign+valign - anchor, set at XML load',
-    'halign': 'horizontal anchor fraction - load-time layout, not animated',
-    'valign': 'vertical anchor fraction - load-time layout, not animated',
+    # halign/valign/align are recorded scalars (SCALAR_SETTERS); only the
+    # string-argument forms stay ignored here.
     'horizalign': 'horizontal align string - load-time layout',
     'vertalign': 'vertical align string - load-time layout',
 }

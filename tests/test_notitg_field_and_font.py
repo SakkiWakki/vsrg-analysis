@@ -109,7 +109,7 @@ def test_identity_copy_is_screen_identity():
     copy = _proxy(keyframes={'x': [_kf(0.0, 320.0)],
                              'y': [_kf(0.0, 240.0)]})
     frame = NotitgFieldInstances([copy]).at(_Ctx(1.0))
-    transform, opacity, _scope, _extra = frame.fields[1]
+    transform, opacity, _scope, _extra, _crop = frame.fields[1]
     assert transform is None and opacity == 1.0
 
 
@@ -156,7 +156,7 @@ def test_hidden_copy_is_dropped():
 
 def test_proxy_copy_is_field_scope_never_screen():
     frame = NotitgFieldInstances([_proxy()]).at(_Ctx(1.0))
-    _transform, _opacity, scope, _extra = frame.fields[1]
+    _transform, _opacity, scope, _extra, _crop = frame.fields[1]
     assert scope == 'field'
 
 

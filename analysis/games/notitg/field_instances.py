@@ -15,8 +15,10 @@ The renderer's field pipeline (effects/base.py,
 qt_renderer._blit_field_instances) renders the field layer group once
 into a window-sized pixmap (twice for dual-player charts - the second
 capture samples player 2's mod channels, see `SecondFieldSpec`), then
-blits it once per `(transform, opacity, scope)` in SCREEN space, clipped
-to the chart region. `(None, 1.0, 'field')` is the untouched original.
+blits it once per `(transform, opacity, scope, extra, crop)` in SCREEN
+space, clipped to the chart region. `(None, 1.0, 'field')` is the
+untouched original; `crop` is the instance's sampled SetCrop* insets
+(None at rest), a source-space clip on its blit.
 
 Scopes: proxy/player instances blit a notefield capture - player 2's
 instances the independently-modded second capture ('field2') when a
@@ -206,7 +208,8 @@ class NotitgFieldInstances:
             H, alpha = sampled
             entries.append((_screen_transform(H, kx, ky, ox, oy),
                             min(1.0, alpha), self._scope(inst),
-                            self._extra(inst, t)))
+                            self._extra(inst, t),
+                            inst['transform'].crop_at(t)))
 
         spec = self._player_fields_spec
         if spec is not None and spec.note_mods:

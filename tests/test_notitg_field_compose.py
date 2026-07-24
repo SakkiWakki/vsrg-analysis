@@ -209,3 +209,69 @@ def test_skew_before_flag_flips_the_compose_side():
     before = {**base, 'skew_x_before': [_kf(0.0, 1.0)]}
     H_before, _ = _channel(before).at(1.0)
     assert not np.allclose(H_after, H_before)
+
+
+# -- crop + align (the AFT sampler band rig) ---------------------------------
+
+_CENTERED = {'x': [_kf(0.0, 320.0)], 'y': [_kf(0.0, 240.0)]}
+
+
+def test_crop_at_rests_none():
+    assert _channel(_CENTERED).crop_at(1.0) is None
+
+
+def test_crop_at_reads_the_leaf_crop_channels():
+    ch = _channel({**_CENTERED, 'crop_left': [_kf(0.0, 0.25)],
+                   'crop_top': [_kf(0.0, 0.5)]})
+    assert ch.crop_at(1.0) == pytest.approx((0.25, 0.5, 0.0, 0.0))
+
+
+def test_crop_does_not_touch_the_transform():
+    plain, _ = _channel(_CENTERED).at(1.0)
+    cropped, _ = _channel({**_CENTERED,
+                           'crop_bottom': [_kf(0.0, 0.5)]}).at(1.0)
+    assert np.allclose(plain, cropped)
+
+
+def test_valign_anchors_content_on_the_position():
+    """valign 0.75 puts the texture's 75% line on the actor's y: the
+    half-screen band trick (cropbottom 0.5 + valign 0.75 shows the top
+    half in place). Texture y=360 lands on y=240; the center rides up."""
+    H, _ = _channel({**_CENTERED, 'valign': [_kf(0.0, 0.75)]}).at(1.0)
+    assert _map_capture(H, 320.0, 360.0) == pytest.approx((320.0, 240.0))
+    assert _map_capture(H, 320.0, 240.0) == pytest.approx((320.0, 120.0))
+
+
+def test_halign_scales_with_the_leaf_zoom():
+    """The anchor shift is content-side: a zoomed sprite shifts by the
+    ZOOMED anchor distance (the engine offsets the quad's vertices, and
+    the zoom then scales them)."""
+    H, _ = _channel({**_CENTERED, 'halign': [_kf(0.0, 0.0)],
+                     'scale_x': [_kf(0.0, 0.5)]}).at(1.0)
+    # halign 0: left edge on the position. Texture x=0 lands at x=320.
+    assert _map_capture(H, 0.0, 240.0) == pytest.approx((320.0, 240.0))
+
+
+def test_centered_align_is_identity():
+    H, _ = _channel({**_CENTERED, 'halign': [_kf(0.0, 0.5)],
+                     'valign': [_kf(0.0, 0.5)]}).at(1.0)
+    assert np.allclose(H, np.eye(3))
+
+
+def test_instances_carry_crop_in_their_entries():
+    from types import SimpleNamespace
+
+    from analysis.games.notitg.field_instances import NotitgFieldInstances
+
+    cropped = field_compose.instance(
+        'A', 'aft', 0,
+        [field_compose.link_timelines({'crop_left': [_kf(0.0, 0.5)]})],
+        aft_order='post')
+    plain = field_compose.instance(
+        'B', 'aft', 0, [field_compose.link_timelines(None)],
+        aft_order='post')
+    frame = NotitgFieldInstances([cropped, plain]).at(
+        SimpleNamespace(t_now=1.0, chart_rect=(0, 0, 640, 480)))
+    base, first, second = frame.fields
+    assert first[4] == pytest.approx((0.5, 0.0, 0.0, 0.0))
+    assert second[4] is None

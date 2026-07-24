@@ -117,6 +117,30 @@ def test_rotation_order_changes_the_composed_matrix():
     assert not np.allclose(m_default, m_zyx)
 
 
+def test_align_verbs_record_the_anchor():
+    # halign/valign move the actor's anchor fraction; AFT band rigs poke
+    # them at runtime (cropbottom 0.5 + valign 0.75 = top half in place),
+    # so they are recorded scalars, not load-time layout.
+    a = SimActor()
+    a.poke('halign', [0.25])
+    a.poke('valign', [0.75])
+    assert a.get('halign') == pytest.approx(0.25)
+    assert a.get('valign') == pytest.approx(0.75)
+
+
+def test_align_shorthand_sets_both_axes():
+    a = SimActor()
+    a.poke('align', [0.0])
+    assert a.get('halign') == 0.0
+    assert a.get('valign') == 0.0
+
+
+def test_align_rests_centered():
+    a = SimActor()
+    assert a.get('halign') == 0.5
+    assert a.get('valign') == 0.5
+
+
 def test_skewto_sets_both_skew_axes():
     a = SimActor()
     a.poke('skewto', [0.3, -0.2])

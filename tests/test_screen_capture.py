@@ -173,3 +173,48 @@ def test_screen_prev_skipped_first_frame_then_feeds_back():
     r._end_screen_composite(painter2, ctx2)
     painter2.end()
     assert QColor(image2.pixel(80, 75)).blue() > 80
+
+
+# -- crop on instance blits (AFT sampler croptop/... pokes) ---------------
+
+def _crop_blit_image(crop):
+    """One 'screen' copy shifted down 60px, with `crop` fractions as the
+    entry's 5th element (None = today's uncropped entry). The source
+    content is a green strip across the top 20 rows; the copy makes the
+    strip land at y 60..80, cropped to the un-hidden columns."""
+    from PySide6.QtGui import QTransform
+
+    r = _renderer()
+    ctx = _ctx(1.0)
+    image, painter = _host()
+    entry = (QTransform.fromTranslate(0, 60), 1.0, 'screen', None, crop)
+    frame = EffectFrame(fields=(entry,))
+    r._sync_prev_screen(ctx)
+    target = r._begin_screen_composite(frame, ctx, painter)
+    target.fillRect(0, 0, 160, 20, QColor(10, 200, 30))
+    r._field_pixmap = None
+    r._blit_field_instances(frame, ctx, target)
+    r._end_screen_composite(painter, ctx)
+    painter.end()
+    return image
+
+
+def test_cropleft_clips_the_copys_source_half():
+    image = _crop_blit_image((0.5, 0.0, 0.0, 0.0))
+    # Right half of the strip copied (source x >= 80), left half not.
+    assert QColor(image.pixel(120, 70)).green() > 150
+    assert QColor(image.pixel(40, 70)).green() < 50
+
+
+def test_rest_crop_none_keeps_the_full_copy():
+    image = _crop_blit_image(None)
+    assert QColor(image.pixel(120, 70)).green() > 150
+    assert QColor(image.pixel(40, 70)).green() > 150
+
+
+def test_croptop_clips_in_source_space():
+    # The whole strip is inside the hidden top 20% of the source, so a
+    # croptop crop leaves the copy region untouched.
+    image = _crop_blit_image((0.0, 0.2, 0.0, 0.0))
+    assert QColor(image.pixel(120, 70)).green() < 50
+    assert QColor(image.pixel(40, 70)).green() < 50

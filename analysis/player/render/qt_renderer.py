@@ -79,6 +79,21 @@ def _field_extra(entry):
     return entry[3] if len(entry) >= 4 else None
 
 
+def _field_crop(entry):
+    """The instance's crop insets (5th element): (left, top, right,
+    bottom) fractions of its texture, or None for the uncropped blit."""
+    return entry[4] if len(entry) >= 5 else None
+
+
+def _crop_inset(design, crop):
+    """`design` inset by the crop fractions. SM SetCrop* hides each
+    edge's fraction of the actor's texture while the surviving content
+    stays put, so crop is a pure source-space clip on the blit."""
+    left, top, right, bottom = crop
+    w, h = design.width(), design.height()
+    return design.adjusted(left * w, top * h, -right * w, -bottom * h)
+
+
 from analysis.player.init.notes_model import stream_groups_or_none
 from analysis.player.render import culling, gl_capture, theme
 from analysis.player.render.capture import RasterCaptureBackend
@@ -914,14 +929,14 @@ class QtPlayerRenderer:
         direct background/below-draws, so it is blitted here as the base
         backdrop exactly once."""
         from analysis.games.notitg.field_instances import design_box
-        box = (design_box(ctx.chart_rect)
-               if (self._full_field_capture(frame, ctx)
-                   or self._has_screen_copy(frame)) else None)
+        design = design_box(ctx.chart_rect)
+        box = (design if (self._full_field_capture(frame, ctx)
+                          or self._has_screen_copy(frame)) else None)
         with self._capture.blits(painter, QRectF(*ctx.chart_rect)) as batch:
             if self._backdrop_src is not None:
                 batch.blit(self._backdrop_src)
             for entry in frame.fields:
-                self._blit_field_instance(batch, entry, box)
+                self._blit_field_instance(batch, entry, box, design)
             if self._screen_open and self._screen_capture is None:
                 # No 'screen' sampler drew this frame, but the node
                 # still captures - its draw position follows the
@@ -936,12 +951,15 @@ class QtPlayerRenderer:
         slot freed when a seek dropped the previous capture."""
         self._screen_capture = self._capture.snapshot('screen')
 
-    def _blit_field_instance(self, batch, entry, box) -> None:
+    def _blit_field_instance(self, batch, entry, box, design) -> None:
         """One instance blit into the open batch (or the fill scope's
         curtain quad), honouring the scope's capture source. Skips
         instances whose source doesn't exist this frame ('screen_prev'
         before any capture is retained, 'field2' without a second
-        capture)."""
+        capture). An entry carrying crop fractions clips its blit to the
+        inset of `design` in source space (SM SetCrop*: the hidden bands
+        never draw, the surviving content stays put); rest crop keeps
+        today's box untouched."""
         transform, opacity, scope = _field_entry(entry)
         extra = _field_extra(entry)
         if opacity < 1.0 / 255.0:
@@ -962,6 +980,9 @@ class QtPlayerRenderer:
             return
         if scope == _SCREEN_PREV_SCOPE and self._prev_screen is None:
             return
+        crop = _field_crop(entry)
+        if crop is not None:
+            box = _crop_inset(design, crop)
         is_player_field = scope.startswith('field') and scope not in (
             _DEFAULT_FIELD_SCOPE, 'full')
         if is_player_field and self._player_field_src.get(scope) is None:

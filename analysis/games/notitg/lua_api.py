@@ -77,6 +77,11 @@ _SCALAR_SETTERS = {
     'rotationz': 'rotation', 'rotationx': 'rotation_x',
     'rotationy': 'rotation_y',
     'diffusealpha': 'alpha', 'skewx': 'skew_x', 'skewy': 'skew_y',
+    # Anchor fractions (SetHorizAlign/SetVertAlign, 0.5 = centered):
+    # runtime pokes on AFT band samplers, recorded like any scalar;
+    # `align(f)` is the both-axes shorthand.
+    'halign': 'halign', 'valign': 'valign',
+    'align': ('halign', 'valign'),
 }
 _ADD_SETTERS = {'addx': 'x', 'addy': 'y', 'addz': 'z'}
 
@@ -131,6 +136,7 @@ _REST = {
     'zbias': 0.0,
     'size_x': _SIZE_UNSET, 'size_y': _SIZE_UNSET,
     'crop_top': 0.0, 'crop_bottom': 0.0, 'crop_left': 0.0, 'crop_right': 0.0,
+    'halign': 0.5, 'valign': 0.5,
     'color': (1.0, 1.0, 1.0),
     'frame': 0.0,
     'hidden': 0.0,

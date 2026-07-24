@@ -63,6 +63,12 @@ cropbottom
 cropleft
 cropright
 
+# -- anchor fractions (SetHorizAlign/SetVertAlign; AFT band rigs
+# re-anchor sampler sprites at runtime alongside their crop pokes) --
+halign
+valign
+align
+
 # -- effect oscillators (ENGINE_ORACLE 2e, GAP #3) --
 vibrate
 wag

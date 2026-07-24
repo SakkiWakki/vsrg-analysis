@@ -66,7 +66,16 @@ _LINK_RESTS = {
     # gates): 'skew_*_before' rest at 0 (skew applies AFTER rotation, the
     # engine default), so an untouched link keeps the stock compose.
     'skew_x_before': 0.0, 'skew_y_before': 0.0,
+    # Texture-edge insets (SetCrop*, fraction hidden per edge) and anchor
+    # fractions (SetHorizAlign/SetVertAlign, 0.5 = centered): the AFT
+    # band idiom crops half the sampler and re-anchors the survivor in
+    # place. Crop is consumed by `crop_at` (a source clip on the blit);
+    # align by the leaf's local matrix.
+    'crop_top': 0.0, 'crop_bottom': 0.0, 'crop_left': 0.0, 'crop_right': 0.0,
+    'halign': 0.5, 'valign': 0.5,
 }
+
+_CROP_PROPS = ('crop_left', 'crop_top', 'crop_right', 'crop_bottom')
 
 # Non-scalar link channels sampled as whole tuples, not per-component
 # curves: the rotation-order token ('xyz'..) and the accumulated spherical
@@ -186,7 +195,8 @@ class TransformChannel:
             link_fov = link['fov'].sample(t)[0]
             if abs(link_fov - field_projection.FOV) > _REST_EPS:
                 fov = link_fov
-            local = self._local(link, t, self._flip_base_y and i == leaf)
+            local = self._local(link, t, self._flip_base_y and i == leaf,
+                                i == leaf)
             world = local if world is None else transform3d.compose(world,
                                                                     local)
         if alpha < _MIN_ALPHA:
@@ -198,10 +208,33 @@ class TransformChannel:
             return None
         return H, alpha
 
+    def crop_at(self, t):
+        """The instance's crop insets `(left, top, right, bottom)` as
+        fractions of its texture, or None at rest (no crop - today's
+        exact blit). Crop is read from the LEAF link only: SetCrop*
+        insets the drawn quad of the actor that owns a texture, and only
+        the leaf sprite has one (an ActorFrame's crop is a no-op)."""
+        if self._t0 is not None:
+            t = max(float(t), self._t0)
+        link = self._links[-1]
+        crop = tuple(link[prop].sample(t)[0] for prop in _CROP_PROPS)
+        if all(edge <= _REST_EPS for edge in crop):
+            return None
+        return crop
+
     @staticmethod
-    def _local(link, t, flip):
+    def _local(link, t, flip, leaf):
         def v(prop):
             return link[prop].sample(t)[0]
+
+        # Anchor offset (halign/valign): the engine offsets the QUAD's
+        # vertices, innermost of everything, so it rides every later
+        # zoom/rotation. Leaf-only: only the sprite has content to
+        # anchor. Centered (0.5) is the rest identity.
+        adx = ady = 0.0
+        if leaf:
+            adx = (0.5 - v('halign')) * field_projection.DESIGN_W
+            ady = (0.5 - v('valign')) * field_projection.DESIGN_H
 
         base_sy = v('base_scale_y')
         if flip:
@@ -220,7 +253,7 @@ class TransformChannel:
             # The overwhelmingly common link state (a plain positioned
             # frame): one translation matrix instead of three matmuls,
             # sampled for every instance link every frame.
-            return transform3d.translate(v('x'), v('y'))
+            return transform3d.translate(v('x') + adx, v('y') + ady)
         (order,) = link['rotation_order'].sample(t)
         m = transform3d.rotate_ordered(rx, ry, rz, order)
         if has_quat:
@@ -245,6 +278,8 @@ class TransformChannel:
                 m = m @ transform3d.skew_y(skewy)
             else:
                 m = transform3d.skew_y(skewy) @ m
+        if adx or ady:
+            m = transform3d.translate(adx, ady) @ m
         return m
 
 
