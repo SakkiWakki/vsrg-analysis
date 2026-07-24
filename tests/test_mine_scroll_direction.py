@@ -34,6 +34,7 @@ def _flip_engine():
 def _player_with_mine(group):
     engine = _flip_engine()
     player = SimpleNamespace(H=800, hit_line_y_frac=0.5, scroll_speed=1.0,
+                             judge_y_px=lambda: 400.0,
                              _sv_engine=engine, sv_enabled=True)
     ctrl = SvRenderController(player)
     player.batch_time_to_y = ctrl.batch_time_to_y

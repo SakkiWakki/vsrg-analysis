@@ -551,6 +551,7 @@ def _chart_sprite_ctx(frame):
     from analysis.player.sv.render import SvRenderController
 
     player = SimpleNamespace(H=800, hit_line_y_frac=0.5, scroll_speed=10.0,
+                            judge_y_px=lambda: 400.0,
                              _sv_engine=IdentitySVEngine())
     player.batch_time_to_y = SvRenderController(player).batch_time_to_y
     return SimpleNamespace(player=player, frame=frame)

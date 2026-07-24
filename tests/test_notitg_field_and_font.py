@@ -52,7 +52,10 @@ def test_settexturename_marks_actor_as_aft():
     aft = RecordingActor()
     aft.poke('SetTextureName', ['gat_aft'])
     assert aft.is_aft
-    assert aft.read('GetTexture') == 'aft:gat_aft'
+    texture = aft.read('GetTexture')
+    assert texture.marker == 'aft:gat_aft'
+    # Polygon rigs read UV scale off the returned texture object.
+    assert texture.GetImageWidth() / texture.GetTextureWidth() == 0.625
 
 
 def test_settexture_from_aft_marks_copy_source():

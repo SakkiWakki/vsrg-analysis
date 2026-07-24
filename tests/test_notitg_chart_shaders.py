@@ -49,7 +49,7 @@ def test_actorframetexture_type_marks_aft():
         ' Var="cap"/>')
     cap = next(a for a in env.actors.values() if a.is_aft)
     assert cap.aft_source is None  # it IS the target, not a copy
-    assert cap.read('GetTexture').startswith('aft:')
+    assert cap.read('GetTexture').marker.startswith('aft:')
 
 
 def _load(xml):
