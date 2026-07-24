@@ -1,15 +1,19 @@
-"""Notes layer: replay-stream taps and long-notes.
+"""Notes layer: every chart note record, replay-stream and chart-stream.
 
 Renders note heads, LN bodies/tails, release guides, press marks, and
-miss-X overlays for every visible candidate. Chart-stream notes (mines,
-lifts, fakes, ghost taps, miss-holds) live in chart_extras.py.
+miss-X overlays for every visible replay candidate, plus the unified
+chart-stream records (mines/lifts/fakes) whose kind selects only the
+sprite -- positioning, per-note mods, per-column reverse, and
+stealth/glow visibility ride the same candidate arrays and `_draw_view`
+bracket taps use. Ghost taps and miss-holds (replay overlays, not note
+records) stay in chart_extras.py.
 
 Public API:
-- `prepare(ctx)` builds `ctx.note_views` once per frame from the player
-  candidate list (shared by the `taps` + `lns` layers so the per-note
-  state is computed once).
-- `draw_taps(ctx, painter)` / `draw_lns(ctx, painter)` are the per-layer
-  drawers the `NoteType` registrations hand out.
+- `prepare(ctx)` builds `ctx.note_views` + `ctx.stream_views` once per
+  frame from the player candidate list (shared by the layers so the
+  per-note state is computed once).
+- `draw_taps` / `draw_lns` / `draw_mines` / `draw_lifts` / `draw_fakes`
+  are the per-layer drawers the `NoteType` registrations hand out.
 - `NoteType` is the per-adapter note-kind spec; `default_note_types()`
   returns the full set every game defaults to.
 """
@@ -26,6 +30,7 @@ from typing import TYPE_CHECKING, Callable, NamedTuple
 
 import numpy as np
 
+from analysis.player.init import notes_model as _nm
 from analysis.player.notetypes import NT_TICK
 from analysis.player.render.layers import chart_extras as _extras
 from analysis.player.render.layers.note_sprites import ln_body_width
@@ -304,17 +309,92 @@ def _ln_body_path(ctx, i, pos, p, head_y, tail_y):
     return _sv_fold_path(ctx, i, pos, p, head_y, tail_y)
 
 
+# ── chart-stream views ───────────────────────────────────────────
+
+@dataclass
+class _StreamView:
+    """One visible chart-stream record (mine/lift/fake): the same
+    positioning/mods/visibility surface as `_NoteView`, minus the
+    replay-only state (judgment, LN body, press marks). `kind` selects
+    only the sprite; `_draw_view` consumes the shared mod fields, so
+    stealth/glow/rotation/zoom/3D behave exactly as they do for taps."""
+    k: int              # index into the unified stream table
+    kind: int
+    col: int
+    y: float
+    y_end: float        # hold-mine span end y; NaN for point records
+    lx: float
+    # False for span records pulled in only for their body stroke (the
+    # cull window missed the head, or it expired): the head sprite
+    # stays undrawn, exactly as if the record weren't a candidate.
+    head_in_window: bool
+    alpha: float = 1.0
+    glow: float = 0.0
+    rotation_deg: float = 0.0
+    zoom: float = 1.0
+    z: float = 0.0
+    rot_x: float = 0.0
+    rot_y: float = 0.0
+
+
+def _build_stream_views(ctx) -> list:
+    """`_StreamView`s for this frame's stream candidates, reading the
+    shared candidate arrays at positions `len(ctx.candidates)` onward
+    (where the renderer appended the stream records)."""
+    s_idx = getattr(ctx, 'stream_candidates', None)
+    if s_idx is None or not len(s_idx):
+        return []
+    p = ctx.player
+    n = p.notes
+    base = len(ctx.candidates)
+    heads = getattr(ctx, 'stream_head_in_window', None)
+    mod_dx = getattr(ctx, 'candidate_dx', None)
+    mod_alpha = getattr(ctx, 'candidate_alpha', None)
+    mod_glow = getattr(ctx, 'candidate_glow', None)
+    mod_rot = getattr(ctx, 'candidate_rot_deg', None)
+    mod_zoom = getattr(ctx, 'candidate_zoom', None)
+    mod_z = getattr(ctx, 'candidate_z', None)
+    mod_rx = getattr(ctx, 'candidate_rot_x', None)
+    mod_ry = getattr(ctx, 'candidate_rot_y', None)
+
+    def at(arr, pos, default):
+        return float(arr[pos]) if arr is not None else default
+
+    views = []
+    for j, k in enumerate(s_idx):
+        pos = base + j
+        col = int(n.stream_cols[k])
+        views.append(_StreamView(
+            k=int(k), kind=int(n.stream_kinds[k]), col=col,
+            y=float(ctx.candidate_head_y[pos]),
+            y_end=float(ctx.candidate_tail_y[pos]),
+            lx=float(ctx.lane_x(col)) + at(mod_dx, pos, 0.0),
+            head_in_window=bool(heads[j]) if heads is not None else True,
+            alpha=(float(display_alpha(mod_alpha[pos]))
+                   if mod_alpha is not None else 1.0),
+            glow=at(mod_glow, pos, 0.0),
+            rotation_deg=at(mod_rot, pos, 0.0),
+            zoom=at(mod_zoom, pos, 1.0),
+            z=at(mod_z, pos, 0.0),
+            rot_x=at(mod_rx, pos, 0.0),
+            rot_y=at(mod_ry, pos, 0.0),
+        ))
+    return views
+
+
 # ── public entry points ──────────────────────────────────────────
 
 def prepare(ctx) -> None:
-    """Build every per-candidate `_NoteView` once. The `taps` and `lns`
-    layer drawers read from `ctx.note_views` ; splitting the previous
-    combined loop into two layer passes would otherwise rebuild each
-    view twice."""
+    """Build every per-candidate `_NoteView` (and `_StreamView`) once.
+    The `taps` / `lns` / stream layer drawers read from
+    `ctx.note_views` / `ctx.stream_views` ; splitting the previous
+    combined loop into per-layer passes would otherwise rebuild each
+    view several times."""
     views: list[_NoteView | None] = []
     for pos, i in enumerate(ctx.candidates):
         views.append(_build(ctx, i, pos))
     ctx.note_views = views
+    ctx.stream_views = _build_stream_views(ctx)
 
 
 def _draw_view(ctx, painter, n, draw_fn) -> None:
@@ -487,6 +567,77 @@ def _body_alphas(n):
     path carries none (SV folds, straight bodies)."""
     path = n.body_path
     return path[2] if path is not None and len(path) > 2 else None
+
+
+# ── chart-stream drawing (mines / lifts / fakes) ─────────────────
+
+# Hold-mine body stroke (Quaver): connects the armed span so the player
+# can see how long the lane stays hot.
+_MINE_BODY_COLOR = (170, 60, 60)
+_MINE_BODY_WIDTH = 3
+
+
+def draw_mines(ctx, painter) -> None:
+    """Mines from the unified stream views: head sprites through the
+    same per-note mod bracket taps use, then hold-mine span bodies
+    (Quaver) and detonation overlays."""
+    _draw_stream_kind(ctx, painter, _nm.KIND_MINE)
+    _draw_hold_mine_spans(ctx, painter)
+    _extras.draw_mine_detonations(ctx, painter)
+
+
+def draw_lifts(ctx, painter) -> None:
+    _draw_stream_kind(ctx, painter, _nm.KIND_LIFT)
+
+
+def draw_fakes(ctx, painter) -> None:
+    _draw_stream_kind(ctx, painter, _nm.KIND_FAKE)
+
+
+def _draw_stream_kind(ctx, painter, kind) -> None:
+    for v in getattr(ctx, 'stream_views', ()):
+        if v.kind == kind and v.head_in_window:
+            _draw_view(ctx, painter, v, _draw_stream_sprite)
+
+
+def _draw_stream_sprite(ctx, painter, v) -> None:
+    """Blit the record's sprite: `kind` selects it and nothing else.
+    Mines are palette-independent glyphs; lifts/fakes key on the column
+    like note heads. Every stream pixmap anchors `y` at its vertical
+    center (square mines, head-shaped lifts/fakes)."""
+    match v.kind:
+        case _nm.KIND_MINE:
+            pm = ctx.sprite_cache.get('mine', ctx)
+        case _nm.KIND_LIFT:
+            pm = ctx.sprite_cache.get('lift', ctx, col=v.col)
+        case _nm.KIND_FAKE:
+            pm = ctx.sprite_cache.get('fake', ctx, col=v.col)
+    painter.drawPixmap(
+        QPointF(float(v.lx), float(v.y - pm.height() / 2)), pm)
+
+
+def _draw_hold_mine_spans(ctx, painter) -> None:
+    """Body stroke + end sprite for hold mines (finite span end; the
+    head sprite is drawn by the shared mine pass). Both endpoints come
+    from the unified kernel (the head/tail candidate ys), so a modded
+    span's ends displace exactly like the column's taps."""
+    p = ctx.player
+    margin = ctx.screen_margin
+    lo, hi = -margin, p.H + margin
+    end_pm = None
+    for v in getattr(ctx, 'stream_views', ()):
+        if v.kind != _nm.KIND_MINE or not math.isfinite(v.y_end):
+            continue
+        if (v.y < lo and v.y_end < lo) or (v.y > hi and v.y_end > hi):
+            continue
+        if end_pm is None:
+            end_pm = ctx.sprite_cache.get('mine', ctx)
+        _extras.draw_lane_line(painter, _MINE_BODY_COLOR, v.lx,
+                               _lane_width(ctx, v.col), v.y, v.y_end,
+                               _MINE_BODY_WIDTH)
+        painter.drawPixmap(
+            QPointF(float(v.lx), float(v.y_end - end_pm.height() / 2)),
+            end_pm)
 
 
 def _draw_replay_note(ctx, painter, n) -> None:
@@ -1003,9 +1154,9 @@ def default_note_types() -> list[NoteType]:
     return [
         NoteType('taps',       'Taps',        'player', draw_taps),
         NoteType('lns',        'Long notes',  'player', draw_lns),
-        NoteType('mines',      'Mines',       'chart',  _extras.draw_mines),
-        NoteType('lifts',      'Lifts',       'chart',  _extras.draw_lifts),
-        NoteType('fakes',      'Fakes',       'chart',  _extras.draw_fakes,
+        NoteType('mines',      'Mines',       'chart',  draw_mines),
+        NoteType('lifts',      'Lifts',       'chart',  draw_lifts),
+        NoteType('fakes',      'Fakes',       'chart',  draw_fakes,
                  stage=Stage.AFTER_NOTES),
         NoteType('miss_holds', 'Miss holds',  'chart',  _extras.draw_miss_holds),
         NoteType('ghost_taps', 'Ghost taps',  'chart',  _extras.draw_ghost_taps,

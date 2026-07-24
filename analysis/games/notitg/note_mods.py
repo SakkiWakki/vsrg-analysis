@@ -2,7 +2,10 @@
 
 `apply(ctx)` runs once per frame after the candidate y arrays exist
 (hooked from build_context): it samples the channels at t_now, runs
-the vectorized ArrowEffects pipeline over the visible candidates, and
+the vectorized ArrowEffects pipeline over the visible candidates --
+replay taps/LNs first, then the chart-stream records (mines/lifts/
+fakes) the renderer appended to the same candidate axis, so one batch
+serves every note kind -- and
 - adds dy to the head/tail/press y arrays in place,
 - stashes per-candidate dx / alpha / rotation / zoom for the note views
   (ctx.candidate_dx / _alpha / _rot_deg / _zoom; dx in our pixel space,
@@ -92,6 +95,21 @@ from analysis.player.render.mods.arrow_effects import (
     tiny_spacing)
 
 _ACTIVE_EPS = 1e-4
+
+
+def _stream_candidates(ctx):
+    """This frame's chart-stream candidate indices, or None when the
+    frame carries none (narrow test ctxs never set the attribute)."""
+    s_idx = getattr(ctx, 'stream_candidates', None)
+    if s_idx is None or not len(s_idx):
+        return None
+    return np.asarray(s_idx, dtype=np.int64)
+
+
+def _stream_count(ctx) -> int:
+    s_idx = _stream_candidates(ctx)
+    return 0 if s_idx is None else len(s_idx)
+
 
 # The 2D per-note foreshortening approximations of an out-of-plane FIELD
 # tilt (X/Y rotation). Deferred to the real 3D projection while it drives
@@ -201,58 +219,11 @@ class NotitgNoteMods:
         judge_y = float(ctx.judge_y)
 
         ppe = self._px_per_engine(ctx, t, scale)
-        if ctx.candidates:
+        if len(ctx.candidates) or _stream_count(ctx):
             self._apply_to_notes(ctx, percents, scale, ppe, judge_y, t)
         # Receptors carry the scroll orientation even on empty frames.
         ctx.receptor_offsets = self._receptor_offsets(
             ctx, percents, ctx.player.keycount, scale, t, judge_y)
-        # Chart streams (mines/lifts/fakes) draw through their own layer
-        # from a separate array set, so they never enter `ctx.candidates`.
-        # Expose the same mod evaluation as a provider they can call per
-        # visible batch, so a mine scrolling to a column's receptor picks
-        # up exactly the displacement that column's taps do.
-        ctx.chart_stream_offsets = (
-            lambda cols, ys, rows:
-            self._stream_offsets(ctx, percents, scale, ppe, judge_y, t,
-                                 cols, ys, rows))
-
-    def _stream_offsets(self, ctx, percents, scale, ppe, judge_y, t,
-                        cols, screen_ys, rows):
-        """Per-note mod displacement for an arbitrary note stream, in OUR
-        pixel space. `cols`/`screen_ys`/`rows` are parallel arrays for the
-        visible notes (screen_ys is each note's pre-mod scroll y). Returns
-        `(dx, dy, rotation_deg, zoom, alpha)` numpy arrays; dx/dy are pixel
-        deltas to add to the note's (lane_x, screen_y), the rest ride the
-        same head-center transform bracket the notes layer uses.
-
-        Mirrors `_apply_to_notes`: accel reshapes the y_offset -> position
-        map first, then the summed position mods contribute dx/dy, then the
-        reverse family flips distance about the (possibly mirrored) receptor.
-        Chart streams carry no press offset and no LN tail, so only the head
-        position is remapped."""
-        cols = np.asarray(cols, dtype=np.int64)
-        ys = np.asarray(screen_ys, dtype=np.float64)
-        p = ctx.player
-        active = any(abs(v) >= _ACTIVE_EPS for v in percents.values())
-        if not active:
-            zero = np.zeros(cols.shape, dtype=np.float64)
-            return zero, zero, zero.copy(), np.ones(cols.shape), np.ones(cols.shape)
-
-        head_off = self._remap_accel(percents, ys, judge_y, ppe)
-        remapped_y = judge_y - head_off * ppe
-        note_beats = np.asarray(rows, dtype=np.float64) / 48.0
-        offs = note_offsets(
-            percents, cols, head_off,
-            t_now=t, beat_now=self._beat_at(t), keycount=p.keycount,
-            note_beats=note_beats)
-
-        r = self._effective_reverse(percents, cols, p.keycount)
-        centered = float(percents.get('centered', 0.0))
-        reversed_y = self._reverse_ys(ctx, remapped_y, r, centered, judge_y)
-
-        dy = (reversed_y - ys) + offs.dy * scale
-        dx = self._tiny_compressed_dx(percents, cols, offs.dx, p.keycount, scale)
-        return dx, dy, offs.rotation_deg, offs.zoom, offs.alpha_mult
 
     def _reverse_ys(self, ctx, ys, r, centered, judge_y):
         """The reverse-family remap of a single y array (see
@@ -267,7 +238,7 @@ class NotitgNoteMods:
     def _apply_to_notes(self, ctx, percents, scale, ppe, judge_y, t) -> None:
         p = ctx.player
         idx = np.asarray(ctx.candidates, dtype=np.int64)
-        cols = np.asarray(p.columns[idx], dtype=np.int64)
+        cols, note_rows = self._candidate_cols_rows(ctx, p, idx)
         self._pin_held_holds(ctx, idx, judge_y, t)
         active = any(abs(v) >= _ACTIVE_EPS for v in percents.values())
 
@@ -286,12 +257,10 @@ class NotitgNoteMods:
             ctx.candidate_tail_y = judge_y - tail_off * ppe
             ctx.candidate_press_y = judge_y - press_off * ppe
 
-            note_beats = (np.asarray(p.notes.noterows_list,
-                                     dtype=np.float64)[idx] / 48.0)
             offs = note_offsets(
                 percents, cols, head_off,
                 t_now=t, beat_now=self._beat_at(t), keycount=p.keycount,
-                note_beats=note_beats, project_3d=True)
+                note_beats=note_rows / 48.0, project_3d=True)
 
         # REVERSE FAMILY (reverse/split/alternate/cross/centered): per
         # column, the receptor slides toward the mirrored judge line by
@@ -326,6 +295,24 @@ class NotitgNoteMods:
         self._stash_hold_body_samples(ctx, percents, cols, idx, head_off,
                                       tail_off, scale, ppe, t)
 
+    def _candidate_cols_rows(self, ctx, p, idx):
+        """Columns + beat rows over the FULL candidate axis: replay
+        candidates first, then the chart-stream records the renderer
+        appended (see qt_renderer._append_stream_candidate_ys). One
+        note_offsets batch then serves taps, LNs, and streams -- a mine
+        picks up exactly the displacement/visibility its column's taps
+        do. Streams without beat rows carry -1 (row-driven kernels are
+        NotITG-only, and NotITG streams always have rows)."""
+        cols = np.asarray(p.columns, dtype=np.int64)[idx]
+        rows = np.asarray(p.notes.noterows_list, dtype=np.float64)[idx]
+        s_idx = _stream_candidates(ctx)
+        if s_idx is None:
+            return cols, rows
+        n = p.notes
+        cols = np.concatenate([cols, n.stream_cols[s_idx].astype(np.int64)])
+        rows = np.concatenate([rows, n.stream_rows[s_idx].astype(np.float64)])
+        return cols, rows
+
     def _pin_held_holds(self, ctx, idx, judge_y, t) -> None:
         """While a hold is held the engine draws its head AT the receptor
         and the body only from there to the tail; the stretch already
@@ -348,6 +335,11 @@ class NotitgNoteMods:
                 & ~np.asarray(p.misses)[idx])
         if not held.any():
             return
+        # The candidate axis extends past the replay candidates with
+        # chart-stream records, which are never held.
+        pad = len(ctx.candidate_head_y) - held.shape[0]
+        if pad:
+            held = np.concatenate([held, np.zeros(pad, dtype=bool)])
         ctx.candidate_head_y = np.where(
             held, np.minimum(ctx.candidate_head_y, judge_y),
             ctx.candidate_head_y)
@@ -398,7 +390,11 @@ class NotitgNoteMods:
         if lane_x_fn is None or ln_tail_times is None:
             return
         tail_off = np.asarray(tail_off, dtype=np.float64)
-        is_ln = np.isfinite(np.asarray(ln_tail_times)[idx]) & np.isfinite(tail_off)
+        # Restrict to the replay prefix of the candidate axis: only
+        # replay candidates can be LNs (stream span ends ride the same
+        # tail array but draw through the stream span path).
+        is_ln = (np.isfinite(np.asarray(ln_tail_times)[idx])
+                 & np.isfinite(tail_off[:len(idx)]))
         if not is_ln.any():
             return
 

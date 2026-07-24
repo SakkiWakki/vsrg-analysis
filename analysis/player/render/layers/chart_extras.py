@@ -1,10 +1,12 @@
-"""Chart-extras layer: mines, lifts, fakes, ghost taps, and miss-holds.
+"""Chart-extras layer: replay overlays (ghost taps, miss-holds) plus
+compat entry points for the chart-stream note layers.
 
-Note-like elements outside the main replay stream. Shares the same cull
-window with the notes layer (single SV-space bisect per bucket).
-
-All visible-index computation is vectorized with NumPy ; the Python loop
-only runs over notes that actually need drawing.
+Mines, lifts, and fakes render through the unified stream pipeline in
+layers/notes.py (one candidate axis, one mod kernel, one draw bracket
+shared with taps); the `draw_mines`/`draw_lifts`/`draw_fakes` functions
+here are thin wrappers kept for plugins that registered against this
+module. Ghost taps and miss-holds are replay overlays, not note
+records, and keep their own vectorized culls here.
 """
 from __future__ import annotations
 
@@ -21,56 +23,29 @@ if TYPE_CHECKING:
     from analysis.player.render.context import RenderContext
 
 
-# ── public entry points ─────────────────────────────────────────────
-
-
-# Hold-mine body stroke (Quaver): connects the armed span so the player
-# can see how long the lane stays hot.
-_MINE_BODY_COLOR = (170, 60, 60)
-_MINE_BODY_WIDTH = 3
+# ── chart-stream compat wrappers ─────────────────────────────────────
+# The imports are deferred to break the module cycle: layers/notes.py
+# imports this module at load. Only plugin-registered callers land
+# here; the builtin note-type layers reference the notes.py drawers
+# directly.
 
 
 def draw_mines(ctx: RenderContext, painter) -> None:
-    p = ctx.player
-    _draw_chart_sprites(ctx, painter,
-                        p.notes.mine_times, p.notes.mine_cols, p.notes.mine_sv,
-                        p.notes.mine_until,
-                        groups=stream_groups_or_none(p.notes.mine_groups),
-                        sprite='mine', keyed=False, rows=p.notes.mine_rows)
-    _draw_hold_mine_spans(ctx, painter)
-    _draw_mine_detonations(ctx, painter)
+    from analysis.player.render.layers import notes
+    notes.draw_mines(ctx, painter)
 
 
-def _draw_hold_mine_spans(ctx, painter) -> None:
-    """Body stroke + end sprite for Quaver hold mines (finite
-    `mine_end_times`; NaN marks a point mine). The head sprite is
-    already drawn by the shared mine pass."""
-    p = ctx.player
-    n = p.notes
-    ends = n.mine_end_times
-    if not ends.size:
-        return
-
-    margin = ctx.screen_margin
-    lo, hi = -margin, p.H + margin
-    groups = stream_groups_or_none(n.mine_groups)
-    end_pm = ctx.sprite_cache.get('mine', ctx)
-    for k in np.nonzero(np.isfinite(ends))[0]:
-        c = int(n.mine_cols[k])
-        if c >= p.keycount:
-            continue
-        y_head = _chart_sprite_y(ctx, n.mine_times, n.mine_sv, groups, k)
-        y_end = _stream_time_y(ctx, float(ends[k]), groups, k)
-        if (y_head < lo and y_end < lo) or (y_head > hi and y_end > hi):
-            continue
-        lx = ctx.lane_x(c)
-        draw_lane_line(painter, _MINE_BODY_COLOR, lx, ctx.lane_width(c),
-                       y_head, y_end, _MINE_BODY_WIDTH)
-        painter.drawPixmap(
-            QPointF(float(lx), float(y_end - end_pm.height() / 2)), end_pm)
+def draw_lifts(ctx: RenderContext, painter) -> None:
+    from analysis.player.render.layers import notes
+    notes.draw_lifts(ctx, painter)
 
 
-def _draw_mine_detonations(ctx, painter) -> None:
+def draw_fakes(ctx: RenderContext, painter) -> None:
+    from analysis.player.render.layers import notes
+    notes.draw_fakes(ctx, painter)
+
+
+def draw_mine_detonations(ctx, painter) -> None:
     """Miss-X over every mine the player actually set off (Quaver
     scores each detonation as a Miss). Appears from the press time
     onward so scrubbing back before the press hides it again."""
@@ -96,24 +71,6 @@ def _draw_mine_detonations(ctx, painter) -> None:
             continue
         painter.drawPixmap(
             QPointF(float(ctx.lane_x(c)), float(y - pm.height() / 2)), pm)
-
-
-def draw_lifts(ctx: RenderContext, painter) -> None:
-    p = ctx.player
-    _draw_chart_sprites(ctx, painter,
-                        p.notes.lift_times, p.notes.lift_cols, p.notes.lift_sv,
-                        p.notes.lift_until,
-                        groups=None,
-                        sprite='lift', keyed=True)
-
-
-def draw_fakes(ctx: RenderContext, painter) -> None:
-    p = ctx.player
-    _draw_chart_sprites(ctx, painter,
-                        p.notes.fake_times, p.notes.fake_cols, p.notes.fake_sv,
-                        p.notes.fake_until,
-                        groups=None,
-                        sprite='fake', keyed=True)
 
 
 def draw(ctx: RenderContext, painter) -> None:
@@ -228,111 +185,6 @@ def _cull_indices(sorted_keys: np.ndarray,
     return np.arange(i, j, dtype=np.intp)
 
 
-def _draw_chart_sprites(ctx, painter, times, cols, sv_times, active_until, *,
-                        groups, sprite, keyed, rows=None):
-    """Cull + blit a chart-stream sprite bucket (mines/lifts/fakes).
-
-    - `groups` ; per-entry SV group ids (Quaver TimingGroups), or None
-      when the whole stream rides the engine's default stream.
-    - `sprite` ; sprite cache key
-    - `keyed`  ; True when the sprite keys on `col` (lifts, fakes).
-      False for palette-independent glyphs like mines.
-    - `rows`   ; per-note beat rows (parallel to `times`); when the game
-      supplies a per-note mod provider (`ctx.chart_stream_offsets`), these
-      feed it so the stream picks up the same NotITG modfield displacement
-      the column's taps get. None or no provider = the plain lane rail.
-
-    Every chart-stream pixmap blits centered on its anchor y (square
-    mines, head-shaped lifts/fakes), so the y-offset is `pm.height() / 2`
-    in both cases.
-    """
-    if not times.size:
-        return
-    search = sv_times if (ctx.use_sv_space and sv_times.size) else times
-    indices = _cull_indices(search, ctx.target_lo, ctx.target_hi)
-    indices = indices[cols[indices] < ctx.player.keycount]
-    if active_until.size:
-        indices = indices[float(ctx.t_now) < active_until[indices]]
-    if not indices.size:
-        return
-
-    cache = ctx.sprite_cache
-    lane_x = ctx.lane_x
-    ys = _chart_stream_ys(ctx, times, sv_times, groups, indices)
-    mods = _chart_stream_mods(ctx, cols[indices], ys, rows, indices)
-
-    # Both pixmap shapes anchor `y` at the pixmap's vertical center
-    # (mines' `(lane_w, lane_w)` square -> `lane_w/2`; head-shaped
-    # pixmaps -> `pm.height() / 2`, which adapts to whichever skin is
-    # active without the blit site needing to know).
-    for n, k in enumerate(indices):
-        c = int(cols[k])
-        pm = cache.get(sprite, ctx, col=c) if keyed else cache.get(sprite, ctx)
-        _blit_chart_sprite(painter, pm, float(lane_x(c)), float(ys[n]), c, ctx,
-                           mods.at(n) if mods is not None else None)
-
-
-def _chart_stream_mods(ctx, cols, ys, rows, indices):
-    """The stream's per-note mod offsets, or None when no provider is wired
-    or the stream carries no rows. `rows` is parallel to the full stream, so
-    it is gathered down to the visible `indices`."""
-    provider = getattr(ctx, 'chart_stream_offsets', None)
-    if provider is None or rows is None:
-        return None
-    dx, dy, rot, zoom, alpha = provider(cols, ys, np.asarray(rows)[indices])
-    return _StreamMods(dx, dy, rot, zoom, alpha)
-
-
-class _StreamMods:
-    """Column-major mod arrays with a per-index accessor. Small enough to
-    stay a thin holder; `at` returns the tuple the blit site consumes."""
-
-    __slots__ = ('dx', 'dy', 'rot', 'zoom', 'alpha')
-
-    def __init__(self, dx, dy, rot, zoom, alpha):
-        self.dx, self.dy, self.rot, self.zoom, self.alpha = dx, dy, rot, zoom, alpha
-
-    def at(self, n):
-        return (float(self.dx[n]), float(self.dy[n]), float(self.rot[n]),
-                float(self.zoom[n]), float(self.alpha[n]))
-
-
-def _blit_chart_sprite(painter, pm, lx, y, col, ctx, mod) -> None:
-    """Blit one chart-stream pixmap centered on `(lx, y)`'s anchor. When
-    `mod` is present ((dx, dy, rot, zoom, alpha)) the sprite is displaced and
-    drawn inside the same head-center rotate/zoom/alpha bracket the notes
-    layer uses (see layers/notes.py `_draw_view`), so a modded mine spins,
-    scales, and fades exactly like a tap in its column."""
-    y_top = y - pm.height() / 2
-    if mod is None:
-        painter.drawPixmap(QPointF(lx, float(y_top)), pm)
-        return
-    dx, dy, rot, zoom, alpha = mod
-    lx += dx
-    y += dy
-    y_top += dy
-    faded = alpha < 1.0
-    transformed = rot or zoom != 1.0
-    if not faded and not transformed:
-        painter.drawPixmap(QPointF(float(lx), float(y_top)), pm)
-        return
-    if faded and alpha < 1.0 / 255.0:
-        return
-    painter.save()
-    if faded:
-        painter.setOpacity(painter.opacity() * alpha)
-    if transformed:
-        cx = lx + pm.width() / 2.0
-        painter.translate(cx, float(y))
-        if rot:
-            painter.rotate(rot)
-        if zoom != 1.0:
-            painter.scale(zoom, zoom)
-        painter.translate(-cx, -float(y))
-    painter.drawPixmap(QPointF(float(lx), float(y_top)), pm)
-    painter.restore()
-
-
 def _chart_stream_ys(ctx, times, sv_times, groups, indices):
     """Screen y for chart-stream sprites at `indices`, routed through
     the same projection primitive taps use (`batch_time_to_y`) so every
@@ -349,18 +201,9 @@ def _chart_stream_ys(ctx, times, sv_times, groups, indices):
 
 def _chart_sprite_y(ctx, times, sv_times, groups, k) -> float:
     """Single-entry `_chart_stream_ys` for the low-count draw sites
-    (hold-mine spans, detonations)."""
+    (mine detonations)."""
     idx = np.array([k], dtype=np.intp)
     return float(_chart_stream_ys(ctx, times, sv_times, groups, idx)[0])
-
-
-def _stream_time_y(ctx, t, groups, k) -> float:
-    """Screen y for an arbitrary chart-time in stream entry `k`'s group.
-    Used for hold-mine end times, which have no cached projection."""
-    sub_groups = groups[k:k + 1] if groups is not None else None
-    times = np.array([t], dtype=np.float64)
-    return float(ctx.player.batch_time_to_y(times, ctx.frame,
-                                             groups=sub_groups)[0])
 
 
 def _visible_miss_hold_indices(ctx) -> np.ndarray:

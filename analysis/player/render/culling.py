@@ -123,6 +123,44 @@ def select_note_candidates(ctx):
     return candidates
 
 
+def select_stream_candidates(ctx) -> None:
+    """Visible-window selection over the unified chart-stream table
+    (mines/lifts/fakes). Fills `ctx.stream_candidates` (ascending
+    indices into `player.notes.stream_*`) and the parallel
+    `ctx.stream_head_in_window` flags (the record's head sprite is
+    inside the cull window and not expired).
+
+    Finite-span records (hold mines) are candidates whenever they
+    exist, flagged head-out when the window misses their head: the
+    span body can cross the screen while the head is far away, they
+    are sparse, and the drawer still clips by screen y."""
+    p = ctx.player
+    n = p.notes
+    times = n.stream_times
+    if not times.size:
+        ctx.stream_candidates = np.empty(0, dtype=np.int64)
+        ctx.stream_head_in_window = np.empty(0, dtype=bool)
+        return
+
+    search = n.stream_sv if (ctx.use_sv_space and n.stream_sv.size) else times
+    lo = int(np.searchsorted(search, ctx.target_lo, side='left'))
+    hi = int(np.searchsorted(search, ctx.target_hi, side='right'))
+    idx = np.arange(lo, hi, dtype=np.int64)
+    idx = idx[n.stream_cols[idx] < p.keycount]
+    idx = idx[float(ctx.t_now) < n.stream_until[idx]]
+
+    spans = np.flatnonzero(np.isfinite(n.stream_end_times))
+    spans = spans[n.stream_cols[spans] < p.keycount]
+    if spans.size:
+        cand = np.union1d(idx, spans)
+        head = np.isin(cand, idx)
+    else:
+        cand = idx
+        head = np.ones(idx.shape, dtype=bool)
+    ctx.stream_candidates = cand
+    ctx.stream_head_in_window = head
+
+
 def _window_pad(ctx):
     p = ctx.player
     pad_sec = float(getattr(p, 'max_draw_pad_sec', 0.0) or 0.0)

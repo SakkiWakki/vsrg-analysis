@@ -13,6 +13,15 @@ from dataclasses import dataclass, field
 import numpy as np
 
 
+# Chart-stream record kinds for the unified stream table below. A
+# record's kind selects ONLY its sprite (and end-of-life semantics like
+# `stream_until`); positioning, per-note mods, and visibility are the
+# same pipeline taps use.
+KIND_MINE = 0
+KIND_LIFT = 1
+KIND_FAKE = 2
+
+
 @dataclass
 class NotesModel:
     # Python-int copies of the noterow/column arrays. The draw loop hits
@@ -114,6 +123,38 @@ class NotesModel:
     # renderer uses this to tint LN tails green for rolls.
     roll_head_keys: set = field(default_factory=set)
 
+    # Unified chart-stream table: one time-sorted struct-of-arrays
+    # record set for every chart-only note above (mines + lifts +
+    # fakes), with a KIND column. Built by `copy_chart_streams` from
+    # the per-type boundary arrays; the render pipeline reads ONLY this
+    # table (the per-type arrays stay as the adapter boundary and the
+    # per-type SV caches). `stream_rows` holds beat rows where the game
+    # supplies them, -1 otherwise (rows only feed the NotITG per-note
+    # mod kernel, and NotITG streams always carry rows).
+    stream_times: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float64))
+    stream_cols: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.int32))
+    stream_rows: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.int64))
+    stream_kinds: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.uint8))
+    stream_until: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float64))
+    stream_groups: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=object))
+    # Span end per record (hold mines), NaN for point records.
+    stream_end_times: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float64))
+    # Cull-space projection of `stream_times`, gathered from the
+    # per-type SV caches by the SV builder (see build_ghost_sv_caches).
+    stream_sv: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float64))
+    # Sort permutation over the mines+lifts+fakes concatenation, so
+    # per-type parallel data can be gathered into table order.
+    stream_order: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.int64))
+
 
 _CHART_STREAM_FIELDS = (
     'mine_times', 'mine_rows', 'mine_cols', 'mine_until', 'mine_groups',
@@ -126,8 +167,13 @@ _CHART_STREAM_FIELDS = (
 def stream_groups_or_none(groups) -> np.ndarray | None:
     """Normalize a chart-stream group array for the SV projection: an
     empty (or absent) array means every entry uses the engine's default
-    stream, which the projection expresses as `groups=None`."""
+    stream, which the projection expresses as `groups=None`. So does an
+    all-None column -- the unified stream table keeps `stream_groups`
+    parallel to its records, and games without TimingGroups fill it
+    with None."""
     if groups is None or not len(groups):
+        return None
+    if all(g is None for g in groups):
         return None
     return groups
 
@@ -135,13 +181,62 @@ def stream_groups_or_none(groups) -> np.ndarray | None:
 def copy_chart_streams(model: NotesModel, replay) -> None:
     """Copy chart-only stream arrays (mines/lifts/fakes + Quaver mine
     detonations) from the replay dict onto the model, preserving each
-    field's declared dtype. Adapters call this from
-    `populate_notes_model`; absent keys keep the empty defaults."""
+    field's declared dtype, then normalize them into the unified stream
+    table. Adapters call this from `populate_notes_model`; absent keys
+    keep the empty defaults."""
     for name in _CHART_STREAM_FIELDS:
         value = replay.get(name)
         if value is not None:
             dtype = getattr(model, name).dtype
             setattr(model, name, np.asarray(value, dtype=dtype))
+    _build_stream_table(model)
+
+
+def _family_column(arr, n, fill, dtype) -> np.ndarray:
+    """A family's per-record column, or a `fill` column when the family
+    left it empty (the boundary key was absent for this game)."""
+    if arr is not None and len(arr) == n:
+        return np.asarray(arr, dtype=dtype)
+    return np.full(n, fill, dtype=dtype)
+
+
+def _build_stream_table(m: NotesModel) -> None:
+    """Merge the per-type stream families into the unified time-sorted
+    table (see the NotesModel field block). The stable sort keeps
+    equal-time records in family order (mines, lifts, fakes) and each
+    family's own adapter order, so draw order is deterministic."""
+    families = (
+        (KIND_MINE, m.mine_times, m.mine_cols, m.mine_rows, m.mine_until,
+         m.mine_groups, m.mine_end_times),
+        (KIND_LIFT, m.lift_times, m.lift_cols, m.lift_rows, m.lift_until,
+         None, None),
+        (KIND_FAKE, m.fake_times, m.fake_cols, m.fake_rows, m.fake_until,
+         None, None),
+    )
+    times, cols, rows, kinds, until, groups, ends = ([] for _ in range(7))
+    for kind, f_times, f_cols, f_rows, f_until, f_groups, f_ends in families:
+        n = len(f_times)
+        if not n:
+            continue
+        times.append(np.asarray(f_times, dtype=np.float64))
+        cols.append(np.asarray(f_cols, dtype=np.int32))
+        kinds.append(np.full(n, kind, dtype=np.uint8))
+        rows.append(_family_column(f_rows, n, -1, np.int64))
+        until.append(_family_column(f_until, n, np.inf, np.float64))
+        groups.append(_family_column(f_groups, n, None, object))
+        ends.append(_family_column(f_ends, n, np.nan, np.float64))
+    if not times:
+        return
+
+    order = np.argsort(np.concatenate(times), kind='stable')
+    m.stream_order = order
+    m.stream_times = np.concatenate(times)[order]
+    m.stream_cols = np.concatenate(cols)[order]
+    m.stream_rows = np.concatenate(rows)[order]
+    m.stream_kinds = np.concatenate(kinds)[order]
+    m.stream_until = np.concatenate(until)[order]
+    m.stream_groups = np.concatenate(groups)[order]
+    m.stream_end_times = np.concatenate(ends)[order]
 
 
 def build_notes_model(replay, times, hold_tails, adapter) -> NotesModel:

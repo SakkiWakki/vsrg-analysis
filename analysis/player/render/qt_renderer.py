@@ -73,6 +73,7 @@ def _field_extra(entry):
     return entry[3] if len(entry) >= 4 else None
 
 
+from analysis.player.init.notes_model import stream_groups_or_none
 from analysis.player.render import culling, gl_capture, theme
 from analysis.player.render.capture import RasterCaptureBackend
 from analysis.player.render.frame_stats import FrameStats
@@ -109,6 +110,7 @@ def _precompute_candidate_ys(ctx) -> None:
         ctx.candidate_head_y = np.empty(0, dtype=np.float64)
         ctx.candidate_tail_y = np.empty(0, dtype=np.float64)
         ctx.candidate_press_y = np.empty(0, dtype=np.float64)
+        _append_stream_candidate_ys(ctx)
         return
     idx = np.asarray(cand, dtype=np.int64)
     head_times = p.times[idx]
@@ -137,6 +139,37 @@ def _precompute_candidate_ys(ctx) -> None:
     press_times = head_times + p.offsets[idx]
     ctx.candidate_press_y = p.batch_time_to_y(press_times, ctx.frame,
                                                groups=cand_groups)
+    _append_stream_candidate_ys(ctx)
+
+
+def _append_stream_candidate_ys(ctx) -> None:
+    """Extend the candidate y arrays with this frame's chart-stream
+    records (mines/lifts/fakes), at positions `len(ctx.candidates)`
+    onward. Head y rides the same batched projection as taps (cached
+    cull-space cum + per-record groups); tail y is the span end (hold
+    mines; NaN propagates for point records exactly like non-LN taps);
+    press y has no meaning for chart streams and rides the head so the
+    uniform kernel remaps stay aligned."""
+    s_idx = ctx.stream_candidates
+    if not len(s_idx):
+        return
+    p = ctx.player
+    n = p.notes
+    groups = stream_groups_or_none(n.stream_groups)
+    sub_groups = groups[s_idx] if groups is not None else None
+    cum = n.stream_sv[s_idx] if n.stream_sv.size else None
+    head = p.batch_time_to_y(n.stream_times[s_idx], ctx.frame,
+                             groups=sub_groups, cum=cum)
+
+    ends = n.stream_end_times[s_idx]
+    if np.isfinite(ends).any():
+        tail = p.batch_time_to_y(ends, ctx.frame, groups=sub_groups)
+    else:
+        tail = np.full(head.shape, np.nan)
+
+    ctx.candidate_head_y = np.concatenate([ctx.candidate_head_y, head])
+    ctx.candidate_tail_y = np.concatenate([ctx.candidate_tail_y, tail])
+    ctx.candidate_press_y = np.concatenate([ctx.candidate_press_y, head])
 
 
 class QtPlayerRenderer:
@@ -219,6 +252,7 @@ class QtPlayerRenderer:
         ctx.effect_frame = self._composite_effects(player, ctx)
         culling.prepare_time_window(ctx)
         ctx.candidates = culling.select_note_candidates(ctx)
+        culling.select_stream_candidates(ctx)
         # Precompute Y positions for every candidate's head + LN tail in one
         # numpy pass. Saves N*(2..4) scalar `ctx.time_to_y` calls per frame ;
         # on dense Etterna charts that's ~600 Python→SV-engine bisects per

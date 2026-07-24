@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import numpy as np
+
 
 @dataclass
 class RenderContext:
@@ -21,6 +23,16 @@ class RenderContext:
     frame: object | None = None
     use_sv_space: bool = False
     candidates: list[int] = field(default_factory=list)
+    # Unified chart-stream culling output (mines/lifts/fakes; see
+    # culling.select_stream_candidates): indices into the NotesModel
+    # stream table + parallel head-in-window flags. Their records ride
+    # the candidate y/mod arrays at positions len(candidates) onward.
+    stream_candidates: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.int64))
+    stream_head_in_window: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=bool))
+    # Per-frame stream views built by layers/notes.prepare.
+    stream_views: list = field(default_factory=list)
     visible_miss_holds: list[int] = field(default_factory=list)
     visible_ghost_taps: list[int] = field(default_factory=list)
     plugin_data: dict = field(default_factory=dict)

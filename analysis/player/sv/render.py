@@ -281,6 +281,15 @@ class SvRenderController:
             groups=stream_groups_or_none(notes.mine_groups))
         notes.lift_sv = self._chart_stream_to_sv(notes.lift_times, notes.lift_rows)
         notes.fake_sv = self._chart_stream_to_sv(notes.fake_times, notes.fake_rows)
+        # Unified stream table: gather the per-type caches into table
+        # order (the mines+lifts+fakes concatenation permuted by the
+        # table's sort, mirroring _build_stream_table).
+        if notes.stream_order.size:
+            notes.stream_sv = np.concatenate(
+                [np.asarray(notes.mine_sv, dtype=np.float64),
+                 np.asarray(notes.lift_sv, dtype=np.float64),
+                 np.asarray(notes.fake_sv, dtype=np.float64)]
+            )[notes.stream_order]
 
     def _chart_stream_to_sv(self, times, rows, groups=None):
         engine = self.p._sv_engine
