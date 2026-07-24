@@ -312,6 +312,38 @@ def test_chain_frag_consumer_carries_shaded_payload(tmp_path):
     assert tint == pytest.approx((1.0, 1.0, 1.0))
 
 
+def test_draw_by_z_frame_sorts_sampler_entries():
+    """Samplers inside a SetDrawByZPosition frame draw in ascending-z
+    order regardless of document order (ActorFrame.cpp:194-205 ->
+    ActorUtil::SortByZPosition stable ascending); entries outside the
+    flagged frame keep their document positions."""
+    from types import SimpleNamespace
+
+    insts = _instances(
+        '<ActorFrame><children>'
+        '<ActorFrameTexture InitCommand="%function(self) self:Create() end"'
+        ' Var="capA"/>'
+        '<ActorFrame InitCommand="%function(self)'
+        '  self:SetDrawByZPosition(true) end"><children>'
+        '<Sprite InitCommand="%function(self)'
+        '  self:SetTexture(capA:GetTexture());'
+        '  self:diffusealpha(0.9); self:z(5) end"/>'
+        '<Sprite InitCommand="%function(self)'
+        '  self:SetTexture(capA:GetTexture());'
+        '  self:diffusealpha(0.8); self:z(-5) end"/>'
+        '</children></ActorFrame>'
+        '</children></ActorFrame>')
+    stamped = [i for i in insts if i.get('z_group') is not None]
+    assert len(stamped) == 2
+
+    effect = NotitgFieldInstances(insts)
+    frame = effect.at(SimpleNamespace(t_now=1.0, chart_rect=(0, 0, 640, 480)))
+    screens = [e for e in frame.fields if e[2] == 'screen']
+    # Document order is alpha .9 (z 5) then alpha .8 (z -5); ascending
+    # z draws the z=-5 sprite first.
+    assert [e[1] for e in screens] == pytest.approx([0.8, 0.9])
+
+
 def test_frag_sampler_emits_no_plain_blit():
     # A Frag= capture sampler draws THROUGH its shader - that draw is
     # the chart_shaders fullscreen pass, so no plain aft instance:

@@ -77,6 +77,13 @@ _SIM_TWEEN_EASING = {
     'spring': EASE_SM_SPRING,
 }
 
+# Verbs whose lack of a poke dispatch is a DOCUMENTED decision (no
+# visual effect / capability not yet built, each with a reason in
+# verb_surface). A verb outside this set that falls through every
+# dispatch is a silent drop and gets reported via `dropped_notify`.
+_UNMODELED_OK = frozenset(verb_surface.IGNORED) | frozenset(
+    verb_surface.DEFERRED)
+
 # Actor.cpp:616 guards a runaway queue ("infinitely recursing
 # ActorCommand?") by finishing all tweens once the queue passes 50.
 _TWEEN_OVERFLOW = 50
@@ -366,6 +373,11 @@ class SimActor:
         # so the drain loop can track ONLY actors with live queues
         # instead of scanning everyone per tick.
         self.queue_notify = None
+        # Set by the environment: called with a verb that fell through
+        # every poke dispatch without a documented IGNORED/DEFERRED
+        # entry - either unmapped, or mapped but never routed (the
+        # Actor:cmd class of bug). Silence here cost whole sessions.
+        self.dropped_notify = None
 
     @property
     def now(self) -> float:
@@ -652,12 +664,24 @@ class SimActor:
         match verb:
             case 'diffuse':
                 self._diffuse(args)
+            case 'diffusecolor':
+                # SetDiffuseColor writes r/g/b onto every corner and
+                # leaves alpha alone (Actor.cpp:986-994).
+                self._diffuse(args[:3])
             case 'hidden':
                 self._visibility(_arg_float(arg0, 1.0) != 0.0)
             case 'visible':
                 self._visibility(_arg_float(arg0, 1.0) == 0.0)
             case 'SetTextureName' | 'SetTexture':
                 self._texture(verb, arg0)
+            case 'blend':
+                self._set_immediate(
+                    'blend_add',
+                    1.0 if str(arg0).strip() == 'add' else 0.0)
+            case 'additiveblend':
+                self._set_immediate(
+                    'blend_add', 1.0 if _arg_float(arg0, 1.0) != 0.0
+                    else 0.0)
             case 'setstate':
                 self._set_state(_as_int(arg0))
             case 'settext':
@@ -671,6 +695,10 @@ class SimActor:
                         'aux', self._current.get('aux', 0.0) + delta)
             case 'animate':
                 self._animate(_arg_float(arg0, 1.0) != 0.0)
+            case 'play':
+                self._animate(True)
+            case 'pause':
+                self._animate(False)
             case 'heading' | 'pitch' | 'roll':
                 self._add_spherical(_SPHERICAL_AXIS[verb], _arg_float(arg0))
             case 'SetRotationOrder':
@@ -685,7 +713,12 @@ class SimActor:
                 self._set_natural(0, _arg_float(arg0))
             case 'SetHeight':
                 self._set_natural(1, _arg_float(arg0))
-            # Any other verb pokes actor state we do not model; ignore it.
+            case _ if verb not in _UNMODELED_OK:
+                # Every deliberately-unmodeled verb is in IGNORED or
+                # DEFERRED with a reason; anything else reaching the
+                # tail is a silent drop - report it.
+                if self.dropped_notify is not None:
+                    self.dropped_notify(verb)
 
     def queue_command(self, name: str) -> None:
         """`queuecommand(name)`: a zero-length tween carrying the command
@@ -749,6 +782,14 @@ class SimActor:
             # A frame's perspective camera fov (deg); projects its whole
             # subtree. Immediate, like vanish - it is not tween state.
             self._set_immediate('fov', _arg_float(args[0] if args else None))
+            return True
+        if verb == 'SetDrawByZPosition':
+            # ActorFrame.cpp:194-205: the frame draws its children
+            # stable-sorted by GetZ ascending (ActorUtil.cpp:408-416)
+            # instead of tree order. Immediate flag, not tween state.
+            arg0 = args[0] if args else True
+            self._set_immediate('draw_by_z',
+                                0.0 if arg0 in (False, 0, '0') else 1.0)
             return True
         return False
 
@@ -856,6 +897,8 @@ class SimActor:
                 self._finish_tweening()
             case 'stoptweening':
                 self._stop_tweening()
+            case 'hurrytweening':
+                self._hurry_tweening(_arg_float(arg0, 1.0))
             case _:
                 return False
         return True
@@ -901,6 +944,15 @@ class SimActor:
                     self._current[prop] = frozen
                     self._emit_at(self._now, prop, frozen, 0.0, 0)
         self._tweens = []
+
+    def _hurry_tweening(self, factor) -> None:
+        """Scale every queued tween's remaining and total time by
+        `factor` (Actor::HurryTweening, openitg Actor.cpp:663-669)."""
+        if factor is None or factor < 0.0:
+            return
+        for tween in self._tweens:
+            tween.left *= factor
+            tween.dur *= factor
 
     def _finish_tweening(self) -> None:
         """Jump current to the FINAL queued state and clear

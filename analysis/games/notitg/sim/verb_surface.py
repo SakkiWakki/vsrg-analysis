@@ -229,6 +229,19 @@ IGNORED: dict = {
     # string-argument forms stay ignored here.
     'horizalign': 'horizontal align string - load-time layout',
     'vertalign': 'vertical align string - load-time layout',
+    # ActorFrameTexture configuration: AFT identity comes from actor
+    # registration (env._register_one marks the aft), capture semantics
+    # from the copy-render model; the per-buffer GL knobs have no
+    # analogue in the composited capture.
+    'Create': 'AFT render-target creation - registration already marks it',
+    'EnableDepthBuffer': 'AFT depth buffer knob - capture model owns it',
+    'EnableAlphaBuffer': 'AFT alpha buffer knob - capture model owns it',
+    'EnableFloat': 'AFT float-texture knob - capture model owns it',
+    'EnablePreserveTexture': 'AFT preserve flag - the capture model '
+                             'carries preserve/feedback semantics',
+    'SetFarDist': 'camera far-plane distance - our projection never '
+                  'far-clips, so the pushed-out plane is already the '
+                  'behavior',
 }
 
 # DEFERRED: a real capability, not yet built - each with the why + the
@@ -282,6 +295,35 @@ DEFERRED: dict = {
     # primitives + live tiers already deferred in lua_api.
     'luaeffect': 'arbitrary per-frame Lua effect (SetEffectLua) - live '
                  'channel tier, chart Lua owns it',
+    # runtime command-registry mutation: the load pass registers XML
+    # command attributes once; adding/removing/querying entries at play
+    # time needs a registry write path plus the engine's name-suffix
+    # semantics pinned from the decompile (Mod Rush charts use these).
+    'addcommand': 'runtime AddCommand registry write - not modeled',
+    'removecommand': 'runtime RemoveCommand registry write - not modeled',
+    'hascommand': 'HasCommand query - needs a value-returning route with '
+                  'an argument (the getter bridge passes none)',
+    # render tiers named in the gat 2 backlog, surfaced by the
+    # dropped-verb reporter:
+    'uniformTexture': 'per-actor shader sampler bind - GL executor tier '
+                      '(ascii.frag samplerAscii)',
+    'texcoordvelocity': 'UV scroll animation - needs a texcoord offset '
+                        'channel on the element',
+    'SetDrawMode': 'polygon mesh draw mode - the crumple.vert mesh tier',
+    'SetNumVertices': 'polygon mesh vertex count - see SetDrawMode',
+    'SetVertexPosition': 'polygon mesh vertex write - see SetDrawMode',
+    'SetVertexTexCoord': 'polygon mesh UV write - see SetDrawMode',
+    'SetXSpline': 'per-column note-path x spline - the shared '
+                  'sample_note_path consumer (arrowpath tier)',
+    'SetZSpline': 'per-column note-path z spline - see SetXSpline',
+    'SetNumPathGradientPoints': 'arrowpath gradient point count - '
+                                'arrowpath tier',
+    'SetPathGradientColor': 'arrowpath gradient color write - '
+                            'arrowpath tier',
+    'Load': 'runtime texture (re)load on a sprite - asset swap not '
+            'modeled',
+    'SetAwake': 'fork hibernate wake toggle - the sim anchors load '
+                'time, nothing sleeps through it',
     'tween': 'tween with a custom Lua easing function - live channel tier',
     'floorwag': 'fork wag variant (Effect not in openitg; Actor.clean.c '
                 'apply-math is COMDAT-folded so its offset/floor behavior '
@@ -382,10 +424,10 @@ HANDLED_BY_NAME: dict = {
     # modchart scratch state (SimActor handles aux/addaux directly, with
     # getaux as the current-read getter above)
     'aux': 'scratch', 'addaux': 'scratch',
-    # mechanism 11: command / message registry
+    # mechanism 11: command / message registry (addcommand/removecommand/
+    # hascommand are DEFERRED - runtime registry mutation is not modeled)
     'playcommand': 'command', 'queuecommand': 'command',
-    'queuemessage': 'command', 'addcommand': 'command',
-    'removecommand': 'command', 'hascommand': 'command', 'cmd': 'command',
+    'queuemessage': 'command', 'cmd': 'command',
     # fork transform-order + spherical rotation (SimActor.poke handles each
     # by name; field_compose._local honors the recorded channels). The
     # rotation order (SetRotationOrder), the pre/post-rotation skew gates

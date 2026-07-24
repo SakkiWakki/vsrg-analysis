@@ -1075,8 +1075,30 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
             if frag_path is not None:
                 inst['frag'] = frag_path
                 inst['frag_uniforms'] = frag_uniforms
+        z_group, z_link = _z_sort_group(chain, links, env)
+        if z_group is not None:
+            inst['z_group'] = z_group
+            inst['z_sort'] = z_link['z']
         instances.append(inst)
     return instances
+
+
+def _z_sort_group(chain, links, env):
+    """(flagged frame rec_id, direct-child link) when the instance sits
+    under a SetDrawByZPosition frame, else (None, None). The engine
+    draws the flagged frame's DIRECT children stable-sorted by their z,
+    ascending (ActorFrame.cpp:194-205 -> ActorUtil::SortByZPosition), so
+    the sort key is the direct child on this instance's ancestor path;
+    the NEAREST flagged ancestor wins for nested flags."""
+    root_first = list(reversed(chain))
+    for i in range(len(root_first) - 2, -1, -1):
+        sim = env.actors.get(env.actor_id(root_first[i]))
+        if sim is None:
+            continue
+        flag = sim.keyframes().get('draw_by_z')
+        if flag and flag[-1].values[0] >= 0.5:
+            return env.actor_id(root_first[i]), links[i + 1]
+    return None, None
 
 
 def _uniform_curves(sim, rec_id, live_sim, actor_keyframes) -> dict:

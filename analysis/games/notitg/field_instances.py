@@ -178,6 +178,25 @@ def _fold_stage_chain(stages, slots, inst, H, alpha, crop, extra):
     return H, alpha, crop, extra
 
 
+def _z_sort_entries(entries, sort_keys) -> None:
+    """Reorder entries within each SetDrawByZPosition group by their
+    sampled z, ascending with original order breaking ties (the engine's
+    stable sort - ActorUtil::SortByZPosition), in place. Group members
+    re-slot into the group's own index positions, so entries outside
+    the group keep their exact draw positions."""
+    groups = {}
+    for i, key in enumerate(sort_keys):
+        if key is not None:
+            groups.setdefault(key[0], []).append(i)
+    for indices in groups.values():
+        if len(indices) < 2:
+            continue
+        ranked = sorted((sort_keys[i][1], i) for i in indices)
+        originals = {i: entries[i] for i in indices}
+        for slot, (_z, src) in zip(indices, ranked):
+            entries[slot] = originals[src]
+
+
 def _screen_transform(H, kx, ky, ox, oy) -> QTransform | None:
     """Window-space QTransform for a sampled capture->design homography:
     None for the identity (the untransformed-blit fast path), else the
@@ -241,6 +260,7 @@ class NotitgFieldInstances:
         kx, ky, ox, oy = _design_map(ctx.chart_rect)
 
         entries = []
+        sort_keys = []
         stages = {}
         slots = set()
         for inst in instances:
@@ -273,6 +293,11 @@ class NotitgFieldInstances:
             entries.append((_screen_transform(H, kx, ky, ox, oy),
                             min(1.0, alpha), self._scope(inst),
                             extra, crop))
+            group = inst.get('z_group')
+            sort_keys.append(
+                None if group is None
+                else (group, inst['z_sort'].sample(t)[0]))
+        _z_sort_entries(entries, sort_keys)
 
         spec = self._player_fields_spec
         if spec is not None and spec.note_mods:
