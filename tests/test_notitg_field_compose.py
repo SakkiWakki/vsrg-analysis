@@ -119,6 +119,37 @@ def test_aft_flip_translates_basezoom_sign():
     assert _map_capture(H, 320.0, 100.0) == pytest.approx((320.0, 380.0))
 
 
+def test_aft_flip_mirrors_the_valign_anchor():
+    """The afthell band rig: basezoomy(-1) + valign(0.75) + y(100). The
+    engine's flipped quad spans the OPPOSITE side of the position
+    (valign 0.75 flipped places like valign 0.25 upright: quad y
+    [-120, 360] about the position), so canceling the sign must negate
+    the anchor offset too - without the mirror the band lands ~half a
+    screen high and shows as a sliver."""
+    link = field_compose.link_timelines(
+        {'x': [_kf(0.0, 320.0)], 'y': [_kf(0.0, 100.0)],
+         'base_scale_y': [_kf(0.0, -1.0)], 'valign': [_kf(0.0, 0.75)]})
+    H, _ = field_compose.TransformChannel([link], flip_base_y=True).at(1.0)
+    # Source center (240) sits at position + mirrored anchor (+120).
+    assert _map_capture(H, 320.0, 240.0) == pytest.approx((320.0, 220.0))
+    assert _map_capture(H, 320.0, 480.0) == pytest.approx((320.0, 460.0))
+
+
+def test_aft_flip_swaps_vertical_crop_edges():
+    """cropbottom on a flipped sampler hides the engine quad's local
+    bottom, which the source mirror puts at OUR source's top: crop_at
+    reports it as a top inset (the surviving band is the source's
+    bottom half, exactly what the engine shows on screen)."""
+    link = field_compose.link_timelines(
+        {'x': [_kf(0.0, 320.0)], 'y': [_kf(0.0, 240.0)],
+         'base_scale_y': [_kf(0.0, -1.0)],
+         'crop_bottom': [_kf(0.0, 0.5)], 'crop_left': [_kf(0.0, 0.1)]})
+    flipped = field_compose.TransformChannel([link], flip_base_y=True)
+    assert flipped.crop_at(1.0) == pytest.approx((0.1, 0.5, 0.0, 0.0))
+    plain = field_compose.TransformChannel([link])
+    assert plain.crop_at(1.0) == pytest.approx((0.1, 0.0, 0.0, 0.5))
+
+
 def test_player_instance_rests_at_versus_seats():
     for number, dx in ((1, -160.0), (2, 160.0)):
         inst = field_compose.player_instance(number, None)

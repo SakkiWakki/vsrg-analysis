@@ -161,11 +161,17 @@ class TransformChannel:
     `link_timelines` dict. `t0` clamps sampling to the compile start, so
     pre-chart times hold the load state instead of pre-load rests (a
     proxy resting `hidden,1` from its InitCommand must not flash visible
-    before the first beat). `flip_base_y` negates the leaf's
-    base_scale_y: AFT samplers set basezoomy(-1) to compensate the
+    before the first beat). `flip_base_y` mirrors the leaf's vertical
+    source axis: AFT samplers set basezoomy(-1) to compensate the
     engine's bottom-up GL captures, and our capture is already top-down,
     so the sign convention is translated (a chart leaving basezoomy at
-    +1 to want the raw flipped texture still lands).
+    +1 to want the raw flipped texture still lands). The mirror is the
+    INNERMOST factor (content-side), so canceling the sign alone is not
+    enough: the anchor offset negates (valign 0.75 on a flipped sprite
+    places the quad like valign 0.25 upright) and the vertical crop
+    edges swap (`crop_at`) - the engine's cropbottom hides the flipped
+    quad's screen-TOP content. Outer rotation/skew are untouched (the
+    mirror never crosses them).
 
     `.at(t)` returns `(H, alpha)` - H the 3x3 row-vector homography
     mapping capture coords onto the design screen - or None when the
@@ -213,11 +219,18 @@ class TransformChannel:
         fractions of its texture, or None at rest (no crop - today's
         exact blit). Crop is read from the LEAF link only: SetCrop*
         insets the drawn quad of the actor that owns a texture, and only
-        the leaf sprite has one (an ActorFrame's crop is a no-op)."""
+        the leaf sprite has one (an ActorFrame's crop is a no-op). A
+        flipped (aft) leaf swaps top/bottom: the crop names the engine
+        quad's edges, and the source mirror puts cropbottom's hidden
+        band at OUR source's top (the afthell half-screen bands)."""
         if self._t0 is not None:
             t = max(float(t), self._t0)
         link = self._links[-1]
-        crop = tuple(link[prop].sample(t)[0] for prop in _CROP_PROPS)
+        left, top, right, bottom = (link[prop].sample(t)[0]
+                                    for prop in _CROP_PROPS)
+        if self._flip_base_y:
+            top, bottom = bottom, top
+        crop = (left, top, right, bottom)
         if all(edge <= _REST_EPS for edge in crop):
             return None
         return crop
@@ -235,6 +248,11 @@ class TransformChannel:
         if leaf:
             adx = (0.5 - v('halign')) * field_projection.DESIGN_W
             ady = (0.5 - v('valign')) * field_projection.DESIGN_H
+            if flip:
+                # The source mirror is innermost, so the anchor offset
+                # rides it: a flipped sprite's valign places the quad on
+                # the opposite side of the position.
+                ady = -ady
 
         base_sy = v('base_scale_y')
         if flip:

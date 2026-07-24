@@ -963,6 +963,14 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
         color = None
         capture_source = None
         if sim.aft_source:
+            if actor.attrs.get('Frag'):
+                # A Frag= sampler draws its capture THROUGH its shader:
+                # that draw is the chart_shaders fullscreen pass (see
+                # _chart_shaders), never a plain blit. Emitting it as
+                # one papers the raw capture over everything drawn
+                # before it in the composite (gat 2's horizon sampler
+                # went visible at t~218 and erased the afthell rig).
+                continue
             kind, player = 'aft', 0
             node = aft_nodes.get(sim.aft_source)
             aft_order = ('pre' if node is not None and rec_id < node

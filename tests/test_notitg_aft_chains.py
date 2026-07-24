@@ -104,6 +104,24 @@ def _afts(instances):
     return [i for i in instances if i['kind'] == 'aft']
 
 
+def test_frag_sampler_emits_no_plain_blit():
+    # A Frag= capture sampler draws THROUGH its shader - that draw is
+    # the chart_shaders fullscreen pass, so no plain aft instance:
+    # emitting one papers the raw capture over the composite (gat 2's
+    # horizon sampler erased the afthell rig). The plain sibling still
+    # blits.
+    afts = _afts(_instances(
+        '<ActorFrame><children>'
+        '<ActorFrameTexture InitCommand="%function(self) self:Create() end"'
+        ' Var="capA"/>'
+        '<Sprite Frag="shaders/post.frag" InitCommand="%function(self)'
+        '  self:SetTexture(capA:GetTexture()) end" Var="shaded"/>'
+        '<Sprite InitCommand="%function(self)'
+        '  self:SetTexture(capA:GetTexture()) end" Var="plain"/>'
+        '</children></ActorFrame>'))
+    assert len(afts) == 1
+
+
 def test_single_aft_consumer_has_no_capture_source():
     # One AFT + one consumer sprite: whole-screen capture, no chain
     # annotation (the gat 1 parity path).
