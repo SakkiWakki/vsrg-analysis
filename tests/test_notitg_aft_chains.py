@@ -320,10 +320,34 @@ def test_chain_frag_consumer_carries_shaded_payload(tmp_path):
     frame = effect.at(SimpleNamespace(t_now=1.0, chart_rect=(0, 0, 640, 480)))
     entry = next(e for e in frame.fields
                  if e[2] == 'screen' and len(e[3] or ()) == 3)
-    key, live, (path, uniforms, tint) = entry[3]
+    key, live, (path, uniforms, tint, additive) = entry[3]
     assert path.endswith('lumi.frag')
     assert uniforms['keying'] == pytest.approx(0.4)
     assert tint == pytest.approx((1.0, 1.0, 1.0))
+    assert additive is False
+
+
+def test_additive_sampler_carries_blend_flag():
+    """`blend('add')` on a capture sampler rides the blit-style payload:
+    additive copies must not occlude (black sums to nothing) - the
+    cyriak recursion's dark copies drawn source-over masked the scene
+    into triangle holes."""
+    from types import SimpleNamespace
+
+    insts = _instances(
+        '<ActorFrame><children>'
+        '<ActorFrameTexture InitCommand="%function(self) self:Create() end"'
+        ' Var="capA"/>'
+        '<Sprite InitCommand="%function(self)'
+        '  self:SetTexture(capA:GetTexture());'
+        '  self:blend(\'add\') end" Var="s0"/>'
+        '</children></ActorFrame>')
+    effect = NotitgFieldInstances(insts)
+    frame = effect.at(SimpleNamespace(t_now=1.0, chart_rect=(0, 0, 640, 480)))
+    entry = next(e for e in frame.fields if e[2] == 'screen')
+    key, live, (path, uniforms, tint, additive) = entry[3]
+    assert additive is True
+    assert path is None
 
 
 def test_draw_by_z_frame_sorts_sampler_entries():

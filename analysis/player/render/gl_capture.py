@@ -608,8 +608,16 @@ class _GLBlits:
         f.glBindTexture(GL_TEXTURE_2D, handle.fbo.texture())
         program.setUniformValue(locs['u_tex'], 0)
         f.glUniform1f(locs['u_opacity'], min(1.0, float(opacity)))
+        additive = frag is not None and len(frag) > 3 and frag[3]
+        if additive:
+            # blend('add'): premultiplied additive - black contributes
+            # nothing, overlaps sum (the cyriak wings). Restored to the
+            # batch's source-over below.
+            f.glBlendFunc(GL_ONE, GL_ONE)
         self._draw_quad(f, program, locs, transform,
                         src_box or QRectF(0, 0, handle.w, handle.h), handle)
+        if additive:
+            f.glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
         program.release()
 
     def fill(self, rgb, opacity, crop=None) -> None:

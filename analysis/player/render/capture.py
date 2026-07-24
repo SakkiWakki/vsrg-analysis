@@ -156,11 +156,18 @@ class _RasterBlits:
 
     def blit(self, handle, transform=None, src_box=None,
              opacity=1.0, frag=None) -> None:
-        # `frag` (a per-actor shader payload) is a GL-tier effect; the
-        # raster fallback draws the positioned blit unshaded/untinted
-        # (agreed fallback - no CPU shader emulation).
+        # `frag` is the blit-style payload (shader path, uniforms, tint,
+        # additive). The shader/tint are GL-tier effects; the raster
+        # fallback draws the positioned blit unshaded/untinted (agreed
+        # fallback - no CPU shader emulation) but DOES honour additive
+        # blending: `blend('add')` decides what occludes what, and
+        # source-over instead of Plus turned the cyriak recursion's
+        # dark copies into triangle-hole masks.
         painter = self._painter
         painter.save()
+        if frag is not None and len(frag) > 3 and frag[3]:
+            painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_Plus)
         if transform is not None:
             painter.setTransform(transform, True)
         if src_box is not None:

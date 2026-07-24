@@ -1015,10 +1015,13 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
             if live_sim is not None:
                 from analysis.games.notitg.sim.seg_read import curve_for
                 color = curve_for(live_sim, rec_id, 'color', (1.0, 1.0, 1.0))
+                blend_add = curve_for(live_sim, rec_id, 'blend_add', (0.0,))
             else:
-                color = EventTimeline(
-                    (actor_keyframes.get(rec_id) or {}).get('color', []),
-                    rest=(1.0, 1.0, 1.0))
+                frames = actor_keyframes.get(rec_id) or {}
+                color = EventTimeline(frames.get('color', []),
+                                      rest=(1.0, 1.0, 1.0))
+                blend_add = EventTimeline(frames.get('blend_add', []),
+                                          rest=(0.0,))
         elif sim.proxy_target in proxy_players:
             kind, player = 'proxy', proxy_players[sim.proxy_target]
         elif getattr(actor, '_aft_fill', False):
@@ -1074,6 +1077,7 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
             # stage-fold walk (a chain consumer composes every stage
             # transform down to the chain root's snapshot slot).
             inst['aft_node'] = sim.aft_source
+            inst['blend_add'] = blend_add
             if frag_path is not None:
                 inst['frag'] = frag_path
                 inst['frag_uniforms'] = frag_uniforms
