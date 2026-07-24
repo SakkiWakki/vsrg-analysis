@@ -36,6 +36,7 @@ from analysis.player.render.expr.parser import parse_body
 from analysis.player.render.schedule import Add
 
 _MOD_VERBS = frozenset({'ApplyModifiers', 'mod'})
+_MISS = object()
 
 
 @dataclass(slots=True)
@@ -131,6 +132,12 @@ class LaneSurface:
             channel: ([t for t, _v in sorted(rows)],
                       [v for _t, v in sorted(rows)])
             for channel, rows in (seed_pokes or {}).items()}
+        # Everything a symbol resolves to is FROZEN for the whole
+        # evaluation (the world is post-load state + compile-time
+        # facts) except the step-timeline globals, so resolution
+        # memoizes - the host-env fallback alone is otherwise ~40% of
+        # the eval (a lupa crossing per read, 750K+ on gat).
+        self._symbol_cache: dict = {}
         self.now = 0.0
         self.beat = 0.0
         self.player = 1
@@ -139,6 +146,20 @@ class LaneSurface:
     # -- reads -----------------------------------------------------------
 
     def symbol(self, name: str):
+        steps = self._global_steps.get(name)
+        if steps is not None:
+            i = bisect_right(steps[0], self.now) - 1
+            if i >= 0:
+                return steps[1][i]
+
+        cached = self._symbol_cache.get(name, _MISS)
+        if cached is not _MISS:
+            return cached
+        resolved = self._resolve_symbol(name)
+        self._symbol_cache[name] = resolved
+        return resolved
+
+    def _resolve_symbol(self, name: str):
         if name == 'GAMESTATE':
             return _GAMESTATE
         if name == '_G':
@@ -156,11 +177,6 @@ class LaneSurface:
         post-load-values approximation the action lowering documents. A
         global the body itself writes overlays through the store first,
         so this only serves load-time constants."""
-        steps = self._global_steps.get(name)
-        if steps is not None:
-            i = bisect_right(steps[0], self.now) - 1
-            if i >= 0:
-                return steps[1][i]
         if self._host_env is None:
             return UNRESOLVED
         try:
@@ -362,10 +378,8 @@ def evaluate_residue(live, registrations, player: int = 1,
     surface.player = player
     store = _DictStore()
     interp = Interpreter(surface, store=store)
-    # Compile once to nested closures (the CompiledBody pattern): the
-    # per-tick cost is a call chain, not an AST re-walk.
-    from analysis.player.render.expr.frame_compile_exec import compile_body
-    run_compiled = compile_body(stmts, interp)
+    run_tick = _c_tick(stmts, surface, store, interp) \
+        or _python_tick(stmts, interp)
 
     to_seconds = live._to_seconds
     step = live._body_step
@@ -382,9 +396,54 @@ def evaluate_residue(live, registrations, player: int = 1,
                 store.values['beat'] = surface.beat
                 store.values['mod_time'] = t
                 try:
-                    run_compiled(interp.root)
+                    run_tick()
                 except Exception:
                     return None
                 out.ticks += 1
             t += step
     return out
+
+
+def _python_tick(stmts, interp):
+    """The interpreter path: the body compiled once to nested closures
+    (the CompiledBody pattern), one call chain per tick."""
+    from analysis.player.render.expr.frame_compile_exec import compile_body
+    run_compiled = compile_body(stmts, interp)
+    return lambda: run_compiled(interp.root)
+
+
+def _c_tick(stmts, surface, store, interp):
+    """The C op-stream executor over the pure LaneSurface - identical
+    wiring to the runtime OpStreamCompiledBody, minus the live env.
+    OPT-IN (VSRG_NOTITG_LANE_EVAL_C=1) and NOT the default: measured on
+    gat it is slower than the interpreter (8.9s vs 7.8s - the pure
+    surface is crossing-dominated and ctypes callbacks cost more than
+    Python-native calls) and diverges on guard sections that read
+    UNRESOLVED-heavy state (49 vs 44 evaluated channels). Kept for
+    executor-parity debugging."""
+    import os
+    import sys
+    if os.environ.get('VSRG_NOTITG_LANE_EVAL_C', '') != '1':
+        return None
+    native_c = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        'player', 'render', 'expr', 'native_c')
+    if native_c not in sys.path:
+        sys.path.insert(0, native_c)
+    try:
+        import cbody
+        import opstream
+        prog = opstream.compile_body_ops(stmts)
+    except Exception:
+        return None
+
+    def fallback_run(node):
+        root = interp.root
+        return interp._eval(node, root, 0)
+
+    try:
+        runner = cbody.CompiledBodyC(prog, surface, store, prog.nodes,
+                                     fallback_run, interp=interp)
+    except Exception:
+        return None
+    return lambda: runner.run(None, beat=surface.beat, t=surface.now)

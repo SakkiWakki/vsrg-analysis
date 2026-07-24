@@ -237,7 +237,13 @@ class CompiledBodyC:
             return self._lib.cbody_intern(self._b, e, len(e))
         if not self._surface.is_host_table(obj):
             return None
-        items = list(obj.items())
+        items_fn = getattr(obj, 'items', None)
+        if items_fn is None:
+            # A host table without dict iteration (a time-varying
+            # surface view like a membership table) can never land as
+            # a frozen snapshot; it stays on the crossing path.
+            return None
+        items = list(items_fn())
         n = len(items)
         pure_array = all(
             isinstance(k, (int, float)) and float(k).is_integer()

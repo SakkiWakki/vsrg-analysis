@@ -385,10 +385,13 @@ def _attach_evaluated_residue(live, preview) -> str:
     MERGED with the action emissions per channel so a channel driven by
     both composes in time order. Tainted channels stay sweep-owned.
 
-    OPT-IN (VSRG_NOTITG_LANE_EVAL=1): the gat gate currently passes only
-    5/21 channels against the swept truth - the evaluation ships as
-    default only once channels are verified, never before."""
-    if os.environ.get('VSRG_NOTITG_LANE_EVAL', '').lower() not in _TRUE:
+    DEFAULT ON (VSRG_NOTITG_LANE_EVAL=0 reverts): the gate harness
+    (tests/local/lane_eval_gate.py) passes every evaluating chart in
+    the 29-chart sweep against the swept truth, and a wrong channel is
+    bounded by design - tainted channels never leave the sweep, and
+    everything here is beyond-frontier preview that the sweep
+    overwrites as it advances."""
+    if os.environ.get('VSRG_NOTITG_LANE_EVAL', '1').lower() not in _TRUE:
         return ''
     from analysis.games.notitg import residue_eval, schedule_lower
 
