@@ -958,7 +958,8 @@ class QtPlayerRenderer:
         before any capture is retained, 'field2' without a second
         capture). An entry carrying crop fractions clips its blit to the
         inset of `design` in source space (SM SetCrop*: the hidden bands
-        never draw, the surviving content stays put); rest crop keeps
+        never draw, the surviving content stays put) - a curtain fill
+        insets its fill rect by the same fractions; rest crop keeps
         today's box untouched."""
         transform, opacity, scope = _field_entry(entry)
         extra = _field_extra(entry)
@@ -974,7 +975,8 @@ class QtPlayerRenderer:
             # above the quad blits the blackout back at itself.
             if self._screen_open and self._screen_capture is None:
                 self._take_screen_capture()
-            batch.fill(extra or (1.0, 1.0, 1.0), opacity)
+            batch.fill(extra or (1.0, 1.0, 1.0), opacity,
+                       crop=_field_crop(entry))
             return
         if scope == _SCREEN_SCOPE and not self._screen_open:
             return

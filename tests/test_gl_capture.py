@@ -193,6 +193,20 @@ def test_fill_covers_clip_at_position(gl):
         assert _probe(image, 80, 60) == (0, 0, 0)     # outside clip
 
 
+def test_fill_crop_insets_curtain(gl):
+    # Region CHART (160x150) cropped (0.25 left, 0.5 bottom): the fill
+    # covers x 40..160, y 0..75 only; the blit shows through elsewhere.
+    def scenario(backend, painter, handle):
+        with backend.blits(painter, CHART) as batch:
+            batch.blit(handle)
+            batch.fill((0.0, 1.0, 0.0), 1.0, crop=(0.25, 0.0, 0.0, 0.5))
+    raster, fbo = _both_backends(gl, scenario)
+    for image in (raster, fbo):
+        assert _probe(image, 100, 40) == (0, 255, 0)  # inside the band
+        assert _probe(image, 25, 40)[0] > 150         # left band hidden
+        assert _probe(image, 100, 90)[0] > 150        # bottom band hidden
+
+
 # -- screen-composite lifecycle on GL -------------------------------------
 
 def _ctx(t):

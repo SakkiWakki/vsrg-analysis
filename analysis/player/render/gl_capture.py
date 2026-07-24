@@ -49,6 +49,7 @@ from PySide6.QtOpenGL import (QOpenGLBuffer, QOpenGLFramebufferObject,
                               QOpenGLShaderProgram,
                               QOpenGLVertexArrayObject)
 
+from analysis.player.render.capture import crop_region
 from analysis.player.render.shaders.gl_pipeline import (
     _adapt_dialect, GL_BLEND, GL_CLAMP_TO_EDGE, GL_COLOR_BUFFER_BIT,
     GL_CULL_FACE, GL_DEPTH_BUFFER_BIT, GL_DEPTH_TEST, GL_FLOAT,
@@ -558,13 +559,16 @@ class _GLBlits:
                         src_box or QRectF(0, 0, handle.w, handle.h), handle)
         program.release()
 
-    def fill(self, rgb, opacity) -> None:
+    def fill(self, rgb, opacity, crop=None) -> None:
         """The curtain quad: a flat premultiplied fill covering the
-        region rect at its position among the blits. Blits themselves
-        are unscissored - the rest-position chart rect sliced content
-        that instance transforms carried across it (the half-clipped
-        columns); the opaque sidebar fill owns its area by paint
-        order."""
+        region rect (inset by the crop fractions) at its position among
+        the blits. Blits themselves are unscissored - the rest-position
+        chart rect sliced content that instance transforms carried
+        across it (the half-clipped columns); the opaque sidebar fill
+        owns its area by paint order."""
+        rect = crop_region(self._region, crop)
+        if not rect.isValid():
+            return
         backend = self._backend
         programs = backend._quad_programs()
         if programs is None:
@@ -575,7 +579,7 @@ class _GLBlits:
         a = min(1.0, float(opacity))
         r, g, b = rgb
         f.glUniform4f(locs['u_color'], r * a, g * a, b * a, a)
-        self._draw_quad(f, program, locs, None, self._region, None)
+        self._draw_quad(f, program, locs, None, rect, None)
         program.release()
 
     def _draw_quad(self, f, program, locs, transform, box, handle) -> None:

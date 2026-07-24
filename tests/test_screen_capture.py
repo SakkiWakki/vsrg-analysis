@@ -218,3 +218,35 @@ def test_croptop_clips_in_source_space():
     image = _crop_blit_image((0.0, 0.2, 0.0, 0.0))
     assert QColor(image.pixel(120, 70)).green() < 50
     assert QColor(image.pixel(40, 70)).green() < 50
+
+
+def _fill_image(crop):
+    """One curtain-fill entry over the chart region, with `crop`
+    fractions as the entry's 5th element."""
+    r = _renderer()
+    ctx = _ctx(1.0)
+    image, painter = _host()
+    entry = (None, 1.0, 'fill', (0.0, 1.0, 0.0), crop)
+    r._blit_field_instances(EffectFrame(fields=(entry,)), ctx, painter)
+    painter.end()
+    return image
+
+
+def test_fill_crop_insets_curtain_band():
+    # chart_rect (0, 0, 160, 150): the crop leaves the band x 40..160,
+    # y 0..75 filled; the hidden left/bottom fractions never draw.
+    image = _fill_image((0.25, 0.0, 0.0, 0.5))
+    assert QColor(image.pixel(100, 40)).green() > 150
+    assert QColor(image.pixel(20, 40)).green() < 50
+    assert QColor(image.pixel(100, 100)).green() < 50
+
+
+def test_fill_full_crop_draws_nothing():
+    image = _fill_image((0.6, 0.0, 0.6, 0.0))
+    assert QColor(image.pixel(80, 75)).green() < 50
+
+
+def test_fill_rest_crop_none_covers_region():
+    image = _fill_image(None)
+    for x, y in ((100, 40), (20, 40), (100, 100)):
+        assert QColor(image.pixel(x, y)).green() > 150

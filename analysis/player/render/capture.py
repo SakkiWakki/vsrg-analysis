@@ -31,6 +31,20 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPainter, QPixmap
 
 
+def crop_region(region, crop):
+    """`region` inset by (left, top, right, bottom) crop fractions of
+    its own size, or unchanged for crop None. SM SetCrop* hides each
+    edge's fraction of the actor's texture, and a curtain fill's region
+    IS the quad's full extent, so the fractions apply directly. A crop
+    that consumes the whole extent yields an invalid rect - callers
+    skip the draw."""
+    if crop is None:
+        return region
+    left, top, right, bottom = crop
+    w, h = region.width(), region.height()
+    return region.adjusted(left * w, top * h, -right * w, -bottom * h)
+
+
 class RasterCaptureBackend:
     """Pooled-QPixmap capture slots (the CPU raster path)."""
 
@@ -111,9 +125,10 @@ class RasterCaptureBackend:
     def blits(self, painter, region):
         """Context manager for a run of instance blits sharing one
         target painter; yields a batch with `blit(handle, ...)` (same
-        semantics as the standalone `blit`) and `fill(rgb, opacity)`
-        (a flat color quad covering the `region` rect - the AFT-rig
-        curtain at its tree position among the blits)."""
+        semantics as the standalone `blit`) and `fill(rgb, opacity,
+        crop)` (a flat color quad covering the `region` rect inset by
+        the crop fractions - the AFT-rig curtain at its tree position
+        among the blits)."""
         return _RasterBlits(painter, region)
 
     def present(self, painter, slot: str) -> None:
@@ -154,10 +169,13 @@ class _RasterBlits:
         painter.drawPixmap(0, 0, handle)
         painter.restore()
 
-    def fill(self, rgb, opacity) -> None:
+    def fill(self, rgb, opacity, crop=None) -> None:
+        rect = crop_region(self._region, crop)
+        if not rect.isValid():
+            return
         painter = self._painter
         painter.save()
         painter.setOpacity(min(1.0, opacity))
         r, g, b = rgb
-        painter.fillRect(self._region, QColor.fromRgbF(r, g, b))
+        painter.fillRect(rect, QColor.fromRgbF(r, g, b))
         painter.restore()
