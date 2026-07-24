@@ -23,13 +23,14 @@ from __future__ import annotations
 
 import struct
 
+import numpy as np
 from shiboken6 import VoidPtr
 
 from PySide6.QtGui import (QImage, QOpenGLContext, QPainter, QVector2D,
                            QVector3D)
 from PySide6.QtOpenGL import (QOpenGLBuffer, QOpenGLFramebufferObject,
                               QOpenGLPaintDevice, QOpenGLShader,
-                              QOpenGLShaderProgram, QOpenGLTexture,
+                              QOpenGLShaderProgram,
                               QOpenGLVertexArrayObject)
 
 from analysis.player.render.shaders import library
@@ -58,6 +59,9 @@ GL_READ_FRAMEBUFFER = 0x8CA8
 GL_DRAW_FRAMEBUFFER = 0x8CA9
 GL_FRAMEBUFFER_BINDING = 0x8CA6
 GL_NEAREST = 0x2600
+GL_RGBA = 0x1908
+GL_UNSIGNED_BYTE = 0x1401
+GL_REPEAT = 0x2901
 
 _VERTEX_SRC = """#version 150
 in vec2 a_pos;
@@ -107,6 +111,32 @@ def _uniform_floats(raw):
     if 2 <= len(seq) <= 4:
         return tuple(float(v) for v in seq)
     return None
+
+
+def upload_file_texture(f, path):
+    """Upload the image at `path` as a raw GL texture id (linear filter,
+    repeat wrap), or None when unreadable. A RAW id on purpose: the
+    texture dies with its context, so app teardown never runs a Qt
+    wrapper destructor without a current context
+    (QOpenGLTexturePrivate::destroy warnings at close)."""
+    image = QImage(path)
+    if image.isNull():
+        return None
+    image = image.convertToFormat(QImage.Format.Format_RGBA8888)
+    # PySide6 binds glGenTextures in its C out-param form: a count plus
+    # a writable buffer the ids land in.
+    ids = np.zeros(1, dtype=np.uint32)
+    f.glGenTextures(1, ids)
+    texture = int(ids[0])
+    f.glBindTexture(GL_TEXTURE_2D, texture)
+    f.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image.width(), image.height(),
+                   0, GL_RGBA, GL_UNSIGNED_BYTE, bytes(image.constBits()))
+    f.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+    f.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+    f.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
+    f.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
+    f.glBindTexture(GL_TEXTURE_2D, 0)
+    return texture
 
 
 def _set_custom_uniforms(f, program, uniforms) -> None:
@@ -416,29 +446,23 @@ class ShaderGLPipeline:
         source bind that follows."""
         for unit, (loc, path) in enumerate(file_samplers,
                                            start=_FILE_SAMPLER_UNIT0):
-            texture = self._file_texture(path)
+            texture = self._file_texture(f, path)
             if texture is None:
                 continue
             f.glActiveTexture(GL_TEXTURE0 + unit)
-            texture.bind()
+            f.glBindTexture(GL_TEXTURE_2D, texture)
             f.glUniform1i(loc, unit)
 
-    def _file_texture(self, path):
-        """The uploaded texture for `path`, cached; None (warned once)
-        when the image is unreadable. Repeat wrap: SM charts scroll and
-        tile bound atlases (texturewrapping is the engine's default idiom
-        for these), and in-range UVs are unaffected."""
+    def _file_texture(self, f, path):
+        """The uploaded texture id for `path`, cached; None (warned
+        once) when the image is unreadable. Repeat wrap: SM charts
+        scroll and tile bound atlases (texturewrapping is the engine's
+        default idiom for these), and in-range UVs are unaffected."""
         if path not in self._file_textures:
-            image = QImage(path)
-            if image.isNull():
+            texture = upload_file_texture(f, path)
+            if texture is None:
                 print(f'shader sampler texture unreadable: {path}')
-                self._file_textures[path] = None
-            else:
-                texture = QOpenGLTexture(image)
-                texture.setMinMagFilters(QOpenGLTexture.Filter.Linear,
-                                         QOpenGLTexture.Filter.Linear)
-                texture.setWrapMode(QOpenGLTexture.WrapMode.Repeat)
-                self._file_textures[path] = texture
+            self._file_textures[path] = texture
         return self._file_textures[path]
 
     def _bind_pass_textures(self, f, locs, src) -> None:
