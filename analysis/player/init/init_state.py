@@ -76,6 +76,14 @@ def _bps_segments(bpms, sm_offset) -> list:
 
 
 def _build_scroll_mult_timeline(player, replay):
+    # A game may hand a LIVE sampleable directly (NotITG's lazy compile
+    # hot-swaps the resolved timeline into it mid-play); the events
+    # contract below stays for everyone else.
+    live = getattr(player._adapter, 'scroll_multiplier_timeline', None)
+    if live is not None:
+        timeline = live(replay)
+        if timeline is not None:
+            return timeline
     events = player._adapter.scroll_multipliers(replay)
     if not events:
         return None

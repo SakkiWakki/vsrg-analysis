@@ -47,10 +47,20 @@ from dataclasses import dataclass
 
 from analysis.player.render.mods.channels import ModChannels, ModEvent
 
+_NUM = r'-?\d+(?:\.\d+)?(?:e[-+]?\d+)?'
+
 _TOKEN = re.compile(
-    r'^(?:\*(?P<speed>-?\d+(?:\.\d+)?)\s+)?'
-    r'(?:(?P<no>no)\s+|(?P<percent>-?\d+(?:\.\d+)?)%?\s+)?'
-    r'(?P<name>[a-z][a-z0-9 ]*?)$')
+    r'^(?:\*(?P<speed>' + _NUM + r')\s+)?'
+    r'(?:(?P<no>no)\s+|(?P<percent>' + _NUM + r')%?\s+)?'
+    r'(?P<name>[a-z][a-z0-9 ]*?)'
+    r'(?P<args>(?:\|[-+0-9.eE]*)*)$')
+
+# NotITG's color-carrying mods take pipe args (`stealthglow|r|g|b`,
+# exe format strings `stealthglow%d|%f|%f|%f`, `diffuse|%f|%f|%f`, ...).
+# Each arg retargets the mod's rgb companion channel - the engine
+# exposes them as their own mods (`stealthglowred`/`green`/`blue`), and
+# the values are fractions already (no percent scaling).
+_PIPE_ARG_CHANNELS = ('red', 'green', 'blue')
 
 # Perspective/appearance controls with no consumer yet; hallway left
 # this set once arrow_effects gained its pinhole-recede kernel.
@@ -105,7 +115,15 @@ def parse_modstring(modstring: str) -> list:
             percent = 1.0
         speed = (float(match['speed']) if match['speed'] is not None
                  else _DEFAULT_SPEED)
-        out.append((percent, speed, name.replace(' ', '')))
+        name = name.replace(' ', '')
+        out.append((percent, speed, name))
+        for channel, arg in zip(_PIPE_ARG_CHANNELS,
+                                match['args'].split('|')[1:]):
+            try:
+                value = float(arg)
+            except ValueError:
+                continue
+            out.append((value, speed, name + channel))
     return out
 
 

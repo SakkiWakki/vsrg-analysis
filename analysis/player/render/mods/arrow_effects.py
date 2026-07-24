@@ -233,6 +233,29 @@ def column_percents(percent, cols: np.ndarray, keycount: int,
     return out
 
 
+def column_add(percents, name, cols):
+    """A mod percent as global + numbered per-column values SUMMED per
+    note. The stealth family stores the column variant alongside the
+    global (PlayerOptions Stealth / StealthCol) and the standard un-hide
+    idiom relies on the ADD: `stealth` 100% then a NEGATIVE `stealth<i>`
+    reveals column i (same semantics as `reverse<c>` in
+    `reverse_fractions`, unlike the position mods' per-column OVERRIDE
+    in `column_percents`). Scalar when no numbered key is present."""
+    total = float(percents.get(name, 0.0))
+    numbered = [(key[len(name):], value) for key, value in percents.items()
+                if key.startswith(name) and key[len(name):].isdigit()]
+    if not numbered:
+        return total
+    cols = np.asarray(cols)
+    keycount = int(cols.max()) + 1 if cols.size else 0
+    col_val = np.zeros(keycount, dtype=np.float64)
+    for suffix, value in numbered:
+        c = int(suffix)
+        if c < keycount:
+            col_val[c] = float(value)
+    return total + col_val[cols]
+
+
 def _scale(x, l1, h1, l2, h2):
     return (x - l1) * (h2 - l2) / (h1 - l1) + l2
 
@@ -941,8 +964,10 @@ def percent_visible(percents, cols, y_pos):
     sudden = percents.get('sudden', 0.0)
     # stealthglow hides the note FILL exactly like stealth (both subtract
     # from the visibility adjust, ArrowEffects.cpp:468-469); stealthglow
-    # additionally keeps a glow pass (see `stealthglow_amount`).
-    stealth = percents.get('stealth', 0.0) + percents.get('stealthglow', 0.0)
+    # additionally keeps a glow pass (see `stealthglow_amount`). Both fold
+    # their numbered per-column variants per note (see `column_add`).
+    stealth = (column_add(percents, 'stealth', cols)
+               + column_add(percents, 'stealthglow', cols))
     hidden_off = percents.get('hiddenoffset', 0.0)
     sudden_off = percents.get('suddenoffset', 0.0)
     blink_adjust = percents.get('_blink_adjust', 0.0)
@@ -967,12 +992,18 @@ def percent_visible(percents, cols, y_pos):
         if sudden != 0.0:
             sa = np.clip(_scale(y_pos, sudden_start, sudden_end, -1.0, 0.0), -1.0, 0.0)
             adjust = adjust + sudden * sa
-    if stealth != 0.0:
+    if np.any(stealth != 0.0):
         adjust = adjust - stealth
     adjust = adjust + blink_adjust
 
     visible = np.clip(1.0 + adjust, 0.0, 1.0)
-    return np.where(y_pos < 0.0, 1.0, visible)
+    # Past-receptor notes are exempt from the appearance terms
+    # (ArrowGetPercentVisible early-out) UNLESS the NotITG
+    # stealthpastreceptors companion is on: it keeps the stealth
+    # subtraction (and only it) live past the receptors.
+    past = 1.0 if not percents.get('stealthpastreceptors', 0.0) \
+        else np.clip(1.0 - stealth, 0.0, 1.0)
+    return np.where(y_pos < 0.0, past, visible)
 
 
 def blink_adjust(percent, t_now):
@@ -986,7 +1017,7 @@ def blink_adjust(percent, t_now):
     return percent * _scale(f, 0, 1, -1.0, 0.0)
 
 
-def stealthglow_amount(percent, y_pos):
+def stealthglow_amount(percent, y_pos, past_receptors=False):
     """NotITG stealthglow appearance amount, per note.
 
     stealth (ArrowEffects.cpp:468-469) subtracts its percent from the
@@ -999,13 +1030,19 @@ def stealthglow_amount(percent, y_pos):
     instead of dropping the note.
 
     Like every appearance term, past-receptor notes (y_pos < 0) are exempt
-    (ArrowGetPercentVisible early-out, ArrowEffects.cpp:447-448). Returns a
-    per-note glow multiplier in [0, 1]; rest (percent 0) = 0 = no glow."""
-    if percent == 0.0:
-        return np.zeros(np.asarray(y_pos).shape, dtype=np.float64)
-    glow = np.full(np.asarray(y_pos).shape, float(np.clip(percent, 0.0, 1.0)),
-                   dtype=np.float64)
-    return np.where(np.asarray(y_pos, dtype=np.float64) < 0.0, 0.0, glow)
+    (ArrowGetPercentVisible early-out, ArrowEffects.cpp:447-448) unless
+    `past_receptors` (the stealthpastreceptors companion) keeps the glow
+    live there too. `percent` may be a per-note array (numbered per-column
+    stealthglow<i> folded by `column_add`). Returns a per-note glow
+    multiplier in [0, 1]; rest (percent 0) = 0 = no glow."""
+    y = np.asarray(y_pos, dtype=np.float64)
+    amount = np.clip(np.asarray(percent, dtype=np.float64), 0.0, 1.0)
+    if not np.any(amount):
+        return np.zeros(y.shape, dtype=np.float64)
+    glow = np.broadcast_to(amount, y.shape)
+    if past_receptors:
+        return glow + np.zeros(y.shape, dtype=np.float64)
+    return np.where(y < 0.0, 0.0, glow)
 
 
 def alpha_from_visible(visible):
@@ -1492,8 +1529,10 @@ def note_offsets(percents: dict, cols: np.ndarray, y_offset: np.ndarray,
     vis_y = y_offset + _tipsy_dy(percents, cols, t_now, keycount, arrow_size)
     alpha = _alpha(percents, cols, vis_y, t_now)
     glow = None
-    if _get(percents, 'stealthglow'):
-        glow = stealthglow_amount(_get(percents, 'stealthglow'), vis_y)
+    if _active(percents, 'stealthglow', keycount):
+        glow = stealthglow_amount(
+            column_add(percents, 'stealthglow', cols), vis_y,
+            past_receptors=bool(_get(percents, 'stealthpastreceptors')))
 
     return NoteOffsets(dx=dx, dy=dy, rotation_deg=rotation,
                        alpha_mult=alpha, zoom=zoom, z=z, rot_x=rot_x,

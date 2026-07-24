@@ -255,8 +255,11 @@ def assemble(percents, cols, y_offset, t_now, beat_now, keycount,
                                           size=arrow_size), y_offset, ctx)
     alpha = mca.alpha_curve(percents, t_now)(vis_y, ctx)
     glow = None
-    if _g(percents, 'stealthglow'):
-        glow = mca.glow_curve(_g(percents, 'stealthglow'))(vis_y, ctx)
+    if is_active(percents, 'stealthglow', keycount):
+        glow = mca.glow_curve(
+            ae.column_add(percents, 'stealthglow', cols),
+            past_receptors=bool(_g(percents, 'stealthpastreceptors')))(
+                vis_y, ctx)
 
     return ae.NoteOffsets(dx=dx, dy=dy, rotation_deg=rotation,
                           alpha_mult=alpha, zoom=zoom, z=z, rot_x=rot_x,

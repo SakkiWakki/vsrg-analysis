@@ -102,3 +102,48 @@ def test_players_split_into_separate_channels():
 def test_reversed_span_window_dropped():
     mc = compile_mod_channels([_window(5.0, 2.0, '*-1 100 drunk')])
     assert mc.mods(0) == ()
+
+
+def test_pipe_args_keep_the_base_mod():
+    # NotITG color-carrying mods format as `name|r|g|b` (exe format
+    # strings: `stealthglow%d|%f|%f|%f`). The token must still drive the
+    # base channel: prefix rules unchanged (bare name = 100%).
+    from analysis.games.notitg.mod_channels import parse_modstring
+
+    parsed = parse_modstring('*10000 stealthglow0|0.25|0|1')
+    by_name = {name: (value, speed) for value, speed, name in parsed}
+    assert by_name['stealthglow0'] == (1.0, 10000.0)
+
+
+def test_pipe_args_become_rgb_companion_channels():
+    from analysis.games.notitg.mod_channels import parse_modstring
+
+    parsed = parse_modstring('*-1 stealthglow|0.25|0.5|1')
+    by_name = {name: (value, speed) for value, speed, name in parsed}
+    assert by_name['stealthglowred'][0] == pytest.approx(0.25)
+    assert by_name['stealthglowgreen'][0] == pytest.approx(0.5)
+    assert by_name['stealthglowblue'][0] == pytest.approx(1.0)
+    # Companions ride the token's approach prefix.
+    assert {by_name[n][1] for n in ('stealthglowred', 'stealthglowgreen',
+                                    'stealthglowblue')} == {-1.0}
+
+
+def test_pipe_args_on_numbered_column_variant():
+    from analysis.games.notitg.mod_channels import parse_modstring
+
+    parsed = parse_modstring('*10000 stealthglow2|0.9|0|1')
+    names = {name for _v, _s, name in parsed}
+    assert names == {'stealthglow2', 'stealthglow2red', 'stealthglow2green',
+                     'stealthglow2blue'}
+
+
+def test_pipe_token_inside_larger_modstring():
+    from analysis.games.notitg.mod_channels import parse_modstring
+
+    parsed = parse_modstring(
+        '*10000 -20 stealth0,*10000 stealthglow0|0.9|0|1,*10000 50 tiny')
+    by_name = {name: value for value, _s, name in parsed}
+    assert by_name['stealth0'] == pytest.approx(-0.2)
+    assert by_name['stealthglow0'] == pytest.approx(1.0)
+    assert by_name['stealthglow0blue'] == pytest.approx(1.0)
+    assert by_name['tiny'] == pytest.approx(0.5)

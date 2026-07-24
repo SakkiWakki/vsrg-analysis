@@ -98,7 +98,6 @@ def _visibility_adjust(percents, t_now) -> cv.Curve:
     inf-inf NaN); stealth folds stealth + stealthglow (both hide the fill)."""
     hidden = percents.get('hidden', 0.0)
     sudden = percents.get('sudden', 0.0)
-    stealth = percents.get('stealth', 0.0) + percents.get('stealthglow', 0.0)
     hidden_off = percents.get('hiddenoffset', 0.0)
     sudden_off = percents.get('suddenoffset', 0.0)
     mini = percents.get('mini', 0.0)
@@ -119,20 +118,50 @@ def _visibility_adjust(percents, t_now) -> cv.Curve:
         if sudden != 0.0:
             terms.append(cv.scale(sudden, window_remap(sudden_start, sudden_end,
                                                        -1.0, 0.0, -1.0, 0.0)))
-    if stealth != 0.0:
-        terms.append(cv.const(-stealth))
+    if _stealth_present(percents):
+        terms.append(lambda y, c: -_stealth_total(percents, c.cols)
+                     * np.ones(np.asarray(y).shape, dtype=np.float64))
     if blink != 0.0:
         terms.append(cv.const(blink))
 
     return cv.add(*terms) if terms else cv.const(0.0)
 
 
+def _stealth_total(percents, cols):
+    """The per-note stealth subtraction: stealth + stealthglow, each with
+    its numbered per-column ADD variants folded (`column_add`)."""
+    from analysis.player.render.mods.arrow_effects import column_add
+    return (column_add(percents, 'stealth', cols)
+            + column_add(percents, 'stealthglow', cols))
+
+
+def _stealth_present(percents) -> bool:
+    for key, value in percents.items():
+        if not value:
+            continue
+        for base in ('stealth', 'stealthglow'):
+            if key == base or (key.startswith(base)
+                               and key[len(base):].isdigit()):
+                return True
+    return False
+
+
 def percent_visible_curve(percents, t_now) -> cv.Curve:
     """ArrowGetPercentVisible (ArrowEffects.cpp:441-484) as a curve over
     vis_y: `clip(1 + adjust, 0, 1)`, with past-receptor notes (vis_y < 0)
-    pinned to full visibility. Returns the per-note visible fraction."""
+    pinned to full visibility - unless stealthpastreceptors keeps the
+    stealth subtraction live there (kernel `percent_visible`'s `past`
+    term). Returns the per-note visible fraction."""
     visible = cv.clamp01(cv.add(cv.const(1.0), _visibility_adjust(percents, t_now)))
-    return past_gate(1.0, visible)
+    if not percents.get('stealthpastreceptors', 0.0):
+        return past_gate(1.0, visible)
+
+    def gated(y, c):
+        y = np.asarray(y, dtype=np.float64)
+        past = np.clip(1.0 - _stealth_total(percents, c.cols), 0.0, 1.0)
+        return np.where(y < 0.0, past, visible(y, c))
+
+    return gated
 
 
 def alpha_curve(percents, t_now) -> cv.Curve:
@@ -160,9 +189,14 @@ def boomerang_visibility_curve(percent) -> cv.Curve:
     return cv.add(cv.const(1.0 - percent), cv.scale(percent, fade))
 
 
-def glow_curve(percent) -> cv.Curve:
+def glow_curve(percent, past_receptors=False) -> cv.Curve:
     """stealthglow_amount (ArrowEffects.cpp) as a curve over vis_y: a flat
     `clip(percent, 0, 1)` glow, gated off (0.0) for past-receptor notes
-    (vis_y < 0). Returns the per-note glow multiplier -- the GLOW field of
-    NoteOffsets. rest (percent 0) = 0 = no glow."""
-    return past_gate(0.0, cv.const(float(np.clip(percent, 0.0, 1.0))))
+    (vis_y < 0) unless `past_receptors` keeps it live there. `percent` may
+    be a per-note array (numbered per-column variants pre-folded). Returns
+    the per-note glow multiplier -- the GLOW field of NoteOffsets. rest
+    (percent 0) = 0 = no glow."""
+    amount = np.clip(np.asarray(percent, dtype=np.float64), 0.0, 1.0)
+    flat = lambda y, c: amount * np.ones(np.asarray(y).shape,
+                                         dtype=np.float64)
+    return flat if past_receptors else past_gate(0.0, flat)

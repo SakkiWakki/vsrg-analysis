@@ -114,12 +114,15 @@ def _frame_resolved(applied) -> list:
     for t, beat, modstring, player in applied:
         indexes = _player_indexes(player)
         if 'clearall' in modstring.lower():
+            # The classic reader's row is `clearall, <live windows>`: the
+            # clearall retargets every seen mod to 0, then the SAME row's
+            # trailing tokens re-apply theirs (parsed below, overwriting
+            # the 0 per channel exactly as the engine's in-frame order).
             for index in indexes:
                 for name in seen.get(index, ()):
                     key = (name, index)
                     flush(key, t)
                     pending[key] = (t, beat, 0.0, _CLEARALL_SPEED)
-            continue
         for value, speed, name in _parsed(modstring):
             for index in indexes:
                 seen.setdefault(index, set()).add(name)

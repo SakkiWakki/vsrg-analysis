@@ -148,11 +148,13 @@ def _compile_live(sm_path, end_seconds) -> dict | None:
     from analysis.games.notitg.shader_bridge import ChartShaderEffect
     chart_shaders = ChartShaderEffect(())
     screen_shake = ScreenShakeHandle()
+    scroll_mult = ScrollMultiplierHandle()
     _spawn_background_upgrade(mod_channels, tree, field_instances,
                              sm_path, end, live_sim=shared_sim,
                              to_seconds=doc.to_seconds, doc=doc,
                              chart_shaders=chart_shaders,
-                             screen_shake=screen_shake)
+                             screen_shake=screen_shake,
+                             scroll_mult=scroll_mult)
 
     return {
         'mod_events': declarative, 'mod_channels': mod_channels,
@@ -162,6 +164,7 @@ def _compile_live(sm_path, end_seconds) -> dict | None:
         'field_instances': field_instances, 'screen_transform': screen_transform,
         'screen_oscillator': screen_shake, 'field_oscillators': [],
         'field_vanish': None, 'chart_shaders': chart_shaders,
+        'scroll_multiplier_timeline': scroll_mult,
         'aft_bg_visible': None, 'base_field_hidden': None,
         '_live_sim': live,
         'named_actors': 0, 'recorded_keyframes': 0,
@@ -437,6 +440,24 @@ def _attach_evaluated_residue(live, preview) -> str:
             f'{len(result.applied)} painter rows)')
 
 
+class ScrollMultiplierHandle:
+    """The chart's eased scroll-multiplier timeline for the lazy path:
+    rest (1.0) until the background sweep resolves the applied xmod
+    stream (the per-frame reader carries the baseline and every burst,
+    none of which the instant compile has). The sv renderer samples this
+    every frame, so the swap needs no player rebuild - the same hot-swap
+    shape as ScreenShakeHandle."""
+
+    __slots__ = ('timeline',)
+
+    def __init__(self, timeline=None):
+        self.timeline = timeline
+
+    def sample(self, t):
+        inner = self.timeline
+        return inner.sample(t) if inner is not None else (1.0,)
+
+
 class ScreenShakeHandle:
     """The screen's oscillator-delta channels for the lazy path: None
     until the background sweep computes them (the delta needs the swept
@@ -453,7 +474,8 @@ class ScreenShakeHandle:
 def _spawn_background_upgrade(mod_channels, tree, field_provider,
                              sm_path, end_seconds, live_sim=None,
                              to_seconds=None, doc=None,
-                             chart_shaders=None, screen_shake=None):
+                             chart_shaders=None, screen_shake=None,
+                             scroll_mult=None):
     """Background pass on a daemon thread: sweep to the chart end, then
     hot-swap three things the instant compile left approximate. With
     `live_sim` (the segment-read default) the sweep advances THAT sim -
@@ -539,6 +561,20 @@ def _spawn_background_upgrade(mod_channels, tree, field_provider,
             _TableView(sweep.env), sweep_seconds)
         applied = _mod_events(_SweptResult(sweep.env.applied_mods))
         full = _compile_channels(swept_declarative + applied)
+        if scroll_mult is not None:
+            # The applied stream carries the chart's xmod baseline and
+            # bursts (the per-frame reader re-applies them); resolve them
+            # into the eased multiplier timeline the sv renderer samples.
+            from analysis.games.notitg.mod_channels import (
+                compile_scroll_multipliers)
+            from analysis.player.render.effects.timeline import (
+                EventTimeline, keyframes_from_events)
+            scroll_events, _skipped = compile_scroll_multipliers(
+                swept_declarative + applied)
+            if scroll_events:
+                keyframes = keyframes_from_events(
+                    scroll_events, ('multiplier',), (1.0,))
+                scroll_mult.timeline = EventTimeline(keyframes, rest=(1.0,))
         # Swap the resolved channels/players into the object the player holds.
         # ModChannels reads _channels/_players on every value() call, so the
         # single-statement rebind is atomic enough for a reader (GIL-guarded
@@ -804,11 +840,15 @@ def _player_number(child_name):
 
 def _base_players(mod_channels) -> list:
     """The 1-based real gameplay players that render an always-drawn
-    base field: the ones the chart actually mods (ApplyModifiers(str,
+    base field: the JOINED sides (at most P1/P2 - the engine draws only
+    joined players) that the chart actually mods (ApplyModifiers(str,
     pn) -> mod channels). A lone player [1] keeps the direct-draw fast
-    path; two+ means a versus/dual layout. Extra `GetChild('PlayerP3')`
-    slots are NOT base players - they exist only as proxy sources."""
-    players = {p + 1 for p in mod_channels.players}  # 0-based -> 1-based
+    path; two means a versus/dual layout. Players 3+ (`GetChild
+    ('PlayerP3')` slots the chart also mods) are NEVER base fields: the
+    screen does not draw them, they exist only as proxy sources - a
+    reference chart's intro shows its extra players' content strictly
+    through proxies, never a stacked center field."""
+    players = {p + 1 for p in mod_channels.players if p + 1 <= 2}
     players.add(1)
     return sorted(players)
 

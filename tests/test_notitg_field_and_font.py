@@ -241,6 +241,36 @@ def test_dual_hidden_base_keeps_capture_path():
     assert frame.fields  # non-empty placeholder -> renderer captures
 
 
+def test_lazy_spec_grows_for_late_binding_players():
+    """LAZY topology: a proxy of player N > 1 can bind long after the
+    effect was built (the provider grows). The spec must mint that
+    player's consumer on sight (factory) so the copy routes to its own
+    `field{N}` re-render instead of silently blitting player 1's."""
+    from analysis.games.notitg.field_instances import PlayerFieldsSpec
+    made = []
+
+    def factory(n):
+        made.append(n)
+        return f'mods{n}'
+
+    spec = PlayerFieldsSpec({}, factory=factory)
+    current = [_proxy('P1p', player=1)]
+    fx = NotitgFieldInstances(lambda: list(current), player_fields=spec)
+
+    fx.at(_Ctx(1.0))
+    assert made == []
+
+    current.append(_proxy('P3p2', player=3))
+    frame = fx.at(_Ctx(1.0))
+    assert made == [3]
+    assert frame.second_field.note_mods[3] == 'mods3'
+    assert 'field3' in [entry[2] for entry in frame.fields]
+
+    # Sighted once: the consumer is reused, not re-minted.
+    fx.at(_Ctx(2.0))
+    assert made == [3]
+
+
 def test_note_mods_samples_requested_player():
     """The consumer samples ONLY its player's channels: a P1-only mod and
     a P2-only mod each light up only in that player's consumer."""

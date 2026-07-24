@@ -230,7 +230,7 @@ class NotitgAdapter(EtternaAdapter):
                                  compiled.get('field_oscillators'),
                                  dual=dual)
 
-    def _player_fields(self, replay, instances):
+    def _player_fields(self, replay, instances, lazy=False):
         """A PlayerFieldsSpec mapping each non-primary player a proxy
         targets (>= 2) to its own mod consumer, so the renderer
         re-renders that player's field into `field{N}` for its copies.
@@ -241,15 +241,23 @@ class NotitgAdapter(EtternaAdapter):
         rendered), so it is not in the map. A proxy of player N
         re-renders player N's note pipeline, not player 1's pixels
         (ENGINE_ORACLE 2b). `_note_mods_for` is 0-based (player=N-1).
-        Zero cost when every copy is player 1."""
+        Zero cost when every copy is player 1.
+
+        `lazy` (the provider-backed instance set): proxies keep binding
+        as the chart plays, so the spec carries a consumer FACTORY and
+        the field-instances effect mints entries for players its
+        snapshot could not know about (spec.ensure)."""
         from analysis.games.notitg.field_instances import PlayerFieldsSpec
         players = sorted({inst.get('player') for inst in instances
                           if inst['kind'] in ('proxy', 'player')
                           and (inst.get('player') or 1) > 1})
-        if not players:
+        if not players and not lazy:
             return None
+        factory = (lambda n: self._note_mods_for(replay, player=n - 1)) \
+            if lazy else None
         return PlayerFieldsSpec(
-            {n: self._note_mods_for(replay, player=n - 1) for n in players})
+            {n: self._note_mods_for(replay, player=n - 1) for n in players},
+            factory=factory)
 
     def scroll_multipliers(self, replay):
         from analysis.games.notitg.mod_channels import compile_scroll_multipliers
@@ -258,6 +266,14 @@ class NotitgAdapter(EtternaAdapter):
             return None
         events, _skipped_cm = compile_scroll_multipliers(compiled['mod_events'])
         return events or None
+
+    def scroll_multiplier_timeline(self, replay):
+        """The lazy compile's hot-swap scroll-multiplier handle (rests at
+        1.0 until the background sweep resolves the applied xmod stream),
+        or None on the eager path (its `mod_events` already carry the
+        xmods, so the events contract stands)."""
+        compiled = self._compiled_modfile(replay)
+        return (compiled or {}).get('scroll_multiplier_timeline')
 
     def effects(self, replay):
         from analysis.games.notitg.field_instances import (
@@ -314,7 +330,8 @@ class NotitgAdapter(EtternaAdapter):
         if instances:
             effects.append(NotitgFieldInstances(
                 instances, base_hidden=base_hidden,
-                player_fields=self._player_fields(replay, snapshot)))
+                player_fields=self._player_fields(
+                    replay, snapshot, lazy=callable(instances))))
         return effects
 
     def engine_beat_px(self):

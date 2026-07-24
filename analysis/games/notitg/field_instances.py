@@ -93,10 +93,26 @@ class PlayerFieldsSpec:
     player independently) into slot `field{N}`; a proxy of player N
     blits from it. Everything but the sampled (mod, player) channels is
     identical across the captures. Player 1 is the primary 'field'
-    capture, always rendered, so it is not in this map."""
+    capture, always rendered, so it is not in this map.
 
-    def __init__(self, note_mods):
+    `factory` (player number -> consumer) serves the LAZY topology: a
+    proxy of player N can bind long after the spec was built (the
+    instance provider grows as the chart plays), so the effect calls
+    `ensure` with the players its current instances reference and the
+    spec mints the missing consumers on sight."""
+
+    def __init__(self, note_mods, factory=None):
         self.note_mods = dict(note_mods)
+        self._factory = factory
+
+    def ensure(self, players) -> None:
+        """Mint consumers for any of `players` (1-based, > 1) not in the
+        map yet. No-op without a factory (the eager spec is complete)."""
+        if self._factory is None:
+            return
+        for number in players:
+            if number not in self.note_mods:
+                self.note_mods[number] = self._factory(number)
 
 
 def _design_map(chart_rect):
@@ -168,6 +184,14 @@ class NotitgFieldInstances:
         instances = self._current_instances()
         if not instances:
             return None
+        if self._player_fields_spec is not None:
+            # Late-binding players (lazy provider growth): consumers for
+            # every player the current copies reference must exist BEFORE
+            # scopes resolve, or a fresh proxy blits player 1's capture.
+            self._player_fields_spec.ensure(
+                {player for inst in instances
+                 if inst['kind'] in ('proxy', 'player')
+                 and (player := inst.get('player') or 1) > 1})
         t = float(ctx.t_now)
         base_hidden = self._base_field_hidden(t)
         kx, ky, ox, oy = _design_map(ctx.chart_rect)
@@ -184,10 +208,14 @@ class NotitgFieldInstances:
                             min(1.0, alpha), self._scope(inst),
                             self._extra(inst, t)))
 
-        if self._player_fields_spec is not None:
+        spec = self._player_fields_spec
+        if spec is not None and spec.note_mods:
             return EffectFrame(
                 fields=tuple(entries or [(None, 0.0, _PROXY_SCOPE)]),
-                second_field=self._player_fields_spec)
+                second_field=spec)
+        # A lazy factory spec with no minted consumer yet is inert: the
+        # chart has referenced no player > 1, so the single-player frame
+        # (and its direct-draw fast path) stands.
         return self._single_frame(base_hidden, entries)
 
     def _single_frame(self, base_hidden, entries) -> EffectFrame | None:
