@@ -892,15 +892,45 @@ def _mark_aft_fills(doc, env) -> None:
     command with an AFT node or sampler sprite."""
     rig_messages: set = set()
     fill_candidates = []
+    node_recs: dict = {}
+    sampler_recs: dict = {}
     for actor in _iter_xml(doc.root):
-        sim = env.actors.get(env.actor_id(actor))
+        rec_id = env.actor_id(actor)
+        sim = env.actors.get(rec_id)
         if sim is None:
             continue
         if sim.is_aft or sim.aft_source:
             rig_messages.update(actor.message_commands())
+            if sim.is_aft:
+                node_recs[sim.aft_texture_name] = rec_id
+            if sim.aft_source:
+                sampler_recs.setdefault(sim.aft_source, []).append(rec_id)
         elif actor.kind in _FILL_KINDS and not actor.children:
-            fill_candidates.append(actor)
-    for actor in fill_candidates:
+            fill_candidates.append((actor, rec_id))
+    # A quad also belongs to a rig purely by POSITION: sandwiched
+    # between an AFT node and that node's NEAREST post sampler with
+    # nothing else drawable in between. gat 2's gf2_kek_black1 resets
+    # the cyriak feedback base to black between node 402 and its
+    # sampler blit - it carries no rig message, but the downstream
+    # nodes' at-position captures must contain it (as a storyboard
+    # element it draws after every capture, so the feedback loop
+    # recycled the uncovered bright scene and blew out to white). The
+    # adjacency requirement keeps ordinary section art out: a span
+    # holding any non-frame, non-candidate actor is no curtain slot.
+    candidate_recs = {rec_id: actor for actor, rec_id in fill_candidates}
+    all_recs = {env.actor_id(a): a for a in _iter_xml(doc.root)
+                if env.actor_id(a) in env.actors}
+    for name, rec_n in node_recs.items():
+        post = [r for r in sampler_recs.get(name, ()) if r > rec_n]
+        if not post:
+            continue
+        between = [r for r in all_recs if rec_n < r < min(post)]
+        if all(r in candidate_recs or all_recs[r].kind == 'ActorFrame'
+               for r in between):
+            for r in between:
+                if r in candidate_recs:
+                    candidate_recs[r]._aft_fill = True
+    for actor, rec_id in fill_candidates:
         if rig_messages & set(actor.message_commands()):
             actor._aft_fill = True
 
