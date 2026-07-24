@@ -644,9 +644,49 @@ def _spawn_background_upgrade(mod_channels, tree, field_provider,
         print(f'[notitg] background compile done '
               f'({_time.monotonic() - sweep_start:.0f}s elapsed)',
               file=sys.stderr)
+        _print_unimplemented(sweep.env, sweep_doc)
 
     threading.Thread(target=worker, daemon=True,
                      name='notitg-lazy-upgrade').start()
+
+
+def _print_unimplemented(env, doc) -> None:
+    """The chart's NOT-IMPLEMENTED report, printed once after the sweep:
+    every DEFERRED verb the chart actually poked (with its documented
+    reason), every silently-dropped verb, and the structural gaps
+    (polygon actors, depth-capped chains). Silence here has repeatedly
+    cost whole sessions of manual section-by-section checking - a gap
+    the chart exercises must always announce itself."""
+    import sys
+
+    from analysis.games.notitg.sim import verb_surface
+
+    lines = []
+    for verb, count in sorted(env.deferred_verbs.items(),
+                              key=lambda kv: -kv[1]):
+        reason = verb_surface.DEFERRED.get(verb, '')
+        lines.append(f'  DEFERRED {verb} x{count}: {reason}')
+    for verb, count in sorted(env.dropped_verbs.items(),
+                              key=lambda kv: -kv[1]):
+        lines.append(f'  DROPPED {verb} x{count}: no dispatch matched '
+                     '(unclassified - route or document it)')
+    if doc is not None:
+        polygons = sum(1 for a in _iter_xml(doc.root)
+                       if a.kind == 'Polygon')
+        if polygons:
+            lines.append(f'  POLYGON actors x{polygons}: mesh tier not '
+                         'built (SetDrawMode/SetNumVertices deferred)')
+        aft_nodes = {a.aft_texture_name: rec_id
+                     for rec_id, a in env.actors.items() if a.is_aft}
+        graph = _aft_chain_graph(doc, env, aft_nodes, {})
+        for name in graph.depth_capped:
+            lines.append(f'  AFT chain at {name}: past MAX_CHAIN_DEPTH, '
+                         'demoted to whole-screen')
+    if lines:
+        print('[notitg] not implemented (exercised by this chart):',
+              file=sys.stderr)
+        for line in lines:
+            print(line, file=sys.stderr)
 
 
 def _poked_props(actor) -> set:

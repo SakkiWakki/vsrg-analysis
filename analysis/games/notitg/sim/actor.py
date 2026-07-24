@@ -378,6 +378,9 @@ class SimActor:
         # entry - either unmapped, or mapped but never routed (the
         # Actor:cmd class of bug). Silence here cost whole sessions.
         self.dropped_notify = None
+        # Like dropped_notify, for DEFERRED verbs: documented gaps the
+        # chart actually exercises (the coverage report's raw feed).
+        self.deferred_notify = None
 
     @property
     def now(self) -> float:
@@ -713,6 +716,12 @@ class SimActor:
                 self._set_natural(0, _arg_float(arg0))
             case 'SetHeight':
                 self._set_natural(1, _arg_float(arg0))
+            case _ if verb in verb_surface.DEFERRED:
+                # A real capability we have not built yet: swallowed for
+                # rendering, but COUNTED so the compile-done report can
+                # say what this chart needs (silent gaps cost sessions).
+                if self.deferred_notify is not None:
+                    self.deferred_notify(verb)
             case _ if verb not in _UNMODELED_OK:
                 # Every deliberately-unmodeled verb is in IGNORED or
                 # DEFERRED with a reason; anything else reaching the

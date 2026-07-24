@@ -164,6 +164,8 @@ class SimEnvironment:
         self._warnings: list = []
         self._faults = 0
         self._fault_messages: list = []
+        self._dropped_verbs: dict = {}
+        self._deferred_verbs: dict = {}
         self._dispatch_depth = 0
         self._tick_dispatches = 0
         self._tick_budget_warned = False
@@ -456,6 +458,33 @@ class SimEnvironment:
         if len(self._fault_messages) < 50 \
                 and text not in self._fault_messages:
             self._fault_messages.append(text)
+
+    def _verb_dropped(self, rec_id, verb) -> None:
+        """A poke fell through every dispatch with no IGNORED/DEFERRED
+        entry: the verb is unmapped, or mapped but never routed (the
+        Actor:cmd class of bug - claimed handled, silently lost). One
+        warning per verb names the first offender; the count is
+        probe-visible via `dropped_verbs`."""
+        count = self._dropped_verbs.get(verb, 0)
+        self._dropped_verbs[verb] = count + 1
+        if count == 0:
+            self._warnings.append(
+                f"verb '{verb}' dropped (no dispatch matched) - first "
+                f'from {self._label(rec_id)} at t={self._now:.2f}')
+
+    @property
+    def dropped_verbs(self) -> dict:
+        """verb -> silently-dropped poke count for this run."""
+        return dict(self._dropped_verbs)
+
+    def _verb_deferred(self, verb) -> None:
+        self._deferred_verbs[verb] = self._deferred_verbs.get(verb, 0) + 1
+
+    @property
+    def deferred_verbs(self) -> dict:
+        """verb -> poke count for DEFERRED (documented-unbuilt) verbs
+        this chart exercised - the coverage report's raw feed."""
+        return dict(self._deferred_verbs)
 
     def actor_id(self, actor) -> int | None:
         return getattr(actor, '_sim_id', None)
@@ -805,6 +834,8 @@ class SimEnvironment:
         actor = SimActor(self._now)
         actor.beat_fn = lambda: self._beat
         actor.queue_notify = lambda: self._queued.add(rec_id)
+        actor.dropped_notify = lambda verb: self._verb_dropped(rec_id, verb)
+        actor.deferred_notify = self._verb_deferred
         self._actors[rec_id] = actor
         self._tables[rec_id] = self._host.env["__make_recorder"](rec_id)
         self._active.append(rec_id)
@@ -1019,6 +1050,13 @@ class SimEnvironment:
             target_id = self._table_rec_id(args[0]) if args else None
             if target_id is not None and target_id in self._actors:
                 actor.proxy_target = target_id
+            return
+        if verb == 'cmd':
+            # Actor:cmd(s) parses s as an actor-command string and runs it
+            # NOW (Actor::RunCommands @0075b280) - the same dispatch as a
+            # classic XML command body on this actor.
+            if args and isinstance(args[0], str):
+                self._run_classic_body(rec_id, args[0])
             return
         self._sync(rec_id)
         actor.poke(verb, list(args))
