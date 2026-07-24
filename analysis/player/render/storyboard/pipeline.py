@@ -143,12 +143,14 @@ class DrawablePipeline:
         self._evaluator = None
         self._executor = None
         self._id_maps = None
+        self._res_applied = False
 
     @property
     def healthy(self) -> bool:
         return not self._disabled
 
-    def delegate(self, frame, ctx, painter, field_captures=None) -> bool:
+    def delegate(self, frame, ctx, painter, field_captures=None,
+                 overscan=None) -> bool:
         """Render the chart region through the Drawable core and blit it.
 
         ``field_captures`` maps a field scope ('field', 'field2', ...) to
@@ -165,15 +167,18 @@ class DrawablePipeline:
         if self._disabled:
             return False
         try:
-            return self._delegate(frame, ctx, painter, field_captures)
+            return self._delegate(frame, ctx, painter, field_captures,
+                                  overscan)
         except Exception:
             self._disable("frame render failed")
             return False
 
-    def _delegate(self, frame, ctx, painter, field_captures) -> bool:
+    def _delegate(self, frame, ctx, painter, field_captures,
+                  overscan) -> bool:
         if not self._ensure_built(painter):
             return False
-        self._ingest_field_captures(field_captures)
+        self._apply_resolution(ctx, painter)
+        self._ingest_field_captures(field_captures, overscan)
         t = float(ctx.t_now)
         feed_ids, counts, feed_u, feed_f = _unpack_feed(
             self._bridge.feed_frame(self._compiled, t, self._id_maps))
@@ -186,7 +191,24 @@ class DrawablePipeline:
         # caller then falls through to the normal render path.
         return self._executor.render_and_present(u, f, painter, ctx.chart_rect)
 
-    def _ingest_field_captures(self, field_captures) -> None:
+    def _apply_resolution(self, ctx, painter) -> None:
+        """Match the composite's FBO resolution to the chart rect's
+        device size ONCE (before any target allocates): a 640x480-pixel
+        composite stretched onto a ~1750px chart rect reads as ultra low
+        res. Geometry stays logical; only allocation scales."""
+        if self._res_applied:
+            return
+        self._res_applied = True
+        try:
+            dpr = float(painter.device().devicePixelRatioF())
+        except Exception:
+            dpr = 1.0
+        chart_w = float(ctx.chart_rect[2]) * dpr
+        chart_h = float(ctx.chart_rect[3]) * dpr
+        self._executor.set_resolution_scale(
+            max(chart_w / _SCREEN_W, chart_h / _SCREEN_H))
+
+    def _ingest_field_captures(self, field_captures, overscan=None) -> None:
         """Bind each live field capture into its mapped field drawable's
         content. A scope with no drawable in the doc (or no capture this
         frame) is skipped. The captures are the renderer's GL capture
@@ -202,9 +224,10 @@ class DrawablePipeline:
             drawable_id = fields.get(scope)
             if drawable_id is None:
                 continue
-            self._bind_capture(drawable_id, handle)
+            self._bind_capture(drawable_id, handle,
+                               (overscan or {}).get(scope))
 
-    def _bind_capture(self, drawable_id, handle) -> None:
+    def _bind_capture(self, drawable_id, handle, margins=None) -> None:
         """Bind one renderer capture handle as ``drawable_id``'s content.
         A GL capture handle resolves to (texture id, pixel w, h) and binds
         via the GL executor; None / an unresolvable handle un-binds the
@@ -215,7 +238,18 @@ class DrawablePipeline:
             self._executor.set_drawable_texture(drawable_id, 0, 0, 0)
             return
         texture_id, w_px, h_px = resolved
-        self._executor.set_drawable_texture(drawable_id, texture_id, w_px, h_px)
+        # An overscanned capture's window origin sits at (+mx, +my) in
+        # the capture (qt_renderer._overscan_blit); the drawable's
+        # logical box corresponds to the inset sub-rect, expressed here
+        # as texture fractions off the handle's LOGICAL size.
+        uv_rect = None
+        mx, my = margins or (0, 0)
+        lw = float(getattr(handle, 'w', 0) or 0)
+        lh = float(getattr(handle, 'h', 0) or 0)
+        if (mx or my) and lw > 0 and lh > 0:
+            uv_rect = (mx / lw, my / lh, (lw - mx) / lw, (lh - my) / lh)
+        self._executor.set_drawable_texture(drawable_id, texture_id,
+                                            w_px, h_px, uv_rect)
 
     def _ensure_built(self, painter) -> bool:
         """Cross Seam A once: build the doc + evaluator + GL executor. GL-ONLY

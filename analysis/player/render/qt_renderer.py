@@ -962,7 +962,8 @@ class QtPlayerRenderer:
             captures = {'field': self._field_src, 'full': self._backdrop_src,
                         **self._player_field_src}
             if (_pipeline is not None
-                    and _pipeline.delegate(frame, ctx, painter, captures)):
+                    and _pipeline.delegate(frame, ctx, painter, captures,
+                                           dict(self._field_overscan))):
                 return
         from analysis.games.notitg.field_instances import design_box
         design = design_box(ctx.chart_rect)

@@ -277,6 +277,11 @@ class GLExecutor:
         # composed screen presents OVER the renderer's painted backdrop
         # instead of covering it opaque black (the black-chart-region fix).
         self._clear_override: dict[int, int] = {}
+        # FBOs allocate at logical * scale pixels so the composite is not
+        # authored-resolution (640x480) stretched onto the chart rect; the
+        # pipeline sets this from the chart rect's device size before the
+        # first frame. Geometry stays in logical units throughout.
+        self._res_scale = 1.0
         self._vao = None
         self._vbo = None
         self._skipped: set[str] = set()
@@ -296,8 +301,21 @@ class GLExecutor:
         presents over the painted backdrop instead of covering it black."""
         self._clear_override[int(drawable_id)] = int(mode)
 
+    def set_resolution_scale(self, scale: float) -> None:
+        """Set the FBO allocation scale (device px per logical unit).
+        Changing it drops every allocated target so they re-allocate at
+        the new size on next use - set it once, before the first frame
+        (retained content does not survive a change)."""
+        scale = max(1.0, float(scale))
+        if abs(scale - self._res_scale) < 1e-6:
+            return
+        self._res_scale = scale
+        for fbo in self._targets.values():
+            fbo.release()
+        self._targets.clear()
+
     def set_drawable_texture(self, drawable_id: int, texture_id: int,
-                             w_px: int, h_px: int) -> None:
+                             w_px: int, h_px: int, uv_rect=None) -> None:
         """Bind an EXTERNAL GL texture as a drawable's content, keyed by
         DrawableId. The texture is NOT owned (never generated, bound, or
         deleted here); a SRC_DRAWABLE blit of ``drawable_id`` samples it
@@ -313,8 +331,13 @@ class GLExecutor:
         if not texture_id:
             self._bound_textures.pop(int(drawable_id), None)
             return
+        # ``uv_rect`` = (x0, y0, x1, y1) fractions of the texture in y-down
+        # content space naming the sub-region that corresponds to the
+        # drawable's logical box (an overscan-padded capture's margins crop
+        # away here); None = the whole texture.
         self._bound_textures[int(drawable_id)] = (
-            int(texture_id), max(1, int(w_px)), max(1, int(h_px)))
+            int(texture_id), max(1, int(w_px)), max(1, int(h_px)),
+            tuple(uv_rect) if uv_rect is not None else None)
 
     def execute(
         self,
@@ -508,7 +531,8 @@ class GLExecutor:
         if fbo is not None:
             return fbo
         w, h = self._sizes[drawable_id]
-        pw, ph = max(1, int(round(w))), max(1, int(round(h)))
+        pw = max(1, int(round(w * self._res_scale)))
+        ph = max(1, int(round(h * self._res_scale)))
         fbo = QOpenGLFramebufferObject(
             pw, ph, QOpenGLFramebufferObject.Attachment.CombinedDepthStencil)
         if not fbo.isValid():
@@ -595,10 +619,13 @@ class GLExecutor:
         tint = (float(frec[_F_TINT]), float(frec[_F_TINT + 1]), float(frec[_F_TINT + 2]))
         additive = int(urec[_U_BLEND]) == _BLEND_ADDITIVE
 
-        target = self._targets.get(target_stack[-1])
-        if target is None:
+        target_id = target_stack[-1]
+        if self._targets.get(target_id) is None:
             return
-        tw, th = target.width(), target.height()
+        # NDC mapping runs in the target's LOGICAL units; the FBO may be
+        # allocated at logical * resolution_scale pixels (the viewport
+        # handles that - geometry must not).
+        tw, th = self._sizes[target_id]
         mat3 = np.array(frec[:9], dtype=np.float64)
 
         if additive:
@@ -610,6 +637,8 @@ class GLExecutor:
                 # An image's logical box is its natural (pixel) size; the
                 # item transform scales it (source-logical == pixels).
                 uploaded = self._image_texture(gf, int(urec[_U_B]))
+                if uploaded is not None and len(uploaded) == 3:
+                    uploaded = (*uploaded, None)
                 logical = None if uploaded is None else (uploaded[1], uploaded[2])
                 self._draw_texture(gf, mat3, tw, th, frec, tint, opacity,
                                    uploaded, logical)
@@ -670,7 +699,7 @@ class GLExecutor:
         fbo = self._targets.get(drawable_id)
         if fbo is None:
             return None
-        return fbo.texture(), fbo.width(), fbo.height()
+        return fbo.texture(), fbo.width(), fbo.height(), None
 
     def _draw_fill(self, gf, mat3, tw, th, tint, opacity) -> None:
         entry = self._programs[1]
@@ -692,7 +721,8 @@ class GLExecutor:
                       logical) -> None:
         if uploaded is None or logical is None:
             return
-        texture, sw, sh = uploaded
+        texture, sw, sh = uploaded[0], uploaded[1], uploaded[2]
+        sub = uploaded[3] if len(uploaded) > 3 else None
         lw, lh = logical
         if lw <= 0.0 or lh <= 0.0 or sw <= 0 or sh <= 0:
             return
@@ -715,8 +745,15 @@ class GLExecutor:
             return
         x0, y0 = crop_l * lw, crop_t * lh
         x1, y1 = x0 + vis_fw * lw, y0 + vis_fh * lh
-        u0, u1 = crop_l, crop_l + vis_fw
-        v0, v1 = 1.0 - crop_t, 1.0 - (crop_t + vis_fh)
+        # Sample fractions compose into the bound sub-rect (an overscanned
+        # capture's design-box region); the flip to the y-up FBO texture
+        # convention happens last.
+        bx0, by0, bx1, by1 = sub if sub is not None else (0.0, 0.0, 1.0, 1.0)
+        span_u, span_v = bx1 - bx0, by1 - by0
+        u0 = bx0 + crop_l * span_u
+        u1 = bx0 + (crop_l + vis_fw) * span_u
+        v0 = 1.0 - (by0 + crop_t * span_v)
+        v1 = 1.0 - (by0 + (crop_t + vis_fh) * span_v)
 
         program.bind()
         gf.glActiveTexture(GL_TEXTURE0)
