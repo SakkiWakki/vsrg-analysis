@@ -598,8 +598,9 @@ class SimEnvironment:
         if var:
             self._host.env[var] = self._tables[rec_id]
         value = actor.attrs.get('InitCommand', '')
-        if value.startswith('%'):
+        if value:
             self._load_bodies.append((rec_id, value))
+        if value.startswith('%'):
             self._run_lua_body(rec_id, _strip_lua_wrapper(value),
                                f'{self._label(rec_id)}.InitCommand',
                                load=True)
@@ -721,8 +722,9 @@ class SimEnvironment:
     def _run_load(self, actor, attr) -> None:
         rec_id = self._id_for(actor)
         value = actor.attrs.get(attr, '')
-        if value.startswith('%'):
+        if value:
             self._load_bodies.append((rec_id, value))
+        if value.startswith('%'):
             self._run_lua_body(rec_id, _strip_lua_wrapper(value),
                                f'{self._label(rec_id)}.{attr}', load=True)
         elif value:

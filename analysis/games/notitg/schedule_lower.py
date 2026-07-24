@@ -67,6 +67,28 @@ class PreviewCompile:
 
 
 @dataclass(slots=True)
+class _Broadcast:
+    """A deferred message broadcast payload - distinct from a raw
+    handler-body string so a queued named command's body is never
+    mistaken for a message name."""
+    message: str
+
+
+class _Scope(dict):
+    """The walk's name-resolution scope: actor-global bindings (the
+    dict payload, so every `names.get` site reads it directly) plus
+    the fold's live registration rows for collection-member indexing
+    (`afts[3]` needs membership AT FIRE TIME - collections that are
+    empty post-load fill in as registration handlers fold)."""
+
+    __slots__ = ('registrations',)
+
+    def __init__(self, actors, registrations):
+        super().__init__(actors)
+        self.registrations = registrations
+
+
+@dataclass(slots=True)
 class _DeferredBody:
     """A mod_message closure riding the task heap: its parsed statements
     plus the const upvalues it captured from the enclosing body (`local
@@ -100,8 +122,9 @@ def lower_actions(env, player: int = 1, to_beats=None,
     emissions: dict = {}
     state: dict = {}
     queue_end: dict = {}
-    names = {name: rec_id
-             for rec_id, name in env.named_actor_ids().items()}
+    names = _Scope({name: rec_id
+                    for rec_id, name in env.named_actor_ids().items()},
+                   out.registrations)
 
     tasks: list = []
     order = 0
@@ -123,7 +146,7 @@ def lower_actions(env, player: int = 1, to_beats=None,
         deferred = _load_schedule_facts(env, names, rec_id, body,
                                         load_s, out)
         order = _push_deferred(env, deferred, tasks, order, 0,
-                               to_seconds, out)
+                               to_seconds, to_beats, out)
 
     while tasks:
         fire_s, _n, beat, rec_id, body, depth = heapq.heappop(tasks)
@@ -139,7 +162,7 @@ def lower_actions(env, player: int = 1, to_beats=None,
             deferred = _harvest_side_facts(env, names, rec_id, body,
                                            beat, fire_s, out)
             order = _push_deferred(env, deferred, tasks, order, depth,
-                                   to_seconds, out)
+                                   to_seconds, to_beats, out)
             continue
         out.lifted_handlers += 1
         fires = _fold_handler(rec_id, handler, fire_s, beat, player,
@@ -147,7 +170,7 @@ def lower_actions(env, player: int = 1, to_beats=None,
         order = _queue_broadcasts(env, fires, tasks, order, depth,
                                   to_beats, beat, out)
         order = _push_deferred(env, handler.deferred, tasks, order,
-                               depth, to_seconds, out)
+                               depth, to_seconds, to_beats, out)
 
     out.emissions = emissions
     for rec_id, per_prop in emissions.items():
@@ -173,18 +196,27 @@ def _queue_broadcasts(env, fires, tasks, order, depth, to_beats,
     return order
 
 
-def _push_deferred(env, rows, tasks, order, depth, to_seconds, out) -> int:
-    """`mod_message(beat, payload)` deferrals onto the task heap: a
-    string payload broadcasts that message's handlers at the beat, a
-    closure payload becomes an anonymous handler (its parsed statements
-    ride the heap directly in place of a body string)."""
-    for b, rec_id, payload in rows:
-        if to_seconds is None or depth >= _MAX_COMMAND_DEPTH:
+def _push_deferred(env, rows, tasks, order, depth, to_seconds, to_beats,
+                   out) -> int:
+    """Deferral rows (beat, rec_id, payload, fire_s) onto the task
+    heap. mod_message rows carry a fire BEAT (fire_s None, resolved via
+    to_seconds); load-queue rows carry exact SECONDS (beat None). A
+    string payload broadcasts that message's handlers; a _DeferredBody
+    or named-command body string becomes the handler itself."""
+    for b, rec_id, payload, fire_s in rows:
+        if depth >= _MAX_COMMAND_DEPTH:
             out.residue_handlers += 1
             continue
-        fire_s = to_seconds(b)
-        if isinstance(payload, str):
-            for handler_rec, body in env._message_commands.get(payload, ()):
+        if fire_s is None:
+            if to_seconds is None:
+                out.residue_handlers += 1
+                continue
+            fire_s = to_seconds(b)
+        if b is None:
+            b = to_beats(fire_s) if to_beats is not None else 0.0
+        if isinstance(payload, _Broadcast):
+            handlers = env._message_commands.get(payload.message, ())
+            for handler_rec, body in handlers:
                 heapq.heappush(tasks, (fire_s, order, b, handler_rec,
                                        body, depth + 1))
                 order += 1
@@ -323,7 +355,7 @@ def _harvest_side_facts(env, names, rec_id, body, beat, fire_s,
                 out.global_sets.setdefault(values[0], []).append(
                     (fire_s, values[1]))
             case '__defer__':
-                deferred.append((values[0], target, values[1]))
+                deferred.append((values[0], target, values[1], None))
             case _ if target not in tweened:
                 targets = _setter_targets(verb, values)
                 for prop, value in (targets or {}).items():
@@ -334,25 +366,51 @@ def _harvest_side_facts(env, names, rec_id, body, beat, fire_s,
 
 
 def _load_schedule_facts(env, names, rec_id, body, load_s, out) -> list:
-    """Deferrals and registrations out of an already-executed load body
-    (tolerant walk); setter and global facts are deliberately dropped -
-    the post-load state is their exact result, while a harvested step
-    could pin a value the rest of the load pass overwrote."""
-    stmts = _handler_stmts(body)
-    if stmts is None:
-        return []
-    steps: list = []
-    _walk_steps(env, names, rec_id, stmts, 0.0, load_s, steps,
-                strict=False, frame={})
+    """The schedule a load body leaves behind: registrations,
+    mod_message deferrals, and QUEUED named commands (`sleep,0.02;
+    queuecommand,SetMe` - the queue drains past load, so the named body
+    replays at load + accumulated tween time). Setter and global facts
+    are deliberately dropped - the post-load state is their exact
+    result, while a harvested step could pin a value the rest of the
+    load pass overwrote. Queue accounting per target goes conservative
+    (None) on an unknowable duration or any skipped statement."""
+    if isinstance(body, str) and not body.startswith('%'):
+        steps = _classic_steps(env, rec_id, body, 0.0, load_s) or []
+    else:
+        stmts = _handler_stmts(body)
+        if stmts is None:
+            return []
+        steps = []
+        _walk_steps(env, names, rec_id, stmts, 0.0, load_s, steps,
+                    strict=False, frame={})
 
     deferred: list = []
+    delay: dict = {}
+    skipped = False
     for target, verb, values in steps:
         match verb:
             case '__register__':
                 out.registrations.setdefault(values[0], []).append(
                     (load_s, target))
             case '__defer__':
-                deferred.append((values[0], target, values[1]))
+                deferred.append((values[0], target, values[1], None))
+            case '__skipped__':
+                skipped = True
+            case _ if verb == 'sleep' or verb in _SIM_TWEEN_EASING:
+                dur = values[0] if values else None
+                waited = delay.get(target, 0.0)
+                delay[target] = waited + dur \
+                    if isinstance(dur, float) and waited is not None \
+                    else None
+            case 'queuecommand':
+                name = values[0] if values else None
+                queued = env._named_commands.get(target, {}).get(name) \
+                    if isinstance(name, str) else None
+                waited = delay.get(target, 0.0)
+                if queued is not None and waited is not None \
+                        and not skipped:
+                    deferred.append((None, target, queued,
+                                     load_s + waited))
     return deferred
 
 
@@ -423,15 +481,29 @@ def _walk_steps(env, names, rec_id, stmts, beat, fire_s, steps,
     resolves constant). `frame` carries const local bindings forward
     (None entries poison rebound-non-const names)."""
     for stmt in stmts:
-        if not _step_from(env, names, rec_id, stmt, beat, fire_s, steps,
-                          strict, frame) and strict:
+        if _step_from(env, names, rec_id, stmt, beat, fire_s, steps,
+                      strict, frame):
+            continue
+        if strict:
             return False
+        # A skipped statement could hide queue-time verbs; the marker
+        # lets sequential consumers (load queue accounting) go
+        # conservative from this point on.
+        steps.append((rec_id, '__skipped__', []))
     return True
 
 
 def _step_from(env, names, rec_id, stmt, beat, fire_s, steps,
                strict, frame) -> bool:
     match stmt:
+        case ast.ExprStmt(expr=ast.Method(
+                recv=ast.Sym(name='MESSAGEMAN'), name='Broadcast',
+                args=(ast.Str(value=message), *_rest))):
+            # An immediate broadcast: the message's handlers fire at
+            # this handler's own clock (a zero-delay deferral).
+            steps.append((rec_id, '__defer__',
+                          [beat, _Broadcast(message)]))
+            return True
         case ast.ExprStmt(expr=ast.Method(recv=recv, name=verb,
                                           args=args)):
             target = _recv_target(env, names, rec_id, recv, beat, fire_s,
@@ -463,7 +535,7 @@ def _step_from(env, names, rec_id, stmt, beat, fire_s, steps,
             match payload:
                 case ast.Str(value=message):
                     steps.append((rec_id, '__defer__',
-                                  [fire_beat, message]))
+                                  [fire_beat, _Broadcast(message)]))
                 case ast.FuncExpr(params=(), body=closure_body):
                     steps.append((rec_id, '__defer__',
                                   [fire_beat, _DeferredBody(
@@ -482,10 +554,22 @@ def _step_from(env, names, rec_id, stmt, beat, fire_s, steps,
             # becomes a step timeline the residue evaluation reads
             # at its exact fire time.
             value = _const_node(env, value_node, beat, fire_s, frame)
-            if value is None:
-                return False
-            steps.append((rec_id, '__setglobal__', [global_name, value]))
-            return True
+            if value is not None:
+                steps.append((rec_id, '__setglobal__',
+                              [global_name, value]))
+                return True
+            # The older template dispatches a literal action table
+            # (`mod_actions = {{beat, closure}, ...}`) instead of
+            # mod_message calls - the same schedule data. Tolerant-only:
+            # a strict walk cannot represent the table binding itself,
+            # so the handler goes residue and the harvest re-walk (this
+            # branch) extracts the deferrals.
+            rows = None if strict else _deferred_table_rows(
+                env, value_node, beat, fire_s, frame)
+            if rows:
+                steps.extend((rec_id, '__defer__', row) for row in rows)
+                return True
+            return False
         case ast.Local(names=local_names, values=values):
             # Const locals join the frame (the `local m_bl = 60/150`
             # tween-length idiom); a non-const initializer poisons its
@@ -561,6 +645,70 @@ def _recv_target(env, names, rec_id, recv, beat, fire_s, frame):
         case ast.Index(base=ast.Sym(name='_G'), key=key_node):
             name = _const_node(env, key_node, beat, fire_s, frame)
             return names.get(name) if isinstance(name, str) else None
+        case ast.Index(base=ast.Sym(name=table_name), key=key_node):
+            # A collection member (`afts[i+1]:linear(...)` after loop
+            # unroll): a const index resolves against the load-built
+            # host table, or against fold-time registration rows for
+            # collections that fill in mid-chart.
+            key = _const_node(env, key_node, beat, fire_s, frame)
+            if not isinstance(key, float):
+                return None
+            return _member_rec(env, names, table_name, int(key), fire_s)
+        case _:
+            return None
+
+
+def _member_rec(env, names, table_name: str, index: int, fire_s: float):
+    try:
+        host = env._host.env
+        table = host[table_name] if table_name in host else None
+        member = None if table is None else table[index]
+        rec = None if member is None else member['__recorder_id']
+    except Exception:
+        rec = None
+    if isinstance(rec, (int, float)):
+        return int(rec)
+
+    rows = getattr(names, 'registrations', {}).get(table_name)
+    if rows is None:
+        return None
+    members = [member for t, member in sorted(rows) if t <= fire_s]
+    if 1 <= index <= len(members):
+        return members[index - 1]
+    return None
+
+
+def _deferred_table_rows(env, node, beat, fire_s, frame):
+    """`{{beat, payload [, persistent]}, ...}` action-table rows as
+    deferral [fire_beat, payload] pairs - the mod_message signature
+    stored as data (the older template's dispatch table). Payloads are
+    message-name strings or zero-param closures; anything else refuses
+    the WHOLE table (a partial read of a dispatch table would drop
+    scheduled work silently), which keeps modstring tables ({beat, len,
+    'mods...'} rows) unmatched."""
+    match node:
+        case ast.Table(array=array, fields=()) if array:
+            rows = []
+            for entry in array:
+                match entry:
+                    case ast.Table(array=(beat_node, payload,
+                                          *_flags), fields=()):
+                        fire_beat = _const_node(env, beat_node, beat,
+                                                fire_s, frame)
+                        if not isinstance(fire_beat, float):
+                            return None
+                        match payload:
+                            case ast.Str(value=message):
+                                rows.append([fire_beat,
+                                             _Broadcast(message)])
+                            case ast.FuncExpr(params=(), body=body):
+                                rows.append([fire_beat, _DeferredBody(
+                                    body, dict(frame))])
+                            case _:
+                                return None
+                    case _:
+                        return None
+            return rows
         case _:
             return None
 
@@ -675,7 +823,7 @@ def _apply_verb(env, names, rec_id, target, verb, values, index,
         handler.global_sets.append((values[0], values[1]))
         return True
     if verb == '__defer__':
-        handler.deferred.append((values[0], rec_id, values[1]))
+        handler.deferred.append((values[0], rec_id, values[1], None))
         return True
     if verb in ('queuecommand', 'playcommand'):
         return _inline_named(env, names, rec_id, target, values, handler,
