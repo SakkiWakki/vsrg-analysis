@@ -952,11 +952,15 @@ class QtPlayerRenderer:
         if os.environ.get('VSRG_DRAWABLE_PIPELINE') == '1':
             from analysis.player.render.storyboard.pipeline import pipeline_for
             _pipeline = pipeline_for(ctx.player)
-            # Hand this frame's live field captures (the transparent
-            # field-layers pixmap + any per-player field{N} captures) to
-            # the pipeline as the field-scope drawables' content, so its
-            # SRC_DRAWABLE blits draw real notes over the painted backdrop.
-            captures = {'field': self._field_src, **self._player_field_src}
+            # Hand this frame's live GL capture handles (the transparent
+            # field-layers capture, any per-player field{N} captures, and the
+            # 'full'-scope backdrop capture) to the pipeline as the field-scope
+            # drawables' content. The GL executor binds their FBO textures
+            # directly (no readback), so its SRC_DRAWABLE blits draw real notes
+            # over the painted backdrop. A scope with no drawable in the doc is
+            # skipped, so handing 'full' is harmless when the doc lacks it.
+            captures = {'field': self._field_src, 'full': self._backdrop_src,
+                        **self._player_field_src}
             if (_pipeline is not None
                     and _pipeline.delegate(frame, ctx, painter, captures)):
                 return

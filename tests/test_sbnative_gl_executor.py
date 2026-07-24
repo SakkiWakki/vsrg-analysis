@@ -125,6 +125,83 @@ def test_snapshot_shows_pre_curtain_content_not_black(gl):
     assert _rgb(screen, 2, 2) == pytest.approx((40, 120, 200), abs=2)
 
 
+def _upload_texture(image):
+    """Upload a QImage to a plain GL texture via the Qt GL functions and
+    return (id, w, h). Mirrors a renderer capture FBO's ``texture()`` for the
+    external-binding test - the executor never owns or deletes it."""
+    from PySide6.QtGui import QOpenGLContext
+    from analysis.player.render.storyboard.gl_executor import _upload_image
+    gf = QOpenGLContext.currentContext().extraFunctions()
+    return _upload_image(gf, image)   # (texture id, w, h)
+
+
+def test_oversized_bound_texture_normalizes_to_the_logical_box(gl):
+    # THE ZOOM FIX (drawable-ir.md rule 5), GL-side: a 1280x960 texture bound
+    # (external, non-owned) as a 640x480 field drawable's content covers that
+    # drawable's LOGICAL box regardless of its pixel size. A fullscreen
+    # (identity mat3) SRC_DRAWABLE blit shows the WHOLE texture scaled into the
+    # 640x480 screen, not the top-left quarter.
+    b = sn.DocBuilder(640.0, 480.0)
+    field = b.drawable(640.0, 480.0, False, False)  # command-less field scope
+    b.item(0, sn.SRC_DRAWABLE, field, sx_rest=1.0, sy_rest=1.0)
+    ev = b.finish()
+
+    # A 1280x960 texture: left half red, right half green (like the raster
+    # golden). Qt paints y-up into GL textures relative to a QImage's y-down,
+    # but a left/right split is orientation-independent, so the horizontal
+    # halves prove normalization without a flip caveat.
+    content = QImage(1280, 960, QImage.Format.Format_ARGB32_Premultiplied)
+    content.fill(QColor(0, 0, 0, 255))
+    from PySide6.QtGui import QPainter
+    p = QPainter(content)
+    p.fillRect(0, 0, 640, 960, QColor(255, 0, 0, 255))       # left half red
+    p.fillRect(640, 0, 640, 960, QColor(0, 255, 0, 255))     # right half green
+    p.end()
+    tex, tw, thh = _upload_texture(content)
+
+    ex = GLExecutor({}, [(640.0, 480.0), (640.0, 480.0)])
+    ex.set_drawable_texture(field, tex, tw, thh)
+    u, f = _frames(ev, 0.0)
+    screen = ex.execute(u, f)
+
+    assert not ex.broken
+    # Left third of the screen samples the image's red left half; right third
+    # the green right half. Zoomed-in (1280 source units into 640 px) would
+    # keep the whole screen red - green on the right proves the fix.
+    assert _rgb(screen, 100, 240) == (255, 0, 0)
+    assert _rgb(screen, 540, 240) == (0, 255, 0)
+
+
+def test_bound_external_texture_draws_and_unbinds(gl):
+    # GL BINDING (spec 2): set_drawable_texture binds an external capture
+    # texture as a command-less field drawable's content; a SRC_DRAWABLE blit
+    # samples it directly (no readback, no upload). Un-binding (texture 0)
+    # drops it so the field reads empty again.
+    b = sn.DocBuilder(4.0, 4.0)
+    field = b.drawable(4.0, 4.0, False, False)
+    b.item(0, sn.SRC_DRAWABLE, field, sx_rest=1.0, sy_rest=1.0)
+    ev = b.finish()
+
+    content = _solid(4, 4, QColor(0, 200, 0, 255))
+    tex, tw, thh = _upload_texture(content)
+
+    ex = GLExecutor({}, [(4.0, 4.0), (4.0, 4.0)])
+    u, f = _frames(ev, 0.0)
+
+    # Nothing bound: the field read draws nothing, so the screen keeps its
+    # cleared color (OpaqueBlack - GLExecutor has no set_clear knob).
+    assert _rgb(ex.execute(u, f), 2, 2) == (0, 0, 0)
+
+    ex.set_drawable_texture(field, tex, tw, thh)
+    drawn = ex.execute(u, f)
+    assert not ex.broken
+    assert _rgb(drawn, 2, 2) == (0, 200, 0)   # the bound texture shows
+
+    # Un-bind (texture 0): the field reads empty, the screen is black again.
+    ex.set_drawable_texture(field, 0, 0, 0)
+    assert _rgb(ex.execute(u, f), 2, 2) == (0, 0, 0)
+
+
 def test_opacity_ramp_changes_intensity_between_times(gl):
     # An opacity channel ramps 0 -> 1 over 2s. A white image over the
     # (opaque black) screen is dimmer at t=0.5 than at t=1.5.

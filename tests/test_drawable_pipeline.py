@@ -22,11 +22,65 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import storyboard_native as sn  # noqa: E402
 from PySide6.QtCore import QRectF  # noqa: E402
 from PySide6.QtGui import QColor, QImage, QPainter  # noqa: E402
+from PySide6.QtOpenGL import (QOpenGLFramebufferObject,  # noqa: E402
+                             QOpenGLPaintDevice)
 
 from analysis.player.render.storyboard import pipeline as pl  # noqa: E402
 
 
 CHART_RECT = (40, 30, 320, 240)
+
+
+@pytest.fixture(scope="module")
+def gl(_qapp):
+    """A current offscreen GL 3+ context (the QOffscreenSurface pattern). The
+    pipeline is GL-ONLY, so its drawing tests need a GL painter; this fixture
+    skips the whole module when no context can be made (headless box)."""
+    from PySide6.QtGui import (QOffscreenSurface, QOpenGLContext,
+                               QSurfaceFormat)
+    fmt = QSurfaceFormat()
+    fmt.setMajorVersion(3)
+    fmt.setMinorVersion(2)
+    fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
+    context = QOpenGLContext()
+    context.setFormat(fmt)
+    surface = QOffscreenSurface()
+    surface.setFormat(fmt)
+    surface.create()
+    if not (context.create() and surface.isValid()
+            and context.makeCurrent(surface)):
+        pytest.skip("no OpenGL context on this platform")
+    yield context
+    context.doneCurrent()
+
+
+class _GLTarget:
+    """A GL render target the pipeline can present onto: an FBO + a
+    QOpenGLPaintDevice-backed QPainter (so ``gl_capture.usable`` sees an
+    OpenGL2 engine). Pre-paints the chart rect a backdrop color when asked, so
+    a transparent composite proves the backdrop shows through. Reads back for
+    assertions only (the app path never reads back; tests may)."""
+
+    def __init__(self, rect, backdrop=None):
+        w = rect[0] + rect[2] + 20
+        h = rect[1] + rect[3] + 20
+        self.fbo = QOpenGLFramebufferObject(
+            w, h, QOpenGLFramebufferObject.Attachment.CombinedDepthStencil)
+        self.fbo.bind()
+        self.device = QOpenGLPaintDevice(w, h)
+        self.painter = QPainter(self.device)
+        self.painter.fillRect(0, 0, w, h, QColor(0, 0, 0, 0))
+        if backdrop is not None:
+            x, y, rw, rh = rect
+            self.painter.fillRect(QRectF(float(x), float(y), float(rw),
+                                         float(rh)), backdrop)
+
+    def present(self, pipe, ctx, **kw):
+        drew = pipe.delegate(frame=object(), ctx=ctx, painter=self.painter, **kw)
+        self.painter.end()
+        image = self.fbo.toImage()
+        self.fbo.release()
+        return drew, image
 _SCREEN_W = pl._SCREEN_W
 _SCREEN_H = pl._SCREEN_H
 
@@ -110,13 +164,6 @@ def _install_bridge(monkeypatch, bridge):
     monkeypatch.setattr(pl, '_load_bridge', lambda: bridge)
 
 
-def _screen_image(rect):
-    img = QImage(rect[0] + rect[2] + 20, rect[1] + rect[3] + 20,
-                 QImage.Format.Format_ARGB32_Premultiplied)
-    img.fill(0)
-    return img
-
-
 def _build_pipeline(monkeypatch, bridge):
     _install_bridge(monkeypatch, bridge)
     player = _Player(compiled={'field_instances': [object()]})
@@ -125,20 +172,15 @@ def _build_pipeline(monkeypatch, bridge):
     return player, pipe
 
 
-def test_delegate_composes_and_blits_into_chart_rect(monkeypatch):
+def test_delegate_composes_and_blits_into_chart_rect(gl, monkeypatch):
     player, pipe = _build_pipeline(monkeypatch, _fake_bridge())
 
-    target = _screen_image(CHART_RECT)
-    painter = QPainter(target)
     ctx = _Ctx(t_now=1.0, player=player)
-    try:
-        drew = pipe.delegate(frame=object(), ctx=ctx, painter=painter)
-    finally:
-        painter.end()
+    drew, target = _GLTarget(CHART_RECT).present(pipe, ctx)
 
     assert drew is True
     x, y, w, h = CHART_RECT
-    # The fed red fill covers the whole screen drawable, blitted into the
+    # The fed red fill covers the whole screen drawable, presented into the
     # chart rect: a pixel well inside the rect is red, one outside is clear.
     inside = target.pixelColor(x + w // 2, y + h // 2)
     outside = target.pixelColor(x + w + 5, y + h + 5)
@@ -146,62 +188,43 @@ def test_delegate_composes_and_blits_into_chart_rect(monkeypatch):
     assert outside.alpha() == 0
 
 
-def test_delegate_accepts_bridge_bytes_and_coverage(monkeypatch):
+def test_delegate_accepts_bridge_bytes_and_coverage(gl, monkeypatch):
     # The real B3 feed_frame returns serialized buffers + a coverage dict;
     # the pipeline must unpack the 5-tuple and pass the bytes straight to
     # the evaluator, drawing the same red fill.
     player, pipe = _build_pipeline(
         monkeypatch, _fake_bridge(bytes_feed=True))
-    target = _screen_image(CHART_RECT)
-    painter = QPainter(target)
     ctx = _Ctx(t_now=0.5, player=player)
-    try:
-        drew = pipe.delegate(frame=object(), ctx=ctx, painter=painter)
-    finally:
-        painter.end()
+    drew, target = _GLTarget(CHART_RECT).present(pipe, ctx)
     assert drew is True
     x, y, w, h = CHART_RECT
     inside = target.pixelColor(x + w // 2, y + h // 2)
     assert inside.red() > 200 and inside.green() < 60 and inside.blue() < 60
 
 
-def test_delegate_leaves_chart_rect_bounds(monkeypatch):
+def test_delegate_leaves_chart_rect_bounds(gl, monkeypatch):
     player, pipe = _build_pipeline(monkeypatch, _fake_bridge())
-    target = _screen_image(CHART_RECT)
-    painter = QPainter(target)
     ctx = _Ctx(t_now=0.0, player=player)
-    try:
-        pipe.delegate(frame=object(), ctx=ctx, painter=painter)
-    finally:
-        painter.end()
+    _drew, target = _GLTarget(CHART_RECT).present(pipe, ctx)
     x, y, w, h = CHART_RECT
-    # Nothing painted above/left of the chart rect (the blit is clipped to
-    # the rect region by the drawImage target rectangle).
+    # Nothing presented above/left of the chart rect (the present quad covers
+    # only the rect region).
     assert target.pixelColor(x - 1, y - 1).alpha() == 0
     assert target.pixelColor(x + w // 2, y - 1).alpha() == 0
 
 
-def test_frame_exception_disables_permanently(monkeypatch):
+def test_frame_exception_disables_permanently(gl, monkeypatch):
     player, pipe = _build_pipeline(
         monkeypatch, _fake_bridge(raise_on_feed=True))
-    target = _screen_image(CHART_RECT)
-    painter = QPainter(target)
     ctx = _Ctx(t_now=0.0, player=player)
-    try:
-        drew = pipe.delegate(frame=object(), ctx=ctx, painter=painter)
-    finally:
-        painter.end()
+    drew, _target = _GLTarget(CHART_RECT).present(pipe, ctx)
     # The feed raised: the frame reports "not drawn" and the pipeline is
     # now permanently disabled for the session.
     assert drew is False
     assert pipe.healthy is False
     # A subsequent delegate also returns False without re-raising.
-    target2 = _screen_image(CHART_RECT)
-    painter2 = QPainter(target2)
-    try:
-        assert pipe.delegate(frame=object(), ctx=ctx, painter=painter2) is False
-    finally:
-        painter2.end()
+    drew2, _t2 = _GLTarget(CHART_RECT).present(pipe, ctx)
+    assert drew2 is False
 
 
 def test_missing_bridge_reports_unavailable(monkeypatch):
@@ -274,57 +297,58 @@ def _field_bridge():
     return Bridge()
 
 
-def test_fed_field_capture_appears_in_the_composite(monkeypatch):
-    # The core D1 behavior: the renderer hands a live field capture; the
-    # pipeline ingests it into the mapped field drawable so the SRC_DRAWABLE
-    # field blit draws those real pixels into the chart rect.
+class _FakeGLHandle:
+    """A stand-in for gl_capture._GLHandle: an FBO whose ``.texture()`` the
+    pipeline binds as a field drawable's content. Fills the FBO a solid color
+    so the composited field pixels are checkable."""
+
+    def __init__(self, w, h, color):
+        self.fbo = QOpenGLFramebufferObject(w, h)
+        self.fbo.bind()
+        dev = QOpenGLPaintDevice(w, h)
+        p = QPainter(dev)
+        p.fillRect(0, 0, w, h, color)
+        p.end()
+        self.fbo.release()
+
+
+def test_fed_field_capture_appears_in_the_composite(gl, monkeypatch):
+    # The core D1 behavior, GL-side: the renderer hands a live field GL
+    # capture; the pipeline binds its FBO texture into the mapped field
+    # drawable so the SRC_DRAWABLE field blit draws those real pixels into the
+    # chart rect - no readback.
     player, pipe = _build_pipeline(monkeypatch, _field_bridge())
 
-    field_capture = QImage(_SCREEN_W, _SCREEN_H,
-                           QImage.Format.Format_ARGB32_Premultiplied)
-    field_capture.fill(QColor(0, 180, 255, 255))  # a distinctive field color
-
-    target = _screen_image(CHART_RECT)
-    painter = QPainter(target)
+    field_capture = _FakeGLHandle(_SCREEN_W, _SCREEN_H,
+                                  QColor(0, 180, 255, 255))
     ctx = _Ctx(t_now=0.0, player=player)
-    try:
-        drew = pipe.delegate(frame=object(), ctx=ctx, painter=painter,
-                             field_captures={'field': field_capture})
-    finally:
-        painter.end()
+    drew, target = _GLTarget(CHART_RECT).present(
+        pipe, ctx, field_captures={'field': field_capture})
     assert drew is True
     x, y, w, h = CHART_RECT
     inside = target.pixelColor(x + w // 2, y + h // 2)
     assert (inside.red() < 60 and inside.green() > 120
-            and inside.blue() > 200)  # the fed field color composited in
+            and inside.blue() > 200)  # the bound field color composited in
 
 
-def test_no_field_capture_composites_transparently_not_black(monkeypatch):
-    # With no field content handed in (and no other opaque source), the
-    # composite is TRANSPARENT over the chart rect - the black-region fix:
-    # the screen root's clear override means the delegate overlays the
-    # backdrop instead of covering it with opaque black.
+def test_no_field_capture_composites_transparently_not_black(gl, monkeypatch):
+    # With no field content bound (and no other opaque source), the composite
+    # is TRANSPARENT over the chart rect - the black-region fix: the screen
+    # root's clear override means the delegate overlays the backdrop instead
+    # of covering it with opaque black.
     player, pipe = _build_pipeline(monkeypatch, _field_bridge())
-    target = _screen_image(CHART_RECT)
-    # Pre-paint the chart rect a backdrop color; a transparent composite
-    # must leave it visible where the field draws nothing.
-    painter = QPainter(target)
-    x, y, w, h = CHART_RECT
-    painter.fillRect(QRectF(float(x), float(y), float(w), float(h)),
-                     QColor(120, 40, 40, 255))
     ctx = _Ctx(t_now=0.0, player=player)
-    try:
-        drew = pipe.delegate(frame=object(), ctx=ctx, painter=painter,
-                             field_captures=None)
-    finally:
-        painter.end()
+    drew, target = _GLTarget(
+        CHART_RECT, backdrop=QColor(120, 40, 40, 255)).present(
+            pipe, ctx, field_captures=None)
     assert drew is True
     # The backdrop shows through the transparent composite (not black).
+    x, y, w, h = CHART_RECT
     inside = target.pixelColor(x + w // 2, y + h // 2)
     assert inside.red() > 100 and inside.green() < 70 and inside.blue() < 70
 
 
-def test_end_to_end_through_the_real_bridge(monkeypatch):
+def test_end_to_end_through_the_real_bridge(gl, monkeypatch):
     # Integration with B3's ACTUAL drawable_bridge (not the fake): a
     # synthetic single-proxy chart builds a real doc and feeds a real
     # entry stream; the pipeline composes and blits without error.
@@ -347,13 +371,8 @@ def test_end_to_end_through_the_real_bridge(monkeypatch):
 
     pipe = pl.build_pipeline(player)
     assert pipe is not None
-    target = _screen_image(CHART_RECT)
-    painter = QPainter(target)
     ctx = _Ctx(t_now=0.0, player=player)
-    try:
-        drew = pipe.delegate(frame=object(), ctx=ctx, painter=painter)
-    finally:
-        painter.end()
+    drew, _target = _GLTarget(CHART_RECT).present(pipe, ctx)
     # The real bridge translated the proxy entries into the feed and the
     # pipeline drew a frame without disabling itself.
     assert drew is True

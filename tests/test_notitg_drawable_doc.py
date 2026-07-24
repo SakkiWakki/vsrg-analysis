@@ -28,6 +28,7 @@ from analysis.games.notitg import field_compose as fc
 from analysis.games.notitg.field_instances import (
     NotitgFieldInstances, PlayerFieldsSpec)
 from analysis.player.render.effects.timeline import EventTimeline, Keyframe
+from analysis.player.render.storyboard.model import Element, build_timelines
 
 
 _EASE_LINEAR = 0
@@ -45,10 +46,12 @@ def _link(**pokes):
     return fc.link_timelines({p: _instant(v) for p, v in pokes.items()})
 
 
-def _compiled(instances, base_hidden=None, player_fields=None):
+def _compiled(instances, base_hidden=None, player_fields=None, tree=None):
     payload = {'field_instances': list(instances), 'base_field_hidden': base_hidden}
     if player_fields is not None:
         payload['player_fields'] = player_fields
+    if tree is not None:
+        payload['tree'] = list(tree)
     return payload
 
 
@@ -250,6 +253,154 @@ def test_dual_player_fields_get_distinct_drawables():
 
 
 # --------------------------------------------------------------------------
+# storyboard elements banded into the static doc
+# --------------------------------------------------------------------------
+
+_BACKGROUND_Z = -100
+_PRE_FIELD_Z = -75
+
+
+def _element(kind, z, *, asset=None, z_index=0, t_start=0.0, keyframes=None,
+             children=(), **fields):
+    """A synthetic storyboard Element at band `z`, resting at the SM defaults
+    with `keyframes` (property -> Keyframe list) written on top."""
+    return Element(
+        kind=kind, z=z, z_index=z_index, t_start=t_start, t_end=float('inf'),
+        anchor=(0.0, 0.0), origin=(0.5, 0.5),
+        timelines=build_timelines(keyframes=keyframes or {}),
+        asset=asset, children=tuple(children), **fields)
+
+
+def _sprite(z, path, **kw):
+    return _element('sprite', z, asset=path, **kw)
+
+
+def test_below_and_above_bands_split_around_the_field_stream():
+    # A background sprite (z<0) and a foreground sprite (z>=0) around one proxy:
+    # the below sprite draws first, the field instance next, the above last.
+    below = _sprite(_BACKGROUND_Z, '/tmp/bg.png',
+                    keyframes={'x': _instant(100.0), 'y': _instant(100.0)})
+    above = _sprite(50, '/tmp/fg.png',
+                    keyframes={'x': _instant(500.0), 'y': _instant(400.0)})
+    compiled = _compiled([_proxy('p', x=320.0, y=240.0)],
+                         tree=[below, above])
+    evaluator, id_maps, report = dd.build_static_doc(compiled)
+
+    assert report['elements_below'] == 1 and report['elements_above'] == 1
+    # Two distinct image ids collected, mapped to their absolute paths.
+    assert set(id_maps['images'].values()) == {'/tmp/bg.png', '/tmp/fg.png'}
+    assert report['images'] == 2
+
+    stream = dd._blit_stream(evaluator, 0.0)
+    kinds = [k for (k, _sid, _m, _a) in stream]
+    # image, then the field-instance blit (a drawable), then image.
+    assert kinds[0] == dd._SRC_IMAGE
+    assert kinds[-1] == dd._SRC_IMAGE
+    assert sn.SRC_DRAWABLE in kinds[1:-1]
+
+
+def test_field_instance_subsequence_unchanged_by_elements():
+    # The field-instance parity must hold IDENTICALLY whether or not storyboard
+    # elements are present: the harness compares the field-instance subsequence.
+    scene = _synthetic_scene()
+    plain = _compiled(scene)
+    with_elems = _compiled(_synthetic_scene(),
+                           tree=[_sprite(_BACKGROUND_Z, '/tmp/a.png',
+                                         keyframes={'x': _instant(50.0)}),
+                                 _sprite(20, '/tmp/b.png',
+                                         keyframes={'x': _instant(600.0)})])
+
+    ev_plain, im_plain, _r = dd.build_static_doc(plain)
+    ev_elem, im_elem, rep_elem = dd.build_static_doc(with_elems)
+
+    # Parity still passes with elements present (subsequence comparison).
+    parity = dd.parity_report(ev_elem, im_elem, _effect(with_elems), _SAMPLE_TIMES)
+    assert parity['all_ok'], dd.format_parity_report(parity)
+
+    # And the field subsequence is byte-for-byte the plain doc's blit stream.
+    for t in _SAMPLE_TIMES:
+        plain_stream = dd._blit_stream(ev_plain, t)
+        sub = dd._field_blit_subsequence(ev_elem, t)
+        assert len(sub) == len(plain_stream)
+        for (pk, pid, pm, pa), (sk, sid, sm, sa) in zip(plain_stream, sub):
+            assert (pk, pid) == (sk, sid)
+            assert abs(pa - sa) < 1e-6
+            assert np.allclose(pm, sm, atol=1e-6)
+    assert rep_elem['elements_below'] == 1 and rep_elem['elements_above'] == 1
+
+
+def test_within_band_sorted_by_z_then_index_then_start():
+    # Three below-band sprites out of z/z_index/t_start order; the emitted image
+    # order must be the renderer's (z, z_index, t_start) sort.
+    a = _sprite(-100, '/tmp/a.png', z_index=1, keyframes={'x': _instant(10.0)})
+    b = _sprite(-100, '/tmp/b.png', z_index=0, keyframes={'x': _instant(20.0)})
+    c = _sprite(-75, '/tmp/c.png', z_index=0, keyframes={'x': _instant(30.0)})
+    compiled = _compiled([], tree=[a, b, c])
+    evaluator, id_maps, report = dd.build_static_doc(compiled)
+
+    # Sorted order: b(z=-100,zi=0), a(z=-100,zi=1), c(z=-75).
+    path_by_id = id_maps['images']
+    image_blits = [(sid) for (k, sid, _m, _a) in dd._blit_stream(evaluator, 0.0)
+                   if k == dd._SRC_IMAGE]
+    ordered_paths = [path_by_id[sid] for sid in image_blits]
+    assert ordered_paths == ['/tmp/b.png', '/tmp/a.png', '/tmp/c.png']
+    assert report['elements_below'] == 3 and report['elements_above'] == 0
+
+
+def test_unsupported_kinds_skipped_with_per_kind_counts():
+    # Shapes / text / video / an asset-less sprite are skipped, each tallied by
+    # kind; only the real image sprite emits.
+    tree = [
+        _sprite(_BACKGROUND_Z, '/tmp/real.png', keyframes={'x': _instant(1.0)}),
+        _element('rect', _BACKGROUND_Z),
+        _element('rect', -50),
+        _element('text', 10, text='hi'),
+        _element('video', -100),
+        _sprite(-100, None),  # image kind, no asset -> 'no_asset'
+    ]
+    compiled = _compiled([], tree=tree)
+    evaluator, id_maps, report = dd.build_static_doc(compiled)
+
+    assert report['elements_below'] == 1 and report['elements_above'] == 0
+    assert report['element_skips'] == {'rect': 2, 'text': 1, 'video': 1,
+                                       'no_asset': 1}
+    assert report['images'] == 1
+
+
+def test_group_is_flattened_to_its_image_children():
+    # A group draws nothing itself; its sprite children band by their OWN z and
+    # the group is tallied as a skip.
+    child_a = _sprite(-100, '/tmp/ga.png', keyframes={'x': _instant(5.0)})
+    child_b = _sprite(30, '/tmp/gb.png', keyframes={'x': _instant(6.0)})
+    group = _element('group', 0, children=[child_a, child_b])
+    compiled = _compiled([], tree=[group])
+    evaluator, id_maps, report = dd.build_static_doc(compiled)
+
+    assert report['elements_below'] == 1  # child_a (z=-100)
+    assert report['elements_above'] == 1  # child_b (z=30)
+    assert report['element_skips'].get('group') == 1
+    assert set(id_maps['images'].values()) == {'/tmp/ga.png', '/tmp/gb.png'}
+
+
+def test_sheet_sprite_gets_a_frame_channel():
+    # A frame-animated sheet sprite carries a frame lane that steps through its
+    # states over time; a plain 1x1 sprite does not.
+    sheet = _element('frames', -100, z_index=0, t_start=0.0,
+                     frames=('/tmp/s.png',), sheet_cols=2, sheet_rows=1,
+                     sheet_states=((0, 0.5), (1, 0.5)),
+                     keyframes={'x': _instant(320.0)})
+    compiled = _compiled([], tree=[sheet])
+    evaluator, id_maps, report = dd.build_static_doc(compiled)
+
+    assert report['elements_below'] == 1
+    # The frame lane advances 0 -> 1 across the state list (evaluator carries a
+    # frame value per image blit; sampling before/after the first delay differs).
+    curve = dd._FrameCurve(sheet)
+    assert curve.sample(0.1)[0] == 0.0
+    assert curve.sample(0.6)[0] == 1.0
+
+
+# --------------------------------------------------------------------------
 # gat 2 smoke (skippable)
 # --------------------------------------------------------------------------
 
@@ -291,6 +442,9 @@ def test_gat2_smoke_static_doc_parity():
           f'captures={report["captures"]} fills={report["fills"]} '
           f'aft={report["aft"]} proxy={report["proxy"]} '
           f'z_groups={report["z_groups"]}')
+    print(f'[gat2] elements: below={report["elements_below"]} '
+          f'above={report["elements_above"]} images={report["images"]} '
+          f'skips-by-kind={report["element_skips"]}')
 
     effect = _effect(compiled)
     sample_times = [50.0, 100.0, 150.0, 200.0, 300.0, 400.0, 500.0]

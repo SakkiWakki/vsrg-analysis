@@ -24,7 +24,7 @@ import pytest
 sn = pytest.importorskip("storyboard_native")
 pytest.importorskip("PySide6")
 
-from PySide6.QtGui import QColor, QImage
+from PySide6.QtGui import QColor, QImage, QPainter
 
 from analysis.player.render.storyboard.executor import (  # noqa: E402
     CLEAR_OPAQUE, CLEAR_TRANSPARENT, RasterExecutor, SCREEN_ID)
@@ -384,3 +384,53 @@ def test_set_drawable_image_feeds_command_less_field_drawable():
     # Un-seed: the stale target is dropped, the field reads empty again.
     ex.set_drawable_image(field, None)
     assert _alpha(ex.execute(u, f), 2, 2) == 0
+
+
+# --- E1: source-space normalization (the zoom fix) ---
+
+
+def test_oversized_content_normalizes_to_the_logical_box():
+    # THE ZOOM FIX (drawable-ir.md rule 5): a 1280x960 image injected into a
+    # 640x480 field drawable covers that drawable's LOGICAL box regardless of
+    # its pixel size. A fullscreen SRC_DRAWABLE blit (identity mat3, scaled to
+    # the field's 640x480 logical box) then shows the WHOLE image scaled down,
+    # not the top-left quarter. Without normalization the field read spanned
+    # 1280x960 source-logical units, so a 640x480 screen showed only a
+    # quadrant - the "too zoomed in" bug.
+    b = sn.DocBuilder(640.0, 480.0)
+    field = b.drawable(640.0, 480.0, False, False)  # command-less field scope
+    # Identity mat3: the field's 640x480 LOGICAL box maps 1:1 onto the 640x480
+    # screen. The backing image is 1280x960 px - normalization must map the
+    # whole image across that logical box (not span 1280x960 source units).
+    b.item(0, sn.SRC_DRAWABLE, field, sx_rest=1.0, sy_rest=1.0)
+    ev = b.finish()
+
+    # A 1280x960 image: left half red, right half green; top half distinct
+    # from bottom via a blue tint band, so we can prove the WHOLE image maps
+    # into the screen (all four quadrants land where they should).
+    content = QImage(1280, 960, QImage.Format.Format_ARGB32_Premultiplied)
+    content.fill(QColor(0, 0, 0, 255))
+    p = QPainter(content)
+    p.fillRect(0, 0, 640, 960, QColor(255, 0, 0, 255))       # left half red
+    p.fillRect(640, 0, 640, 960, QColor(0, 255, 0, 255))     # right half green
+    p.fillRect(0, 0, 1280, 20, QColor(0, 0, 255, 255))       # a thin top band blue
+    p.end()
+
+    ex = RasterExecutor({}, [(640.0, 480.0), (640.0, 480.0)])
+    ex.set_clear(SCREEN_ID, CLEAR_TRANSPARENT)
+    ex.set_drawable_image(field, content)
+    u, f = _frames(ev, 0.0)
+    screen = ex.execute(u, f)
+
+    # The screen is 640x480. The whole 1280x960 image is squeezed into it:
+    # a point in the LEFT half of the screen samples the image's red left
+    # half; a point in the RIGHT half samples the green right half. If the
+    # blit were "too zoomed in" (1280 logical units into 640 px) the right
+    # half of the screen would sample the image's HORIZONTAL CENTER, still
+    # red - so green on the right proves the fix.
+    assert _rgb(screen, 100, 240) == (255, 0, 0)    # left third: red
+    assert _rgb(screen, 540, 240) == (0, 255, 0)    # right third: green
+    # The top blue band (top ~2% of the image) maps to the top ~2% of the
+    # screen (~10 px), proving vertical normalization too.
+    assert _rgb(screen, 320, 4) == (0, 0, 255)      # near the very top: blue
+    assert _rgb(screen, 320, 240) in ((255, 0, 0), (0, 255, 0))  # mid: not blue

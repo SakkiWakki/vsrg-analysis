@@ -59,11 +59,12 @@ from analysis.player.render.shaders.gl_pipeline import (
     _adapt_dialect,
     GL_BLEND, GL_COLOR_BUFFER_BIT, GL_CULL_FACE, GL_DEPTH_BUFFER_BIT,
     GL_DEPTH_TEST, GL_DRAW_FRAMEBUFFER, GL_FLOAT, GL_FRAMEBUFFER,
-    GL_LINEAR, GL_NEAREST,
+    GL_FRAMEBUFFER_BINDING, GL_LINEAR, GL_NEAREST,
     GL_READ_FRAMEBUFFER, GL_RGBA, GL_SCISSOR_TEST, GL_STENCIL_BUFFER_BIT,
     GL_STENCIL_TEST, GL_TEXTURE0, GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
     GL_TEXTURE_MIN_FILTER, GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T,
     GL_TRIANGLE_STRIP, GL_UNSIGNED_BYTE)
+from PySide6.QtOpenGL import QOpenGLPaintDevice
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +155,28 @@ def _mat_source_to_ndc(mat3: np.ndarray, w: int, h: int) -> QMatrix3x3:
     return QMatrix3x3([float(v) for v in m.flatten()])
 
 
+def _device_to_ndc(pw: int, ph: int) -> QMatrix3x3:
+    """Map device-px coords (top-left origin, y-down) to NDC with Qt's
+    top-left at (-1, +1). Used to present the composed screen quad onto the
+    host GL target."""
+    m = np.array([[2.0 / pw, 0.0, -1.0],
+                  [0.0, -2.0 / ph, 1.0],
+                  [0.0, 0.0, 1.0]], dtype=np.float64)
+    return QMatrix3x3([float(v) for v in m.flatten()])
+
+
+def _target_device_size(painter):
+    """(device-px width, height, dpr) of the painter's render target.
+    QOpenGLPaintDevice reports device pixels; widget devices report logical
+    pixels (scaled by the ratio) - mirrors gl_capture._target_device_size."""
+    dev = painter.device()
+    dpr = float(dev.devicePixelRatioF())
+    if isinstance(dev, QOpenGLPaintDevice):
+        size = dev.size()
+        return size.width(), size.height(), dpr
+    return int(dev.width() * dpr), int(dev.height() * dpr), dpr
+
+
 def _set_sample_params(f, texture) -> None:
     """Linear + clamp on an FBO texture (sources sample under arbitrary
     homographies; the reference backend filters linearly)."""
@@ -240,6 +263,20 @@ class GLExecutor:
         self._programs = None            # (tex_entry, fill_entry)
         self._targets: dict[int, QOpenGLFramebufferObject] = {}
         self._image_textures: dict[int, tuple] = {}  # image id -> (tex, w, h)
+        # EXTERNAL bound textures: DrawableId -> (texture id, pixel w, h),
+        # not owned by this executor (never deleted). set_drawable_texture
+        # binds a renderer capture FBO's texture as a drawable's content, so
+        # a SRC_DRAWABLE blit of that id samples the live capture directly -
+        # no QImage readback, no upload. This is the GL app path (D1: bound
+        # texture ingest). Sampled like an owned FBO texture, normalized to
+        # the drawable's logical box per drawable-ir.md rule 5.
+        self._bound_textures: dict[int, tuple] = {}
+        # Per-drawable clear-mode overrides (DrawableId -> ClearMode code),
+        # API parity with the raster backend. The screen root is minted
+        # OpaqueBlack; the GL pipeline overrides it TransparentBlack so the
+        # composed screen presents OVER the renderer's painted backdrop
+        # instead of covering it opaque black (the black-chart-region fix).
+        self._clear_override: dict[int, int] = {}
         self._vao = None
         self._vbo = None
         self._skipped: set[str] = set()
@@ -249,6 +286,35 @@ class GLExecutor:
         """Update a polyline source's vertices (API parity with the raster
         backend). Lines are a logged-once TODO on the GL path."""
         self._lines[int(lines_id)] = np.asarray(verts, dtype=np.float32).reshape(-1, 2)
+
+    def set_clear(self, drawable_id: int, mode: int) -> None:
+        """Override the clear mode a drawable's BEGIN applies, keyed by
+        DrawableId (parity with RasterExecutor.set_clear). ``mode`` is a
+        ClearMode code (TransparentBlack=0, OpaqueBlack=1, Retain=2); set once,
+        it holds across execute() calls and wins over the record's own clear.
+        The pipeline sets the screen root TransparentBlack so the composite
+        presents over the painted backdrop instead of covering it black."""
+        self._clear_override[int(drawable_id)] = int(mode)
+
+    def set_drawable_texture(self, drawable_id: int, texture_id: int,
+                             w_px: int, h_px: int) -> None:
+        """Bind an EXTERNAL GL texture as a drawable's content, keyed by
+        DrawableId. The texture is NOT owned (never generated, bound, or
+        deleted here); a SRC_DRAWABLE blit of ``drawable_id`` samples it
+        like the drawable's own FBO texture, normalized to the drawable's
+        logical box (drawable-ir.md rule 5). ``w_px``/``h_px`` are the
+        texture's pixel dimensions (only the aspect matters after
+        normalization). Passing texture_id 0 / None un-binds it.
+
+        This is how the GL pipeline hands the renderer's live field / slot /
+        backdrop capture (a ``gl_capture._GLHandle``'s ``fbo.texture()``)
+        into the doc's command-less field drawables, with no CPU readback -
+        the GL-only app path the directive calls for."""
+        if not texture_id:
+            self._bound_textures.pop(int(drawable_id), None)
+            return
+        self._bound_textures[int(drawable_id)] = (
+            int(texture_id), max(1, int(w_px)), max(1, int(h_px)))
 
     def execute(
         self,
@@ -261,6 +327,57 @@ class GLExecutor:
         Retained (persistent) targets survive across calls, so re-running
         the same doc reuses last frame's content for any Retain drawable
         (feedback)."""
+        gf = self._compose(u, f, uf)
+        if gf is None:
+            return self._empty_screen()
+        gf.glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        return self._screen_image()
+
+    def render_and_present(self, u: np.ndarray, f: np.ndarray, painter,
+                           chart_rect, uf: np.ndarray | None = None) -> bool:
+        """Compose the schedule, then present the screen FBO over ``painter``'s
+        GL target into ``chart_rect`` - NO QImage readback (the GL-only app
+        path). ``chart_rect`` is (x, y, w, h) in the painter's logical units;
+        the screen composite is drawn source-over so a transparent screen
+        clear lets the painted backdrop show through. Returns True when it
+        presented, False (never raising) when it could not - the caller then
+        falls through to the normal path.
+
+        The whole compose+present runs inside ONE native-painting bracket:
+        the caller's QPainter is mid-frame on its GL target, and raw GL ops
+        (the compose FBO walk, our own quad program/VBO) must not run while
+        Qt's paint engine holds the context - hence the bracket around both.
+        The host framebuffer is captured at bracket entry and restored before
+        exit so Qt resumes painting onto its own target."""
+        gl = QOpenGLContext.currentContext()
+        if gl is None:
+            self._log_once('no_context', 'GLExecutor: no current GL context, '
+                           'nothing presented')
+            return False
+        gf = gl.extraFunctions()
+        painter.beginNativePainting()
+        try:
+            host_fbo = int(gf.glGetIntegerv(GL_FRAMEBUFFER_BINDING))
+            if self._compose(u, f, uf) is None:
+                return False
+            screen = self._targets.get(_SCREEN_ID)
+            if screen is None:
+                return False
+            self._present_screen(gf, painter, screen, chart_rect, host_fbo)
+        except Exception as exc:  # noqa: BLE001 - one bad present never crashes the frame
+            self._log_once('present', f'GLExecutor: present failed ({exc}), skipped')
+            return False
+        finally:
+            gf.glBindFramebuffer(GL_FRAMEBUFFER, host_fbo)
+            painter.endNativePainting()
+        return True
+
+    def _compose(self, u: np.ndarray, f: np.ndarray, uf):
+        """Run the schedule onto the per-drawable FBOs, leaving the screen
+        FBO populated. Returns the GL functions object, or None when there is
+        no usable context / the GL objects failed to build (the caller
+        degrades). Does NOT rebind the default framebuffer - callers finish
+        by reading back (execute) or presenting (render_and_present)."""
         u = np.ascontiguousarray(u, dtype=np.uint32)
         f = np.ascontiguousarray(f, dtype=np.float32)
         uf = None if uf is None else np.ascontiguousarray(uf, dtype=np.float32)
@@ -268,11 +385,11 @@ class GLExecutor:
         gl = QOpenGLContext.currentContext()
         if gl is None:
             self._log_once('no_context', 'GLExecutor: no current GL context, '
-                           'returning empty screen image')
-            return self._empty_screen()
+                           'nothing composed')
+            return None
         gf = gl.extraFunctions()
         if not self._ensure_gl(gf):
-            return self._empty_screen()
+            return None
 
         self._set_pipeline_state(gf)
         target_stack: list[int] = []
@@ -288,9 +405,50 @@ class GLExecutor:
                     self._copy(gf, u[i], target_stack)
                 case n if n == _OP_END:
                     self._end(gf, target_stack)
+        return gf
 
-        gf.glBindFramebuffer(GL_FRAMEBUFFER, 0)
-        return self._screen_image()
+    def _present_screen(self, gf, painter, screen, chart_rect, host_fbo) -> None:
+        """Draw the screen FBO's texture onto ``host_fbo`` (the caller's GL
+        target, captured at bracket entry - never assumed 0, Wayland/EGL
+        reports 0 wrongly) into ``chart_rect`` (source-over). Maps the chart
+        rect (logical -> device px -> NDC) and draws one textured quad. Runs
+        inside the caller's native-painting bracket."""
+        entry = self._programs[0]
+        if entry is None:
+            return
+        x, y, w, h = chart_rect
+        pw, ph, dpr = _target_device_size(painter)
+        gf.glBindFramebuffer(GL_FRAMEBUFFER, host_fbo)
+        gf.glViewport(0, 0, pw, ph)
+        # The compose walk left depth/stencil/cull disabled and blend on, but
+        # be explicit - the present quad is a flat source-over blit.
+        gf.glDisable(GL_DEPTH_TEST)
+        gf.glDisable(GL_STENCIL_TEST)
+        gf.glDisable(GL_CULL_FACE)
+        gf.glDisable(GL_SCISSOR_TEST)
+        gf.glEnable(GL_BLEND)
+        gf.glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+        # Quad positions are the chart rect's DEVICE-px corners; u_mat maps
+        # device px -> NDC. The whole screen texture samples across the rect
+        # (uv spans 0..1). The screen FBO texture is y-up relative to the
+        # content (gl_capture's v = 1 - y/h convention), so the rect's TOP
+        # corner samples v=1 and the bottom v=0 - the same flip
+        # gl_capture.present uses, keeping the content upright on the y-down
+        # device target.
+        dx0, dy0 = x * dpr, y * dpr
+        dx1, dy1 = (x + w) * dpr, (y + h) * dpr
+        program, locs = entry
+        program.bind()
+        gf.glActiveTexture(GL_TEXTURE0)
+        gf.glBindTexture(GL_TEXTURE_2D, screen.texture())
+        program.setUniformValue(locs['u_tex'], 0)
+        gf.glUniform1f(locs['u_opacity'], 1.0)
+        gf.glUniform3f(locs['u_tint'], 1.0, 1.0, 1.0)
+        program.setUniformValue(locs['u_mat'], _device_to_ndc(pw, ph))
+        # uv = (u0, v0, u1, v1): top corner v0=1, bottom v1=0 (the flip).
+        self._draw_quad(gf, dx0, dy0, dx1, dy1, uv=(0.0, 1.0, 1.0, 0.0))
+        gf.glBindTexture(GL_TEXTURE_2D, 0)
+        program.release()
 
     # -- GL object lifecycle ----------------------------------------------
 
@@ -366,7 +524,7 @@ class GLExecutor:
 
     def _begin(self, gf, rec: np.ndarray, target_stack: list[int]) -> None:
         drawable_id = int(rec[_U_A])
-        clear = int(rec[_U_B])
+        clear = self._clear_override.get(drawable_id, int(rec[_U_B]))
         fbo = self._target(drawable_id)
         if fbo is None:
             return
@@ -440,11 +598,23 @@ class GLExecutor:
             case n if n == _SRC_FILL:
                 self._draw_fill(gf, mat3, tw, th, tint, opacity)
             case n if n == _SRC_IMAGE:
+                # An image's logical box is its natural (pixel) size; the
+                # item transform scales it (source-logical == pixels).
+                uploaded = self._image_texture(gf, int(urec[_U_B]))
+                logical = None if uploaded is None else (uploaded[1], uploaded[2])
                 self._draw_texture(gf, mat3, tw, th, frec, tint, opacity,
-                                   self._image_texture(gf, int(urec[_U_B])))
+                                   uploaded, logical)
             case n if n == _SRC_DRAWABLE:
+                # SOURCE NORMALIZATION (drawable-ir.md rule 5): the source
+                # drawable's content covers its LOGICAL box regardless of its
+                # backing FBO pixel size (a chart-rect-sized bound capture is
+                # 640x480 logical). The quad spans the logical box; uv samples
+                # the whole texture. Same zoom fix as the raster backend.
+                src_id = int(urec[_U_B])
+                uploaded = self._drawable_texture(src_id)
+                lw, lh = self._sizes[src_id]
                 self._draw_texture(gf, mat3, tw, th, frec, tint, opacity,
-                                   self._drawable_texture(int(urec[_U_B])))
+                                   uploaded, (float(lw), float(lh)))
             case n if n == _SRC_LINES:
                 self._log_once('lines', 'GLExecutor: Lines source not implemented (TODO), skipped')
             case n if n == _SRC_MESH:
@@ -479,9 +649,15 @@ class GLExecutor:
         return uploaded
 
     def _drawable_texture(self, drawable_id: int):
-        """(texture, w, h) for a source Drawable's FBO; None when it has
-        not been composed this run and holds no retained content (a
-        feedback read of a never-drawn drawable is transparent)."""
+        """(texture, w, h) for a source Drawable; None when there is nothing
+        to sample. An externally bound texture (a live renderer capture)
+        wins over the owned FBO, so a command-less field drawable reads the
+        handed capture directly. Absent that, the owned FBO; None when the
+        drawable has not been composed this run and holds no retained
+        content (a feedback read of a never-drawn drawable is transparent)."""
+        bound = self._bound_textures.get(drawable_id)
+        if bound is not None:
+            return bound
         fbo = self._targets.get(drawable_id)
         if fbo is None:
             return None
@@ -503,30 +679,35 @@ class GLExecutor:
         self._draw_quad(gf, 0.0, 0.0, 1.0, 1.0, uv=None)
         program.release()
 
-    def _draw_texture(self, gf, mat3, tw, th, frec, tint, opacity, uploaded) -> None:
-        if uploaded is None:
+    def _draw_texture(self, gf, mat3, tw, th, frec, tint, opacity, uploaded,
+                      logical) -> None:
+        if uploaded is None or logical is None:
             return
         texture, sw, sh = uploaded
+        lw, lh = logical
+        if lw <= 0.0 or lh <= 0.0 or sw <= 0 or sh <= 0:
+            return
         entry = self._programs[0]
         if entry is None:
             return
         program, locs = entry
-        # Crops are fractions of the SOURCE logical size; inset both the
-        # quad geometry and the sampled uv, so the visible content stays
-        # anchored under the transform (matches the raster backend).
-        crop_l = _clamp01(float(frec[_F_CROP])) * sw
-        crop_t = _clamp01(float(frec[_F_CROP + 1])) * sh
-        crop_r = _clamp01(float(frec[_F_CROP + 2])) * sw
-        crop_b = _clamp01(float(frec[_F_CROP + 3])) * sh
-        vis_w = max(0.0, sw - crop_l - crop_r)
-        vis_h = max(0.0, sh - crop_t - crop_b)
-        if vis_w <= 0.0 or vis_h <= 0.0:
+        # Crops are fractions of the source's LOGICAL box; inset the quad
+        # geometry in logical units and the sampled uv in fractions of the
+        # texture (the two decouple - the backing texture may be a chart-
+        # rect-sized capture whose logical box is 640x480). y-down FBO
+        # convention: v = 1 - fraction (gl_capture's mapping).
+        crop_l = _clamp01(float(frec[_F_CROP]))
+        crop_t = _clamp01(float(frec[_F_CROP + 1]))
+        crop_r = _clamp01(float(frec[_F_CROP + 2]))
+        crop_b = _clamp01(float(frec[_F_CROP + 3]))
+        vis_fw = max(0.0, 1.0 - crop_l - crop_r)
+        vis_fh = max(0.0, 1.0 - crop_t - crop_b)
+        if vis_fw <= 0.0 or vis_fh <= 0.0:
             return
-        x0, y0 = crop_l, crop_t
-        x1, y1 = crop_l + vis_w, crop_t + vis_h
-        # y-down FBO convention: v = 1 - y/h (gl_capture's mapping).
-        u0, u1 = x0 / sw, x1 / sw
-        v0, v1 = 1.0 - y0 / sh, 1.0 - y1 / sh
+        x0, y0 = crop_l * lw, crop_t * lh
+        x1, y1 = x0 + vis_fw * lw, y0 + vis_fh * lh
+        u0, u1 = crop_l, crop_l + vis_fw
+        v0, v1 = 1.0 - crop_t, 1.0 - (crop_t + vis_fh)
 
         program.bind()
         gf.glActiveTexture(GL_TEXTURE0)

@@ -7,7 +7,15 @@ machinery:
 
     compiled chart --bridge.build_doc--> Evaluator (Seam A, once)
     per frame:  bridge.feed_frame --> Evaluator.frame_with_feeds (Seam B)
-                --> RasterExecutor.execute --> QImage --> drawImage(chart_rect)
+                --> GLExecutor.render_and_present --> chart_rect (GL quad)
+
+GL-ONLY (user directive): the executor is a ``GLExecutor`` that binds the
+renderer's live capture FBO textures directly and presents the composite
+onto the painter's GL target with no QImage readback. It is built only when
+the delegate's painter is on a GL engine (``gl_capture.usable``); a non-GL
+painter DISABLES the pipeline with a one-line log - there is no raster app
+path and no readback fallback. ``RasterExecutor`` stays a reference/test
+backend only, never constructed here.
 
 DEFAULT OFF: with the flag unset the renderer never constructs this object
 and behaves byte-for-byte as before. The hook in the renderer is a single
@@ -37,7 +45,6 @@ from __future__ import annotations
 import logging
 
 import numpy as np
-from PySide6.QtCore import QRectF
 
 logger = logging.getLogger(__name__)
 
@@ -145,9 +152,9 @@ class DrawablePipeline:
         """Render the chart region through the Drawable core and blit it.
 
         ``field_captures`` maps a field scope ('field', 'field2', ...) to
-        the renderer's LIVE capture handle for that scope this frame (the
-        transparent field-layers pixmap and any per-player captures). Their
-        pixels become the doc's field-scope drawables' content, so
+        the renderer's LIVE GL capture handle for that scope this frame (the
+        transparent field-layers capture and any per-player captures). Each
+        handle's FBO texture is bound as its field drawable's content, so
         SRC_DRAWABLE field blits draw real notes. None = no field content
         this frame (the composite still runs; field drawables read empty).
 
@@ -164,24 +171,28 @@ class DrawablePipeline:
             return False
 
     def _delegate(self, frame, ctx, painter, field_captures) -> bool:
-        if not self._ensure_built():
+        if not self._ensure_built(painter):
             return False
         self._ingest_field_captures(field_captures)
         t = float(ctx.t_now)
         feed_ids, counts, feed_u, feed_f = _unpack_feed(
             self._bridge.feed_frame(self._compiled, t, self._id_maps))
-        image = self._evaluate(t, feed_ids, counts, feed_u, feed_f)
-        if image is None:
+        u, f = self._schedule(t, feed_ids, counts, feed_u, feed_f)
+        if u is None:
             return False
-        self._blit(painter, ctx, image)
-        return True
+        # GL-ONLY present: composite onto the painter's GL target directly,
+        # no QImage readback (the user directive). render_and_present returns
+        # False if it could not draw (broken context, bind failure) - the
+        # caller then falls through to the normal render path.
+        return self._executor.render_and_present(u, f, painter, ctx.chart_rect)
 
     def _ingest_field_captures(self, field_captures) -> None:
-        """Feed each live field capture into its mapped field drawable's
+        """Bind each live field capture into its mapped field drawable's
         content. A scope with no drawable in the doc (or no capture this
-        frame) is skipped; a non-QImage handle (a GL capture texture) is
-        converted when it can be, else skipped - the raster executor is a
-        QImage backend, so only QImage-convertible captures ingest."""
+        frame) is skipped. The captures are the renderer's GL capture
+        handles (``gl_capture._GLHandle``): the GL executor binds their FBO
+        textures directly (no readback), which is the GL-only app path -
+        the raster executor is reference/test-only and never runs here."""
         if not field_captures:
             return
         fields = self._id_maps.get('fields') if isinstance(self._id_maps, dict) else None
@@ -191,40 +202,61 @@ class DrawablePipeline:
             drawable_id = fields.get(scope)
             if drawable_id is None:
                 continue
-            image = _as_qimage(handle)
-            if image is not None:
-                self._executor.set_drawable_image(drawable_id, image)
+            self._bind_capture(drawable_id, handle)
 
-    def _ensure_built(self) -> bool:
-        """Cross Seam A once: build the doc + evaluator + executor. A
+    def _bind_capture(self, drawable_id, handle) -> None:
+        """Bind one renderer capture handle as ``drawable_id``'s content.
+        A GL capture handle resolves to (texture id, pixel w, h) and binds
+        via the GL executor; None / an unresolvable handle un-binds the
+        drawable so it reads empty this frame (a command-less field drawable
+        carries only what is fed)."""
+        resolved = _resolve_gl_texture(handle)
+        if resolved is None:
+            self._executor.set_drawable_texture(drawable_id, 0, 0, 0)
+            return
+        texture_id, w_px, h_px = resolved
+        self._executor.set_drawable_texture(drawable_id, texture_id, w_px, h_px)
+
+    def _ensure_built(self, painter) -> bool:
+        """Cross Seam A once: build the doc + evaluator + GL executor. GL-ONLY
+        (user directive): the executor binds the renderer's capture FBO
+        textures directly, so it is built only when the delegate's painter is
+        on a GL engine (the ``gl_capture.usable`` test). A non-GL painter (a
+        raster host, a headless frame) DISABLES the pipeline with the one-line
+        log - there is no raster app path and no QImage-readback fallback. A
         build that raises disables the pipeline; a build that yields no
         evaluator (bridge declined) reports unavailable without a crash."""
         if self._evaluator is not None:
             return True
+        from analysis.player.render.gl_capture import usable
+        if not usable(painter):
+            self._disable("painter is not on a GL engine (GL-only pipeline)")
+            return False
         evaluator, id_maps = self._bridge.build_doc(
             self._compiled, screen_w=_SCREEN_W, screen_h=_SCREEN_H)
         if evaluator is None:
             self._disable("bridge produced no evaluator")
             return False
+        from analysis.player.render.storyboard.gl_executor import GLExecutor
         from analysis.player.render.storyboard.executor import (
-            RasterExecutor, CLEAR_TRANSPARENT, SCREEN_ID)
+            CLEAR_TRANSPARENT, SCREEN_ID)
         self._evaluator = evaluator
         self._id_maps = id_maps
-        self._executor = RasterExecutor(
+        self._executor = GLExecutor(
             _images_of(id_maps),
             _drawable_sizes_of(id_maps, evaluator))
-        # The screen root is minted OpaqueBlack (DocBuilder has no clear
-        # arg; that opaque clear IS the black-chart-region baseline). Make
-        # it TransparentBlack so the composed image overlays the backdrop
+        # The screen root is minted OpaqueBlack (DocBuilder has no clear arg;
+        # that opaque clear IS the black-chart-region baseline). Make it
+        # TransparentBlack so the composed screen presents OVER the backdrop
         # the renderer already painted, instead of covering it.
         self._executor.set_clear(SCREEN_ID, CLEAR_TRANSPARENT)
         return True
 
-    def _evaluate(self, t, feed_ids, counts, feed_u, feed_f):
-        """Fold the doc + this frame's feeds into a DrawSchedule and run
-        the raster executor. Returns the screen QImage or None."""
-        # Feed buffers are two flat SoA arrays (u32 kinds/ids + f32 state);
-        # the evaluator ingests them zero-copy per the Seam-B contract.
+    def _schedule(self, t, feed_ids, counts, feed_u, feed_f):
+        """Fold the doc + this frame's feeds into a DrawSchedule: return the
+        (u, f) SoA record arrays for the executor, or (None, None) on failure.
+        Feed buffers are two flat SoA arrays (u32 kinds/ids + f32 state); the
+        evaluator ingests them zero-copy per the Seam-B contract."""
         raw_u, raw_f = _feed_bytes(
             feed_u, feed_f,
             self._evaluator.feed_u_stride, self._evaluator.feed_f_stride)
@@ -234,17 +266,7 @@ class DrawablePipeline:
             n, self._evaluator.u_stride)
         f = np.frombuffer(f_raw, dtype=np.float32).reshape(
             n, self._evaluator.f_stride)
-        return self._executor.execute(u, f)
-
-    def _blit(self, painter, ctx, image) -> None:
-        """Blit the composed screen image into the chart rect. The screen
-        drawable is 640x480 design units; drawImage stretches it into the
-        real chart rectangle, exactly the mapping the legacy blit uses."""
-        x, y, w, h = ctx.chart_rect
-        painter.save()
-        painter.drawImage(QRectF(float(x), float(y), float(w), float(h)),
-                          image)
-        painter.restore()
+        return u, f
 
     def _disable(self, why: str) -> None:
         if not self._disabled:
@@ -293,25 +315,26 @@ def _as_feed_bytes(buf, stride: int, dtype) -> bytes:
     return np.zeros((0, stride), dtype=dtype).tobytes()
 
 
-def _as_qimage(handle):
-    """A QImage view of a renderer capture handle, or None when it cannot
-    be one. Raster captures are QPixmaps (``.toImage()``); a handle that is
-    already a QImage passes through; anything else (a GL texture handle) has
-    no cheap CPU image and is skipped - the raster executor is a QImage
-    backend, so those scopes simply carry no content this frame."""
+def _resolve_gl_texture(handle):
+    """Resolve a renderer capture handle to (texture id, pixel w, h) for GL
+    binding, or None when it carries no live GL texture this frame.
+
+    The renderer's GL capture backend hands ``gl_capture._GLHandle`` objects:
+    ``.fbo`` is a ``QOpenGLFramebufferObject`` whose ``.texture()`` is the
+    live capture texture, and ``.fbo.width()/.height()`` its pixel size.
+    (After source normalization only the aspect matters, but the pixel size
+    is the honest source dimension.) A None handle, a non-GL handle (a raster
+    QPixmap - never expected on the GL-only app path), or an invalid FBO all
+    resolve to None -> the drawable un-binds and reads empty this frame."""
     if handle is None:
         return None
-    from PySide6.QtGui import QImage
-    if isinstance(handle, QImage):
-        return handle
-    to_image = getattr(handle, 'toImage', None)
-    if callable(to_image):
-        try:
-            image = to_image()
-        except Exception:
-            return None
-        return image if isinstance(image, QImage) else None
-    return None
+    fbo = getattr(handle, 'fbo', None)
+    if fbo is None:
+        return None
+    texture = fbo.texture()
+    if not texture:
+        return None
+    return int(texture), int(fbo.width()), int(fbo.height())
 
 
 def _images_of(id_maps) -> dict:

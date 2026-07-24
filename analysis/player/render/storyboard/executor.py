@@ -410,7 +410,10 @@ class RasterExecutor:
         if source is None:
             logger.warning("RasterExecutor: missing image id %d, drew nothing", image_id)
             return
-        self._draw_source_image(painter, source, frec, tint)
+        # An image's logical box IS its natural (pixel) size; the item's
+        # transform scales it. Source pixels and source-logical units
+        # coincide, so no normalization is needed.
+        self._draw_source_image(painter, source, source.width(), source.height(), frec, tint)
 
     def _draw_drawable(
         self,
@@ -425,7 +428,15 @@ class RasterExecutor:
             # Not yet composed this run and no retained content: a
             # feedback read of a never-drawn drawable is transparent.
             return
-        self._draw_source_image(painter, source, frec, tint)
+        # SOURCE NORMALIZATION (drawable-ir.md rule 5): a drawable's
+        # content covers its LOGICAL box whatever its backing pixel size.
+        # The mat3 is authored in the source drawable's logical units, so
+        # the quad spans that logical box (not the backing image's pixels,
+        # which may be a chart-rect-sized injected capture) and the pixels
+        # merely sample across it. Kills the "too zoomed in" bug where a
+        # 1280x960 field capture was drawn as if it were 640x480 logical.
+        lw, lh = self._sizes[drawable_id]
+        self._draw_source_image(painter, source, float(lw), float(lh), frec, tint)
 
     def _draw_lines(
         self,
@@ -458,6 +469,8 @@ class RasterExecutor:
         self,
         painter: QPainter,
         source: QImage,
+        logical_w: float,
+        logical_h: float,
         frec: np.ndarray,
         tint: tuple[float, float, float],
     ) -> None:
@@ -465,20 +478,26 @@ class RasterExecutor:
         if not _is_white(tint):
             src = _tinted(source, tint)
 
-        sw, sh = source.width(), source.height()
-        crop_l = float(frec[_F_CROP]) * sw
-        crop_t = float(frec[_F_CROP + 1]) * sh
-        crop_r = float(frec[_F_CROP + 2]) * sw
-        crop_b = float(frec[_F_CROP + 3]) * sh
-        # Crops are fractions of the source's logical size; inset the
-        # sampled source rectangle and place it at the matching logical
-        # offset so the geometry stays anchored under the transform.
-        vis_w = max(0.0, sw - crop_l - crop_r)
-        vis_h = max(0.0, sh - crop_t - crop_b)
-        if vis_w <= 0.0 or vis_h <= 0.0:
+        # `logical_w/h` is the source's logical box (the units the mat3 is
+        # authored in); the backing pixels (`pw/ph`) may differ - an
+        # injected capture is chart-rect-sized while its drawable is 640x480
+        # logical. Quad geometry spans the LOGICAL box; the sampled sub-rect
+        # spans the matching fraction of the PIXEL image. Crops are fractions
+        # of the logical box, applied to both so they stay aligned.
+        pw, ph = source.width(), source.height()
+        if logical_w <= 0.0 or logical_h <= 0.0 or pw <= 0 or ph <= 0:
             return
-        target = QRectF(crop_l, crop_t, vis_w, vis_h)
-        sub = QRectF(crop_l, crop_t, vis_w, vis_h)
+        crop_l = float(frec[_F_CROP])
+        crop_t = float(frec[_F_CROP + 1])
+        crop_r = float(frec[_F_CROP + 2])
+        crop_b = float(frec[_F_CROP + 3])
+        vis_fw = max(0.0, 1.0 - crop_l - crop_r)
+        vis_fh = max(0.0, 1.0 - crop_t - crop_b)
+        if vis_fw <= 0.0 or vis_fh <= 0.0:
+            return
+        target = QRectF(crop_l * logical_w, crop_t * logical_h,
+                        vis_fw * logical_w, vis_fh * logical_h)
+        sub = QRectF(crop_l * pw, crop_t * ph, vis_fw * pw, vis_fh * ph)
         painter.drawImage(target, src, sub)
 
     def _log_skipped_lanes(self, urec: np.ndarray) -> None:

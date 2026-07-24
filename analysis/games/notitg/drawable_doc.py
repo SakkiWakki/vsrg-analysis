@@ -52,6 +52,7 @@ from __future__ import annotations
 import numpy as np
 
 from analysis.player.render.effects.timeline import EventTimeline
+from analysis.player.render.storyboard.sprite_sheet import frame_at_time
 
 # The design chart region: SM's fixed 640x480 screen. Sampling the effect over
 # this region makes the design map the identity (kx=ky=1, ox=oy=0), so an
@@ -76,6 +77,25 @@ _DENSE_DT = 1.0 / 30.0
 _EASE_LINEAR = 0
 
 _REST_EPS = 1e-4
+
+# Storyboard element kinds this wave emits as Image items. Sprites (a single
+# cell) and frame-animated sheets both back an SRC_IMAGE draw; every other kind
+# (shapes, text, groups-with-no-image, video, compound) is skipped with a
+# per-kind count in the report. Backgrounds - the user-reported missing content
+# - are BGCHANGES sprites, so they land here.
+_IMAGE_KINDS = ('sprite', 'frames')
+
+# The element property -> native `item` transform-lane mapping. Each pair is
+# (element timeline prop, the item() id/rest kwarg stem); every lane is a scalar
+# EventTimeline exported once through export_channel. `hidden` is handled apart
+# (inverted into the item's visible gate), and the sheet frame is its own
+# derived channel - neither appears here.
+_ELEMENT_ITEM_LANES = (
+    ('x', 'x'), ('y', 'y'),
+    ('scale_x', 'sx'), ('scale_y', 'sy'),
+    ('rotation', 'rot'),
+    ('alpha', 'opacity'),
+)
 
 
 # --------------------------------------------------------------------------
@@ -193,6 +213,67 @@ def _export_dense(timeline, t0: float, t1: float, prop: int):
 
 
 # --------------------------------------------------------------------------
+# Storyboard elements - flatten, band, and (per kind) emit or skip
+# --------------------------------------------------------------------------
+
+# A group (ActorFrame) draws nothing itself; its transform composes onto its
+# children. This wave does not yet fold the group transform into the leaves
+# (the item() transform lanes carry each leaf's OWN timelines only), so a group
+# is flattened away and its image leaves emit at their own placement - a
+# documented interim (true group composition awaits the transform-fold wave).
+_SKIP_GROUP = 'group'
+
+
+class _FrameCurve:
+    """A `.sample(t)`-duck curve tracing a sheet sprite's current frame index
+    over time, so `export_channel` dense-samples it into the item's frame lane.
+
+    Mirrors `render._sheet_frame`: a recorded `state_pin` sampler wins; else the
+    sheet auto-animates through `sheet_states` on the element's own clock. A
+    plain 1x1 sprite has no states and no pin, so this rests at frame 0."""
+
+    __slots__ = ('_element', '_rest')
+
+    def __init__(self, element):
+        self._element = element
+        self._rest = (0.0,)
+
+    def sample(self, t: float) -> tuple:
+        element = self._element
+        if element.state_pin is not None:
+            return (float(element.state_pin.sample(t)[0]),)
+        return (float(frame_at_time(element.sheet_states, t - element.t_start)),)
+
+
+def _flatten_elements(elements) -> list:
+    """The element tree flattened to a leaf list in tree order, groups replaced
+    by their children (see `_SKIP_GROUP`). Returns `(leaves, group_count)`."""
+    leaves = []
+    groups = 0
+    stack = list(reversed(list(elements)))
+    while stack:
+        element = stack.pop()
+        if element.kind == _SKIP_GROUP:
+            groups += 1
+            stack.extend(reversed(list(element.children)))
+            continue
+        leaves.append(element)
+    return leaves, groups
+
+
+def _band_elements(leaves):
+    """Split flattened leaves into (below, above) bands by the sign of their
+    band z, each band internally sorted by the renderer's `(z, z_index,
+    t_start)` key - reproducing today's banding as the doc's starting point.
+    Below-band (z < 0) draws before the field instances, above-band (z >= 0)
+    after (true tree-order interleave replaces this in a later wave)."""
+    ordered = sorted(leaves, key=lambda e: (e.z, e.z_index, e.t_start))
+    below = [e for e in ordered if e.z < 0]
+    above = [e for e in ordered if e.z >= 0]
+    return below, above
+
+
+# --------------------------------------------------------------------------
 # build_static_doc - the tree-order static-scene compiler
 # --------------------------------------------------------------------------
 
@@ -265,6 +346,14 @@ class _Builder:
         self._screen = (float(screen_w), float(screen_h))
         self._field_ids: dict[str, int] = {}
         self._slot_ids: dict[str, int] = {}
+        # Storyboard image sources: an image id per DISTINCT absolute asset path
+        # (loading is the consumer's job). id_maps carries the {id -> path} map.
+        self._image_ids: dict[str, int] = {}
+        self._image_paths: dict[int, str] = {}
+        # Per-band emitted counts + per-kind skip counts, surfaced in the report.
+        self._elem_below = 0
+        self._elem_above = 0
+        self._elem_skips: dict[str, int] = {}
         # Memoize channel ids by timeline object identity + prop, so a link's
         # shared rest timelines (a whole field of untouched props) collapse to
         # one channel each.
@@ -363,7 +452,17 @@ class _Builder:
     # -- entry point ------------------------------------------------------
 
     def run(self):
-        """Walk the instance list in order, emitting commands, and finish."""
+        """Emit the below-band storyboard elements, then the field-instance
+        stream in tree order, then the above-band elements, and finish.
+
+        Reproducing today's banding: below-band (z < 0) storyboard elements draw
+        BEFORE the field instances, above-band (z >= 0) AFTER. Within each band
+        the leaves are sorted by the renderer's `(z, z_index, t_start)` key. This
+        is the starting point - a true tree-order interleave of elements and
+        instances replaces it once the producers emit element tree positions."""
+        below, above = self._banded_elements()
+        self._elem_below = self._emit_element_band(below)
+
         instances = self._current_instances_ensured()
         self._emit_base_field(instances)
         i = 0
@@ -377,10 +476,24 @@ class _Builder:
                 continue
             self._emit_instance(inst)
             i += 1
+
+        self._elem_above = self._emit_element_band(above)
+
         evaluator = self._builder.finish()
         id_maps = {'screen': _SCREEN_ID, 'slots': dict(self._slot_ids),
-                   'fields': dict(self._field_ids)}
+                   'fields': dict(self._field_ids),
+                   'images': dict(self._image_paths)}
         return evaluator, id_maps
+
+    def _banded_elements(self):
+        """(below, above) storyboard-element bands from `compiled['tree']`,
+        groups flattened away (their leaves banded by their own z). The group
+        count is folded into the skip tally so the report accounts for it."""
+        tree = self._compiled.get('tree') or ()
+        leaves, groups = _flatten_elements(tree)
+        if groups:
+            self._elem_skips['group'] = self._elem_skips.get('group', 0) + groups
+        return _band_elements(leaves)
 
     def _current_instances_ensured(self) -> list:
         instances = _current_instances(self._compiled)
@@ -492,6 +605,90 @@ class _Builder:
         spec = self._compiled.get('player_fields')
         return getattr(spec, 'note_mods', {}) if spec is not None else {}
 
+    # -- storyboard element emission --------------------------------------
+
+    def _emit_element_band(self, leaves) -> int:
+        """Emit each leaf in `leaves` as an Image item (or count its skip);
+        returns the number of items actually emitted."""
+        emitted = 0
+        for element in leaves:
+            if self._emit_element(element):
+                emitted += 1
+        return emitted
+
+    def _emit_element(self, element) -> bool:
+        """Emit one leaf element as an SRC_IMAGE item, or count it as a per-kind
+        skip. Returns True when an item was emitted. Only image-backed kinds
+        (sprite / frames) with a resolvable asset path draw; everything else -
+        shapes, text, video, compound, an image kind with no asset - is skipped
+        and tallied by kind (an asset-less image kind counts as 'no_asset')."""
+        if element.kind not in _IMAGE_KINDS:
+            self._count_skip(element.kind)
+            return False
+        image_id = self._image_id(element)
+        if image_id is None:
+            self._count_skip('no_asset')
+            return False
+        self._sn_image_item(image_id, element)
+        return True
+
+    def _count_skip(self, kind: str) -> None:
+        self._elem_skips[kind] = self._elem_skips.get(kind, 0) + 1
+
+    def _image_id(self, element):
+        """The image id for an element's asset (a 'frames' element uses its
+        first frame path), minted once per distinct absolute path and recorded
+        in the image table. None when the element carries no asset."""
+        path = element.asset or (element.frames[0] if element.frames else None)
+        if not path:
+            return None
+        image_id = self._image_ids.get(path)
+        if image_id is None:
+            image_id = len(self._image_ids)
+            self._image_ids[path] = image_id
+            self._image_paths[image_id] = path
+        return image_id
+
+    def _sn_image_item(self, image_id: int, element) -> None:
+        """Push one SRC_IMAGE item: the element's scalar transform timelines on
+        the item's own lanes (export_channel each), the inverted `hidden` gate
+        on `visible`, and the sheet-frame channel on `frame`. The anchor/origin
+        natural-size offset is NOT folded (item lanes are the leaf's own x/y);
+        that placement refinement rides the transform-fold wave."""
+        kwargs = self._element_transform_kwargs(element)
+        kwargs.update(self._element_frame_kwarg(element))
+        kwargs.update(self._element_visible_kwarg(element))
+        self._builder.item(_SCREEN_ID, self._sn.SRC_IMAGE, image_id,
+                           additive=bool(element.additive), **kwargs)
+
+    def _element_transform_kwargs(self, element) -> dict:
+        kwargs: dict[str, object] = {}
+        for prop, stem in _ELEMENT_ITEM_LANES:
+            timeline = element.timelines.get(prop)
+            if timeline is None:
+                continue
+            chan_id, rest = self._channel(timeline)
+            kwargs[f'{stem}_id'] = chan_id
+            kwargs[f'{stem}_rest'] = rest
+        return kwargs
+
+    def _element_frame_kwarg(self, element) -> dict:
+        """A sheet sprite carries a frame lane tracing its current cell; a plain
+        1x1 sprite rests at frame 0 (no lane)."""
+        if element.sheet_cols * element.sheet_rows <= 1 and element.state_pin is None:
+            return {}
+        chan_id, rest = self._channel(_FrameCurve(element))
+        return {'frame_id': chan_id, 'frame_rest': rest}
+
+    def _element_visible_kwarg(self, element) -> dict:
+        """The element's SM `hidden` bit inverted onto the item's visible gate
+        (visible = 1 - hidden), reusing the base-field inversion export."""
+        hidden = element.timelines.get('hidden')
+        if hidden is None:
+            return {}
+        visible_id, visible_rest = self._visible_from_hidden(hidden)
+        return {'visible_id': visible_id, 'visible_rest': visible_rest}
+
 
 def build_static_doc(compiled, screen_w: float = _SCREEN_W,
                      screen_h: float = _SCREEN_H):
@@ -500,14 +697,20 @@ def build_static_doc(compiled, screen_w: float = _SCREEN_W,
 
     Returns `(evaluator, id_maps, report)`:
       - `evaluator`  : a finished `storyboard_native.Evaluator`;
-      - `id_maps`    : `{'screen', 'slots': {key -> id}, 'fields': {scope -> id}}`;
+      - `id_maps`    : `{'screen', 'slots': {key -> id}, 'fields': {scope -> id},
+                         'images': {image_id -> absolute path}}`;
       - `report`     : `{'instances', 'fields', 'slots', 'captures', 'fills',
-                         'aft', 'proxy', 'z_groups'}` count summary.
+                         'aft', 'proxy', 'z_groups', 'images',
+                         'elements_below', 'elements_above', 'element_skips'}`.
 
-    The screen root drawable (0) carries the whole static command list in
-    instance order; proxy/player/aft blits source per-player field / per-slot
-    drawables (minted lazily as referenced), captures emit Snapshot commands,
-    fills emit SRC_FILL items, and z_group runs are wrapped in SortSpans.
+    The screen root drawable (0) carries the whole static command list; the
+    storyboard element tree (`compiled['tree']`) draws around the field-instance
+    stream by z band (below-band elements first, then the instances, then
+    above-band elements), reproducing today's banding. proxy/player/aft blits
+    source per-player field / per-slot drawables (minted lazily as referenced),
+    captures emit Snapshot commands, fills emit SRC_FILL items, image elements
+    emit SRC_IMAGE items (paths collected in `id_maps['images']`), and z_group
+    runs are wrapped in SortSpans.
     """
     b = _Builder(compiled, screen_w, screen_h)
     instances = _current_instances(compiled)
@@ -515,6 +718,10 @@ def build_static_doc(compiled, screen_w: float = _SCREEN_W,
     evaluator, id_maps = b.run()
     report['fields'] = len(id_maps['fields'])
     report['slots'] = len(id_maps['slots'])
+    report['images'] = len(id_maps['images'])
+    report['elements_below'] = b._elem_below
+    report['elements_above'] = b._elem_above
+    report['element_skips'] = dict(b._elem_skips)
     return evaluator, id_maps, report
 
 
@@ -531,6 +738,10 @@ def _report(instances) -> dict:
         'z_groups': len(groups),
         'fields': 0,
         'slots': 0,
+        'images': 0,
+        'elements_below': 0,
+        'elements_above': 0,
+        'element_skips': {},
     }
 
 
@@ -541,6 +752,12 @@ def _report(instances) -> dict:
 # Op / source kinds (mirror native/src/evaluate.rs); imported lazily so this
 # module stays importable without the extension for the pure helpers above.
 _OP_BLIT = 1
+
+# The source kind storyboard element blits carry (mirrors evaluate.rs). Field
+# instances only ever blit fills (SRC_FILL) and drawables (SRC_DRAWABLE), so an
+# image blit is unambiguously a storyboard element - the parity harness drops
+# them to recover the field-instance subsequence.
+_SRC_IMAGE = 0
 
 
 def _blit_stream(evaluator, t):
@@ -560,6 +777,15 @@ def _blit_stream(evaluator, t):
         alpha = float(f[i, 9])
         out.append((int(u[i, 1]), int(u[i, 2]), mat, alpha))
     return out
+
+
+def _field_blit_subsequence(evaluator, t):
+    """The field-instance SUBSEQUENCE of the blit stream at `t`: the full blit
+    stream with storyboard element (SRC_IMAGE) blits dropped. With elements
+    banded around the instances, this is exactly the stream the instance-only
+    doc produced, in the same order - the parity harness compares against this
+    so element inclusion never perturbs field-instance parity."""
+    return [blit for blit in _blit_stream(evaluator, t) if blit[0] != _SRC_IMAGE]
 
 
 def _mat3_from_qtransform(qt):
@@ -597,11 +823,16 @@ def compare_at(evaluator, id_maps, effect, t,
     unresolved slot) is not a BLIT and is skipped on BOTH sides so the streams
     stay aligned. mat3 comparison is projective-relative (both normalized), the
     same space on both sides (design 640x480 via `_DESIGN_RECT`).
+
+    The evaluator side is the field-instance SUBSEQUENCE (storyboard element
+    image blits dropped): with elements banded around the instances, that
+    subsequence is exactly the instance-only doc's blit stream, so this parity
+    is unchanged by element inclusion. `n_blit` counts the field blits only.
     """
     frame = effect.at(_Ctx(float(t), _DESIGN_RECT))
     entries = frame.fields if frame is not None else ()
     expected = _expected_blits(entries, id_maps)
-    got = _blit_stream(evaluator, t)
+    got = _field_blit_subsequence(evaluator, t)
 
     diffs = []
     max_alpha_err = 0.0
