@@ -114,6 +114,27 @@ $(FRAME_NATIVE_STAMP): $(FRAME_NATIVE_SRCS) | venv
 .PHONY: frame-native
 frame-native: $(FRAME_NATIVE_STAMP)
 
+# ─── Drawable core (storyboard_native) ─────────────────────────────────
+#
+# The game-agnostic Drawable evaluator (.claude/plans/drawable-ir.md):
+# evaluate(DrawableDoc, t) -> DrawSchedule as flat SoA buffers. Same
+# maturin pattern as frame-native; nothing imports it yet (the render
+# integration lands with the rework phases), so absence is harmless.
+SB_NATIVE_DIR := analysis/player/render/storyboard/native
+SB_NATIVE_SRCS := $(shell find $(SB_NATIVE_DIR)/src -type f -name '*.rs' 2>/dev/null) \
+                  $(SB_NATIVE_DIR)/Cargo.toml
+SB_NATIVE_STAMP := $(SB_NATIVE_DIR)/.maturin-stamp
+
+$(SB_NATIVE_STAMP): $(SB_NATIVE_SRCS) | venv
+	$(Q)echo "[storyboard-native] maturin develop --release"
+	$(Q)cd $(SB_NATIVE_DIR) && ../../../../../$(VENV_MATURIN) develop --release
+	$(Q)$(VENV_PY) -c "import storyboard_native" \
+	    || { echo "[storyboard-native] post-build import failed ; venv mismatch?"; exit 1; }
+	$(Q)touch $@
+
+.PHONY: storyboard-native
+storyboard-native: $(SB_NATIVE_STAMP)
+
 # ─── NotITG C op-stream body executor (libcbody.so) ────────────────────
 #
 # The computed-goto op-stream executor: the Lua-free native compute core

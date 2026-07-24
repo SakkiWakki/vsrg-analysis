@@ -1,0 +1,24 @@
+[package]
+name = "storyboard_native"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+# The game-agnostic Drawable core (see .claude/plans/drawable-ir.md):
+# evaluate(DrawableDoc, t, events, feeds) -> DrawSchedule. Built as a
+# PyO3 extension module importable as ``storyboard_native``. Python
+# compiles charts into the doc once (Seam A, per-object builder
+# allowed); per-frame traffic (feeds/events in, the schedule out) is
+# flat SoA buffers only - no per-object marshalling on hot seams (the
+# notitg_frame_native lesson: boundary chatter, not compute, was the
+# cost). ``abi3-py310`` matches the other native crates.
+[lib]
+name = "storyboard_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py310"] }
+
+[profile.release]
+lto = "thin"
+opt-level = 3

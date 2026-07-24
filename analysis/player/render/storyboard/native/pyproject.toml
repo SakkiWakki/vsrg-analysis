@@ -1,0 +1,17 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "storyboard_native"
+version = "0.1.0"
+description = "Game-agnostic Drawable core for vsrg-analysis: evaluate a drawable document to a flat draw schedule."
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Rust",
+    "Private :: Do Not Upload",
+]
+
+[tool.maturin]
+bindings = "pyo3"
+module-name = "storyboard_native"
