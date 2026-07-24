@@ -49,6 +49,36 @@ def _compiled_body_flag() -> bool:
 _compiled_body_flag._announced = False
 
 
+class _LiveBaseHidden:
+    """Lazy twin of modfile._base_field_hidden_timeline: samples the
+    real PlayerP1 screen child's hidden channel from the live sim.
+    gat-family charts hide the base fields whole-file and show notes
+    only through copies; the eager path honoured this, but the lazy
+    path hardcoded None - so the app drew the hidden base fields
+    (fullscreen notes + receptors) into every scene AND every AFT
+    capture, and feedback rigs multiplied them (the cyriak
+    branch-density excess). The screen child binds when the chart first
+    calls GetChild('PlayerP1') - AFTER load - so the curve resolves on
+    first sample, not at compile."""
+
+    def __init__(self, live):
+        self._live = live
+        self._curve = None
+
+    def sample(self, t):
+        if self._curve is None:
+            rec = self._live.env.screen_child_ids().get('PlayerP1')
+            if rec is None:
+                return (0.0,)
+            from analysis.games.notitg.sim.seg_read import curve_for
+            self._curve = curve_for(self._live, rec, 'hidden', (0.0,))
+        return self._curve.sample(t)
+
+
+def _base_field_hidden_live(live):
+    return _LiveBaseHidden(live)
+
+
 def _lazy_flag() -> bool:
     """LAZY REPLAY (the DEFAULT compile path): `compile` stores a LiveSim
     (instant open, no whole-song bake) and the storyboard element tree + field
@@ -165,7 +195,8 @@ def _compile_live(sm_path, end_seconds) -> dict | None:
         'screen_oscillator': screen_shake, 'field_oscillators': [],
         'field_vanish': None, 'chart_shaders': chart_shaders,
         'scroll_multiplier_timeline': scroll_mult,
-        'aft_bg_visible': None, 'base_field_hidden': None,
+        'aft_bg_visible': None,
+        'base_field_hidden': _base_field_hidden_live(live),
         '_live_sim': live,
         'named_actors': 0, 'recorded_keyframes': 0,
         'warnings': list(live.warnings) + [
