@@ -132,6 +132,22 @@ def test_function_literal_with_trailing_semicolon():
     assert xml_actors._strip_lua_wrapper(value) == ' bound = self '
 
 
+def test_cmd_runs_command_string_on_actor():
+    # Actor:cmd(s) runs s as an actor-command string NOW (Actor::
+    # RunCommands) - getfucked2 hides its TV-static sprite with
+    # `self:cmd('...;hidden,1;')` in its OnCommand; a dropped cmd left
+    # the noise quad visible for the whole song.
+    env, _w = _load(
+        '<ActorFrame><children>'
+        '<Quad InitCommand="%function(self)'
+        " self:cmd('x,320;hidden,1') end\"/>"
+        '</children></ActorFrame>')
+    xs = _recorded(env, 'x')
+    hiddens = _recorded(env, 'hidden')
+    assert any(320.0 in kf.values for kf in xs)
+    assert any(1.0 in kf.values for kf in hiddens)
+
+
 def test_queued_command_stopping_own_tweens_survives_drain():
     # A queue-carried command may call stoptweening on ITS OWN actor
     # mid-drain, clearing the queue while update_to still holds the old

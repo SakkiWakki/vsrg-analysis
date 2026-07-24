@@ -378,3 +378,34 @@ def test_state_pin_from_recorded_setstate(tmp_path):
     el = modfile._compile_actor(actor, 0.0, named, None)
     assert el.state_pin is not None
     assert el.state_pin.sample(5.0)[0] == pytest.approx(4.0)
+
+
+def test_xml_frame_delay_attributes_define_the_state_list():
+    # Sprite::LoadFromNode reads Frame%04d=/Delay%04d= off the sprite
+    # NODE itself: scold's toss plays 0, 1 then freezes on 2 (delay 999).
+    from analysis.games.notitg import modfile
+
+    class _Actor:
+        attrs = {'Frame0000': '0', 'Delay0000': '0.1',
+                 'Frame0001': '1', 'Delay0001': '0.1',
+                 'Frame0002': '2', 'Delay0002': '999'}
+
+    assert modfile._xml_attr_states(_Actor(), 3) \
+        == ((0, 0.1), (1, 0.1), (2, 999.0))
+    assert modfile._xml_attr_states(_Actor(), 2)[-1][0] == 1  # clamped
+
+    class _Plain:
+        attrs = {}
+
+    assert modfile._xml_attr_states(_Plain(), 3) == ()
+
+
+def test_underscore_hidden_texture_resolves(tmp_path):
+    from analysis.games.notitg.modfile import _resolve_texture_path
+    (tmp_path / '_toss 3x1.png').write_bytes(b'\x89PNG')
+    assert _resolve_texture_path('toss 3x1.png', tmp_path) \
+        == str(tmp_path / '_toss 3x1.png')
+    # An exact on-disk match still wins over the underscore variant.
+    (tmp_path / 'toss 3x1.png').write_bytes(b'\x89PNG')
+    assert _resolve_texture_path('toss 3x1.png', tmp_path) \
+        == str(tmp_path / 'toss 3x1.png')

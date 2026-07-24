@@ -1340,18 +1340,25 @@ _IMAGE_SUFFIXES = ('.png', '.jpg', '.jpeg', '.gif', '.bmp')
 def _resolve_texture_path(reference: str, base_dir: Path) -> str | None:
     """Resolve a texture reference to an existing image file under
     `base_dir`, following SM's leniencies: an explicit path is used as
-    is; a `.sprite`/`.actor` manifest yields its inner `Texture=`; a bare
-    name matches a file with any image extension (SM omits them)."""
+    is; a `.sprite`/`.actor` manifest yields its inner `Texture=`; a
+    bare name matches a file with any image extension (SM omits them);
+    and a `_`-prefixed on-disk file still resolves (SM's hidden-asset
+    convention hides it from pickers, not from direct references -
+    scold's `Texture="toss 3x1.png"` names `_toss 3x1.png`)."""
     candidate = (base_dir / reference)
     if candidate.suffix.lower() == '.sprite':
         return _sprite_manifest_texture(candidate, base_dir)
-    if candidate.exists():
-        return str(candidate)
-    for suffix in _IMAGE_SUFFIXES:
-        with_ext = candidate.with_name(candidate.name + suffix)
-        if with_ext.exists():
-            return str(with_ext)
-    return _prefix_globbed(candidate) or str(candidate)
+    for name in (candidate, candidate.with_name('_' + candidate.name)):
+        if name.exists():
+            return str(name)
+        for suffix in _IMAGE_SUFFIXES:
+            with_ext = name.with_name(name.name + suffix)
+            if with_ext.exists():
+                return str(with_ext)
+        globbed = _prefix_globbed(name)
+        if globbed is not None:
+            return globbed
+    return str(candidate)
 
 
 def _prefix_globbed(candidate: Path) -> str | None:
@@ -1400,10 +1407,28 @@ def _resolve_sprite(actor) -> tuple:
 
     spec = sprite_sheet.size_spec_from_filename(asset)
     frame_count = spec.cols * spec.rows
-    states = _manifest_states(actor, frame_count)
+    states = (_xml_attr_states(actor, frame_count)
+              or _manifest_states(actor, frame_count))
     if not states and frame_count > 1:
         states = sprite_sheet.default_states(frame_count)
     return (asset, spec, states)
+
+
+def _xml_attr_states(actor, frame_count: int) -> tuple:
+    """`Frame%04d=`/`Delay%04d=` attributes on the sprite NODE itself -
+    Sprite::LoadFromNode reads these before any manifest (scold's toss
+    sprite plays frames 0, 1 then freezes on 2 via Delay0002=999). ()
+    when the node declares none."""
+    states = []
+    while True:
+        index = len(states)
+        frame = _as_int(actor.attrs.get(f'Frame{index:04d}'))
+        if frame is None:
+            break
+        delay = _as_float(actor.attrs.get(f'Delay{index:04d}'))
+        states.append((min(max(frame, 0), frame_count - 1),
+                       delay if delay is not None else 0.1))
+    return tuple(states)
 
 
 def _manifest_states(actor, frame_count: int) -> tuple:

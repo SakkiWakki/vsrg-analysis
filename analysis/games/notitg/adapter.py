@@ -209,7 +209,8 @@ class NotitgAdapter(EtternaAdapter):
                                       bpms, player=player)
         tilt_active = field_3d.tilt_active if field_3d is not None else None
         return NotitgNoteMods(channels, bpms, field_tilt_active=tilt_active,
-                              player=player)
+                              player=player,
+                              note_path=(compiled or {}).get('note_path'))
 
     def _field_instances(self, compiled) -> list:
         """The compiled generic field-instance list (players + proxy/AFT

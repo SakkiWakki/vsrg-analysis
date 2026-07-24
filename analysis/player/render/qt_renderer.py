@@ -1036,8 +1036,10 @@ class QtPlayerRenderer:
             transform, box = self._overscan_blit(transform, box, slot)
         frag = (extra[2] if isinstance(extra, tuple) and len(extra) > 2
                 else None)
+        mesh = (extra[3] if isinstance(extra, tuple) and len(extra) > 3
+                else None)
         batch.blit(source, transform=transform, src_box=box,
-                   opacity=opacity, frag=frag)
+                   opacity=opacity, frag=frag, mesh=mesh)
 
     def _take_aft_slot(self, name) -> None:
         """Snapshot the in-progress composite into a chain node's slot

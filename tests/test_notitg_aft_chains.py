@@ -319,8 +319,9 @@ def test_chain_frag_consumer_carries_shaded_payload(tmp_path):
     effect = NotitgFieldInstances(insts)
     frame = effect.at(SimpleNamespace(t_now=1.0, chart_rect=(0, 0, 640, 480)))
     entry = next(e for e in frame.fields
-                 if e[2] == 'screen' and len(e[3] or ()) == 3)
-    key, live, (path, uniforms, tint, additive) = entry[3]
+                 if e[2] == 'screen' and len(e[3] or ()) >= 3)
+    key, live, payload, _mesh = entry[3]
+    path, uniforms, tint, additive, _samplers = payload
     assert path.endswith('lumi.frag')
     assert uniforms['keying'] == pytest.approx(0.4)
     assert tint == pytest.approx((1.0, 1.0, 1.0))
@@ -345,7 +346,8 @@ def test_additive_sampler_carries_blend_flag():
     effect = NotitgFieldInstances(insts)
     frame = effect.at(SimpleNamespace(t_now=1.0, chart_rect=(0, 0, 640, 480)))
     entry = next(e for e in frame.fields if e[2] == 'screen')
-    key, live, (path, uniforms, tint, additive) = entry[3]
+    key, live, payload, _mesh = entry[3]
+    path, uniforms, tint, additive, _samplers = payload
     assert additive is True
     assert path is None
 
@@ -382,12 +384,14 @@ def test_draw_by_z_frame_sorts_sampler_entries():
     assert [e[1] for e in screens] == pytest.approx([0.8, 0.9])
 
 
-def test_frag_sampler_emits_no_plain_blit():
-    # A Frag= capture sampler draws THROUGH its shader - that draw is
-    # the chart_shaders fullscreen pass, so no plain aft instance:
-    # emitting one papers the raw capture over the composite (gat 2's
-    # horizon sampler erased the afthell rig). The plain sibling still
-    # blits.
+def test_frag_sampler_emits_its_own_blit():
+    # EVERY Frag= capture sampler draws as a blit of its source node's
+    # at-position slot (through the shader on GL) - there is no
+    # fullscreen-pass tier to route to. A finished-frame pass sees the
+    # AFT curtain idiom's black quad (drawn between node and sampler)
+    # and renders pass(black)=black - gat 2's whole MonitorOn window
+    # (chart 440s -> end) died that way; the at-position slot is
+    # pre-curtain by construction.
     afts = _afts(_instances(
         '<ActorFrame><children>'
         '<ActorFrameTexture InitCommand="%function(self) self:Create() end"'
@@ -397,15 +401,14 @@ def test_frag_sampler_emits_no_plain_blit():
         '<Sprite InitCommand="%function(self)'
         '  self:SetTexture(capA:GetTexture()) end" Var="plain"/>'
         '</children></ActorFrame>'))
-    assert len(afts) == 1
+    assert len(afts) == 2
 
 
 def test_transformed_frag_sampler_keeps_the_plain_blit():
-    # A Frag= sampler the chart TRANSFORMS compiles no fullscreen pass
-    # (see producers._fullscreen_identity_draw), so it keeps its plain
-    # blit: the AFT curtain idiom blacks out the raw scene expecting
-    # the sampler to redraw the capture on top - getfucked2's kecak/
-    # afthell windows showed bare curtain when both draws were dropped.
+    # A Frag= sampler the chart TRANSFORMS blits like any other sampler:
+    # the AFT curtain idiom blacks out the raw scene expecting the
+    # sampler to redraw the capture on top - getfucked2's kecak/
+    # afthell windows showed bare curtain when that draw was dropped.
     afts = _afts(_instances(
         '<ActorFrame><children>'
         '<ActorFrameTexture InitCommand="%function(self) self:Create() end"'

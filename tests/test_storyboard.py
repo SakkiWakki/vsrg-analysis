@@ -507,3 +507,44 @@ def test_group_fov_projects_children():
         Storyboard(200, 200, 'height', (flat_grp,)), t=0.5)
     assert projected is not None and flat is not None
     assert projected[2] < flat[2]   # z-pushed child shrank under fov
+
+
+# ── SM runtime texture channels (texcoord scroll, asset swap) -------------
+
+def _sm_element(extra_keyframes=None, **overrides):
+    from analysis.player.render.storyboard.model import Element
+    fields = dict(kind='sprite', z=1, z_index=0, t_start=0.0,
+                  t_end=float('inf'), anchor=(0.0, 0.0), origin=(0.5, 0.5),
+                  timelines=build_timelines(keyframes=extra_keyframes),
+                  asset='a.png')
+    fields.update(overrides)
+    return Element(**fields)
+
+
+def test_texcoord_offset_rest_is_the_fast_path():
+    from analysis.player.render.storyboard.render import _texcoord_offset
+    assert _texcoord_offset(_sm_element(), 3.0) is None
+
+
+def test_texcoord_offset_advances_and_wraps():
+    from analysis.player.render.effects.timeline import Keyframe
+    from analysis.player.render.storyboard.render import _texcoord_offset
+    el = _sm_element({'texcoord_scroll':
+                      [Keyframe(2.0, (2.0, 0.0, 0.5, 0.0, 0.25), 0.0, 0)]})
+    assert _texcoord_offset(el, 3.0) == pytest.approx((0.0, 0.75))
+    assert _texcoord_offset(el, 4.0) == pytest.approx((0.0, 0.0))  # wrapped
+
+
+def test_swap_view_applies_recorded_load(tmp_path):
+    from analysis.player.render.effects.timeline import Keyframe
+    el = _sm_element({'asset_swap':
+                      [Keyframe(5.0, ('b 2x2.png', 2.0, 2.0), 0.0, 0)]})
+    effect = StoryboardEffect(
+        Storyboard(design_w=640, design_h=480, fit='stretch',
+                   elements=(el,)))
+    assert effect._swap_view(el, 4.0) is el
+    view = effect._swap_view(el, 6.0)
+    assert (view.asset, view.sheet_cols, view.sheet_rows) \
+        == ('b 2x2.png', 2, 2)
+    assert view.sheet_states == ((0, 0.1), (1, 0.1), (2, 0.1), (3, 0.1))
+    assert effect._swap_view(el, 7.0) is view  # cached clone

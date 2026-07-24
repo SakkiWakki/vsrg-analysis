@@ -208,6 +208,62 @@ def _entry_shim(uv_names: tuple, varyings: dict,
     return '\n'.join(lines)
 
 
+# ── vertex-stage translation (the Polygon mesh tier) ─────────────────
+#
+# A NotITG Polygon's `Vert=` shader (crumple.vert) displaces mesh
+# vertices in the actor's LOCAL space (gl_Vertex, center origin,
+# +y down) and projects through the fixed-function matrices. The mesh
+# tier supplies `a_pos` (local xy) / `a_uv` (source UV, already
+# converted to our capture orientation) and one `u_mvp` that maps local
+# coords straight to clip space (the instance homography embedded in a
+# mat4, depth 0 - the engine projection is orthographic so z never
+# perspective-divides). Fixed-function inputs the chart reads are
+# shimmed: identity texture matrix, identity normal machinery, white
+# color. The chart main is renamed and wrapped so the paired fragment
+# stage (the plain textured-quad frag) always receives `v_uv`.
+
+_ATTRIBUTE_RE = re.compile(r'\battribute\b')
+_VARYING_KEYWORD_RE = re.compile(r'\bvarying\b')
+_TEXTURE_MATRIX_RE = re.compile(r'\bgl_TextureMatrix\s*\[[^\]]*\]')
+_VERT_MAIN_RE = re.compile(r'\bvoid\s+main\s*\(\s*(?:void)?\s*\)')
+
+_VERT_PREAMBLE = """#version 150
+uniform mat4 u_mvp;
+in vec2 a_pos;
+in vec2 a_uv;
+out vec2 v_uv;
+vec4 _vs_frontcolor;
+vec4 _vs_texcoord[2];
+#define texture2D texture
+#define gl_Vertex vec4(a_pos, 0.0, 1.0)
+#define gl_MultiTexCoord0 vec4(a_uv, 0.0, 1.0)
+#define gl_ModelViewProjectionMatrix u_mvp
+#define gl_NormalMatrix mat3(1.0)
+#define gl_Normal vec3(0.0, 0.0, 1.0)
+#define gl_Color vec4(1.0)
+#define gl_FrontColor _vs_frontcolor
+#define gl_TexCoord _vs_texcoord
+"""
+
+_VERT_WRAPPER = """
+void main(void) { _vs_chart_main(); v_uv = a_uv; }
+"""
+
+
+def translate_vert(glsl: str) -> str:
+    """Return a contract vertex shader for the raw NotITG chart vert
+    `glsl` (see the section comment). Raises ValueError when the source
+    has no main to wrap."""
+    if not _VERT_MAIN_RE.search(glsl):
+        raise ValueError('NotITG vert has no main to translate')
+    body = _VERSION_RE.sub('', glsl)
+    body = _ATTRIBUTE_RE.sub('in', body)
+    body = _VARYING_KEYWORD_RE.sub('out', body)
+    body = _TEXTURE_MATRIX_RE.sub('mat4(1.0)', body)
+    body = _VERT_MAIN_RE.sub('void _vs_chart_main()', body, count=1)
+    return _VERT_PREAMBLE + body + _VERT_WRAPPER
+
+
 def translate(glsl: str, uv_source: str = 'fragcoord') -> str:
     """Return a contract-compliant fragment shader for the raw NotITG
     chart frag `glsl`. Raises ValueError if it declares no sampler0

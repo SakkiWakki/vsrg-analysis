@@ -303,12 +303,6 @@ DEFERRED: dict = {
     'removecommand': 'runtime RemoveCommand registry write - not modeled',
     'hascommand': 'HasCommand query - needs a value-returning route with '
                   'an argument (the getter bridge passes none)',
-    # render tiers named in the gat 2 backlog, surfaced by the
-    # dropped-verb reporter:
-    'uniformTexture': 'per-actor shader sampler bind - GL executor tier '
-                      '(ascii.frag samplerAscii)',
-    'texcoordvelocity': 'UV scroll animation - needs a texcoord offset '
-                        'channel on the element',
     # Per-player notefield shader binds (LunaPlayer<Player> fork
     # additions: SetArrowShader @0x00533740, SetHoldShader @0x00533aa0,
     # SetReceptorShader @0x00535a40, Clear* @0x005278xx, Get* variants;
@@ -336,21 +330,6 @@ DEFERRED: dict = {
     'PushNoteData': 'runtime notedata injection @0x0052dc60 - compiled '
                     'note streams cannot mutate yet',
     'PushNoteDataTime': 'time-variant of PushNoteData @0x0052de20',
-    'SetDrawMode': 'polygon mesh draw mode - the crumple.vert mesh tier',
-    'SetNumVertices': 'polygon mesh vertex count - see SetDrawMode',
-    'SetVertexPosition': 'polygon mesh vertex write - see SetDrawMode',
-    'SetVertexTexCoord': 'polygon mesh UV write - see SetDrawMode',
-    'SetXSpline': 'per-column note-path x spline - the shared '
-                  'sample_note_path consumer (arrowpath tier)',
-    'SetZSpline': 'per-column note-path z spline - see SetXSpline',
-    'SetNumPathGradientPoints': 'arrowpath gradient point count - '
-                                'arrowpath tier',
-    'SetPathGradientColor': 'arrowpath gradient color write - '
-                            'arrowpath tier',
-    'Load': 'runtime texture (re)load on a sprite - asset swap not '
-            'modeled',
-    'SetAwake': 'fork hibernate wake toggle - the sim anchors load '
-                'time, nothing sleeps through it',
     'tween': 'tween with a custom Lua easing function - live channel tier',
     'floorwag': 'fork wag variant (Effect not in openitg; Actor.clean.c '
                 'apply-math is COMDAT-folded so its offset/floor behavior '
@@ -426,6 +405,41 @@ HANDLED_BY_NAME: dict = {
     'blend': 'blend', 'additiveblend': 'blend',
     'setstate': 'sprite', 'animate': 'sprite', 'play': 'sprite',
     'pause': 'sprite',
+    # Sprite:Load(path) - runtime texture swap (openitg Sprite.cpp:246:
+    # reloads the texture and re-derives size + animation states, actor
+    # transforms untouched). Recorded onto the `asset_swap` channel; the
+    # storyboard renderer re-derives the sheet grid from the new file.
+    'Load': 'asset-swap',
+    # SetTexCoordVelocity (openitg Sprite.h:62, applied per Update at
+    # Sprite.cpp:346): UV units/sec, recorded as a closed-form scroll
+    # anchor on the `texcoord_scroll` channel.
+    'texcoordvelocity': 'uv-scroll',
+    # Fork Player hibernate gate (LunaPlayer::SetAwake @0x00533780): an
+    # asleep player neither updates nor draws. Recorded onto the `awake`
+    # channel (rest 1); the field-instance chain treats awake 0 as
+    # hidden.
+    'SetAwake': 'awake',
+    # GetShader():uniformTexture(name, tex) - a sampler bind onto the
+    # actor's shader program (RageShaderProgram::SetUniformTexture
+    # @0x0046e870, cached and flushed at Apply). Recorded as static
+    # sampler_binds; file-backed binds upload in the GL tiers.
+    'uniformTexture': 'shader-sampler',
+    # Player note-path family (SetXSpline @0x536dd0, SetZSpline
+    # @0x537170, SetNumPathGradientPoints @0x534ea0, SetPathGradientColor
+    # @0x5353e0): per-column path-displacement splines ArrowEffects
+    # GetXPos/GetZPos sample per arrow, plus the drawn arrowpath's color
+    # stops. Recorded per (column, point) by SimActor._poke_note_path;
+    # note_path.py rebuilds the curves (sample_note_path) for notes,
+    # hold bodies, receptors, and the arrowpath ribbon.
+    'SetXSpline': 'note-path', 'SetZSpline': 'note-path',
+    'SetNumPathGradientPoints': 'note-path',
+    'SetPathGradientColor': 'note-path',
+    # Polygon mesh family (LunaPolygon @0x549050-0x5498f0): the vertex
+    # vector as static actor state (SimActor._poke_mesh); an
+    # AFT-textured Polygon renders as a mesh field instance through its
+    # translated Vert= shader (gl_capture mesh draw, crumple.vert).
+    'SetDrawMode': 'mesh', 'SetNumVertices': 'mesh',
+    'SetVertexPosition': 'mesh', 'SetVertexTexCoord': 'mesh',
     'diffuse': 'diffuse', 'diffusecolor': 'diffuse',
     # per-corner / per-edge diffuse gradient (SetDiffuseUpperLeft etc.,
     # Actor.h:190-197): each writes one/two of the four corner-color

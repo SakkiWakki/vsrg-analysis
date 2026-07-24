@@ -139,6 +139,17 @@ _BODY_BOX_FILTER = 4
 # Below this spatial wavelength (engine px) a waveform kernel is zeroed
 # for body evaluation: 3x the sample spacing, safely above Nyquist.
 _BODY_MIN_WAVELENGTH = 3.0 * _BODY_SAMPLE_SPACING
+# Arrowpath trail sampling (ReceptorArrowRow::DrawArrowPath @0x53b390:
+# the fork draws each column's future note path when the `arrowpath`
+# mod is on). Spacing along the scroll axis in engine px, per-column
+# sample cap, and the stroke width. The ArrowPathWidth/ArrowPathGirth
+# mods exist in the fork but their units are unpinned (COMDAT-folded
+# draw site), so the width stays this constant until a reference frame
+# fixes it
+_ARROWPATH_SAMPLE_SPACING = 16.0
+_ARROWPATH_MAX_SAMPLES = 96
+_ARROWPATH_WIDTH = 1.0 # Perfect size
+
 # Waveform kernel -> its period companion (wavelength ~ 2*AS*(1+period)).
 _WAVEFORM_PERIODS = {
     'digital': 'digitalperiod', 'zigzag': 'zigzagperiod',
@@ -176,11 +187,16 @@ def beat_at(segments, t: float) -> float:
 
 
 class NotitgNoteMods:
-    def __init__(self, channels, bpms, field_tilt_active=None, player=0):
+    def __init__(self, channels, bpms, field_tilt_active=None, player=0,
+                 note_path=None):
         self._channels = channels
         self._field_tilt_active = field_tilt_active
         self._player = int(player)
         self._segments = beat_segments(bpms)
+        # The compiled note-path handle (SetXSpline family): per-column
+        # spline displacement every consumer of this pipeline inherits -
+        # heads, hold-body strips, receptors, the arrowpath ribbon.
+        self._note_path = note_path
 
     def _beat_at(self, t: float) -> float:
         return beat_at(self._segments, t)
@@ -218,12 +234,21 @@ class NotitgNoteMods:
         scale = ctx.lane_w / ARROW_SIZE
         judge_y = float(ctx.judge_y)
 
+        # The per-column note-path spline (SetXSpline family), or None
+        # while inert - the zero-cost fast path. Stashed for the
+        # arrowpath ribbon, which traces the same displaced path.
+        spline = (self._note_path.sampler_at(t, self._player)
+                  if self._note_path is not None else None)
+        ctx.note_path_spline = spline
+
         ppe = self._px_per_engine(ctx, t, scale)
         if len(ctx.candidates) or _stream_count(ctx):
-            self._apply_to_notes(ctx, percents, scale, ppe, judge_y, t)
+            self._apply_to_notes(ctx, percents, scale, ppe, judge_y, t,
+                                 spline)
         # Receptors carry the scroll orientation even on empty frames.
         ctx.receptor_offsets = self._receptor_offsets(
-            ctx, percents, ctx.player.keycount, scale, t, judge_y)
+            ctx, percents, ctx.player.keycount, scale, t, judge_y, spline)
+        self._stash_arrowpath(ctx, percents, scale, ppe, judge_y, t, spline)
 
     def _reverse_ys(self, ctx, ys, r, centered, judge_y):
         """The reverse-family remap of a single y array (see
@@ -235,12 +260,14 @@ class NotitgNoteMods:
         receptor_y = receptor_y + centered * (center_y - receptor_y)
         return receptor_y + (1.0 - 2.0 * r) * (np.asarray(ys) - judge_y)
 
-    def _apply_to_notes(self, ctx, percents, scale, ppe, judge_y, t) -> None:
+    def _apply_to_notes(self, ctx, percents, scale, ppe, judge_y, t,
+                        spline=None) -> None:
         p = ctx.player
         idx = np.asarray(ctx.candidates, dtype=np.int64)
         cols, note_rows = self._candidate_cols_rows(ctx, p, idx)
         self._pin_held_holds(ctx, idx, judge_y, t)
-        active = any(abs(v) >= _ACTIVE_EPS for v in percents.values())
+        active = (spline is not None
+                  or any(abs(v) >= _ACTIVE_EPS for v in percents.values()))
 
         # ACCEL FAMILY (boost/brake/wave/expand): reshape the raw scroll
         # y_offset -> position mapping BEFORE any dy contribution. Each of
@@ -261,6 +288,14 @@ class NotitgNoteMods:
                 percents, cols, head_off,
                 t_now=t, beat_now=self._beat_at(t), keycount=p.keycount,
                 note_beats=note_rows / 48.0, project_3d=True)
+            # The note-path spline adds onto the summed mods in engine
+            # px, BEFORE tiny's whole-offset compression (GetXPos adds
+            # spline and mods into one x the spacing multiplier scales).
+            if spline is not None:
+                np.add(offs.dx, spline.offsets('x', cols, head_off),
+                       out=offs.dx)
+                np.add(offs.z, spline.offsets('z', cols, head_off),
+                       out=offs.z)
 
         # REVERSE FAMILY (reverse/split/alternate/cross/centered): per
         # column, the receptor slides toward the mirrored judge line by
@@ -294,7 +329,7 @@ class NotitgNoteMods:
         ctx.candidate_glow_rgb = offs.glow_rgb
 
         self._stash_hold_body_samples(ctx, percents, cols, idx, head_off,
-                                      tail_off, scale, ppe, t)
+                                      tail_off, scale, ppe, t, spline)
 
     def _candidate_cols_rows(self, ctx, p, idx):
         """Columns + beat rows over the FULL candidate axis: replay
@@ -366,7 +401,8 @@ class NotitgNoteMods:
         return spacing * dx + (spacing - 1.0) * column
 
     def _stash_hold_body_samples(self, ctx, percents, cols, idx, head_off,
-                                 tail_off, scale, ppe, t) -> None:
+                                 tail_off, scale, ppe, t,
+                                 spline=None) -> None:
         """Sample each visible hold's body so the notes layer can draw it
         as a polyline that BENDS under the per-note x/y mods, instead of a
         straight head-to-tail rect (drunk/wave/digital etc. displace every
@@ -415,6 +451,16 @@ class NotitgNoteMods:
             segments['offs'], t_now=t, beat_now=self._beat_at(t),
             keycount=p.keycount, note_beats=segments['beats'],
             project_3d=True)
+        # Body strips ride the same note-path spline as heads: each
+        # sample is displaced at ITS OWN y_offset, so a hold's body
+        # bends along the helix instead of hanging straight off it.
+        if spline is not None:
+            np.add(sample.dx,
+                   spline.offsets('x', segments['cols'], segments['offs']),
+                   out=sample.dx)
+            np.add(sample.z,
+                   spline.offsets('z', segments['cols'], segments['offs']),
+                   out=sample.z)
 
         # A body only needs the polyline when something actually VARIES
         # along it: a bending dx (drunk/wave/digital ...) or a per-strip
@@ -621,7 +667,59 @@ class NotitgNoteMods:
         ctx.candidate_press_y = self._reverse_ys(
             ctx, ctx.candidate_press_y, r, centered, judge_y)
 
-    def _receptor_offsets(self, ctx, percents, keycount, scale, t, judge_y) -> dict:
+    def _stash_arrowpath(self, ctx, percents, scale, ppe, judge_y, t,
+                         spline) -> None:
+        """The fork's arrowpath trails: while the `arrowpath` mod is on,
+        one polyline per column tracing where that column's notes will
+        travel, sampled through the SAME pipeline the notes use (accel
+        remap, reverse family, dy/dx kernels, note-path spline, tiny
+        compression) so the trail sits exactly under the arrows. Stashed
+        as ctx.arrowpath_ribbons: (xs, ys, gradient stops, width px,
+        alpha) per column, in OUR pixel space; the field layer strokes
+        them under the receptors. The trail stays a 2D stroke (the
+        spline's z is ignored here - the x displacement carries the
+        visible helix; notes and bodies keep the real depth)."""
+        amount = min(1.0, abs(float(percents.get('arrowpath', 0.0))))
+        lane_x_fn = getattr(ctx, 'lane_x', None)
+        if amount < _ACTIVE_EPS or lane_x_fn is None:
+            ctx.arrowpath_ribbons = None
+            return
+        kc = ctx.player.keycount
+        _rx, _ry, _w, h = ctx.chart_rect
+        max_off = h * (1.0 + 2.0 * _BODY_WINDOW_PAD) / max(ppe, 1e-6)
+        count = int(np.clip(round(max_off / _ARROWPATH_SAMPLE_SPACING) + 1,
+                            2, _ARROWPATH_MAX_SAMPLES))
+        raw = np.linspace(0.0, max_off, count)
+        off = accel_y_offset(percents, raw)
+
+        cols = np.repeat(np.arange(kc, dtype=np.int64), count)
+        off_all = np.tile(off, kc)
+        offs = note_offsets(self._band_limited(percents), cols, off_all,
+                            t_now=t, beat_now=self._beat_at(t), keycount=kc)
+        dx_all = offs.dx
+        if spline is not None:
+            dx_all = dx_all + spline.offsets('x', cols, off_all)
+        dx_all = self._tiny_compressed_dx(percents, cols, dx_all, kc, scale)
+
+        ys_base = judge_y - off * ppe
+        r = self._effective_reverse(percents, np.arange(kc), kc)
+        centered = float(percents.get('centered', 0.0))
+        path = (self._note_path.player(self._player)
+                if self._note_path is not None else None)
+        width = _ARROWPATH_WIDTH * scale
+        ribbons = []
+        for col in range(kc):
+            window = slice(col * count, (col + 1) * count)
+            ys = (self._reverse_ys(ctx, ys_base, float(r[col]), centered,
+                                   judge_y) + offs.dy[window] * scale)
+            xs = lane_x_fn(col) + ctx.lane_w / 2.0 + dx_all[window]
+            stops = (path.gradient_at(t, col) if path is not None
+                     else [(1.0, 1.0, 1.0, 1.0)])
+            ribbons.append((xs, ys, stops, width, amount))
+        ctx.arrowpath_ribbons = ribbons
+
+    def _receptor_offsets(self, ctx, percents, keycount, scale, t, judge_y,
+                          spline=None) -> dict:
         """Per-column receptor mods in OUR pixel space. `receptor_offsets`
         evaluates the pipeline at y_offset = 0 over one note per column;
         dx/dy convert from engine px by `scale`, rotation/zoom are
@@ -630,13 +728,20 @@ class NotitgNoteMods:
         the dark family ALONE (`receptor_dark_alpha`, engine-exact per the
         ReceptorArrowRow decompile): the stealth/glow appearance terms the
         y=0 pipeline computes never apply to receptors, so a stealthed
-        field keeps its receptor marks."""
+        field keeps its receptor marks. The note-path spline displaces
+        receptors at its y-offset-0 value (the engine draws receptors
+        through the same GetXPos)."""
         cols = np.arange(keycount, dtype=np.int64)
         offs = receptor_offsets(percents, cols, t_now=t,
                                 beat_now=self._beat_at(t), keycount=keycount)
         dy = offs.dy * scale + self._receptor_reverse_dy(ctx, percents, cols, judge_y)
         alpha = receptor_dark_alpha(percents, cols)
-        dx = self._tiny_compressed_dx(percents, cols, offs.dx, keycount, scale)
+        dx_engine = offs.dx
+        if spline is not None:
+            dx_engine = dx_engine + spline.offsets(
+                'x', cols, np.zeros(keycount))
+        dx = self._tiny_compressed_dx(percents, cols, dx_engine, keycount,
+                                      scale)
         return {
             'dx': dx, 'dy': dy,
             'rotation_deg': offs.rotation_deg, 'zoom': offs.zoom,

@@ -43,6 +43,14 @@ _NAMESPACE_SEP = ':'
 # Session registry of chart-supplied shaders: id -> contract GLSL.
 _REGISTRY: dict[str, str] = {}
 
+# Extra sampler bindings per registered shader: id -> {glsl sampler
+# name: absolute image path}. NotITG's uniformTexture is cached program
+# state flushed at Apply time (RageShaderProgram::SetUniformTexture), so
+# a bind is a static property of the registered shader, not per-pass
+# data; the GL pipeline uploads each file once and binds it whenever the
+# program runs.
+_SAMPLERS: dict[str, dict] = {}
+
 
 def _is_builtin_name(name: str) -> bool:
     """A bare, path-safe builtin id: alphanumerics and underscores only,
@@ -75,17 +83,24 @@ def _reject_builtin_shadow(name: str) -> None:
             f'ids with a {_NAMESPACE_SEP!r} prefix (e.g. chart:{name})')
 
 
-def register_source(name: str, glsl: str, *, compat: bool = False) -> str:
+def register_source(name: str, glsl: str, *, compat: bool = False,
+                    samplers: dict | None = None) -> str:
     """Register chart-supplied GLSL under `name` for the session and
     return the id. `name` must be namespaced (contain a `:`) so it cannot
     collide with a builtin. With `compat=True` the source is a raw NotITG
-    chart frag and is translated onto our contract first."""
+    chart frag and is translated onto our contract first. `samplers`
+    binds extra sampler uniforms to image files (the chart's
+    uniformTexture pokes): {glsl name: absolute path}."""
     if _NAMESPACE_SEP not in name:
         raise ValueError(
             f'chart shader id {name!r} must be namespaced with '
             f'{_NAMESPACE_SEP!r} (e.g. chart:{name})')
     _reject_builtin_shadow(name)
     _REGISTRY[name] = notitg_compat.translate(glsl) if compat else glsl
+    if samplers:
+        _SAMPLERS[name] = dict(samplers)
+    else:
+        _SAMPLERS.pop(name, None)
     return name
 
 
@@ -109,6 +124,14 @@ def registered_uniform_names(name: str) -> tuple:
     return notitg_compat.uniform_names(glsl) if glsl else ()
 
 
+def sampler_files(name: str) -> dict:
+    """The registered extra-sampler bindings for shader `name`:
+    {glsl sampler name: absolute image path}; empty for builtins and
+    registrations without texture binds."""
+    return dict(_SAMPLERS.get(name, ()))
+
+
 def clear_registry() -> None:
     """Drop all session registrations (test isolation, chart unload)."""
     _REGISTRY.clear()
+    _SAMPLERS.clear()

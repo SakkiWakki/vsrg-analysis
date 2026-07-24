@@ -38,6 +38,10 @@ from analysis.player.render.lua.host import LuaScriptError
 # generates one actor per iteration; real generators empty in tens).
 _MAX_INCLUDE_EXPANSIONS = 512
 
+# SM omits image extensions freely (ActorUtil's directory-listing
+# resolution); the asset resolver retries a bare reference with each.
+_IMAGE_SUFFIXES = ('.png', '.jpg', '.jpeg', '.gif', '.bmp')
+
 # A classic-command arg that may be a Lua expression over identifiers
 # (globals, screen constants) rather than a plain number.
 _IDENT_CHAR_RE = re.compile(r'[A-Za-z_]')
@@ -719,6 +723,15 @@ class SimEnvironment:
         base_dir = getattr(actor, '_base_dir', None)
         if base_dir is not None:
             self._xml_dirs[rec_id] = f'{base_dir}/'
+        reference = (actor.attrs.get('Texture') or actor.attrs.get('Load')
+                     or actor.attrs.get('File'))
+        if reference:
+            # The actor's own texture file, so GetTexture() can answer
+            # with a 'file:' marker (what uniformTexture binds samplers
+            # to). Unresolvable references (dynamic includes, theme
+            # paths) just leave the marker unavailable.
+            self._actors[rec_id].texture_file = self._resolve_asset(
+                rec_id, reference)
         if actor.kind == 'ActorFrameTexture':
             # An `<... Type="ActorFrameTexture">` render target: name it so
             # its GetTexture() marker reaches copy/post-process sprites
@@ -836,6 +849,7 @@ class SimEnvironment:
         actor.queue_notify = lambda: self._queued.add(rec_id)
         actor.dropped_notify = lambda verb: self._verb_dropped(rec_id, verb)
         actor.deferred_notify = self._verb_deferred
+        actor.asset_resolver = lambda raw: self._resolve_asset(rec_id, raw)
         self._actors[rec_id] = actor
         self._tables[rec_id] = self._host.env["__make_recorder"](rec_id)
         self._active.append(rec_id)
@@ -1123,6 +1137,33 @@ class SimEnvironment:
                 actor.poke('x', [start_x])
                 actor.poke('y', [240.0])
         return self._tables[rec_id]
+
+    def _resolve_asset(self, rec_id, raw: str) -> str | None:
+        """A chart-authored texture path (a File= attribute,
+        Sprite:Load's argument) resolved to an absolute image file, or
+        None when nothing exists there. Charts build these from
+        GetSongDir() (absolute already) or relative to their own XML;
+        both roots are tried in that order, with SM's omitted-extension
+        leniency (`File="noise"` finds noise.png)."""
+        path = Path(raw)
+        if path.is_absolute():
+            return self._existing_image(path)
+        for base in (self._xml_dirs.get(rec_id), self._song_dir):
+            if base:
+                found = self._existing_image(Path(base) / raw)
+                if found:
+                    return found
+        return None
+
+    @staticmethod
+    def _existing_image(candidate: Path) -> str | None:
+        if candidate.is_file():
+            return str(candidate)
+        for suffix in _IMAGE_SUFFIXES:
+            with_ext = candidate.with_name(candidate.name + suffix)
+            if with_ext.is_file():
+                return str(with_ext)
+        return None
 
     def _loadfile(self, path=None):
         """Sandboxed `loadfile`: charts load their template libraries

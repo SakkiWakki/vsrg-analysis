@@ -43,11 +43,11 @@ from shiboken6 import VoidPtr
 import numpy as np
 
 from PySide6.QtCore import QRectF
-from PySide6.QtGui import (QMatrix3x3, QOpenGLContext, QPainter,
-                           QPaintEngine)
+from PySide6.QtGui import (QImage, QMatrix3x3, QMatrix4x4, QOpenGLContext,
+                           QPainter, QPaintEngine)
 from PySide6.QtOpenGL import (QOpenGLBuffer, QOpenGLFramebufferObject,
                               QOpenGLPaintDevice, QOpenGLShader,
-                              QOpenGLShaderProgram,
+                              QOpenGLShaderProgram, QOpenGLTexture,
                               QOpenGLVertexArrayObject)
 
 from analysis.player.render.capture import crop_region
@@ -62,6 +62,27 @@ from analysis.player.render.shaders.gl_pipeline import (
 
 GL_ONE = 1
 GL_ONE_MINUS_SRC_ALPHA = 0x0303
+GL_TRIANGLES = 0x0004
+GL_TRIANGLE_FAN = 0x0006
+
+# Polygon mesh primitive tags (producers._mesh_payload) -> GL modes.
+_MESH_GL_MODES = {'triangles': GL_TRIANGLES,
+                  'trianglestrip': GL_TRIANGLE_STRIP,
+                  'trianglefan': GL_TRIANGLE_FAN}
+
+# Default mesh vertex stage: the undisplaced grid (a Polygon without a
+# Vert= shader). Attribute layout matches the quad program (a_pos 0,
+# a_uv 1); a_pos is actor-LOCAL, mapped by the u_mvp mat4.
+_MESH_VERTEX_SRC = """#version 150
+in vec2 a_pos;
+in vec2 a_uv;
+uniform mat4 u_mvp;
+out vec2 v_uv;
+void main(void) {
+    v_uv = a_uv;
+    gl_Position = u_mvp * vec4(a_pos, 0.0, 1.0);
+}
+"""
 
 # Capture content is premultiplied (Qt's GL paint engine renders
 # premultiplied ARGB), so instance opacity multiplies every channel and
@@ -174,6 +195,14 @@ class GLCaptureBackend:
         # Per-actor chart frag programs, keyed by .frag path; None
         # entries mark failed builds (logged once, plain-blit fallback).
         self._frag_programs: dict = {}
+        # File-backed sampler textures (chart uniformTexture binds):
+        # path -> QOpenGLTexture | None (unreadable, warned once).
+        self._file_textures: dict = {}
+        # Polygon mesh tier: programs keyed by Vert= path (None = the
+        # undisplaced default), static vertex buffers keyed by the mesh
+        # payload's vertex-array identity.
+        self._mesh_programs: dict = {}
+        self._mesh_buffers: dict = {}
         self._vao = None
         self._vbo = None
         self._context = None
@@ -199,6 +228,9 @@ class GLCaptureBackend:
         self._freelist = []
         self._programs = None
         self._frag_programs = {}
+        self._file_textures = {}
+        self._mesh_programs = {}
+        self._mesh_buffers = {}
         self._vao = None
         self._vbo = None
         self._context = glctx
@@ -449,6 +481,83 @@ class GLCaptureBackend:
         self._frag_programs[frag_path] = entry
         return entry
 
+    def _mesh_program(self, vert_path):
+        """The mesh program for a Polygon: the translated Vert= shader
+        (crumple.vert) over the plain textured frag, or the undisplaced
+        default when the actor has none / translation fails. Cached per
+        path; None only when even the default fails to build."""
+        if vert_path in self._mesh_programs:
+            return self._mesh_programs[vert_path]
+        vert_src = _MESH_VERTEX_SRC
+        if vert_path:
+            try:
+                from analysis.player.render.shaders.library import (
+                    notitg_compat)
+                vert_src = notitg_compat.translate_vert(
+                    Path(vert_path).read_text(encoding='utf-8',
+                                              errors='replace'))
+            except (OSError, ValueError) as exc:
+                print(f'[gl_capture] mesh vert {vert_path} skipped '
+                      f'({exc}); mesh draws undisplaced')
+        entry = _build_program(_TEX_FRAG_SRC,
+                               ('u_mvp', 'u_tex', 'u_tint', 'u_opacity'),
+                               vert_src=vert_src)
+        if entry is None and vert_src is not _MESH_VERTEX_SRC:
+            print(f'[gl_capture] translated vert {vert_path} did not '
+                  'build; mesh draws undisplaced')
+            entry = _build_program(
+                _TEX_FRAG_SRC, ('u_mvp', 'u_tex', 'u_tint', 'u_opacity'),
+                vert_src=_MESH_VERTEX_SRC)
+        self._mesh_programs[vert_path] = entry
+        return entry
+
+    def _mesh_buffer(self, mesh):
+        """(vao, vbo, vertex count) for a mesh payload's static
+        interleaved (x, y, u, v) float32 vertices, uploaded once and
+        cached by array identity (the payload persists on its
+        instance)."""
+        vertices = mesh['vertices']
+        key = id(vertices)
+        cached = self._mesh_buffers.get(key)
+        if cached is not None:
+            return cached
+        data = vertices.tobytes()
+        vbo = QOpenGLBuffer(QOpenGLBuffer.Type.VertexBuffer)
+        vbo.create()
+        vbo.bind()
+        vbo.allocate(data, len(data))
+        vao = QOpenGLVertexArrayObject()
+        vao.create()
+        vao.bind()
+        f = QOpenGLContext.currentContext().extraFunctions()
+        stride = _FLOATS_PER_VERTEX * 4
+        f.glEnableVertexAttribArray(0)
+        f.glVertexAttribPointer(0, 2, GL_FLOAT, 0, stride, VoidPtr(0))
+        f.glEnableVertexAttribArray(1)
+        f.glVertexAttribPointer(1, 2, GL_FLOAT, 0, stride, VoidPtr(8))
+        vao.release()
+        vbo.release()
+        entry = (vao, vbo, len(vertices))
+        self._mesh_buffers[key] = entry
+        return entry
+
+    def _file_texture(self, path):
+        """The uploaded texture for `path`, cached; None (warned once)
+        when the image is unreadable. Repeat wrap - charts tile bound
+        noise/atlas textures (texturewrapping is the engine idiom)."""
+        if path not in self._file_textures:
+            image = QImage(path)
+            if image.isNull():
+                print(f'[gl_capture] sampler texture unreadable: {path}')
+                self._file_textures[path] = None
+            else:
+                texture = QOpenGLTexture(image)
+                texture.setMinMagFilters(QOpenGLTexture.Filter.Linear,
+                                         QOpenGLTexture.Filter.Linear)
+                texture.setWrapMode(QOpenGLTexture.WrapMode.Repeat)
+                self._file_textures[path] = texture
+        return self._file_textures[path]
+
     def _bind_quad(self, f) -> None:
         """Bind the shared dynamic quad VAO (interleaved pos+uv, one
         4-vertex strip re-uploaded per blit - 64 bytes)."""
@@ -485,11 +594,11 @@ def _set_sample_params(f, texture) -> None:
     f.glBindTexture(GL_TEXTURE_2D, 0)
 
 
-def _build_program(frag_src, uniforms):
+def _build_program(frag_src, uniforms, vert_src=_VERTEX_SRC):
     program = QOpenGLShaderProgram()
     built = (program.addShaderFromSourceCode(
                  QOpenGLShader.ShaderTypeBit.Vertex,
-                 _adapt_dialect(_VERTEX_SRC))
+                 _adapt_dialect(vert_src))
              and program.addShaderFromSourceCode(
                  QOpenGLShader.ShaderTypeBit.Fragment,
                  _adapt_dialect(frag_src)))
@@ -501,8 +610,8 @@ def _build_program(frag_src, uniforms):
     return program, {u: program.uniformLocation(u) for u in uniforms}
 
 
-def _source_to_ndc(transform, dpr, pw, ph) -> QMatrix3x3:
-    """The mat3 mapping source logical coords through the instance
+def _source_to_ndc_np(transform, dpr, pw, ph) -> np.ndarray:
+    """The 3x3 mapping source logical coords through the instance
     transform to target NDC (w in the third component): T then
     logical->device (dpr) then device->NDC with Qt's top-left at
     (-1, +1). Column-vector convention, QTransform's row-vector grid
@@ -518,8 +627,31 @@ def _source_to_ndc(transform, dpr, pw, ph) -> QMatrix3x3:
     ndc = np.array([[2.0 * dpr / pw, 0.0, -1.0],
                     [0.0, -2.0 * dpr / ph, 1.0],
                     [0.0, 0.0, 1.0]])
-    m = ndc @ t_cv
+    return ndc @ t_cv
+
+
+def _source_to_ndc(transform, dpr, pw, ph) -> QMatrix3x3:
+    m = _source_to_ndc_np(transform, dpr, pw, ph)
     return QMatrix3x3([float(v) for v in m.flatten()])
+
+
+def _mesh_mvp(transform, mesh, dpr, pw, ph, handle) -> QMatrix4x4:
+    """The mat4 mapping mesh LOCAL coords (actor center origin, design
+    px) to clip space: local -> capture px (capture/design ratio about
+    the capture center) -> NDC through the instance homography. Depth
+    drops out (row/column 2 zero) - the engine mesh projection is
+    orthographic, so a Vert= shader's z displacement never
+    perspective-divides."""
+    dw, dh = mesh.get('design_size', (640.0, 480.0))
+    local = np.array([[handle.w / dw, 0.0, handle.w / 2.0],
+                      [0.0, handle.h / dh, handle.h / 2.0],
+                      [0.0, 0.0, 1.0]])
+    m = _source_to_ndc_np(transform, dpr, pw, ph) @ local
+    return QMatrix4x4(
+        float(m[0, 0]), float(m[0, 1]), 0.0, float(m[0, 2]),
+        float(m[1, 0]), float(m[1, 1]), 0.0, float(m[1, 2]),
+        0.0, 0.0, 0.0, 0.0,
+        float(m[2, 0]), float(m[2, 1]), 0.0, float(m[2, 2]))
 
 
 class _GLBlits:
@@ -574,7 +706,7 @@ class _GLBlits:
         return False
 
     def blit(self, handle, transform=None, src_box=None,
-             opacity=1.0, frag=None) -> None:
+             opacity=1.0, frag=None, mesh=None) -> None:
         backend = self._backend
         if not isinstance(handle, _GLHandle) or handle.gen != backend._gen:
             # A handle from a lost context or a raster-fallback frame:
@@ -583,6 +715,9 @@ class _GLBlits:
             return
         programs = backend._quad_programs()
         if programs is None:
+            return
+        if mesh is not None and self._draw_mesh(handle, transform, mesh,
+                                                frag, opacity):
             return
         # `frag` shades this blit through a chart's per-actor .frag
         # (path, {uniform: value}, tint rgb): the program samples the
@@ -599,6 +734,7 @@ class _GLBlits:
                 loc = program.uniformLocation(name)
                 if loc != -1:
                     f.glUniform1f(loc, float(value))
+            self._bind_file_samplers(program, frag)
         else:
             program, locs = programs[0]
             program.bind()
@@ -619,6 +755,69 @@ class _GLBlits:
         if additive:
             f.glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
         program.release()
+
+    def _draw_mesh(self, handle, transform, mesh, frag, opacity) -> bool:
+        """One Polygon mesh draw: the instance's capture sampled over
+        the recorded vertex grid, displaced by its translated Vert=
+        shader. Shares the blit contract (tint / opacity / additive /
+        uniform pokes / uniformTexture binds ride the frag payload).
+        Returns False when the program or buffers cannot build - the
+        caller quad-blits instead (the mesh at rest IS the quad)."""
+        backend = self._backend
+        entry = backend._mesh_program(mesh.get('vert'))
+        if entry is None:
+            return False
+        vao, _vbo, count = backend._mesh_buffer(mesh)
+        program, locs = entry
+        f = self._f
+        program.bind()
+        program.setUniformValue(
+            locs['u_mvp'],
+            _mesh_mvp(transform, mesh, self._dpr, self._pw, self._ph,
+                      handle))
+        r, g, b = frag[2] if frag else (1.0, 1.0, 1.0)
+        f.glUniform3f(locs['u_tint'], r, g, b)
+        f.glUniform1f(locs['u_opacity'], min(1.0, float(opacity)))
+        if frag is not None:
+            for name, value in (frag[1] or {}).items():
+                loc = program.uniformLocation(name)
+                if loc != -1:
+                    f.glUniform1f(loc, float(value))
+            self._bind_file_samplers(program, frag)
+        f.glActiveTexture(GL_TEXTURE0)
+        f.glBindTexture(GL_TEXTURE_2D, handle.fbo.texture())
+        program.setUniformValue(locs['u_tex'], 0)
+        additive = frag is not None and len(frag) > 3 and frag[3]
+        if additive:
+            f.glBlendFunc(GL_ONE, GL_ONE)
+        vao.bind()
+        f.glDrawArrays(_MESH_GL_MODES[mesh['mode']], 0, count)
+        vao.release()
+        if additive:
+            f.glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+        program.release()
+        # Restore the shared dynamic-quad binding for the batch's next
+        # plain blit.
+        backend._vao.bind()
+        backend._vbo.bind()
+        return True
+
+    def _bind_file_samplers(self, program, frag) -> None:
+        """The chart's uniformTexture file binds riding the frag payload
+        (5th slot): each uploaded texture on its own unit above the quad
+        texture (unit 0, re-activated by the caller right after)."""
+        samplers = frag[4] if len(frag) > 4 else None
+        if not samplers:
+            return
+        f = self._f
+        for unit, (name, path) in enumerate(samplers.items(), start=1):
+            loc = program.uniformLocation(name)
+            texture = self._backend._file_texture(path)
+            if loc == -1 or texture is None:
+                continue
+            f.glActiveTexture(GL_TEXTURE0 + unit)
+            texture.bind()
+            f.glUniform1i(loc, unit)
 
     def fill(self, rgb, opacity, crop=None) -> None:
         """The curtain quad: a flat premultiplied fill covering the

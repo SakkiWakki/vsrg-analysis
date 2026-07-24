@@ -25,10 +25,11 @@ import struct
 
 from shiboken6 import VoidPtr
 
-from PySide6.QtGui import QOpenGLContext, QPainter, QVector2D, QVector3D
+from PySide6.QtGui import (QImage, QOpenGLContext, QPainter, QVector2D,
+                           QVector3D)
 from PySide6.QtOpenGL import (QOpenGLBuffer, QOpenGLFramebufferObject,
                               QOpenGLPaintDevice, QOpenGLShader,
-                              QOpenGLShaderProgram,
+                              QOpenGLShaderProgram, QOpenGLTexture,
                               QOpenGLVertexArrayObject)
 
 from analysis.player.render.shaders import library
@@ -71,6 +72,11 @@ _UNIFORMS = ('u_tex', 'u_resolution', 'u_time', 'u_strength')
 # texture unit 1 only when a program actually resolves the location.
 _SECOND_SAMPLER = 'u_tex2'
 _CAPTURE_UNIT = 1
+
+# File-backed sampler binds (a chart's uniformTexture pokes, registered
+# with the shader in the library) occupy units from here up: unit 0 is
+# the pass source, unit 1 the u_tex2 capture.
+_FILE_SAMPLER_UNIT0 = 2
 
 # Multi-pass shaders whose single stack id fans out to several library
 # frags. Bloom mirrors fluXis: separable gaussian blur (horizontal then
@@ -136,7 +142,7 @@ def _adapt_dialect(src: str) -> str:
 
 class ShaderGLPipeline:
     def __init__(self):
-        self._programs = {}          # name -> (program, locs) | None
+        self._programs = {}   # name -> (program, locs, file_samplers) | None
         # Slot 0 is the capture (read-only during passes so two-input
         # passes can re-read the original frame); slots 1 and 2 ping-pong
         # the intermediates without ever clobbering the capture.
@@ -155,6 +161,9 @@ class ShaderGLPipeline:
         self._host_fbo = 0
         self._context = None
         self._broken = False
+        # File-backed sampler textures (a chart's uniformTexture binds):
+        # path -> QOpenGLTexture | None (None = unreadable, warned once).
+        self._file_textures = {}
 
     def begin_capture(self, host_painter, w, h) -> QPainter | None:
         """Redirect chart painting into the capture FBO. Returns the
@@ -173,6 +182,7 @@ class ShaderGLPipeline:
             self._size = (0, 0)
             self._vao = None
             self._vbo = None
+            self._file_textures = {}
             self._context = glctx
         dpr = float(host_painter.device().devicePixelRatioF())
         pw = max(1, int(w * dpr))
@@ -379,10 +389,11 @@ class ShaderGLPipeline:
     def _draw_pass(self, f, entry, uniforms, src, t_now) -> None:
         """Bind `entry`'s program and its contract uniforms, then draw the
         fullscreen quad. The target FBO and viewport are set by the caller."""
-        program, locs = entry
+        program, locs, file_samplers = entry
         pw, ph = self._size
         f.glViewport(0, 0, pw, ph)
         program.bind()
+        self._bind_file_samplers(f, file_samplers)
         self._bind_pass_textures(f, locs, src)
         program.setUniformValue(locs['u_tex'], 0)
         program.setUniformValue(locs['u_resolution'], QVector2D(pw, ph))
@@ -397,6 +408,38 @@ class ShaderGLPipeline:
         _set_custom_uniforms(f, program, uniforms)
         f.glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
         program.release()
+
+    def _bind_file_samplers(self, f, file_samplers) -> None:
+        """Bind each of the pass's file-backed sampler textures (chart
+        uniformTexture binds registered with the shader) to its own unit
+        above the contract units. Unit 0 is re-activated by the pass
+        source bind that follows."""
+        for unit, (loc, path) in enumerate(file_samplers,
+                                           start=_FILE_SAMPLER_UNIT0):
+            texture = self._file_texture(path)
+            if texture is None:
+                continue
+            f.glActiveTexture(GL_TEXTURE0 + unit)
+            texture.bind()
+            f.glUniform1i(loc, unit)
+
+    def _file_texture(self, path):
+        """The uploaded texture for `path`, cached; None (warned once)
+        when the image is unreadable. Repeat wrap: SM charts scroll and
+        tile bound atlases (texturewrapping is the engine's default idiom
+        for these), and in-range UVs are unaffected."""
+        if path not in self._file_textures:
+            image = QImage(path)
+            if image.isNull():
+                print(f'shader sampler texture unreadable: {path}')
+                self._file_textures[path] = None
+            else:
+                texture = QOpenGLTexture(image)
+                texture.setMinMagFilters(QOpenGLTexture.Filter.Linear,
+                                         QOpenGLTexture.Filter.Linear)
+                texture.setWrapMode(QOpenGLTexture.WrapMode.Repeat)
+                self._file_textures[path] = texture
+        return self._file_textures[path]
 
     def _bind_pass_textures(self, f, locs, src) -> None:
         """Bind the pass source (slot `src`) to unit 0, and, when the
@@ -438,8 +481,10 @@ class ShaderGLPipeline:
         self._vao = vao
 
     def _program(self, name):
-        """Build (once) and return `(program, uniform_locations)` for
-        `name`, or None when the shader is unknown or failed to build.
+        """Build (once) and return `(program, uniform_locations,
+        file_samplers)` for `name`, or None when the shader is unknown or
+        failed to build. `file_samplers` are the shader's registered
+        uniformTexture binds as (location, path) pairs, resolved once.
         Failures are cached so each warns once."""
         if name in self._programs:
             return self._programs[name]
@@ -460,7 +505,11 @@ class ShaderGLPipeline:
             if built and program.link():
                 locs = {u: program.uniformLocation(u) for u in _UNIFORMS}
                 locs[_SECOND_SAMPLER] = program.uniformLocation(_SECOND_SAMPLER)
-                entry = (program, locs)
+                file_samplers = tuple(
+                    (loc, path)
+                    for sampler, path in library.sampler_files(name).items()
+                    if (loc := program.uniformLocation(sampler)) != -1)
+                entry = (program, locs, file_samplers)
             else:
                 print(f'shader {name!r} failed to build: {program.log()}')
 

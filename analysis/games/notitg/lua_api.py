@@ -140,6 +140,9 @@ _REST = {
     'color': (1.0, 1.0, 1.0),
     'frame': 0.0,
     'hidden': 0.0,
+    # Fork Player hibernate gate (SetAwake): players are born awake, so
+    # an untouched field never sleeps.
+    'awake': 1.0,
 }
 
 # Actor getter verb -> the property whose CURRENT value it returns.

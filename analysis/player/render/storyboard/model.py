@@ -111,13 +111,26 @@ _COLOR_RESTS = {
     'glow': (1.0, 1.0, 1.0, 0.0),
 }
 
+# Non-color tuple/string channels a sprite can carry.
+# `texcoord_scroll` is SM's SetTexCoordVelocity recorded as a closed-form
+# anchor (t0, offset_u, offset_v, vel_u, vel_v): the drawn UV offset at t
+# is offset + vel * (t - t0), wrapping mod 1. Rest = never scrolled.
+# `asset_swap` is a runtime Sprite:Load() texture swap recorded as
+# (absolute path, sheet cols, sheet rows) - the game frontend decodes
+# the grid convention at record time; path '' = never swapped.
+_SPRITE_RESTS = {
+    'texcoord_scroll': (0.0, 0.0, 0.0, 0.0, 0.0),
+    'asset_swap': ('', 1.0, 1.0),
+}
+
 
 def build_timelines(rests: dict | None = None,
                     keyframes: dict | None = None) -> dict:
     """One `EventTimeline` per property. `rests` overrides the default
     rest state (scalars as floats, 'color' as an (r, g, b) tuple);
     `keyframes` maps property name -> list of Keyframes."""
-    rests = {**_SCALAR_RESTS, **_COLOR_RESTS, **(rests or {})}
+    rests = {**_SCALAR_RESTS, **_COLOR_RESTS, **_SPRITE_RESTS,
+             **(rests or {})}
     keyframes = keyframes or {}
     out = {}
     for prop, rest in rests.items():
@@ -165,7 +178,8 @@ def build_live_timelines(sim, rec_id, rests: dict | None = None) -> dict:
     """Like `build_timelines`, but each property is a `LiveCurve` reading the
     live sim - the lazy-replay counterpart. Same key set + rest defaults so the
     element samples identically."""
-    rests = {**_SCALAR_RESTS, **_COLOR_RESTS, **(rests or {})}
+    rests = {**_SCALAR_RESTS, **_COLOR_RESTS, **_SPRITE_RESTS,
+             **(rests or {})}
     return {prop: LiveCurve(sim, rec_id, prop, rest)
             for prop, rest in rests.items()}
 

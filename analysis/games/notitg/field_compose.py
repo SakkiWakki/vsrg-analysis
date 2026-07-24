@@ -61,6 +61,10 @@ _LINK_RESTS = {
     'scale_x': 1.0, 'scale_y': 1.0, 'scale_z': 1.0,
     'base_scale_x': 1.0, 'base_scale_y': 1.0, 'base_scale_z': 1.0,
     'alpha': 1.0, 'hidden': 0.0,
+    # Fork Player hibernate gate (SetAwake @0x00533780): an asleep
+    # player neither updates nor draws. Rest 1 (born awake), so only a
+    # chart's explicit SetAwake(false) blanks its field instance.
+    'awake': 1.0,
     'fov': field_projection.FOV,
     # Fork transform-order state (NotITG SetRotationOrder + skew-before
     # gates): 'skew_*_before' rest at 0 (skew applies AFTER rotation, the
@@ -192,6 +196,8 @@ class TransformChannel:
         leaf = len(self._links) - 1
         for i, link in enumerate(self._links):
             if link['hidden'].sample(t)[0] >= 0.5:
+                return None
+            if link['awake'].sample(t)[0] < 0.5:
                 return None
             alpha *= link['alpha'].sample(t)[0]
             # A frame's fov projects its whole subtree; the innermost

@@ -235,7 +235,7 @@ def test_gl_all_library_shaders_compile(gl):
     for name in library.available():
         entry = pipeline._program(name)
         assert entry is not None, f'{name} failed to build'
-        _, locs = entry
+        _, locs, _samplers = entry
         for uniform in ('u_tex', 'u_resolution', 'u_strength'):
             assert locs[uniform] != -1, f'{name} lost {uniform}'
     for name in ('noise', 'glitch'):

@@ -167,12 +167,69 @@ def _draw_receptor_mark(painter, cx, cy, lane_w, rotation_deg, zoom, alpha):
     painter.restore()
 
 
+def _draw_arrowpaths(ctx, painter) -> None:
+    """NotITG arrowpath trails (ReceptorArrowRow::DrawArrowPath): one
+    stroked polyline per column tracing where that column's notes will
+    travel, produced by the game's note-mod consumer as
+    ctx.arrowpath_ribbons = (xs, ys, gradient stops, width, alpha) rows.
+    A single gradient stop strokes flat; multiple stops interpolate
+    per-segment along the path (the fork's SetPathGradientColor stops,
+    spaced evenly - their exact positions are unpinned)."""
+    ribbons = getattr(ctx, 'arrowpath_ribbons', None)
+    if not ribbons:
+        return
+    pad = 4096.0
+    w_max = getattr(ctx.player, 'W', 0.0) + pad
+    h_max = getattr(ctx.player, 'H', 0.0) + pad
+    painter.save()
+    base_opacity = painter.opacity()
+    for xs, ys, stops, width, alpha in ribbons:
+        if len(xs) < 2:
+            continue
+        # Clamp far-offscreen samples: the GL paint engine drops paths
+        # whose device bounds pass +/-32767 px (the mod-slam trap the
+        # LN body stroke guards the same way).
+        xs = np.clip(xs, -pad, w_max)
+        ys = np.clip(ys, -pad, h_max)
+        painter.setOpacity(base_opacity * alpha)
+        points = [QPointF(float(x), float(y)) for x, y in zip(xs, ys)]
+        if len(stops) == 1:
+            painter.setPen(_arrowpath_pen(stops[0], width))
+            painter.drawPolyline(points)
+            continue
+        segment_colors = _gradient_segment_colors(stops, len(points) - 1)
+        for i, color in enumerate(segment_colors):
+            painter.setPen(_arrowpath_pen(color, width))
+            painter.drawLine(points[i], points[i + 1])
+    painter.restore()
+
+
+def _arrowpath_pen(rgba, width) -> QPen:
+    r, g, b, a = (max(0.0, min(1.0, float(c))) for c in rgba)
+    pen = QPen(QColor.fromRgbF(r, g, b, a), max(0.5, width))
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    return pen
+
+
+def _gradient_segment_colors(stops, segments) -> list:
+    """One rgba per segment, linearly interpolated across the stop list
+    spread evenly over the path."""
+    stops = np.asarray(stops, dtype=np.float64)
+    fractions = (np.arange(segments) + 0.5) / segments
+    positions = fractions * (len(stops) - 1)
+    k = np.clip(positions.astype(np.int64), 0, len(stops) - 2)
+    f = (positions - k)[:, None]
+    return [tuple(c) for c in stops[k] * (1.0 - f) + stops[k + 1] * f]
+
+
 def draw_judgment(ctx, painter):
     p = ctx.player
     t_now = ctx.t_now
     sps = ctx.scroll_speed
     judge_y = ctx.judge_y
     x0, field_w = _field_span(ctx)
+    _draw_arrowpaths(ctx, painter)
 
     # Window shading. Anchor both edges at judge_y and ask the SV engine
     # for the render-space distance across each half independently --

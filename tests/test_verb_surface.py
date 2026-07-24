@@ -69,6 +69,65 @@ def test_getter_read_kinds_are_valid():
         assert read in (READ_CURRENT, READ_DEST), name
 
 
+# Per-verb args where the generic single float would not exercise the
+# real route (a command string, a name, a mode token, a rect).
+_POKE_ARGS = {
+    'queuecommand': ['Foo'], 'queuemessage': ['Foo'],
+    'effectclock': ['music'], 'blend': ['add'],
+    'SetRotationOrder': ['zyx'],
+    'stretchto': [0.0, 0.0, 640.0, 480.0],
+    'scaletocover': [0.0, 0.0, 640.0, 480.0],
+    'scaletofit': [0.0, 0.0, 640.0, 480.0],
+}
+
+# Handled-by-name verbs that never reach SimActor.poke: the recorder
+# bridge routes playcommand/queuecommand named-dispatch and Actor:cmd
+# through the environment (env._actor_command / env._actor_poke's cmd
+# branch, covered by tests/test_notitg_sim_load.py).
+_ENV_ROUTED = {'playcommand', 'cmd'}
+
+
+def test_every_handled_claim_actually_routes():
+    """A verb HANDLED_BY_NAME claims is handled must not fall through to
+    the drop tail - Actor:cmd carried the 'command' tag for months while
+    every call silently vanished. Getter-mechanism names verify through
+    read(); the rest poke through the real dispatch with dropped_notify
+    armed."""
+    for name in vs.HANDLED_BY_NAME:
+        if name in _ENV_ROUTED:
+            continue
+        if name.lower().startswith('get'):
+            actor = SimActor()
+            assert actor.read(name) is not None, \
+                f'{name} claimed handled but read() has no answer'
+            continue
+        actor = SimActor()
+        dropped = []
+        actor.dropped_notify = dropped.append
+        actor.poke(name, _POKE_ARGS.get(name, [1.0]))
+        assert not dropped, \
+            f'{name} claimed handled but fell through to the drop tail'
+
+
+def test_unmapped_verb_reports_via_dropped_notify():
+    actor = SimActor()
+    dropped = []
+    actor.dropped_notify = dropped.append
+    actor.poke('no_such_verb', [1.0])
+    assert dropped == ['no_such_verb']
+
+
+def test_documented_ignored_and_deferred_verbs_stay_silent():
+    actor = SimActor()
+    dropped = []
+    actor.dropped_notify = dropped.append
+    ignored = next(iter(vs.IGNORED))
+    deferred = 'x2'
+    actor.poke(ignored, [1.0])
+    actor.poke(deferred, [1.0])
+    assert dropped == []
+
+
 def test_trap_families_are_deferred_not_guessed():
     """The '*2' second-slot family stays DEFERRED (Actor.clean.c is
     COMDAT-folded and openitg has no analogue, so its dual-transform role
@@ -313,3 +372,78 @@ def test_deferred_verb_does_not_silently_write():
     a.poke('x2', [999])
     assert a.get('x') == 0.0
     assert a.keyframes() == {}
+
+
+# -- gat 2 backlog: Load / texcoordvelocity / SetAwake ------------------------
+
+def test_small_sprite_verbs_are_no_longer_deferred():
+    for name in ('Load', 'texcoordvelocity', 'SetAwake'):
+        assert name not in vs.DEFERRED, name
+        assert name in vs.HANDLED_BY_NAME, name
+
+
+def test_texcoordvelocity_records_a_closed_form_anchor():
+    """The recorded anchor (t0, offset, velocity) reproduces the engine's
+    per-Update UV accumulation: a re-poke folds the offset scrolled so
+    far into the new anchor, so offset(t) stays continuous across
+    velocity changes (Sprite.cpp:346-359)."""
+    a = SimActor()
+    a.poke('texcoordvelocity', [0.0, 0.25])
+    a.update_to(4.0)
+    a.poke('texcoordvelocity', [1.0, 0.0])
+    t0, ou, ov, vu, vv = a.keyframes()['texcoord_scroll'][-1].values
+    assert (t0, vu, vv) == (4.0, 1.0, 0.0)
+    assert ou == pytest.approx(0.0)
+    assert ov == pytest.approx(1.0)  # 0.25 UV/s for 4s
+
+
+def test_set_awake_records_the_gate_and_rests_awake():
+    a = SimActor()
+    a.poke('SetAwake', [False])
+    assert a.keyframes()['awake'][-1].values == (0.0,)
+    a.poke('SetAwake', [True])
+    assert a.keyframes()['awake'][-1].values == (1.0,)
+
+
+def test_load_records_resolved_path_with_sheet_grid(tmp_path):
+    img = tmp_path / 'judgent labil 2x6.png'
+    img.write_bytes(b'\x89PNG')
+    a = SimActor()
+    a.asset_resolver = lambda raw: str(img) if raw.endswith('.png') else None
+    a.poke('Load', ['lua/judgent labil 2x6.png'])
+    assert a.keyframes()['asset_swap'][-1].values == (str(img), 2.0, 6.0)
+
+
+def test_load_drops_nonpath_and_unresolvable_arguments():
+    """The engine no-ops on an empty path; a permissive-stub argument
+    (THEME:GetPath under the sandbox) is not a string; an unresolvable
+    path must keep the previous texture instead of recording a swap."""
+    a = SimActor()
+    a.asset_resolver = lambda raw: None
+    a.poke('Load', [object()])
+    a.poke('Load', [''])
+    a.poke('Load', ['no/such/file.png'])
+    assert 'asset_swap' not in a.keyframes()
+
+
+def test_uniform_texture_is_a_handled_static_bind():
+    assert 'uniformTexture' not in vs.DEFERRED
+    assert vs.HANDLED_BY_NAME['uniformTexture'] == 'shader-sampler'
+    a = SimActor()
+    marker = type('Tex', (), {'marker': 'file:/charts/asciitable.png'})()
+    a.poke('uniformTexture', ['samplerAscii', marker])
+    assert a.sampler_binds == {'samplerAscii': 'file:/charts/asciitable.png'}
+    # A non-texture second argument (permissive stub, plain float) is
+    # ignored rather than recorded as a garbage bind.
+    a.poke('uniformTexture', ['samplerOther', 3.0])
+    assert 'samplerOther' not in a.sampler_binds
+
+
+def test_get_texture_answers_a_file_marker_for_plain_sprites():
+    a = SimActor()
+    assert a.read('GetTexture') is None
+    a.texture_file = '/charts/asciitable.png'
+    assert a.read('GetTexture').marker == 'file:/charts/asciitable.png'
+    # An AFT identity outranks the file (a capture target stays aft:).
+    a.mark_aft('cap')
+    assert a.read('GetTexture').marker == 'aft:cap'

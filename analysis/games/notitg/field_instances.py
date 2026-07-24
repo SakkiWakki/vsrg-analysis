@@ -374,23 +374,27 @@ class NotitgFieldInstances:
                        or inst['name'])
                 live_now = live is None or live.sample(t)[0] >= 0.5
                 frag = inst.get('frag')
+                mesh = inst.get('mesh')
                 color = inst.get('color')
                 blend = inst.get('blend_add')
                 tint = tuple(color.sample(t)) if color is not None \
                     else (1.0, 1.0, 1.0)
                 additive = blend is not None and blend.sample(t)[0] >= 0.5
-                if frag is None and not additive \
+                if frag is None and mesh is None and not additive \
                         and tint == (1.0, 1.0, 1.0):
                     return (key, live_now)
                 # The blit-style payload: the sampler's .frag path, its
-                # uniform pokes sampled now, the diffuse rgb tint, and
-                # the additive-blend flag (`blend('add')` - black
+                # uniform pokes sampled now, the diffuse rgb tint, the
+                # additive-blend flag (`blend('add')` - black
                 # contributes nothing, overlaps sum; opaque source-over
                 # instead turns dark copies into occluders, which tiled
-                # the cyriak recursion into triangle holes).
+                # the cyriak recursion into triangle holes), and the
+                # frag's uniformTexture file binds.
                 uniforms = {name: tl.sample(t)[0] for name, tl in
                             (inst.get('frag_uniforms') or {}).items()}
-                return (key, live_now, (frag, uniforms, tint, additive))
+                return (key, live_now, (frag, uniforms, tint, additive,
+                                        inst.get('frag_samplers') or None),
+                        mesh)
             case 'capture':
                 # The slot name the renderer snapshots the in-progress
                 # composite into at this entry's position.

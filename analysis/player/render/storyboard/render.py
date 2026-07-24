@@ -20,6 +20,7 @@ strobe tints don't re-rasterize every frame.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from functools import lru_cache
 
 import numpy as np
@@ -131,6 +132,45 @@ def _inset_rect(rect: QRectF, crop) -> QRectF:
     return QRectF(rect.left() + left * w, rect.top() + top * h,
                   w * max(0.0, 1.0 - left - right),
                   h * max(0.0, 1.0 - top - bottom))
+
+
+def _texcoord_offset(el, t):
+    """The live UV scroll offset (u, v) in [0, 1), or None when the
+    element never scrolls (the fast path). `texcoord_scroll` is the
+    closed-form anchor (t0, offset_u, offset_v, vel_u, vel_v) recorded
+    from SM's SetTexCoordVelocity; the offset at `t` is
+    offset + vel * (t - t0), wrapped mod 1 exactly as the engine floors
+    its accumulated coords (Sprite.cpp:364-374)."""
+    timeline = el.timelines.get('texcoord_scroll')
+    if timeline is None:
+        return None
+    t0, ou, ov, vu, vv = timeline.sample(t)
+    if ou == 0.0 and ov == 0.0 and vu == 0.0 and vv == 0.0:
+        return None
+    return ((ou + vu * (t - t0)) % 1.0, (ov + vv * (t - t0)) % 1.0)
+
+
+def _draw_scrolled(painter, rect, pm, src, uv) -> None:
+    """Draw the source cell sampled at a wrapped UV offset: GL REPEAT
+    under QPainter, which cannot wrap, so the shifted cell is drawn as
+    up to four sub-rects (the offset tail, then the wrapped head, per
+    axis) mapped onto the matching sub-rects of the dest."""
+    u, v = uv
+    du, dv = u * src.width(), v * src.height()
+    fx = rect.width() / src.width() if src.width() else 0.0
+    fy = rect.height() / src.height() if src.height() else 0.0
+    cols = ((du, src.width() - du, 0.0), (0.0, du, src.width() - du))
+    rows = ((dv, src.height() - dv, 0.0), (0.0, dv, src.height() - dv))
+    for sx, sw, dx in cols:
+        if sw <= 0.0:
+            continue
+        for sy, sh, dy in rows:
+            if sh <= 0.0:
+                continue
+            dest = QRectF(rect.left() + dx * fx, rect.top() + dy * fy,
+                          sw * fx, sh * fy)
+            piece = QRectF(src.left() + sx, src.top() + sy, sw, sh)
+            painter.drawPixmap(dest, pm, piece)
 
 
 def _is_sheet(el) -> bool:
@@ -336,6 +376,7 @@ class StoryboardEffect:
         self._pixmaps = {}
         self._tinted = {}
         self._text_metrics = {}
+        self._swapped = {}
         self._document_renderer = (self._build_document_renderer(storyboard)
                                    if USE_DOCUMENT_PATH else None)
 
@@ -405,6 +446,7 @@ class StoryboardEffect:
                        ref_w, ref_h, inherited_alpha=1.0,
                        walker=_ELEMENT_WALK, node=None,
                        world3d=None, fov=None) -> None:
+        el = self._swap_view(el, t)
         # SM's `hidden` bit hard-gates the draw independently of alpha, so
         # an actor carrying a diffusealpha crossfade stays dark while
         # hidden (the ShowAFTBG capture sprite sits `hidden,1` until its
@@ -602,7 +644,11 @@ class StoryboardEffect:
             case 'sprite' | 'frames':
                 pm = self._tinted_pixmap(self._asset_at(el, t), color)
                 src = _inset_rect(self._source_rect(el, t, pm), crop)
-                painter.drawPixmap(rect, pm, src)
+                uv = _texcoord_offset(el, t)
+                if uv is None:
+                    painter.drawPixmap(rect, pm, src)
+                else:
+                    _draw_scrolled(painter, rect, pm, src, uv)
             case 'rect':
                 painter.fillRect(rect, color)
             case 'ellipse':
@@ -775,6 +821,34 @@ class StoryboardEffect:
                 return (w, h) if w > 0 and h > 0 else None
 
     # -- asset caches -------------------------------------------------------
+
+    def _swap_view(self, el, t):
+        """The element with any recorded runtime texture swap applied
+        (SM Sprite:Load - the `asset_swap` channel carries (path, cols,
+        rows) from the game frontend). Same element object until a swap
+        is live, then a cached clone with the new asset + sheet grid and
+        SM's default sequential animation states (Sprite.cpp:246-285
+        rebuilds m_States on load; a recorded state_pin still overrides
+        them). The clone is cached per (element, path) so steady frames
+        never re-allocate."""
+        timeline = el.timelines.get('asset_swap')
+        if timeline is None or el.kind not in ('sprite', 'frames'):
+            return el
+        path, cols, rows = timeline.sample(t)
+        if not path or path == el.asset:
+            return el
+
+        key = (id(el), path)
+        view = self._swapped.get(key)
+        if view is None:
+            cols, rows = max(1, int(cols)), max(1, int(rows))
+            view = replace(
+                el, kind='sprite', asset=path, frames=(),
+                sheet_cols=cols, sheet_rows=rows,
+                sheet_states=tuple((i, 0.1) for i in range(cols * rows)),
+                size_spec=None)
+            self._swapped[key] = view
+        return view
 
     def _asset_at(self, el, t) -> str | None:
         if el.kind != 'frames':

@@ -59,6 +59,7 @@ from analysis.games.notitg.lua_api import (
     _SCALAR_SETTERS, _SIZE_AXIS_SETTERS, _SIZE_PAIR_SETTERS, _TWEEN_EASING,
     AftTexture, _as_float, _as_int)
 from analysis.games.notitg.recording_actor import KIND_DEFAULTS
+from analysis.games.notitg.sprite_sheet import grid_from_filename
 from analysis.player.render.segment_timeline import SegmentTimeline
 from analysis.games.notitg.sim import verb_surface
 from analysis.player.render import transform3d
@@ -185,6 +186,19 @@ _SPHERICAL_AXIS = {'heading': 'y', 'pitch': 'x', 'roll': 'z'}
 # per-frame ticks are 1/60 apart, real gaps between sections are long.
 _DRIVEN_SPAN_GAP = 0.5
 
+# Player note-path spline family (SetXSpline/SetZSpline @0x536dd0/
+# 0x537170): per-(column, point) writes recorded as instant channels the
+# note_path builder consumes. Bounds guard runaway indices from broken
+# chart loops - the fork runs 4-8 columns and reference charts use ~11
+# points.
+_SPLINE_VERBS = {'SetXSpline': 'spline_x', 'SetZSpline': 'spline_z'}
+_MAX_PATH_COLUMNS = 16
+_MAX_PATH_POINTS = 64
+
+# Polygon mesh cap (SetNumVertices): getfucked2's fullscreen crumple
+# grid is 1152 vertices; the cap only guards runaway allocations.
+_MAX_MESH_VERTICES = 65536
+
 # The sim dispatches off verb_surface's generated tables (the full actor
 # verb surface), which are supersets of lua_api's harvest-path tables: the
 # scalar table adds zbias / basezoomz / skewy / the per-axis rotation
@@ -198,16 +212,20 @@ _SIM_BULK_ADD_SETTERS = verb_surface.BULK_ADD_SETTERS
 _SIM_CROP_COMPOSITES = verb_surface.CROP_COMPOSITES
 
 
-# Tuple-valued rests for the color-gradient / glow channels, which
-# lua_api._REST (scalar-only) does not carry. A corner rests at the UNSET
-# sentinel (any component < 0 = "use the flat diffuse"); glow rests at
-# alpha 0 = no glow pass (Actor.cpp:1008). Kept in sync with the storyboard
-# model's _COLOR_RESTS - the recording and the render must agree on rest.
+# Tuple-valued rests for channels lua_api._REST (scalar-only) does not
+# carry. A gradient corner rests at the UNSET sentinel (any component < 0
+# = "use the flat diffuse"); glow rests at alpha 0 = no glow pass
+# (Actor.cpp:1008); texcoord_scroll is the UV-scroll anchor
+# (t0, offset_u, offset_v, vel_u, vel_v) resting at "never scrolled".
+# Kept in sync with the storyboard model's tuple rests - the recording
+# and the render must agree on rest.
 _COLOR_UNSET = (-1.0, -1.0, -1.0, -1.0)
+_TEXCOORD_SCROLL_REST = (0.0, 0.0, 0.0, 0.0, 0.0)
 _COLOR_RESTS = {
     'color_ul': _COLOR_UNSET, 'color_ur': _COLOR_UNSET,
     'color_ll': _COLOR_UNSET, 'color_lr': _COLOR_UNSET,
     'glow': (1.0, 1.0, 1.0, 0.0),
+    'texcoord_scroll': _TEXCOORD_SCROLL_REST,
 }
 
 
@@ -350,6 +368,26 @@ class SimActor:
         self._natural = list(_DEFAULT_NATURAL_SIZE)
         self._aft_source: str | None = None
         self._aft_texture_name: str | None = None
+        # The actor's own texture file (its XML File=/Texture= asset),
+        # set by the environment at registration so GetTexture() can
+        # answer with a 'file:<path>' marker for a plain sprite - the
+        # thing uniformTexture binds a shader sampler to.
+        self.texture_file: str | None = None
+        # GetShader():uniformTexture(name, tex) binds: GLSL sampler name
+        # -> texture marker ('file:<path>' / 'aft:<name>'). Engine binds
+        # are cached program state flushed at Apply
+        # (RageShaderProgram::SetUniformTexture), so last-write-wins
+        # static state, not a keyframed channel.
+        self.sampler_binds: dict = {}
+        # Polygon mesh state (LunaPolygon SetDrawMode/SetNumVertices/
+        # SetVertexPosition/SetVertexTexCoord): the vertex vector as
+        # plain arrays, last write wins - charts build their mesh once
+        # at init and animate it through the vertex shader, so the
+        # geometry is static state, not a keyframed channel (a chart
+        # re-poking vertices per frame keeps only its final grid).
+        self.mesh_mode: str | None = None
+        self.mesh_positions: list | None = None  # [x, y, z] actor-local px
+        self.mesh_uvs: list | None = None        # [u, v] chart UVs
         self._osc_spans: list = []
         self._osc_open: OscSpan | None = None
         self._driven = False
@@ -381,6 +419,10 @@ class SimActor:
         # Like dropped_notify, for DEFERRED verbs: documented gaps the
         # chart actually exercises (the coverage report's raw feed).
         self.deferred_notify = None
+        # Set by the environment: resolves a chart-authored texture path
+        # (Sprite:Load's argument) to an absolute file, or None when no
+        # file exists there. The actor records only resolved swaps.
+        self.asset_resolver = None
 
     @property
     def now(self) -> float:
@@ -532,6 +574,11 @@ class SimActor:
                 return self.get(_SCALAR_GETTERS[v])
             case 'GetTexture' if self._aft_texture_name is not None:
                 return AftTexture(f'aft:{self._aft_texture_name}')
+            case 'GetTexture' if self.texture_file is not None:
+                # A plain sprite's own texture: the 'file:' marker
+                # uniformTexture binds shader samplers to (ascii.frag's
+                # samplerAscii atlas, crumple.vert's samplerRandom).
+                return AftTexture(f'file:{self.texture_file}')
             case 'GetSecsIntoEffect':
                 return self._secs_into_effect()
             case 'GetEffectMagnitude' if self._osc_open is not None:
@@ -656,6 +703,10 @@ class SimActor:
         arg0 = args[0] if args else None
         if self._poke_multi_arg(verb, args) or self._poke_bulk(verb, args):
             return
+        if self._poke_note_path(verb, args):
+            return
+        if self._poke_mesh(verb, args):
+            return
         if self._poke_effect(verb, args):
             return
         if self._poke_color(verb, args):
@@ -716,6 +767,14 @@ class SimActor:
                 self._set_natural(0, _arg_float(arg0))
             case 'SetHeight':
                 self._set_natural(1, _arg_float(arg0))
+            case 'Load':
+                self._load_texture(arg0)
+            case 'SetAwake':
+                # Fork Player hibernate gate (@0x00533780): asleep = no
+                # update, no draw. The field-instance chain reads awake
+                # 0 as hidden; players are born awake (rest 1).
+                self._set_immediate(
+                    'awake', 0.0 if arg0 in (False, 0, '0') else 1.0)
             case _ if verb in verb_surface.DEFERRED:
                 # A real capability we have not built yet: swallowed for
                 # rendering, but COUNTED so the compile-done report can
@@ -792,6 +851,9 @@ class SimActor:
             # subtree. Immediate, like vanish - it is not tween state.
             self._set_immediate('fov', _arg_float(args[0] if args else None))
             return True
+        if verb == 'texcoordvelocity':
+            self._texcoord_velocity(args)
+            return True
         if verb == 'SetDrawByZPosition':
             # ActorFrame.cpp:194-205: the frame draws its children
             # stable-sorted by GetZ ascending (ActorUtil.cpp:408-416)
@@ -800,6 +862,89 @@ class SimActor:
             self._set_immediate('draw_by_z',
                                 0.0 if arg0 in (False, 0, '0') else 1.0)
             return True
+        return False
+
+    def _poke_note_path(self, verb, args) -> bool:
+        """The Player note-path family. SetXSpline / SetZSpline
+        (pointIdx, col, value_px, y_offset_domain, mode) write one
+        control point of the column's path-displacement spline
+        (ArrowEffects GetXPos/GetZPos add the sampled value; the mode
+        sentinel, -1 in every observed chart, is unpinned and ignored).
+        SetNumPathGradientPoints(col, n) / SetPathGradientColor(pointIdx,
+        col, r, g, b, a) shape the drawn arrowpath's color stops. Each
+        write lands as an instant channel keyed by column/point
+        (`spline_x:{col}:{idx}` -> (value, domain), `pathgrad:{col}:{idx}`
+        -> rgba, `pathgrad_n:{col}` -> count) for the note_path builder.
+        Malformed or out-of-bounds writes drop; the verb stays consumed."""
+        prefix = _SPLINE_VERBS.get(verb)
+        if prefix is not None:
+            if len(args) >= 4:
+                idx, col = _as_int(args[0]), _as_int(args[1])
+                value, domain = _arg_float(args[2]), _arg_float(args[3])
+                if (self._path_index_ok(col, idx)
+                        and value is not None and domain is not None):
+                    self._set_immediate(f'{prefix}:{col}:{idx}',
+                                        (value, domain))
+            return True
+        if verb == 'SetNumPathGradientPoints':
+            if len(args) >= 2:
+                col, count = _as_int(args[0]), _arg_float(args[1])
+                if self._path_index_ok(col, 0) and count is not None:
+                    self._set_immediate(f'pathgrad_n:{col}', count)
+            return True
+        if verb == 'SetPathGradientColor':
+            if len(args) >= 6:
+                idx, col = _as_int(args[0]), _as_int(args[1])
+                if self._path_index_ok(col, idx):
+                    self._set_immediate(
+                        f'pathgrad:{col}:{idx}',
+                        tuple(_arg_float(a, 0.0) for a in args[2:6]))
+            return True
+        return False
+
+    @staticmethod
+    def _path_index_ok(col, idx) -> bool:
+        return (col is not None and idx is not None
+                and 0 <= col < _MAX_PATH_COLUMNS
+                and 0 <= idx < _MAX_PATH_POINTS)
+
+    def _poke_mesh(self, verb, args) -> bool:
+        """The Polygon mesh family (LunaPolygon @0x549050-0x5498f0).
+        SetDrawMode(primitive string) / SetNumVertices(n) allocate the
+        vertex vector; SetVertexPosition(i, x, y, z) writes actor-local
+        px (center origin, engine +y down as poked) and
+        SetVertexTexCoord(i, u, v) the chart's UVs (pre-scaled by the
+        AFT image/texture ratio - the producers unscale). Indices are
+        0-based (getfucked2's grid loop starts at k=0). Out-of-range or
+        malformed writes drop; the verb stays consumed."""
+        match verb:
+            case 'SetDrawMode':
+                if isinstance(args[0] if args else None, str):
+                    self.mesh_mode = args[0].strip().lower()
+                return True
+            case 'SetNumVertices':
+                n = _as_int(args[0] if args else None)
+                if n is not None and 0 < n <= _MAX_MESH_VERTICES:
+                    self.mesh_positions = [[0.0, 0.0, 0.0]
+                                           for _ in range(n)]
+                    self.mesh_uvs = [[0.0, 0.0] for _ in range(n)]
+                return True
+            case 'SetVertexPosition':
+                if len(args) >= 3 and self.mesh_positions is not None:
+                    i = _as_int(args[0])
+                    if i is not None and 0 <= i < len(self.mesh_positions):
+                        self.mesh_positions[i] = [
+                            _arg_float(a, 0.0) for a in
+                            (args[1], args[2],
+                             args[3] if len(args) > 3 else 0.0)]
+                return True
+            case 'SetVertexTexCoord':
+                if len(args) >= 3 and self.mesh_uvs is not None:
+                    i = _as_int(args[0])
+                    if i is not None and 0 <= i < len(self.mesh_uvs):
+                        self.mesh_uvs[i] = [_arg_float(args[1], 0.0),
+                                            _arg_float(args[2], 0.0)]
+                return True
         return False
 
     def _poke_channel(self, verb, arg0) -> bool:
@@ -824,18 +969,35 @@ class SimActor:
         a poke on the frag-owning actor. arg0 is the GLSL uniform name,
         the rest its value; only the first scalar component is kept - the
         chart-shader bridge drives scalar strengths, and a vec's extra
-        lanes have no fullscreen-pass consumer yet. Writing through the
-        normal dest path means a `linear(t)` before the poke eases the
-        uniform exactly as the chart authored it (SM's shader uniforms
-        are Actor tween state, openitg RageDisplay::SetUniform*)."""
+        lanes have no fullscreen-pass consumer yet. Uniforms are
+        RageShaderProgram state cached on the program and flushed at
+        Apply (HOWTO_3D_AND_SHADERS.md 129-136) - NOT Actor tween state
+        - so the write is IMMEDIATE, never queued: gat 2's crumple ramp
+        pokes amp per frame while the SAME actor runs a queued
+        linear/sleep/linear chain, and the dest-path write parked every
+        poke at the queue's end (the ball popped 1.7s late instead of
+        ramping)."""
         if verb == 'GetShader':
+            return True
+        if verb == 'uniformTexture':
+            # uniformTexture(name, tex): bind a GLSL sampler to another
+            # actor's texture (RageShaderProgram::SetUniformTexture
+            # @0x0046e870 - cached program state, flushed at Apply).
+            # `tex` is a GetTexture() marker; the consumers resolve
+            # 'file:' binds to uploaded images ('aft:' capture binds
+            # stay unconsumed until captures reach the shader tier).
+            name = args[0] if args else None
+            marker = getattr(args[1] if len(args) > 1 else None,
+                             'marker', None)
+            if isinstance(name, str) and isinstance(marker, str):
+                self.sampler_binds[name] = marker
             return True
         if verb not in _UNIFORM_VERBS:
             return False
         name = args[0] if args else None
         value = _arg_float(args[1]) if len(args) > 1 else None
         if isinstance(name, str) and value is not None:
-            self._set_scalar(f'uniform:{name}', value)
+            self._set_immediate(f'uniform:{name}', value)
         return True
 
     def _poke_bulk(self, verb, args) -> bool:
@@ -1138,6 +1300,42 @@ class SimActor:
         that also calls `SetTextureName` overrides this default name."""
         if self._aft_texture_name is None:
             self._aft_texture_name = name
+
+    def _load_texture(self, arg) -> None:
+        """Sprite:Load(path): runtime texture swap (openitg
+        Sprite.cpp:246-285 - reloads the texture, re-derives size and
+        animation states, leaves the actor transform alone). Recorded
+        onto the `asset_swap` channel as (resolved absolute path, sheet
+        cols, sheet rows) - the grid is decoded HERE from the new
+        filename (SM's NxM token, RageTexture) so the game-agnostic
+        renderer never learns the convention. The engine no-ops on an
+        empty path, and a permissive stub argument (THEME:GetPath under
+        the sandbox) is not a path, so both drop here; an unresolvable
+        real path also drops - the sprite keeps its previous texture
+        rather than going black."""
+        if not isinstance(arg, str) or not arg:
+            return
+        resolved = self.asset_resolver(arg) if self.asset_resolver else arg
+        if resolved:
+            cols, rows = grid_from_filename(resolved)
+            self._set_immediate('asset_swap',
+                                (str(resolved), float(cols), float(rows)))
+
+    def _texcoord_velocity(self, args) -> None:
+        """SetTexCoordVelocity(vx, vy) in UV units/sec (openitg
+        Sprite.h:62; Sprite::Update advances the UVs by delta*velocity,
+        Sprite.cpp:346-359). Recorded as the closed-form scroll anchor
+        (t0, offset_u, offset_v, vel_u, vel_v): the accumulated offset up
+        to this poke is folded into the anchor, so any sampler reproduces
+        the engine's per-Update accumulation exactly as
+        offset(t) = anchor_offset + vel * (t - t0)."""
+        t0, ox, oy, vx, vy = self._current.get('texcoord_scroll',
+                                               _TEXCOORD_SCROLL_REST)
+        now = self._now
+        self._set_immediate('texcoord_scroll', (
+            now, ox + vx * (now - t0), oy + vy * (now - t0),
+            _arg_float(args[0] if args else None, 0.0),
+            _arg_float(args[1] if len(args) > 1 else None, 0.0)))
 
     # -- effect oscillators ---------------------------------------------
 

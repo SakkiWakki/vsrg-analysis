@@ -155,14 +155,17 @@ class _RasterBlits:
         return False
 
     def blit(self, handle, transform=None, src_box=None,
-             opacity=1.0, frag=None) -> None:
+             opacity=1.0, frag=None, mesh=None) -> None:
         # `frag` is the blit-style payload (shader path, uniforms, tint,
         # additive). The shader/tint are GL-tier effects; the raster
         # fallback draws the positioned blit unshaded/untinted (agreed
         # fallback - no CPU shader emulation) but DOES honour additive
         # blending: `blend('add')` decides what occludes what, and
         # source-over instead of Plus turned the cyriak recursion's
-        # dark copies into triangle-hole masks.
+        # dark copies into triangle-hole masks. `mesh` (a Polygon grid
+        # drawn through its Vert= shader) is likewise GL-tier; the
+        # raster fallback draws the undisplaced quad, which IS the mesh
+        # at rest (a flat fullscreen grid).
         painter = self._painter
         painter.save()
         if frag is not None and len(frag) > 3 and frag[3]:
