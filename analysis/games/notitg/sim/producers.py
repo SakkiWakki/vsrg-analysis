@@ -295,8 +295,8 @@ class _LiveFieldInstances:
                 deadline = _time.perf_counter() + 0.003
                 while (_time.perf_counter() < deadline
                        and live.frontier < live._end_seconds):
-                    live.advance_to(min(live.frontier + 0.02,
-                                        live._end_seconds))
+                    live.advance_frontier(min(live.frontier + 0.02,
+                                              live._end_seconds))
             finally:
                 lock.release()
 
@@ -571,14 +571,20 @@ def _spawn_background_upgrade(mod_channels, tree, field_provider,
                     _time.monotonic() - getattr(sweep, 'render_seen', 0.0)
                     < 0.5):
                 _time.sleep(0.05)
+            elif lock is not None:
+                # Compute the chunk target INSIDE the lock: read outside
+                # and the render-thread nudge can advance the frontier
+                # past it first, turning the stale target into a
+                # "backward seek" that RESETS the sim and re-simulates
+                # from zero - measured as 86 full rebuilds in 30
+                # sim-seconds, the sweep crawling at ~1x realtime while
+                # the tick loop alone runs ~100x.
+                with lock:
+                    sweep.advance_frontier(min(sweep.now + 0.25,
+                                              end_seconds))
+                _time.sleep(0.001)
             else:
-                target = min(sweep.now + 0.25, end_seconds)
-                if lock is not None:
-                    with lock:
-                        sweep.advance_to(target)
-                    _time.sleep(0.001)
-                else:
-                    sweep.advance_to(target)
+                sweep.advance_frontier(min(sweep.now + 0.25, end_seconds))
             if sweep.now - last_print >= 30.0:
                 last_print = sweep.now
                 print(f'[notitg] background compile: {sweep.now:.0f}s '
@@ -1478,8 +1484,11 @@ _AFT_UV_SCALE_X = 640.0 / 1024.0
 _AFT_UV_SCALE_Y = 480.0 / 512.0
 
 # GL_QUADS is not in core profiles; a quads mesh re-expands to the
-# triangle list (v0,v1,v2)(v0,v2,v3) per quad.
-_MESH_MODES = ('triangles', 'trianglestrip', 'trianglefan', 'quads')
+# triangle list (v0,v1,v2)(v0,v2,v3) per quad. A quadstrip's vertex
+# order IS a triangle strip's (quad v0v1v3v2 == triangles v0v1v2 +
+# v1v3v2), so it maps directly.
+_MESH_MODES = ('triangles', 'trianglestrip', 'trianglefan', 'quads',
+               'quadstrip', 'linestrip')
 
 
 def _mesh_payload(sim, actor) -> dict | None:
@@ -1509,6 +1518,8 @@ def _mesh_payload(sim, actor) -> dict | None:
         quads = np.arange(len(positions) - len(positions) % 4)
         order = quads.reshape(-1, 4)[:, (0, 1, 2, 0, 2, 3)].ravel()
         positions, uvs, mode = positions[order], uvs[order], 'triangles'
+    elif mode == 'quadstrip':
+        mode = 'trianglestrip'
     vert = actor.attrs.get('Vert')
     vert_path = _resolve_frag(actor, vert) if vert else None
     return {'mode': mode,

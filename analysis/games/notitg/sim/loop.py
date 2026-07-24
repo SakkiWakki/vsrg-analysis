@@ -392,6 +392,18 @@ class LiveSim:
         # re-simulates (the fast path must never short-circuit a fresh env).
         self._last_advance_t = None
 
+    def advance_frontier(self, target_t):
+        """Forward-only advance for FRONTIER DRIVERS (the sweep worker,
+        the render-thread nudge, batch tools): a target at or behind the
+        frontier is a no-op, never a backward-seek reset. Concurrent
+        drivers inevitably present stale targets - a fixed goal the
+        sweep already passed, a chunk computed before another thread
+        advanced - and letting those reset re-simulates the whole chart
+        from zero (measured as 86 rebuilds in 30 sim-seconds, the sweep
+        crawling at ~1x realtime while the tick loop runs ~100x)."""
+        if target_t > self._t:
+            self.advance_to(target_t)
+
     def advance_to(self, target_t):
         """Tick the sim forward to the largest grid point <= `target_t`. Grid
         ticks are never truncated to `target_t` (the INVARIANT above), so `_t`
