@@ -974,6 +974,8 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
         aft_live = None
         color = None
         capture_source = None
+        frag_path = None
+        frag_uniforms = None
         if sim.aft_source:
             if actor.attrs.get('Frag') and _fullscreen_identity_draw(sim):
                 # A fullscreen-identity Frag= sampler draws its capture
@@ -997,6 +999,24 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
             # consumer blits that isolated capture; None = whole screen
             # (the gat 1 path, byte-identical).
             capture_source = chain_graph.capture_of(sim.aft_source)
+            frag = actor.attrs.get('Frag')
+            if frag:
+                # A kept Frag= sampler (transformed draw): its blit runs
+                # THROUGH the shader on the GL tier (raster falls back
+                # to the unshaded blit). Uniforms ride their recorded
+                # poke streams; the diffuse rgb tints even plain blits.
+                resolved = _resolve_frag(actor, frag)
+                if resolved is not None:
+                    frag_path = str(resolved)
+                    frag_uniforms = _uniform_curves(sim, rec_id, live_sim,
+                                                    actor_keyframes)
+            if live_sim is not None:
+                from analysis.games.notitg.sim.seg_read import curve_for
+                color = curve_for(live_sim, rec_id, 'color', (1.0, 1.0, 1.0))
+            else:
+                color = EventTimeline(
+                    (actor_keyframes.get(rec_id) or {}).get('color', []),
+                    rest=(1.0, 1.0, 1.0))
         elif sim.proxy_target in proxy_players:
             kind, player = 'proxy', proxy_players[sim.proxy_target]
         elif getattr(actor, '_aft_fill', False):
@@ -1052,8 +1072,26 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
             # stage-fold walk (a chain consumer composes every stage
             # transform down to the chain root's snapshot slot).
             inst['aft_node'] = sim.aft_source
+            if frag_path is not None:
+                inst['frag'] = frag_path
+                inst['frag_uniforms'] = frag_uniforms
         instances.append(inst)
     return instances
+
+
+def _uniform_curves(sim, rec_id, live_sim, actor_keyframes) -> dict:
+    """{uniform name: value timeline} from the actor's recorded
+    `GetShader():uniform*` pokes (rest 0.0, the engine default)."""
+    names = [prop[len('uniform:'):] for prop in sim.keyframes()
+             if prop.startswith('uniform:')]
+    if live_sim is not None:
+        from analysis.games.notitg.sim.seg_read import curve_for
+        return {name: curve_for(live_sim, rec_id, f'uniform:{name}', (0.0,))
+                for name in names}
+    frames = actor_keyframes.get(rec_id) or {}
+    return {name: EventTimeline(frames.get(f'uniform:{name}', []),
+                                rest=(0.0,))
+            for name in names}
 
 
 def _chain_slot_nodes(graph, aft_nodes) -> frozenset:
@@ -1282,7 +1320,7 @@ _FULLSCREEN_ALLOWED = {
 }
 
 
-def _fullscreen_identity_draw(sim, frames) -> bool:
+def _fullscreen_identity_draw(sim, frames=None) -> bool:
     """Whether a Frag= capture sampler's DRAW stays fullscreen-identity,
     the condition for compiling it to a fullscreen pass: the pass output
     replaces the whole frame, so it is only faithful when the actor
@@ -1297,6 +1335,10 @@ def _fullscreen_identity_draw(sim, frames) -> bool:
     its fullscreen pass."""
     if getattr(sim, '_osc_spans', ()) or getattr(sim, '_osc_open', None):
         return False
+    if frames is None:
+        # The lazy field-instance rebuild has no compiled keyframe map;
+        # the sim actor's own recorded stream is the same data.
+        frames = sim.keyframes()
     return not any(value not in allowed
                    for prop, allowed in _FULLSCREEN_ALLOWED.items()
                    for kf in frames.get(prop, ())

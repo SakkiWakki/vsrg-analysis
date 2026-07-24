@@ -241,6 +241,77 @@ def test_chainless_aft_emits_no_capture_instance():
     assert {i['kind'] for i in insts} == {'aft'}
 
 
+def test_quad_translation_samples_the_varying_uv():
+    """uv_source='varying' translates a chart frag for the textured-quad
+    blit: UVs read the quad's interpolated source coordinate (not
+    gl_FragCoord), and the chart main is wrapped so the blit opacity
+    multiplies its output."""
+    from analysis.player.render.shaders.library import notitg_compat
+
+    glsl = ('uniform sampler2D sampler0;\n'
+            'varying vec2 imageCoord;\n'
+            'uniform float keying;\n'
+            'void main() {\n'
+            '  gl_FragColor = texture2D(sampler0, imageCoord) * keying;\n'
+            '}\n')
+    quad = notitg_compat.translate(glsl, uv_source='varying')
+    assert 'in vec2 v_uv;' in quad
+    assert 'vec2 _fs_uv = v_uv;' in quad
+    assert '_fs_fragcolor = _fs_shaded * u_opacity;' in quad
+    assert 'uniform float keying;' in quad
+    fullscreen = notitg_compat.translate(glsl)
+    assert 'gl_FragCoord.xy / u_resolution' in fullscreen
+    assert 'v_uv' not in fullscreen
+
+
+def test_chain_frag_consumer_carries_shaded_payload(tmp_path):
+    """A kept Frag= sampler of a chain node compiles the shaded-blit
+    payload: frag path + uniform streams on the instance, sampled into
+    the entry's 3rd extra element (key, live, (path, uniforms, tint))."""
+    from types import SimpleNamespace
+
+    frag = tmp_path / 'lumi.frag'
+    frag.write_text('uniform sampler2D sampler0; uniform float keying;\n'
+                    'void main() { gl_FragColor = vec4(0.0); }\n')
+    xml = ('<ActorFrame><children>'
+           '<ActorFrameTexture InitCommand="%function(self) self:Create() end"'
+           ' Var="capA"/>'
+           '<Sprite InitCommand="%function(self)'
+           '  self:SetTexture(capA:GetTexture()) end" Var="s0"/>'
+           '<ActorFrameTexture InitCommand="%function(self) self:Create() end"'
+           ' Var="capB"/>'
+           '<Sprite Frag="lumi.frag" InitCommand="%function(self)'
+           '  self:SetTexture(capB:GetTexture()); self:zoom(0.5)'
+           '  self:GetShader():uniform1f(\'keying\', 0.4) end" Var="s1"/>'
+           '</children></ActorFrame>')
+    env = SimEnvironment(0.0, 0, to_seconds=lambda b: b * 0.5)
+    root = parse_actor_xml(xml).root
+
+    def stamp(actor):
+        actor._base_dir = str(tmp_path)
+        for child in actor.children:
+            stamp(child)
+
+    stamp(root)
+    env.load_actors(root)
+    doc = type('Doc', (), {'root': root})()
+    insts = _sim_field_instances(
+        doc, env, env.actor_keyframes(), osc_context=None,
+        named_keyframes={}, field_oscillators=None,
+        mod_channels=_ONE_PLAYER, t0=0.0)
+    shaded = next(i for i in insts if i['kind'] == 'aft' and i.get('frag'))
+    assert shaded['frag'].endswith('lumi.frag')
+
+    effect = NotitgFieldInstances(insts)
+    frame = effect.at(SimpleNamespace(t_now=1.0, chart_rect=(0, 0, 640, 480)))
+    entry = next(e for e in frame.fields
+                 if e[2] == 'screen' and len(e[3] or ()) == 3)
+    key, live, (path, uniforms, tint) = entry[3]
+    assert path.endswith('lumi.frag')
+    assert uniforms['keying'] == pytest.approx(0.4)
+    assert tint == pytest.approx((1.0, 1.0, 1.0))
+
+
 def test_frag_sampler_emits_no_plain_blit():
     # A Frag= capture sampler draws THROUGH its shader - that draw is
     # the chart_shaders fullscreen pass, so no plain aft instance:
@@ -255,6 +326,23 @@ def test_frag_sampler_emits_no_plain_blit():
         '  self:SetTexture(capA:GetTexture()) end" Var="shaded"/>'
         '<Sprite InitCommand="%function(self)'
         '  self:SetTexture(capA:GetTexture()) end" Var="plain"/>'
+        '</children></ActorFrame>'))
+    assert len(afts) == 1
+
+
+def test_transformed_frag_sampler_keeps_the_plain_blit():
+    # A Frag= sampler the chart TRANSFORMS compiles no fullscreen pass
+    # (see producers._fullscreen_identity_draw), so it keeps its plain
+    # blit: the AFT curtain idiom blacks out the raw scene expecting
+    # the sampler to redraw the capture on top - getfucked2's kecak/
+    # afthell windows showed bare curtain when both draws were dropped.
+    afts = _afts(_instances(
+        '<ActorFrame><children>'
+        '<ActorFrameTexture InitCommand="%function(self) self:Create() end"'
+        ' Var="capA"/>'
+        '<Sprite Frag="shaders/post.frag" InitCommand="%function(self)'
+        '  self:SetTexture(capA:GetTexture())'
+        '  self:zoom(0.8); self:rotationz(8) end" Var="shaded"/>'
         '</children></ActorFrame>'))
     assert len(afts) == 1
 

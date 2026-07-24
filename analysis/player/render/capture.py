@@ -155,7 +155,10 @@ class _RasterBlits:
         return False
 
     def blit(self, handle, transform=None, src_box=None,
-             opacity=1.0) -> None:
+             opacity=1.0, frag=None) -> None:
+        # `frag` (a per-actor shader payload) is a GL-tier effect; the
+        # raster fallback draws the positioned blit unshaded/untinted
+        # (agreed fallback - no CPU shader emulation).
         painter = self._painter
         painter.save()
         if transform is not None:

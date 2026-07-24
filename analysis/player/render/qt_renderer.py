@@ -1034,8 +1034,10 @@ class QtPlayerRenderer:
         if scope != _SCREEN_SCOPE and scope != _SCREEN_PREV_SCOPE:
             slot = scope if is_player_field else 'field'
             transform, box = self._overscan_blit(transform, box, slot)
+        frag = (extra[2] if isinstance(extra, tuple) and len(extra) > 2
+                else None)
         batch.blit(source, transform=transform, src_box=box,
-                   opacity=opacity)
+                   opacity=opacity, frag=frag)
 
     def _take_aft_slot(self, name) -> None:
         """Snapshot the in-progress composite into a chain node's slot
@@ -1053,7 +1055,7 @@ class QtPlayerRenderer:
 
     def _aft_slot_of(self, extra):
         """The composed-capture slot handle an extra keys, or None."""
-        if not isinstance(extra, tuple) or len(extra) != 2:
+        if not isinstance(extra, tuple) or len(extra) < 2:
             return None
         return self._aft_slots.get(extra[0])
 
@@ -1082,7 +1084,7 @@ class QtPlayerRenderer:
         reference (retain/release)."""
         if extra is None:
             return live_capture
-        name, live = extra
+        name, live = extra[0], extra[1]
         slot = self._aft_slots.get(name)
         if slot is not None:
             # A composed-capture slot: at-position content the node's

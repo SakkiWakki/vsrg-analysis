@@ -36,6 +36,7 @@ raster backend from the next frame (`usable` returns False).
 from __future__ import annotations
 
 import struct
+from pathlib import Path
 
 from shiboken6 import VoidPtr
 
@@ -80,9 +81,13 @@ void main(void) {
 _TEX_FRAG_SRC = """#version 150
 uniform sampler2D u_tex;
 uniform float u_opacity;
+uniform vec3 u_tint;
 in vec2 v_uv;
 out vec4 fragColor;
-void main(void) { fragColor = texture(u_tex, v_uv) * u_opacity; }
+void main(void) {
+    vec4 c = texture(u_tex, v_uv);
+    fragColor = vec4(c.rgb * u_tint, c.a) * u_opacity;
+}
 """
 
 _FILL_FRAG_SRC = """#version 150
@@ -166,6 +171,9 @@ class GLCaptureBackend:
         self._slots: dict[str, _Slot] = {}
         self._freelist: list[_GLHandle] = []
         self._programs = None       # (tex_entry, fill_entry) or None
+        # Per-actor chart frag programs, keyed by .frag path; None
+        # entries mark failed builds (logged once, plain-blit fallback).
+        self._frag_programs: dict = {}
         self._vao = None
         self._vbo = None
         self._context = None
@@ -190,6 +198,7 @@ class GLCaptureBackend:
         self._slots = {}
         self._freelist = []
         self._programs = None
+        self._frag_programs = {}
         self._vao = None
         self._vbo = None
         self._context = glctx
@@ -405,13 +414,40 @@ class GLCaptureBackend:
         None when a build failed (backend marked broken)."""
         if self._programs is not None:
             return self._programs
-        tex = _build_program(_TEX_FRAG_SRC, ('u_mat', 'u_tex', 'u_opacity'))
+        tex = _build_program(_TEX_FRAG_SRC,
+                             ('u_mat', 'u_tex', 'u_opacity', 'u_tint'))
         fill = _build_program(_FILL_FRAG_SRC, ('u_mat', 'u_color'))
         if tex is None or fill is None:
             self._mark_broken('quad program build failed')
             return None
         self._programs = (tex, fill)
         return self._programs
+
+    def _frag_program(self, frag_path):
+        """The textured-quad program running a chart's per-actor .frag
+        (notitg_compat 'varying' translation: the shader samples the
+        quad's interpolated SOURCE UV, so it composes with any blit
+        transform), cached per path. None when the file is missing or
+        fails to build - the caller falls back to the plain textured
+        program, logged once, never silently per-frame."""
+        cached = self._frag_programs.get(frag_path)
+        if cached is not None or frag_path in self._frag_programs:
+            return cached
+        entry = None
+        try:
+            from analysis.player.render.shaders.library import notitg_compat
+            glsl = Path(frag_path).read_text(encoding='utf-8',
+                                             errors='replace')
+            contract = notitg_compat.translate(glsl, uv_source='varying')
+            entry = _build_program(contract, ('u_mat', 'u_tex',
+                                              'u_resolution', 'u_opacity'))
+        except (OSError, ValueError) as exc:
+            print(f'[gl_capture] per-actor frag {frag_path} skipped: {exc}')
+        if entry is None and frag_path is not None:
+            print(f'[gl_capture] per-actor frag {frag_path} did not build; '
+                  'consumers blit unshaded')
+        self._frag_programs[frag_path] = entry
+        return entry
 
     def _bind_quad(self, f) -> None:
         """Bind the shared dynamic quad VAO (interleaved pos+uv, one
@@ -538,7 +574,7 @@ class _GLBlits:
         return False
 
     def blit(self, handle, transform=None, src_box=None,
-             opacity=1.0) -> None:
+             opacity=1.0, frag=None) -> None:
         backend = self._backend
         if not isinstance(handle, _GLHandle) or handle.gen != backend._gen:
             # A handle from a lost context or a raster-fallback frame:
@@ -548,9 +584,26 @@ class _GLBlits:
         programs = backend._quad_programs()
         if programs is None:
             return
-        program, locs = programs[0]
+        # `frag` shades this blit through a chart's per-actor .frag
+        # (path, {uniform: value}, tint rgb): the program samples the
+        # quad's SOURCE UV, so it composes with the transform. A failed
+        # build falls back to the plain textured program (tinted).
+        entry = backend._frag_program(frag[0]) if frag and frag[0] else None
         f = self._f
-        program.bind()
+        if entry is not None:
+            program, locs = entry
+            program.bind()
+            f.glUniform2f(locs['u_resolution'],
+                          float(handle.w), float(handle.h))
+            for name, value in (frag[1] or {}).items():
+                loc = program.uniformLocation(name)
+                if loc != -1:
+                    f.glUniform1f(loc, float(value))
+        else:
+            program, locs = programs[0]
+            program.bind()
+            r, g, b = frag[2] if frag else (1.0, 1.0, 1.0)
+            f.glUniform3f(locs['u_tint'], r, g, b)
         f.glActiveTexture(GL_TEXTURE0)
         f.glBindTexture(GL_TEXTURE_2D, handle.fbo.texture())
         program.setUniformValue(locs['u_tex'], 0)

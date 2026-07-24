@@ -169,13 +169,12 @@ def _fold_stage_chain(stages, slots, inst, H, alpha, crop, extra):
         crop = crop_s
         node = source
         folded = True
-    if node in slots and extra is not None:
-        return H, alpha, crop, (node, extra[1])
-    if folded and extra is not None:
-        # Chain resolved but its root slot is absent this frame (the
-        # root node never went live): keep the composed transform, key
-        # the root so the renderer's retained slot (if any) serves it.
-        return H, alpha, crop, (node, extra[1])
+    if (node in slots or folded) and extra is not None:
+        # Key the ROOT so the renderer serves its slot (when absent this
+        # frame, the retained slot from the node's last live frame).
+        # The tail carries the live flag and any shaded-blit payload
+        # through unchanged.
+        return H, alpha, crop, (node,) + tuple(extra[1:])
     return H, alpha, crop, extra
 
 
@@ -342,7 +341,19 @@ class NotitgFieldInstances:
             case 'aft':
                 live = inst.get('aft_live')
                 key = inst.get('capture_source') or inst['name']
-                return (key, live is None or live.sample(t)[0] >= 0.5)
+                live_now = live is None or live.sample(t)[0] >= 0.5
+                frag = inst.get('frag')
+                color = inst.get('color')
+                tint = tuple(color.sample(t)) if color is not None \
+                    else (1.0, 1.0, 1.0)
+                if frag is None and tint == (1.0, 1.0, 1.0):
+                    return (key, live_now)
+                # The shaded-blit payload: the sampler's .frag path, its
+                # uniform pokes sampled now, and the diffuse rgb tint
+                # (GL tier; raster blits plain).
+                uniforms = {name: tl.sample(t)[0] for name, tl in
+                            (inst.get('frag_uniforms') or {}).items()}
+                return (key, live_now, (frag, uniforms, tint))
             case 'capture':
                 # The slot name the renderer snapshots the in-progress
                 # composite into at this entry's position.

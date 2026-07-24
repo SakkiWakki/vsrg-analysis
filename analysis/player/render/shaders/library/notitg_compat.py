@@ -157,7 +157,8 @@ _ALIAS_GLOBALS = (
 )
 
 
-def _preamble(varyings: dict, chart_uniforms: dict) -> list:
+def _preamble(varyings: dict, chart_uniforms: dict,
+              quad_input: bool = False) -> list:
     lines = [CONTRACT_HEADER,
              'uniform sampler2D u_tex;',
              'uniform vec2 u_resolution;',
@@ -167,6 +168,16 @@ def _preamble(varyings: dict, chart_uniforms: dict) -> list:
              '#define texture2D texture',
              '#define gl_FragColor _fs_fragcolor',
              'out vec4 _fs_fragcolor;']
+    if quad_input:
+        # The textured-quad vertex stage's interpolated source UV
+        # (gl_capture's _VERTEX_SRC `out vec2 v_uv`), plus the blit
+        # opacity: the chart main is renamed and wrapped so its output
+        # picks up the instance opacity like every plain blit.
+        lines += ['in vec2 v_uv;',
+                  'uniform float u_opacity;',
+                  'vec4 _fs_shaded;',
+                  '#undef gl_FragColor',
+                  '#define gl_FragColor _fs_shaded']
     lines += [f'{gtype} {name};' for gtype, name, _ in _ALIAS_GLOBALS]
     if _VARYING_COLOUR in varyings:
         lines.append('vec4 color;')
@@ -178,8 +189,8 @@ def _preamble(varyings: dict, chart_uniforms: dict) -> list:
 
 
 def _entry_shim(uv_names: tuple, varyings: dict,
-                hoisted_assignments: list) -> str:
-    """Assignments injected at the top of main(): the fullscreen UV feeds
+                hoisted_assignments: list, uv_source: str) -> str:
+    """Assignments injected at the top of main(): the source UV feeds
     the chart's UV varyings, the contract aliases / per-vertex colour take
     their values, and any hoisted global initializer runs (all
     non-constant, so they cannot initialise a global at file scope)."""
@@ -187,7 +198,9 @@ def _entry_shim(uv_names: tuple, varyings: dict,
     if _VARYING_COLOUR in varyings:
         lines.append('color = vec4(1.0);')
     if uv_names:
-        lines.append('vec2 _fs_uv = gl_FragCoord.xy / u_resolution;')
+        uv = ('v_uv' if uv_source == 'varying'
+              else 'gl_FragCoord.xy / u_resolution')
+        lines.append(f'vec2 _fs_uv = {uv};')
         lines += [f'{name} = _fs_uv;' for name in uv_names]
     # Hoisted global initializers run last: they may read the aliases and
     # UV globals set above.
@@ -195,10 +208,16 @@ def _entry_shim(uv_names: tuple, varyings: dict,
     return '\n'.join(lines)
 
 
-def translate(glsl: str) -> str:
-    """Return a contract-compliant fullscreen fragment shader for the raw
-    NotITG chart frag `glsl`. Raises ValueError if it declares no
-    sampler0 (nothing to sample -- not a fullscreen texture pass)."""
+def translate(glsl: str, uv_source: str = 'fragcoord') -> str:
+    """Return a contract-compliant fragment shader for the raw NotITG
+    chart frag `glsl`. Raises ValueError if it declares no sampler0
+    (nothing to sample -- not a texture pass).
+
+    `uv_source` picks where the chart's UV varyings read from:
+    'fragcoord' (the fullscreen post pass - UV = destination position)
+    or 'varying' (a textured-quad blit - UV = the quad's interpolated
+    `v_uv` source coordinate, so the frag samples the SOURCE texel the
+    vertex mapping chose regardless of where the quad landed)."""
     if not _SAMPLER0_RE.search(glsl):
         raise ValueError('NotITG frag has no sampler0 to translate')
 
@@ -213,10 +232,16 @@ def translate(glsl: str) -> str:
     body, hoisted = _hoist_nonconst_globals(body)
 
     # UV varyings become mutable globals so the entry shim can assign them
-    # the fullscreen UV (a `#define` cannot be an lvalue for that).
+    # the source UV (a `#define` cannot be an lvalue for that).
     uv_globals = '\n'.join(f'vec2 {name};' for name in uv_names)
-    shim = _entry_shim(uv_names, varyings, hoisted)
-    injected = _MAIN_RE.sub(lambda m: m.group(0) + '\n' + shim + '\n', body,
-                            count=1)
-    preamble = '\n'.join(_preamble(varyings, chart_uniforms))
+    shim = _entry_shim(uv_names, varyings, hoisted, uv_source)
+    quad = uv_source == 'varying'
+    entry = 'void _fs_chart_main() {' if quad else None
+    injected = _MAIN_RE.sub(
+        lambda m: (entry or m.group(0)) + '\n' + shim + '\n', body, count=1)
+    if quad:
+        injected += ('\nvoid main(void) { _fs_chart_main(); '
+                     '_fs_fragcolor = _fs_shaded * u_opacity; }\n')
+    preamble = '\n'.join(_preamble(varyings, chart_uniforms,
+                                   quad_input=quad))
     return preamble + '\n' + uv_globals + '\n' + injected
