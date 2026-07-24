@@ -21,6 +21,7 @@ _WHITE       = QColor(255, 255, 255)
 _DEATH_RED   = QColor(220, 50, 50)
 
 _BG_BRUSH       = QBrush(_BG_BASE)
+_ENGINE_BLACK_BRUSH = QBrush(QColor(0, 0, 0))
 _LANE_BG_BRUSH  = QBrush(_LANE_BG)
 _LANE_LINE_PEN  = QPen(_LANE_LINE_C, 1)
 _JUDGE_LINE_PEN = QPen(_WHITE, 2)
@@ -54,8 +55,18 @@ def _judge_brush(color: tuple) -> QBrush:
 # ── draw functions ──────────────────────────────────────────────────
 
 def draw_background(ctx, painter):
-    """Single fullscreen fill ; one draw call, zero allocations."""
-    painter.fillRect(QRectF(0, 0, ctx.player.W, ctx.player.H), _BG_BRUSH)
+    """Single fullscreen fill ; one draw call, zero allocations.
+
+    Transparent-field games clear TRUE BLACK, matching the engine's
+    framebuffer clear: the app's near-black canvas tint (14,14,16) is
+    invisible live but ADDITIVE capture copies sum it - a dozen stacked
+    AFT generations turned the tint into visible gray phantom quads
+    (gat 2's cyriak wash)."""
+    adapter = getattr(ctx.player, '_adapter', None)
+    brush = (_ENGINE_BLACK_BRUSH
+             if adapter is not None and adapter.transparent_field()
+             else _BG_BRUSH)
+    painter.fillRect(QRectF(0, 0, ctx.player.W, ctx.player.H), brush)
 
 
 def draw_lanes(ctx, painter):
