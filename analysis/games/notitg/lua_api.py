@@ -436,6 +436,39 @@ VERB_REGISTRY['GetTexture'] = Verb(
     'GetTexture', GETTER, IMPLEMENTED, 'aft',
     'returns the AFT capture marker a copy sprite feeds SetTexture',
     'ActorFrameTexture.cpp')
+
+
+class AftTexture:
+    """What `GetTexture()` returns for an AFT: the 'aft:<name>' marker
+    (SetTexture unwraps it via `.marker`) plus the RageTexture size API
+    (image = the design-space capture size, texture = the next-pow2
+    allocation the engine pads to). A plain object, not a str subclass:
+    lupa flattens str subclasses to Lua strings, and rigs call size
+    getters ON the returned value to compute UV scale.
+
+    Examples: Mdrqnxtagon's crumple Polygon reads GetImageWidth() /
+    GetTextureWidth() (-> 0.625) and the height pair (-> 0.9375) to
+    scale its vertex-grid UVs before SetDrawMode."""
+
+    __slots__ = ('marker',)
+
+    def __init__(self, marker: str):
+        self.marker = marker
+
+    def __repr__(self):
+        return self.marker
+
+    def GetImageWidth(self, _self=None):
+        return 640.0
+
+    def GetImageHeight(self, _self=None):
+        return 480.0
+
+    def GetTextureWidth(self, _self=None):
+        return 1024.0
+
+    def GetTextureHeight(self, _self=None):
+        return 512.0
 VERB_REGISTRY.update(_entries(
     ('SetTarget', 'GetTarget'), CAPTURE, IMPLEMENTED, native='proxy',
     note='ActorProxy target bind - copy re-renders the target',

@@ -295,11 +295,20 @@ class SimEnvironment:
                     return
         # No eager all-actor sync: pokes and getter reads _sync lazily,
         # so only the actors the body actually touches advance per tick.
+        # `self` binds to the Update actor's table exactly as
+        # `_run_lua_body` binds it for every other command body - a
+        # body reading self:GetSecsIntoEffect() must see its own actor,
+        # not whatever the last load body left behind.
         self._host.env['mod_time'] = self._now
+        saved = self._host.env['self']
+        if rec_id is not None:
+            self._host.env['self'] = self._tables.get(rec_id, saved)
         try:
             self._update_chunk()
         except Exception as exc:
             self._record_fault(name, exc)
+        finally:
+            self._host.env['self'] = saved
 
     def _run_update_body_compiled(self, body, name, rec_id) -> None:
         """The interpreter-driven Update body (frame_eval, no Lua). Builds one
@@ -1139,6 +1148,13 @@ class SimEnvironment:
             'GetSongBeat': lambda _self: self._beat,
             'GetSongBeatNoOffset': lambda _self: self._beat,
             'GetSongTime': lambda _self: self._now,
+            # ArrowEffects::GetZPos(player, col, yoffset): the note z
+            # from active z mods. Our sim world has no z-spline state
+            # (SetZSpline is unconsumed), so 0.0 is its true value; a
+            # numeric answer also keeps the caller's Update tick alive
+            # (the permissive-table fallback faulted math.abs and
+            # killed everything after it in the same guard).
+            'GetZ': lambda _self, *_a: 0.0,
             # Charts gate their whole modfile on a minimum engine build
             # (tonumber(GetVersionDate()) >= ...); report a modern one.
             'GetVersionDate': lambda _self: '20990101',
@@ -1217,10 +1233,11 @@ class SimEnvironment:
         if isinstance(beat, (int, float)):
             self._beat = float(beat)
 
-    def _apply_modifiers(self, _self, modstring=None, *_a) -> None:
+    def _apply_modifiers(self, _self, modstring=None, pn=None,
+                         *_a) -> None:
         if isinstance(modstring, str):
             self._applied_mods.append(
-                (self._now, self._beat, modstring.strip(), None))
+                (self._now, self._beat, modstring.strip(), _as_int(pn)))
 
 
 def _beat_of(row) -> float:

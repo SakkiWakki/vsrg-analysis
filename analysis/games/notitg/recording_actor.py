@@ -63,7 +63,7 @@ from bisect import bisect_right
 from analysis.games.notitg.lua_api import (
     _ADD_SETTERS, _DRIVEN_SPAN_GAP, _FALLBACK_TWEEN_EASING, _LIVE_RESET,
     _REST, _SCALAR_GETTERS, _SCALAR_SETTERS, _SIZE_AXIS_SETTERS,
-    _SIZE_PAIR_SETTERS, _TWEEN_EASING, _as_float, _as_int,
+    _SIZE_PAIR_SETTERS, _TWEEN_EASING, AftTexture, _as_float, _as_int,
     _resolve_screen_expr)  # noqa: F401 - screen-constant resolution, re-exported
 from analysis.player.render.effects.timeline import EventTimeline, Keyframe
 
@@ -538,7 +538,7 @@ class RecordingActor:
             case v if v in _SCALAR_GETTERS:
                 return self.get(_SCALAR_GETTERS[v])
             case 'GetTexture' if self._aft_texture_name is not None:
-                return f'aft:{self._aft_texture_name}'
+                return AftTexture(f'aft:{self._aft_texture_name}')
             case _:
                 return None
 
@@ -555,6 +555,7 @@ class RecordingActor:
         (GetTexture bridges to the 'aft:<name>' marker). Any other
         texture (a name/path) is an ordinary sprite and leaves both
         unset."""
+        arg = getattr(arg, 'marker', arg)
         if not isinstance(arg, str):
             return
         if verb == 'SetTextureName':

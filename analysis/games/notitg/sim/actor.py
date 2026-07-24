@@ -57,7 +57,7 @@ from bisect import bisect_right
 from analysis.games.notitg.lua_api import (
     _ADD_SETTERS, _FALLBACK_TWEEN_EASING, _REST, _SCALAR_GETTERS,
     _SCALAR_SETTERS, _SIZE_AXIS_SETTERS, _SIZE_PAIR_SETTERS, _TWEEN_EASING,
-    _as_float, _as_int)
+    AftTexture, _as_float, _as_int)
 from analysis.games.notitg.recording_actor import KIND_DEFAULTS
 from analysis.player.render.segment_timeline import SegmentTimeline
 from analysis.games.notitg.sim import verb_surface
@@ -516,7 +516,7 @@ class SimActor:
             case v if v in _SCALAR_GETTERS:
                 return self.get(_SCALAR_GETTERS[v])
             case 'GetTexture' if self._aft_texture_name is not None:
-                return f'aft:{self._aft_texture_name}'
+                return AftTexture(f'aft:{self._aft_texture_name}')
             case 'GetSecsIntoEffect':
                 return self._secs_into_effect()
             case 'GetEffectMagnitude' if self._osc_open is not None:
@@ -539,6 +539,11 @@ class SimActor:
                 return self._current.get('skew_y_before', 0.0)
             case 'getdiffuse':
                 return self._get_diffuse()
+            case 'getrotation':
+                return self.getrotation()
+            case 'getcurrentrotation':
+                return (self.get('rotation_x'), self.get('rotation_y'),
+                        self.get('rotation'))
             case _:
                 return None
 
@@ -570,8 +575,10 @@ class SimActor:
                 return elapsed % period if period > 0 else elapsed
 
     def getrotation(self):
-        return (self.get('rotation_x'), self.get('rotation_y'),
-                self.get('rotation'))
+        """(rx, ry, rz) from the DEST state (Actor.h:523 GetRotationX/Y/Z
+        read m_baseRotation dest; getcurrentrotation reads current)."""
+        return (self.get_dest('rotation_x'), self.get_dest('rotation_y'),
+                self.get_dest('rotation'))
 
     # -- recording surface ----------------------------------------------
 
@@ -1054,6 +1061,7 @@ class SimActor:
         self._set_scalar('skew_y', sy)
 
     def _texture(self, verb, arg) -> None:
+        arg = getattr(arg, 'marker', arg)
         if not isinstance(arg, str):
             return
         if verb == 'SetTextureName':
