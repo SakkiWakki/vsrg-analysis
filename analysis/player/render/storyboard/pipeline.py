@@ -347,8 +347,29 @@ class DrawablePipeline:
         if not usable(painter):
             self._disable("painter is not on a GL engine (GL-only pipeline)")
             return False
+        # The FIRST prepare also waits for the settle gate: its worker-side
+        # dense channel sampling reads (and can advance) the LIVE sim, and
+        # doing that while the background sweep thread is still driving the
+        # same sim STALLED the sweep (the user's vanished 'background
+        # compile' progress). Post-sweep the static timelines are frozen
+        # and worker reads are safe - so no prepare starts until the
+        # topology signature has stopped changing.
+        if not self._signature_settled():
+            return False
         self._start_prepare()
         return False
+
+    def _signature_settled(self) -> bool:
+        """True once the provider's topology signature has been unchanged
+        for the settle window (the sweep's churn ended)."""
+        import time as _time
+        signature = _topology_signature(self._compiled)
+        now = _time.monotonic()
+        if signature != self._settle_sig:
+            self._settle_sig = signature
+            self._settle_since = now
+            return False
+        return now - self._settle_since >= self._REBUILD_SETTLE_S
 
     def _start_prepare(self) -> None:
         """Kick the worker-side prepare. The signature is taken BEFORE the

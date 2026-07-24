@@ -160,6 +160,9 @@ def _spin_present(pipe, ctx, rect=CHART_RECT, tries=200, backdrop=None,
         drew, target = gt.present(pipe, ctx, **kw)
         if drew or not pipe.healthy:
             break
+        # Production waits for the topology settle window before the first
+        # prepare; tests fast-forward it (the fakes' topology is static).
+        pipe._settle_since = -1e9
         _t.sleep(0.005)
     return drew, target
 
