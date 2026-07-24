@@ -47,12 +47,13 @@ from PySide6.QtGui import (QImage, QMatrix3x3, QMatrix4x4, QOpenGLContext,
                            QPainter, QPaintEngine)
 from PySide6.QtOpenGL import (QOpenGLBuffer, QOpenGLFramebufferObject,
                               QOpenGLPaintDevice, QOpenGLShader,
-                              QOpenGLShaderProgram, QOpenGLTexture,
+                              QOpenGLShaderProgram,
                               QOpenGLVertexArrayObject)
 
 from analysis.player.render.capture import crop_region
 from analysis.player.render.shaders.gl_pipeline import (
-    _adapt_dialect, GL_BLEND, GL_CLAMP_TO_EDGE, GL_COLOR_BUFFER_BIT,
+    _adapt_dialect, upload_file_texture,
+    GL_BLEND, GL_CLAMP_TO_EDGE, GL_COLOR_BUFFER_BIT,
     GL_CULL_FACE, GL_DEPTH_BUFFER_BIT, GL_DEPTH_TEST, GL_FLOAT,
     GL_FRAMEBUFFER, GL_FRAMEBUFFER_BINDING, GL_DRAW_FRAMEBUFFER,
     GL_LINEAR, GL_NEAREST, GL_READ_FRAMEBUFFER, GL_SCISSOR_TEST,
@@ -62,13 +63,15 @@ from analysis.player.render.shaders.gl_pipeline import (
 
 GL_ONE = 1
 GL_ONE_MINUS_SRC_ALPHA = 0x0303
+GL_LINE_STRIP = 0x0003
 GL_TRIANGLES = 0x0004
 GL_TRIANGLE_FAN = 0x0006
 
 # Polygon mesh primitive tags (producers._mesh_payload) -> GL modes.
 _MESH_GL_MODES = {'triangles': GL_TRIANGLES,
                   'trianglestrip': GL_TRIANGLE_STRIP,
-                  'trianglefan': GL_TRIANGLE_FAN}
+                  'trianglefan': GL_TRIANGLE_FAN,
+                  'linestrip': GL_LINE_STRIP}
 
 # Default mesh vertex stage: the undisplaced grid (a Polygon without a
 # Vert= shader). Attribute layout matches the quad program (a_pos 0,
@@ -196,7 +199,7 @@ class GLCaptureBackend:
         # entries mark failed builds (logged once, plain-blit fallback).
         self._frag_programs: dict = {}
         # File-backed sampler textures (chart uniformTexture binds):
-        # path -> QOpenGLTexture | None (unreadable, warned once).
+        # path -> raw GL texture id | None (unreadable, warned once).
         self._file_textures: dict = {}
         # Polygon mesh tier: programs keyed by Vert= path (None = the
         # undisplaced default), static vertex buffers keyed by the mesh
@@ -556,20 +559,17 @@ class GLCaptureBackend:
         return entry
 
     def _file_texture(self, path):
-        """The uploaded texture for `path`, cached; None (warned once)
-        when the image is unreadable. Repeat wrap - charts tile bound
+        """The uploaded texture id for `path`, cached; None (warned
+        once) when the image is unreadable. A raw id, not a Qt wrapper:
+        it dies with the context, so app close never destroys a texture
+        without a current context. Repeat wrap - charts tile bound
         noise/atlas textures (texturewrapping is the engine idiom)."""
         if path not in self._file_textures:
-            image = QImage(path)
-            if image.isNull():
+            f = QOpenGLContext.currentContext().extraFunctions()
+            texture = upload_file_texture(f, path)
+            if texture is None:
                 print(f'[gl_capture] sampler texture unreadable: {path}')
-                self._file_textures[path] = None
-            else:
-                texture = QOpenGLTexture(image)
-                texture.setMinMagFilters(QOpenGLTexture.Filter.Linear,
-                                         QOpenGLTexture.Filter.Linear)
-                texture.setWrapMode(QOpenGLTexture.WrapMode.Repeat)
-                self._file_textures[path] = texture
+            self._file_textures[path] = texture
         return self._file_textures[path]
 
     def _bind_quad(self, f) -> None:
@@ -830,7 +830,7 @@ class _GLBlits:
             if loc == -1 or texture is None:
                 continue
             f.glActiveTexture(GL_TEXTURE0 + unit)
-            texture.bind()
+            f.glBindTexture(GL_TEXTURE_2D, texture)
             f.glUniform1i(loc, unit)
 
     def fill(self, rgb, opacity, crop=None) -> None:
