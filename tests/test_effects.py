@@ -34,34 +34,33 @@ def test_composite_skips_inactive_effects():
     assert frame.is_identity
 
 
-def test_begin_effect_transform_confined_to_chart_rect():
-    # Opacity + transform apply only inside the effect bracket; the HUD
-    # paints outside it, so an invisibility effect can never hide the
-    # sidebar. Assert the bracket clips to chart_rect and is restorable.
+def test_begin_effect_transform_brackets_opacity_unclipped():
+    # Opacity + transform apply only inside the effect bracket, and the
+    # bracket must NOT clip: a clip set before the transform freezes at
+    # the rest-position chart rect and slices columns the transform
+    # carries across it. The HUD's opaque sidebar fill paints after
+    # every chart layer, so sidebar ownership is paint order, not
+    # clipping. FakePainter has no setClipRect - a clip regression
+    # fails loudly here.
     from analysis.player.render.qt_renderer import QtPlayerRenderer
     from analysis.player.render.effects.base import CompositeFrame
 
     class FakePainter:
         def __init__(self):
             self.saved = 0
-            self.clip = None
             self.opacity = 1.0
         def save(self): self.saved += 1
         def restore(self): self.saved -= 1
-        def setClipRect(self, r): self.clip = r
         def setOpacity(self, o): self.opacity = o
         def setTransform(self, t, combine): pass
 
-    ctx = _ctx_win()
     p = FakePainter()
     frame = CompositeFrame(transform=None, opacity=0.0)
-    wrapped = QtPlayerRenderer._begin_effect_transform(frame, p, ctx)
+    wrapped = QtPlayerRenderer._begin_effect_transform(frame, p)
     assert wrapped and p.saved == 1
     assert p.opacity == 0.0
-    assert (p.clip.width(), p.clip.height()) == pytest.approx(
-        (ctx.chart_rect[2], ctx.chart_rect[3]))
     QtPlayerRenderer._end_effect_transform(p)
-    assert p.saved == 0   # opacity/clip fully unwound before HUD paints
+    assert p.saved == 0   # opacity fully unwound before HUD paints
 
 
 def test_composite_multiplies_opacity_and_composes_transforms():
@@ -208,28 +207,27 @@ def test_composite_scene_channel_and_top_split():
     assert [z for z, _ in frame.top] == [SCENE_TOP_Z + 100]
 
 
-def test_begin_scene_transform_clips_to_chart_rect():
+def test_begin_scene_transform_brackets_unclipped():
+    # Same contract as the effect bracket: the scene camera (zoom,
+    # shake) must not clip to the rest chart rect - it moves content
+    # across that boundary by design. No setClipRect on FakePainter.
     from analysis.player.render.qt_renderer import QtPlayerRenderer
     from analysis.player.render.effects.base import CompositeFrame
 
     class FakePainter:
         def __init__(self):
             self.saved = 0
-            self.clip = None
         def save(self): self.saved += 1
         def restore(self): self.saved -= 1
-        def setClipRect(self, r): self.clip = r
         def setTransform(self, t, combine): pass
 
-    ctx = _ctx_win()
     p = FakePainter()
     frame = CompositeFrame(scene_transform=QTransform().translate(9, 9))
-    assert QtPlayerRenderer._begin_scene_transform(frame, p, ctx)
-    assert p.saved == 1 and p.clip is not None
+    assert QtPlayerRenderer._begin_scene_transform(frame, p)
+    assert p.saved == 1
     QtPlayerRenderer._end_effect_transform(p)
     assert p.saved == 0
-    assert not QtPlayerRenderer._begin_scene_transform(
-        CompositeFrame(), p, ctx)
+    assert not QtPlayerRenderer._begin_scene_transform(CompositeFrame(), p)
 
 
 def test_upscroll_mirrors_about_chart_center():
@@ -624,3 +622,31 @@ def test_fluxis_adapter_builds_layerfade_pulse_beatpulse():
     assert any(isinstance(e, LayerFadeEffect) for e in built)
     assert any(isinstance(e, PulseEffect) for e in built)
     assert any(isinstance(e, BeatPulseEffect) for e in built)
+
+
+def test_transformed_draw_survives_chart_rect_boundary():
+    # Real-painter regression for the half-clipped-column glitch: a
+    # transform carries a note across the rest chart-rect edge
+    # (x = W - sidebar). Pixels must land on BOTH sides - the old
+    # pre-transform clip cut everything past that screen line.
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    from analysis.player.render.effects.base import CompositeFrame
+    from analysis.player.render.qt_renderer import QtPlayerRenderer
+
+    w, h, boundary = 800, 100, 800 - 210
+    image = QImage(w, h, QImage.Format.Format_RGB32)
+    image.fill(QColor(0, 0, 0))
+    painter = QPainter(image)
+    frame = CompositeFrame(
+        transform=QTransform().translate(boundary - 20.0, 0.0))
+    wrapped = QtPlayerRenderer._begin_effect_transform(frame, painter)
+    painter.fillRect(0, 40, 60, 20, QColor(255, 255, 255))
+    if wrapped:
+        QtPlayerRenderer._end_effect_transform(painter)
+    painter.end()
+
+    left = QColor(image.pixel(boundary - 5, 50))
+    right = QColor(image.pixel(boundary + 10, 50))
+    assert left.red() == 255
+    assert right.red() == 255

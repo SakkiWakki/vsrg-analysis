@@ -377,14 +377,14 @@ class GLCaptureBackend:
 
     # -- blits -------------------------------------------------------------
 
-    def blit(self, painter, handle, clip, transform=None, src_box=None,
+    def blit(self, painter, handle, region, transform=None, src_box=None,
              opacity=1.0) -> None:
-        with self.blits(painter, clip) as batch:
+        with self.blits(painter, region) as batch:
             batch.blit(handle, transform=transform, src_box=src_box,
                        opacity=opacity)
 
-    def blits(self, painter, clip):
-        return _GLBlits(self, painter, clip)
+    def blits(self, painter, region):
+        return _GLBlits(self, painter, region)
 
     def present(self, painter, slot: str) -> None:
         """Composite the (closed) slot over `painter`'s target: a
@@ -490,10 +490,10 @@ class _GLBlits:
     bracket on the target painter: state set once, one quad draw per
     blit/fill, snapshots legal mid-batch."""
 
-    def __init__(self, backend, painter, clip):
+    def __init__(self, backend, painter, region):
         self._backend = backend
         self._painter = painter
-        self._clip = clip
+        self._region = region
         self.target_fbo = 0
 
     def __enter__(self):
@@ -512,7 +512,6 @@ class _GLBlits:
         f.glEnable(GL_BLEND)
         f.glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
         f.glViewport(0, 0, self._pw, self._ph)
-        self._apply_scissor(f)
         backend._bind_quad(f)
         backend._batch = self
         return self
@@ -536,17 +535,6 @@ class _GLBlits:
         f.glBindFramebuffer(GL_FRAMEBUFFER, self.target_fbo)
         self._painter.endNativePainting()
         return False
-
-    def _apply_scissor(self, f) -> None:
-        """Clip in target space: the clip rect is axis-aligned (the
-        chart region), so a scissor covers it exactly."""
-        clip = self._clip
-        x0 = int(round(clip.x() * self._dpr))
-        y1 = int(round((clip.y() + clip.height()) * self._dpr))
-        w = int(round(clip.width() * self._dpr))
-        h = int(round(clip.height() * self._dpr))
-        f.glEnable(GL_SCISSOR_TEST)
-        f.glScissor(x0, self._ph - y1, w, h)
 
     def blit(self, handle, transform=None, src_box=None,
              opacity=1.0) -> None:
@@ -572,7 +560,11 @@ class _GLBlits:
 
     def fill(self, rgb, opacity) -> None:
         """The curtain quad: a flat premultiplied fill covering the
-        clip rect at its position among the blits."""
+        region rect at its position among the blits. Blits themselves
+        are unscissored - the rest-position chart rect sliced content
+        that instance transforms carried across it (the half-clipped
+        columns); the opaque sidebar fill owns its area by paint
+        order."""
         backend = self._backend
         programs = backend._quad_programs()
         if programs is None:
@@ -583,7 +575,7 @@ class _GLBlits:
         a = min(1.0, float(opacity))
         r, g, b = rgb
         f.glUniform4f(locs['u_color'], r * a, g * a, b * a, a)
-        self._draw_quad(f, program, locs, None, self._clip, None)
+        self._draw_quad(f, program, locs, None, self._region, None)
         program.release()
 
     def _draw_quad(self, f, program, locs, transform, box, handle) -> None:

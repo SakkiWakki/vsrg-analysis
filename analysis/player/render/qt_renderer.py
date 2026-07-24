@@ -401,7 +401,7 @@ class QtPlayerRenderer:
                 # pixmap alongside the background clear.
                 below_target = self._backdrop_painter or chart_painter
                 scene_wrapped = self._begin_scene_transform(
-                    effect_frame, below_target, ctx)
+                    effect_frame, below_target)
                 self._draw_effect_below(effect_frame, ctx, below_target)
                 below_drawn = True
                 self._end_backdrop_capture()
@@ -411,7 +411,7 @@ class QtPlayerRenderer:
                 field_painter = self._begin_field_capture(
                     effect_frame, ctx, chart_painter)
                 chart_wrapped = self._begin_effect_transform(
-                    effect_frame, field_painter or chart_painter, ctx)
+                    effect_frame, field_painter or chart_painter)
             if is_hud:
                 # HUD layers render into a cached offscreen target at
                 # most _HUD_REDRAW_HZ, at the frame TAIL (`_render_hud`)
@@ -505,15 +505,18 @@ class QtPlayerRenderer:
             host.drawPixmap(0, 0, handle)
 
     @staticmethod
-    def _begin_effect_transform(frame, painter, ctx) -> bool:
+    def _begin_effect_transform(frame, painter) -> bool:
         """Push the composited transform + opacity for the chart-layer
-        group, clipped to the chart region so no transform can paint
-        into the sidebar. Returns whether a save() was made (so the
-        caller knows to restore)."""
+        group. Deliberately UNCLIPPED: a clip set before the transform
+        freezes in screen space at the rest-position chart rect, so any
+        transform that carried a column across that boundary sliced its
+        notes in half. The sidebar needs no clip protection - the HUD
+        paints an opaque sidebar fill after every chart layer, so it
+        owns that region by paint order. Returns whether a save() was
+        made (so the caller knows to restore)."""
         if frame is None or (frame.transform is None and frame.opacity >= 1.0):
             return False
         painter.save()
-        painter.setClipRect(QRectF(*ctx.chart_rect))
         if frame.transform is not None:
             painter.setTransform(frame.transform, True)
         if frame.opacity < 1.0:
@@ -734,7 +737,7 @@ class QtPlayerRenderer:
                     fp.translate(mx, my)
                 player._note_mods = note_mods
                 self._rebuild_note_mods(ctx)
-                wrapped = self._begin_effect_transform(frame, fp, ctx)
+                wrapped = self._begin_effect_transform(frame, fp)
                 self._draw_field_layers(ctx, fp, visibility)
                 if wrapped:
                     self._end_effect_transform(fp)
@@ -899,15 +902,17 @@ class QtPlayerRenderer:
         return self._aft_frozen.get(name, live_capture)
 
     @staticmethod
-    def _begin_scene_transform(frame, painter, ctx) -> bool:
+    def _begin_scene_transform(frame, painter) -> bool:
         """Push the scene-wide camera transform around below-draws,
-        chart layers, and effect draws under SCENE_TOP_Z, clipped to
-        the chart region. Returns whether a save() was made."""
+        chart layers, and effect draws under SCENE_TOP_Z. Unclipped for
+        the same reason as `_begin_effect_transform`: a pre-transform
+        clip froze at the rest chart rect and sliced content the camera
+        (zoom, shake) moved across it. Returns whether a save() was
+        made."""
         if (frame is None or frame.scene_transform is None
                 or painter is None):
             return False
         painter.save()
-        painter.setClipRect(QRectF(*ctx.chart_rect))
         painter.setTransform(frame.scene_transform, True)
         return True
 
@@ -927,12 +932,11 @@ class QtPlayerRenderer:
 
     @staticmethod
     def _draw_effect_draws(draws, ctx, painter) -> None:
-        """Run overlay draws clipped to the chart region; effects never
-        paint into the sidebar."""
+        """Run overlay draws bracketed by save/restore; unclipped (the
+        opaque sidebar fill paints after them and owns its region)."""
         if not draws:
             return
         painter.save()
-        painter.setClipRect(QRectF(*ctx.chart_rect))
         for _z, fn in draws:
             fn(ctx, painter)
         painter.restore()

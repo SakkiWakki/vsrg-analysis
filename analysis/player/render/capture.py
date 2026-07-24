@@ -94,24 +94,27 @@ class RasterCaptureBackend:
         """One reference to a snapshot handle dropped (None accepted);
         QPixmaps just get garbage-collected."""
 
-    def blit(self, painter, handle, clip, transform=None, src_box=None,
+    def blit(self, painter, handle, region, transform=None, src_box=None,
              opacity=1.0) -> None:
-        """One instance blit of `handle` onto `painter`: clipped to the
-        `clip` rect in target space, under `transform`, additionally
-        clipped to `src_box` in the handle's own source space (the
-        design box - offscreen content never bleeds in), at `opacity`.
-        `blits` batches several onto one painter state push."""
-        with self.blits(painter, clip) as batch:
+        """One instance blit of `handle` onto `painter` under
+        `transform`, clipped only to `src_box` in the handle's own
+        source space (the design box - offscreen content never bleeds
+        in), at `opacity`. `region` is the curtain-fill geometry, NOT a
+        blit clip: clipping blits to the rest-position chart rect
+        sliced content that transforms carried across its edge; the
+        opaque sidebar fill paints later and owns that area. `blits`
+        batches several onto one painter state push."""
+        with self.blits(painter, region) as batch:
             batch.blit(handle, transform=transform, src_box=src_box,
                        opacity=opacity)
 
-    def blits(self, painter, clip):
+    def blits(self, painter, region):
         """Context manager for a run of instance blits sharing one
         target painter; yields a batch with `blit(handle, ...)` (same
         semantics as the standalone `blit`) and `fill(rgb, opacity)`
-        (a flat color quad covering the clip rect - the AFT-rig
+        (a flat color quad covering the `region` rect - the AFT-rig
         curtain at its tree position among the blits)."""
-        return _RasterBlits(painter, clip)
+        return _RasterBlits(painter, region)
 
     def present(self, painter, slot: str) -> None:
         """Draw the (closed) slot's full content onto `painter` at the
@@ -126,9 +129,9 @@ class _RasterBlits:
     """One batch of instance blits: each blit saves/restores around its
     own transform + clips so entries stay independent."""
 
-    def __init__(self, painter, clip):
+    def __init__(self, painter, region):
         self._painter = painter
-        self._clip = clip
+        self._region = region
 
     def __enter__(self):
         return self
@@ -140,7 +143,6 @@ class _RasterBlits:
              opacity=1.0) -> None:
         painter = self._painter
         painter.save()
-        painter.setClipRect(self._clip)
         if transform is not None:
             painter.setTransform(transform, True)
         if src_box is not None:
@@ -155,8 +157,7 @@ class _RasterBlits:
     def fill(self, rgb, opacity) -> None:
         painter = self._painter
         painter.save()
-        painter.setClipRect(self._clip)
         painter.setOpacity(min(1.0, opacity))
         r, g, b = rgb
-        painter.fillRect(self._clip, QColor.fromRgbF(r, g, b))
+        painter.fillRect(self._region, QColor.fromRgbF(r, g, b))
         painter.restore()
