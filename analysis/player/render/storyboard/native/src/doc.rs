@@ -82,6 +82,24 @@ pub struct ShaderDesc {
     pub uniform_names: Vec<String>,
 }
 
+/// A registered mesh (drawable-ir.md MeshDesc): flat interleaved
+/// `[x, y, u, v]` vertices, a primitive `mode`, and an optional vertex
+/// shader (id into `DrawableDoc.shaders`, or inline source). The GL DRAW
+/// of these vertices is the executor tier; the core only registers the
+/// data and lets `Source::Mesh(id)` reference it into a record lane.
+#[derive(Clone, Debug)]
+pub struct MeshDesc {
+    /// Interleaved vertex attributes, 4 floats per vertex: x, y, u, v.
+    pub vertices: Vec<f32>,
+    /// Primitive assembly mode (executor-defined enum: e.g. triangles /
+    /// strip / fan); carried opaquely through the core.
+    pub mode: u32,
+    /// Optional vertex-shader program id (into `shaders`) or inline source
+    /// for the crumple.vert path; None = the executor's default mesh vert.
+    pub vert_shader: Option<u32>,
+    pub vert_source: Option<String>,
+}
+
 /// A clip shape in the target drawable's logical units (Item.clip).
 /// Extensible per the type sheet's ClipDesc vocabulary; Mesh clips are
 /// deferred until the mesh tier lands.
@@ -263,6 +281,7 @@ pub struct Drawable {
 pub struct DrawableDoc {
     pub drawables: Vec<Drawable>,
     pub shaders: Vec<ShaderDesc>,
+    pub meshes: Vec<MeshDesc>,
     pub clips: Vec<ClipDesc>,
     pub channels: ChannelTable,
     /// Monotonic counter minting stable per-reaction ids (the lowering
@@ -289,6 +308,12 @@ impl DrawableDoc {
         id
     }
 
+    pub fn add_mesh(&mut self, mesh: MeshDesc) -> u32 {
+        let id = self.meshes.len() as u32;
+        self.meshes.push(mesh);
+        id
+    }
+
     pub fn add_clip(&mut self, clip: ClipDesc) -> u32 {
         let id = self.clips.len() as u32;
         self.clips.push(clip);
@@ -300,6 +325,28 @@ impl DrawableDoc {
         let id = self.reaction_count;
         self.reaction_count += 1;
         id
+    }
+
+    /// Structural check: a SortSpan re-sorts the next `len` commands by
+    /// sampled z; the engine's SetDrawByZPosition has no notion of a span
+    /// living inside another span's window, so this is forbidden. Returns
+    /// `Err((drawable, outer_index, inner_index))` for the first nested
+    /// span found (Snapshot-inside-SortSpan is fine - it sorts with the
+    /// span). `Ok(())` when every span's window is span-free.
+    pub fn find_nested_sort_span(&self) -> Result<(), (usize, usize, usize)> {
+        for (d, drawable) in self.drawables.iter().enumerate() {
+            let cmds = &drawable.commands;
+            for (i, cmd) in cmds.iter().enumerate() {
+                let Cmd::SortSpan { len } = cmd else { continue };
+                let end = (i + 1 + *len as usize).min(cmds.len());
+                for (j, inner) in cmds.iter().enumerate().take(end).skip(i + 1) {
+                    if matches!(inner, Cmd::SortSpan { .. }) {
+                        return Err((d, i, j));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn add_drawable(&mut self, size: [f32; 2], persistent: bool, dynamic: bool) -> u32 {
@@ -316,5 +363,51 @@ impl DrawableDoc {
             dynamic,
         });
         id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn image_item() -> Cmd {
+        Cmd::Item(Item::of(Source::Image {
+            image: 0,
+            frame: ChannelRef::constant(0.0),
+        }))
+    }
+
+    #[test]
+    fn nested_sort_span_is_detected() {
+        let mut doc = DrawableDoc::with_screen([640.0, 480.0]);
+        let cmds = &mut doc.drawables[0].commands;
+        cmds.push(Cmd::SortSpan { len: 3 });
+        cmds.push(image_item());
+        cmds.push(Cmd::SortSpan { len: 1 }); // inner span inside the outer window
+        cmds.push(image_item());
+        assert_eq!(doc.find_nested_sort_span(), Err((0, 0, 2)));
+    }
+
+    #[test]
+    fn adjacent_sort_spans_are_not_nested() {
+        // A second span beginning AFTER the first's window is fine.
+        let mut doc = DrawableDoc::with_screen([640.0, 480.0]);
+        let cmds = &mut doc.drawables[0].commands;
+        cmds.push(Cmd::SortSpan { len: 1 });
+        cmds.push(image_item());
+        cmds.push(Cmd::SortSpan { len: 1 });
+        cmds.push(image_item());
+        assert!(doc.find_nested_sort_span().is_ok());
+    }
+
+    #[test]
+    fn snapshot_inside_sort_span_is_allowed() {
+        let mut doc = DrawableDoc::with_screen([640.0, 480.0]);
+        let slot = doc.add_drawable([640.0, 480.0], true, false);
+        let cmds = &mut doc.drawables[0].commands;
+        cmds.push(Cmd::SortSpan { len: 2 });
+        cmds.push(image_item());
+        cmds.push(Cmd::Snapshot { into: slot });
+        assert!(doc.find_nested_sort_span().is_ok());
     }
 }

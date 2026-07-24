@@ -342,3 +342,88 @@ def test_reaction_column_filter_respected():
     # A column-1 press is filtered out; a column-3 press fires.
     assert _opacity(ev, 2.0, [sn.EV_PRESS], [1.0], [1], [1.0]) == pytest.approx(0.4)
     assert _opacity(ev, 2.0, [sn.EV_PRESS], [1.0], [3], [1.0]) == pytest.approx(1.0)
+
+
+# -- C12 ease-aware channels --------------------------------------------
+
+def test_channel_eases_match_the_python_timeline():
+    """A curved-ease channel samples exactly what the repo's EventTimeline
+    plays for the same keyframe - so a Python-compiled eased keyframe
+    crosses Seam A losslessly (no 1/30s densification)."""
+    from analysis.player.render.effects.timeline import EventTimeline, Keyframe
+
+    easing = 13  # OutQuint
+    # Positive opacity range so the item never trips the transparent-item
+    # drop gate; opacity is the probed BLIT lane.
+    t0, dur, v0, v1 = 2.0, 4.0, 0.1, 0.9
+    tl = EventTimeline(
+        [Keyframe(t=t0, values=(v1,), duration=dur, easing=easing, start=(v0,))],
+        rest=(v0,),
+    )
+
+    b = sn.DocBuilder(640.0, 480.0)
+    ramp = b.channel([t0, t0 + dur], [v0, v1], [dur, 0.0], v0, eases=[easing, 0])
+    b.item(0, sn.SRC_FILL, 0, opacity_id=ramp, opacity_rest=v0)
+    ev = b.finish()
+
+    for t in (1.0, 2.0, 3.0, 4.5, 6.0, 7.5):
+        u, f = _frames(ev, t)
+        got = f[u[:, 0] == sn.OP_BLIT][0][9]  # BLIT opacity lane
+        assert got == pytest.approx(tl.sample(t)[0], abs=1e-4), f't={t}'
+
+
+def test_channel_default_is_linear_and_curved_diverges():
+    b = sn.DocBuilder(640.0, 480.0)
+    lin = b.channel([0.0, 4.0], [0.0, 4.0], [4.0, 0.0], 0.0)
+    curved = b.channel([0.0, 4.0], [0.0, 4.0], [4.0, 0.0], 0.0, eases=[2, 0])  # InQuad
+    b.item(0, sn.SRC_FILL, 0, opacity_id=lin, opacity_rest=0.0)
+    b.item(0, sn.SRC_FILL, 0, opacity_id=curved, opacity_rest=0.0)
+    ev = b.finish()
+    _u, f = _frames(ev, 2.0)  # midpoint
+    lin_val, curved_val = f[1][9], f[2][9]
+    assert lin_val == pytest.approx(2.0)             # linear midpoint
+    assert curved_val == pytest.approx(1.0, abs=1e-4)  # InQuad(0.5)*4 = 1.0
+
+
+# -- B8 mesh crate-side -------------------------------------------------
+
+def test_mesh_item_record_lanes():
+    """A registered mesh is referenced by a Source::Mesh item, whose BLIT
+    record carries (SRC_MESH, mesh_id) in the source lanes."""
+    b = sn.DocBuilder(640.0, 480.0)
+    quad = b.mesh([0, 0, 0, 0, 1, 0, 1, 0, 1, 1, 1, 1], mode=0)
+    other = b.mesh([0, 0, 0, 0], mode=1, vert_shader_id=-1, vert_source='void main(){}')
+    b.item(0, sn.SRC_MESH, quad)
+    b.item(0, sn.SRC_MESH, other)
+    ev = b.finish()
+    assert ev.mesh_count() == 2
+
+    u, _f = _frames(ev, 0.0)
+    blits = u[u[:, 0] == sn.OP_BLIT]
+    srcs = [(int(row[1]), int(row[2])) for row in blits]
+    assert srcs == [(sn.SRC_MESH, quad), (sn.SRC_MESH, other)]
+
+
+# -- C15 nested SortSpan ruling -----------------------------------------
+
+def test_nested_sort_span_is_rejected_at_build():
+    b = sn.DocBuilder(640.0, 480.0)
+    b.sort_span(0, 3)          # outer span covers the next 3 commands
+    b.item(0, sn.SRC_FILL, 0)
+    b.sort_span(0, 1)          # inner span inside the outer window -> error
+    b.item(0, sn.SRC_FILL, 0)
+    with pytest.raises(ValueError, match='nested SortSpan'):
+        b.finish()
+
+
+def test_snapshot_inside_sort_span_is_allowed():
+    b = sn.DocBuilder(640.0, 480.0)
+    slot = b.drawable(640.0, 480.0, True, False)
+    b.sort_span(0, 2)
+    b.item(0, sn.SRC_IMAGE, 5, z_rest=1.0, has_z=True)
+    b.snapshot(0, slot)        # a snapshot within the span sorts with it
+    ev = b.finish()            # no error
+    u, _f = _frames(ev, 0.0)
+    # The snapshot (z 0) sorts before the z=1 item.
+    span_ops = [k for k in u[:, 0].tolist() if k in (sn.OP_BLIT, sn.OP_COPY)]
+    assert span_ops == [sn.OP_COPY, sn.OP_BLIT]

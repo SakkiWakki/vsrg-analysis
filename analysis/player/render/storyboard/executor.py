@@ -134,6 +134,14 @@ class RasterExecutor:
         # make the screen composite TRANSPARENT so its blit overlays the
         # normally-painted backdrop instead of covering it opaque black.
         self._clear_override: dict[int, int] = {}
+        # Per-drawable retain-decay factors (DrawableId -> alpha kept per
+        # frame). Engine PreserveTexture ACCUMULATES WITH DECAY: a Retain
+        # drawable's retained content fades toward zero each frame rather
+        # than persisting forever (the ghost-trail smear). At each execute()
+        # a Retain BEGIN pre-multiplies the surviving content by the factor
+        # BEFORE this frame's new content lands on top. Absent / 1.0 = no
+        # decay (today's persist-forever behavior); 0.0 = one-frame content.
+        self._decay: dict[int, float] = {}
         # Per-frame injected content: DrawableId -> QImage source, applied
         # into the target table at execute() start so SRC_DRAWABLE blits of
         # command-less drawables (the field-scope drawables the pipeline
@@ -178,6 +186,18 @@ class RasterExecutor:
         rather than covering it with opaque black (the black-chart-region
         baseline)."""
         self._clear_override[int(drawable_id)] = int(mode)
+
+    def set_decay(self, drawable_id: int, factor_per_frame: float) -> None:
+        """Set a Retain drawable's per-frame decay factor, keyed by
+        DrawableId. Each execute() a Retain BEGIN pre-multiplies the
+        surviving content's alpha (premultiplied: every channel) by
+        ``factor_per_frame`` before this frame's content composes on top, so
+        undrawn content fades geometrically toward transparent instead of
+        persisting forever (the engine PreserveTexture accumulate-with-decay
+        semantics; the ghost-trail smear). 1.0 = no decay (today's
+        behavior); 0.0 = content lasts a single frame. Only affects Retain
+        BEGINs - Transparent/Opaque clears wipe the surface regardless."""
+        self._decay[int(drawable_id)] = max(0.0, min(1.0, float(factor_per_frame)))
 
     def set_drawable_image(self, drawable_id: int, image: QImage) -> None:
         """Seed a drawable's target content with `image`, keyed by
@@ -267,12 +287,28 @@ class RasterExecutor:
             img.fill(0)
         elif clear == _CLEAR_OPAQUE:
             img.fill(QColor(0, 0, 0, 255))
-        # Retain: leave existing content untouched (feedback / snapshots).
+        else:
+            # Retain: keep existing content, but fade it by the per-drawable
+            # decay factor first (accumulate-with-decay). DestinationIn with a
+            # solid src of alpha=factor multiplies every premultiplied channel
+            # by factor, so a factor of 1.0 is a no-op (persist forever).
+            self._decay_retained(img, self._decay.get(drawable_id, 1.0))
 
         target_stack.append(drawable_id)
         new_painter = QPainter(img)
         new_painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         return new_painter
+
+    def _decay_retained(self, img: QImage, factor: float) -> None:
+        """Fade a Retain surface's premultiplied content toward transparent
+        by ``factor`` in place (DestinationIn multiplies dest by src alpha).
+        1.0 is a no-op, so the common no-decay path pays nothing."""
+        if factor >= 1.0:
+            return
+        fade = QPainter(img)
+        fade.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+        fade.fillRect(img.rect(), QColor.fromRgbF(0.0, 0.0, 0.0, factor))
+        fade.end()
 
     def _end(
         self,
@@ -497,7 +533,8 @@ class RasterExecutor:
             return
         target = QRectF(crop_l * logical_w, crop_t * logical_h,
                         vis_fw * logical_w, vis_fh * logical_h)
-        sub = QRectF(crop_l * pw, crop_t * ph, vis_fw * pw, vis_fh * ph)
+        sub = _half_texel_inset(
+            QRectF(crop_l * pw, crop_t * ph, vis_fw * pw, vis_fh * ph), pw, ph)
         painter.drawImage(target, src, sub)
 
     def _log_skipped_lanes(self, urec: np.ndarray) -> None:
@@ -507,6 +544,20 @@ class RasterExecutor:
         if int(urec[_U_SHADER]) != 0 and "shader" not in self._skipped_lanes:
             self._skipped_lanes.add("shader")
             logger.warning("RasterExecutor: shader lane not implemented (TODO), drawn unshaded")
+
+
+def _half_texel_inset(sub: QRectF, pw: int, ph: int) -> QRectF:
+    """Inset a pixel-space sample rect by half a texel of the backing
+    ``pw`` x ``ph`` texture on each edge, so bilinear sampling at a sub-rect
+    edge cannot reach the adjacent margin/sidebar texel and bleed it in
+    (A5). Guarded: an inset that would invert or collapse the rect (a
+    sub-1px sample window) is left untouched - correctness over the
+    anti-bleed nicety at that scale."""
+    hx = 0.5 if pw > 0 else 0.0
+    hy = 0.5 if ph > 0 else 0.0
+    if sub.width() <= 2.0 * hx or sub.height() <= 2.0 * hy:
+        return sub
+    return sub.adjusted(hx, hy, -hx, -hy)
 
 
 def _clip_path(shape: tuple) -> QPainterPath:

@@ -36,8 +36,14 @@ Conventions follow gl_capture.py (the solved traps - keep in lockstep):
 
 HARD RULE (the glGenTextures lesson): every GL op is individually
 guarded. A bad op logs ONCE and is skipped; it never kills the frame or
-the executor. Lines / mesh / clip / shader sources are logged-once TODOs
-(the raster backend is the reference for those until they land here).
+the executor. Lines / mesh sources are logged-once TODOs (the raster
+backend is the reference for those until they land here).
+
+Per-item frag shaders (set_shaders) shade IMAGE / DRAWABLE blits through
+a translated chart .frag (uv_source='varying'; sampler0 = the source
+texture); a build failure degrades to unshaded, never black. Clip lane 6
+is consumed as a glScissor rect in target device space for axis-aligned
+rect clips; 'poly' / rotated clips log once and draw unclipped.
 
 Clear modes match ClearMode in doc.rs: TransparentBlack=0, OpaqueBlack=1,
 Retain=2.
@@ -66,10 +72,14 @@ from analysis.player.render.shaders.gl_pipeline import (
     GL_TRIANGLE_STRIP, GL_UNSIGNED_BYTE)
 from PySide6.QtOpenGL import QOpenGLPaintDevice
 
+from analysis.player.render.shaders.library import notitg_compat
+
 logger = logging.getLogger(__name__)
 
 GL_ONE = 1
+GL_ZERO = 0
 GL_ONE_MINUS_SRC_ALPHA = 0x0303
+GL_CONSTANT_ALPHA = 0x8003
 GL_CLAMP_TO_EDGE = 0x812F
 
 _SCREEN_ID = 0
@@ -144,6 +154,21 @@ def _clamp01(v: float) -> float:
     return max(0.0, min(1.0, v))
 
 
+def _inset_half_texel(a: float, b: float, texels: int) -> tuple[float, float]:
+    """Move the [a, b] uv edge pair inward by half a texel of a ``texels``-
+    wide texture axis, in whichever order they arrive (v may be flipped).
+    Guards against inversion: a window already thinner than one texel is
+    left untouched (A5 - anti-bleed never crosses over)."""
+    if texels <= 0:
+        return a, b
+    half = 0.5 / texels
+    if abs(b - a) <= 2.0 * half:
+        return a, b
+    lo, hi = (a, b) if a <= b else (b, a)
+    lo, hi = lo + half, hi - half
+    return (lo, hi) if a <= b else (hi, lo)
+
+
 def _mat_source_to_ndc(mat3: np.ndarray, w: int, h: int) -> QMatrix3x3:
     """Compose the record's column-vector mat3 (source logical -> target
     logical) with target-logical -> NDC (y-down, top-left at (-1, +1); 1
@@ -153,6 +178,12 @@ def _mat_source_to_ndc(mat3: np.ndarray, w: int, h: int) -> QMatrix3x3:
                        [0.0, 0.0, 1.0]], dtype=np.float64)
     m = to_ndc @ mat3.astype(np.float64).reshape(3, 3)
     return QMatrix3x3([float(v) for v in m.flatten()])
+
+
+def _identity_ndc() -> QMatrix3x3:
+    """The identity 3x3 for u_mat: quad positions are already in NDC (used
+    by the fullscreen decay-modulate quad)."""
+    return QMatrix3x3([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])
 
 
 def _device_to_ndc(pw: int, ph: int) -> QMatrix3x3:
@@ -237,8 +268,9 @@ class GLExecutor:
     source textures (uploaded to GL lazily); ``drawable_sizes`` is indexed
     by DrawableId and gives each drawable's logical size (allocated as a
     device-px FBO of that integer size, logical == device px here).
-    ``clips`` / ``lines`` are accepted for API symmetry - clip and line
-    sources are logged-once TODOs on the GL path.
+    ``clips`` mirrors the doc's ClipDesc table (rect clips honored via
+    glScissor, poly/rotated logged-once TODO); ``lines`` sources are a
+    logged-once TODO on the GL path.
 
     Requires a current GL 3+ context at construction and execute() time;
     the caller is responsible for making one current (the offscreen-
@@ -257,6 +289,17 @@ class GLExecutor:
         self._clips = list(clips or [])
         self._lines: dict[int, np.ndarray] = dict(lines or {})
         self.shader_uniforms: dict[int, list[float]] = {}
+        # Per-drawable retain-decay factors (DrawableId -> alpha kept per
+        # frame); see set_decay. A Retain BEGIN fades surviving content by
+        # this factor before new content lands (accumulate-with-decay).
+        self._decay: dict[int, float] = {}
+        # Per-item shader descriptors indexed by shader id: (frag_source,
+        # vert_source_or_None, [uniform_names]); see set_shaders. Programs
+        # build lazily from these (needs a current context) and cache in
+        # _shader_programs (shader id -> (program, {name: loc}) or None once
+        # a build has been attempted and failed -> that item blits unshaded).
+        self._shader_descs: dict[int, tuple] = {}
+        self._shader_programs: dict[int, tuple | None] = {}
 
         # Lazily built GL objects (need a current context, which the ctor
         # may not have; built on first execute()).
@@ -300,6 +343,33 @@ class GLExecutor:
         The pipeline sets the screen root TransparentBlack so the composite
         presents over the painted backdrop instead of covering it black."""
         self._clear_override[int(drawable_id)] = int(mode)
+
+    def set_decay(self, drawable_id: int, factor_per_frame: float) -> None:
+        """Set a Retain drawable's per-frame decay factor, keyed by
+        DrawableId (parity with RasterExecutor.set_decay). Each execute() a
+        Retain BEGIN pre-multiplies the surviving FBO content by this factor
+        (constant-alpha modulate into the FBO) before this frame's content
+        composes on top, so undrawn content fades geometrically toward
+        transparent instead of persisting forever - the engine
+        PreserveTexture accumulate-with-decay semantics (the ghost-trail
+        smear). 1.0 = no decay (today's behavior); 0.0 = one-frame content.
+        Only Retain BEGINs decay; Transparent/Opaque clears wipe regardless."""
+        self._decay[int(drawable_id)] = max(0.0, min(1.0, float(factor_per_frame)))
+
+    def set_shaders(self, descs) -> None:
+        """Register per-item fragment shaders, indexed by shader id: ``descs``
+        is a list of ``(frag_source, vert_source_or_None, [uniform_names])``.
+        A BLIT whose shader lane is s+1 draws through the program built from
+        ``descs[s]`` (the monitor / lumikey per-blit .frag tier): the raw
+        NotITG chart frag is translated (uv_source='varying') like
+        gl_capture._frag_program, sampler0 = the blit's source texture, and
+        the blit's sampled uf window binds by pairing values with
+        ``uniform_names`` order. A build failure logs once and the item blits
+        UNSHADED (never black). Design-only wiring: the pipeline feeds this
+        list later (Seam-A shader names travel once); calling it drops any
+        previously built programs so they rebuild from the new descs."""
+        self._shader_descs = {i: tuple(d) for i, d in enumerate(descs or [])}
+        self._shader_programs.clear()
 
     def set_resolution_scale(self, scale: float) -> None:
         """Set the FBO allocation scale (device px per logical unit).
@@ -573,8 +643,34 @@ class GLExecutor:
         elif clear == _CLEAR_OPAQUE:
             gf.glClearColor(0.0, 0.0, 0.0, 1.0)
             gf.glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)
-        # Retain: leave existing content untouched (feedback / snapshots).
+        else:
+            # Retain: keep content, but fade it by the per-drawable decay
+            # factor first (accumulate-with-decay). 1.0 is a no-op.
+            self._decay_retained(gf, self._decay.get(drawable_id, 1.0))
         target_stack.append(drawable_id)
+
+    def _decay_retained(self, gf, factor: float) -> None:
+        """Fade the bound Retain FBO's premultiplied content toward
+        transparent by ``factor`` in place: a fullscreen quad drawn with
+        blend (ZERO src, CONSTANT_ALPHA dst) leaves dest = dest * factor on
+        every channel (alpha included). 1.0 is a no-op, so the common
+        no-decay path pays nothing. Restores the batch's source-over blend
+        afterward. The fill program is reused only to raster the coverage
+        quad - its emitted color is discarded by the ZERO src factor."""
+        if factor >= 1.0:
+            return
+        entry = self._programs[1]
+        if entry is None:
+            return
+        program, locs = entry
+        program.bind()
+        gf.glBlendColor(0.0, 0.0, 0.0, factor)
+        gf.glBlendFunc(GL_ZERO, GL_CONSTANT_ALPHA)
+        gf.glUniform4f(locs['u_color'], 0.0, 0.0, 0.0, 1.0)
+        program.setUniformValue(locs['u_mat'], _identity_ndc())
+        self._draw_quad(gf, -1.0, -1.0, 1.0, 1.0, uv=None)
+        program.release()
+        gf.glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
 
     def _end(self, gf, target_stack: list[int]) -> None:
         if target_stack:
@@ -612,7 +708,6 @@ class GLExecutor:
         if not target_stack:
             return
         self._stash_uniforms(urec, uf)
-        self._log_todo_lanes(urec)
 
         src_kind = int(urec[_U_A])
         opacity = _clamp01(float(frec[_F_OPACITY]))
@@ -627,7 +722,12 @@ class GLExecutor:
         # handles that - geometry must not).
         tw, th = self._sizes[target_id]
         mat3 = np.array(frec[:9], dtype=np.float64)
+        # A per-item frag program shades IMAGE / DRAWABLE source draws; Fill
+        # and Lines/Mesh keep the default path (the shaded blit is a textured
+        # pass over the item's OWN source, drawable-ir.md attach point #1).
+        shaded = self._resolve_shader(gf, urec)
 
+        clipped = self._apply_scissor(gf, urec, target_id, tw, th)
         if additive:
             gf.glBlendFunc(GL_ONE, GL_ONE)
         match src_kind:
@@ -641,7 +741,7 @@ class GLExecutor:
                     uploaded = (*uploaded, None)
                 logical = None if uploaded is None else (uploaded[1], uploaded[2])
                 self._draw_texture(gf, mat3, tw, th, frec, tint, opacity,
-                                   uploaded, logical)
+                                   uploaded, logical, shaded)
             case n if n == _SRC_DRAWABLE:
                 # SOURCE NORMALIZATION (drawable-ir.md rule 5): the source
                 # drawable's content covers its LOGICAL box regardless of its
@@ -652,13 +752,15 @@ class GLExecutor:
                 uploaded = self._drawable_texture(src_id)
                 lw, lh = self._sizes[src_id]
                 self._draw_texture(gf, mat3, tw, th, frec, tint, opacity,
-                                   uploaded, (float(lw), float(lh)))
+                                   uploaded, (float(lw), float(lh)), shaded)
             case n if n == _SRC_LINES:
                 self._log_once('lines', 'GLExecutor: Lines source not implemented (TODO), skipped')
             case n if n == _SRC_MESH:
                 self._log_once('mesh', 'GLExecutor: Mesh source not implemented (TODO), skipped')
         if additive:
             gf.glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+        if clipped:
+            gf.glDisable(GL_SCISSOR_TEST)
 
     # -- source draws ------------------------------------------------------
 
@@ -718,7 +820,7 @@ class GLExecutor:
         program.release()
 
     def _draw_texture(self, gf, mat3, tw, th, frec, tint, opacity, uploaded,
-                      logical) -> None:
+                      logical, shaded=None) -> None:
         if uploaded is None or logical is None:
             return
         texture, sw, sh = uploaded[0], uploaded[1], uploaded[2]
@@ -726,10 +828,6 @@ class GLExecutor:
         lw, lh = logical
         if lw <= 0.0 or lh <= 0.0 or sw <= 0 or sh <= 0:
             return
-        entry = self._programs[0]
-        if entry is None:
-            return
-        program, locs = entry
         # Crops are fractions of the source's LOGICAL box; inset the quad
         # geometry in logical units and the sampled uv in fractions of the
         # texture (the two decouple - the backing texture may be a chart-
@@ -754,13 +852,27 @@ class GLExecutor:
         u1 = bx0 + (crop_l + vis_fw) * span_u
         v0 = 1.0 - (by0 + crop_t * span_v)
         v1 = 1.0 - (by0 + (crop_t + vis_fh) * span_v)
+        # Half-texel inset (A5): keep GL_LINEAR at a sub-rect edge from
+        # bleeding the adjacent margin/sidebar texel of the backing texture.
+        u0, u1 = _inset_half_texel(u0, u1, sw)
+        v0, v1 = _inset_half_texel(v0, v1, sh)
 
+        program, locs = shaded if shaded is not None else self._programs[0]
+        if program is None:
+            return
         program.bind()
         gf.glActiveTexture(GL_TEXTURE0)
         gf.glBindTexture(GL_TEXTURE_2D, texture)
         program.setUniformValue(locs['u_tex'], 0)
         gf.glUniform1f(locs['u_opacity'], opacity)
-        gf.glUniform3f(locs['u_tint'], _clamp01(tint[0]), _clamp01(tint[1]), _clamp01(tint[2]))
+        # The default textured program tints/dims in-shader; a per-item frag
+        # program (uv_source='varying') has no u_tint and folds opacity into
+        # its own gl_FragColor (see notitg_compat), so bind only what it has.
+        if 'u_tint' in locs:
+            gf.glUniform3f(locs['u_tint'], _clamp01(tint[0]), _clamp01(tint[1]),
+                           _clamp01(tint[2]))
+        if 'u_resolution' in locs:
+            gf.glUniform2f(locs['u_resolution'], float(sw), float(sh))
         program.setUniformValue(locs['u_mat'], _mat_source_to_ndc(mat3, tw, th))
         self._draw_quad(gf, x0, y0, x1, y1, uv=(u0, v0, u1, v1))
         gf.glBindTexture(GL_TEXTURE_2D, 0)
@@ -801,11 +913,112 @@ class GLExecutor:
             float(v) for v in uf[offset:offset + count]
         ]
 
-    def _log_todo_lanes(self, urec: np.ndarray) -> None:
-        if int(urec[_U_SHADER]) != 0:
-            self._log_once('shader', 'GLExecutor: shader lane not implemented (TODO), drawn unshaded')
-        if int(urec[_U_CLIP]) != 0:
-            self._log_once('clip', 'GLExecutor: clip lane not implemented (TODO), drawn unclipped')
+    # -- per-item shaders (B7: the monitor / lumikey tier) ----------------
+
+    def _resolve_shader(self, gf, urec: np.ndarray):
+        """(program, {name: loc}) for a BLIT's shader lane, with the item's
+        sampled uniforms bound BY NAME (uf values paired with the desc's
+        ``uniform_names`` order), or None to draw unshaded. A missing desc or
+        a build failure logs once and returns None (never black - degrade to
+        the plain textured program). ``sampler0`` = the source texture at
+        GL_TEXTURE0, bound by the caller's texture draw."""
+        shader_plus_one = int(urec[_U_SHADER])
+        if shader_plus_one == 0:
+            return None
+        shader_id = shader_plus_one - 1
+        entry = self._shader_program(gf, shader_id)
+        if entry is None:
+            self._log_once(f'shader_{shader_id}',
+                           f'GLExecutor: shader {shader_id} unavailable, drawn unshaded')
+            return None
+        program, locs, names = entry
+        program.bind()
+        values = self.shader_uniforms.get(shader_id, [])
+        for name, value in zip(names, values):
+            loc = locs.get(name, -1)
+            if loc != -1:
+                gf.glUniform1f(loc, float(value))
+        program.release()
+        return program, locs
+
+    def _shader_program(self, gf, shader_id: int):
+        """Lazily build and cache the per-item frag program for ``shader_id``
+        from its set_shaders desc: (program, {name: loc}, uniform_names), or
+        None once a build has been attempted and failed. Ports
+        gl_capture._frag_program: translate the raw chart frag with
+        uv_source='varying' (sample the quad's SOURCE uv so it composes with
+        the blit transform), retry with int-literals promoted for ES
+        contexts, and give up to unshaded on failure."""
+        if shader_id in self._shader_programs:
+            return self._shader_programs[shader_id]
+        desc = self._shader_descs.get(shader_id)
+        entry = None
+        if desc is not None:
+            frag_src, _vert_src, names = desc[0], desc[1], list(desc[2] or [])
+            entry = self._build_frag(frag_src, names)
+        self._shader_programs[shader_id] = entry
+        return entry
+
+    def _build_frag(self, frag_src, names):
+        """Build one per-item frag program (translated + int-promotion
+        retry). Returns (program, {name: loc}, names) or None. The uniform
+        location table covers the translated program's own uniforms
+        (u_mat/u_tex/u_resolution/u_opacity) plus the chart's named
+        uniforms, so _draw_texture and _resolve_shader bind by lookup."""
+        base = ('u_mat', 'u_tex', 'u_resolution', 'u_opacity')
+        try:
+            contract = notitg_compat.translate(frag_src, uv_source='varying')
+            built = _build_program(contract, base + tuple(names))
+            if built is None:
+                relaxed = notitg_compat.translate(
+                    notitg_compat.promote_int_literals(frag_src),
+                    uv_source='varying')
+                built = _build_program(relaxed, base + tuple(names))
+        except (ValueError, OSError) as exc:
+            self._log_once('shader_build', f'GLExecutor: per-item frag failed to translate ({exc}), drawn unshaded')
+            return None
+        if built is None:
+            self._log_once('shader_build', 'GLExecutor: per-item frag failed to build, drawn unshaded')
+            return None
+        program, locs = built
+        return program, locs, names
+
+    # -- clips (B10: rect scissor in target space) ------------------------
+
+    def _apply_scissor(self, gf, urec: np.ndarray, target_id: int,
+                       tw: float, th: float) -> bool:
+        """Consume clip lane 6 as a glScissor rect in the target FBO's device
+        pixels. Returns True when a scissor was enabled (the caller disables
+        it after the draw). Only axis-aligned rect clips are honored; 'poly'
+        clips and rotated targets are a logged-once TODO drawn UNCLIPPED (the
+        raster backend's QPainterPath clip is the reference for those). The
+        clip shape is in the target's LOGICAL units (drawable-ir.md rule 1),
+        scaled to device px by the FBO's resolution scale."""
+        clip_plus_one = int(urec[_U_CLIP])
+        if clip_plus_one == 0:
+            return False
+        clip_id = clip_plus_one - 1
+        if not 0 <= clip_id < len(self._clips):
+            self._log_once('clip_missing', f'GLExecutor: clip id {clip_id} has no shape, drawn unclipped')
+            return False
+        shape = self._clips[clip_id]
+        if not shape or shape[0] != 'rect':
+            self._log_once('clip_poly', 'GLExecutor: non-rect / rotated clip not implemented (TODO), drawn unclipped')
+            return False
+        _, l, t, r, b = shape
+        fbo = self._targets.get(target_id)
+        ph = fbo.height() if fbo is not None else int(round(th))
+        # Logical -> device px (FBO is logical * res_scale). Scissor origin is
+        # bottom-left, y-up; the FBO content is y-down, so flip the top edge.
+        sx = int(round(min(l, r) * self._res_scale))
+        sw = int(round(abs(r - l) * self._res_scale))
+        sh_px = int(round(abs(b - t) * self._res_scale))
+        sy = ph - int(round(max(t, b) * self._res_scale))
+        if sw <= 0 or sh_px <= 0:
+            return False
+        gf.glEnable(GL_SCISSOR_TEST)
+        gf.glScissor(sx, sy, sw, sh_px)
+        return True
 
     # -- readback ----------------------------------------------------------
 

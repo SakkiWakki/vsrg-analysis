@@ -1,9 +1,33 @@
 """Opt-in Drawable pipeline (analysis/player/render/storyboard/pipeline.py).
 
 Exercises the end-to-end delegate offscreen on a synthetic frame: a fake
-B3 bridge builds a real ``storyboard_native`` doc, the pipeline crosses
-Seam A once, feeds a per-frame item stream across Seam B, runs the real
-RasterExecutor, and blits the composed screen image into the chart rect.
+static-doc compiler builds a real ``storyboard_native`` doc, the pipeline
+crosses Seam A once, samples the whole static doc per frame (``frame(t)``,
+NO feeds - the static doc's Snapshots are static commands), runs the real
+GL executor, and presents the composed screen image into the chart rect.
+
+STATIC-DOC ADAPTATION (this wave): the pipeline switched from the
+per-frame feed bridge (``drawable_bridge.build_doc`` + ``feed_frame``) to
+the static tree-order doc (``drawable_doc.build_static_doc``). Every fake
+here therefore exposes ``build_static_doc(compiled) -> (evaluator, id_maps,
+report)`` (a 3-tuple) whose doc carries its OWN items (no dynamic feed
+drawable), and the pipeline monkeypatch target is ``pl._load_doc``. The
+adaptations from the feed-model tests are documented at each fake:
+
+- ``_fake_doc`` replaces ``_fake_bridge``: the doc's screen root carries a
+  SRC_FILL item directly (channel-backed via ``item(...)``), so a plain
+  ``frame(t)`` composes the fill - no feed_frame, no dynamic drawable.
+- The bytes/coverage feed test is retired: the static doc has no feed
+  return to unpack, so there is nothing to serialize. Its intent (the
+  pipeline draws through the real evaluator) is covered by the compose
+  test. The remaining count is preserved by adding the element-image and
+  rebuild-on-growth tests this wave owns.
+- ``_field_doc`` replaces ``_field_bridge``: the doc's screen root reads a
+  command-less FIELD drawable via a static SRC_DRAWABLE item; the pipeline
+  binds a handed capture into it (the D1 behavior, unchanged).
+- ``raise_on_build`` replaces ``raise_on_feed`` for the disable test: with
+  no per-frame feed, the failure that permanently disables the pipeline is
+  raised from the per-frame ``frame`` sampling instead (a wrapped evaluator).
 
 Also guards the two invariants the renderer relies on: the pipeline never
 raises out of a frame (any error permanently self-disables), and a build
@@ -108,102 +132,104 @@ class _Adapter:
         return self._compiled
 
 
-def _fake_bridge(fed_color=(1.0, 0.0, 0.0), raise_on_feed=False,
-                 bytes_feed=False):
-    """A fake B3 bridge: build_doc returns a real Evaluator whose screen
-    consumes one DYNAMIC drawable; feed_frame emits one fed fill item that
-    the executor rasterizes red into the screen.
+# --------------------------------------------------------------------------
+# Fake static-doc compilers (build_static_doc -> (evaluator, id_maps, report))
+# --------------------------------------------------------------------------
 
-    ``bytes_feed`` mirrors the real B3 contract: feed_frame returns a
-    5-tuple whose buffers are already ``.tobytes()`` and whose trailing
-    element is a coverage dict."""
+def _fill_doc_evaluator():
+    """A real Evaluator whose screen root carries ONE static SRC_FILL item
+    scaled to the full screen (a white curtain). Composing it with a plain
+    ``frame(t)`` rasterizes that fill - the static-doc equivalent of the old
+    fed-fill bridge, with no feed drawable.
 
-    class Bridge:
+    The native ``item`` seeds a BLIT's tint white and offers no per-channel
+    tint setter (see drawable_doc._z_channel), so the fill composes WHITE; the
+    compose test asserts an opaque white curtain rather than a colored one."""
+    b = sn.DocBuilder(float(_SCREEN_W), float(_SCREEN_H))
+    # A fill's unit quad (0,0)-(1,1) is scaled to the full screen by the item
+    # transform (sx=640, sy=480).
+    b.item(0, sn.SRC_FILL, 0, sx_rest=float(_SCREEN_W), sy_rest=float(_SCREEN_H))
+    return b.finish()
+
+
+def _report(**over):
+    base = {'instances': 0, 'captures': 0, 'fills': 0, 'aft': 0, 'proxy': 0,
+            'z_groups': 0, 'fields': 0, 'slots': 0, 'images': 0,
+            'elements_below': 0, 'elements_above': 0, 'element_skips': {}}
+    base.update(over)
+    return base
+
+
+class _WrapEvaluator:
+    """Wraps a real Evaluator to raise from ``frame`` on demand (the
+    static-doc analogue of the old raise-on-feed fake: the per-frame failure
+    now lives in the evaluator sampling, not a feed call)."""
+
+    def __init__(self, inner, raise_on_frame=False):
+        self._inner = inner
+        self._raise = raise_on_frame
+
+    def frame(self, t):
+        if self._raise:
+            raise RuntimeError("synthetic frame failure")
+        return self._inner.frame(t)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def _fake_doc(raise_on_frame=False):
+    """A fake static-doc compiler: ``build_static_doc`` returns a real
+    Evaluator whose screen root draws one full-screen white fill (rasterized
+    by the executor), plus the 3-tuple id_maps/report the pipeline expects.
+
+    Replaces the old ``_fake_bridge`` (build_doc + feed_frame): the fill is a
+    STATIC item the plain ``frame(t)`` composes - there is no dynamic feed
+    drawable and no feed_frame call."""
+
+    class Doc:
         @staticmethod
-        def build_doc(compiled, screen_w=640, screen_h=480):
-            b = sn.DocBuilder(float(screen_w), float(screen_h))
-            notes = b.drawable(float(screen_w), float(screen_h), False, True)
-            b.item(0, sn.SRC_DRAWABLE, notes)
-            evaluator = b.finish()
-            id_maps = {
-                'images': {},
-                'drawable_sizes': [(screen_w, screen_h), (screen_w, screen_h)],
-                'dynamic_id': notes,
-            }
-            return evaluator, id_maps
+        def build_static_doc(compiled, screen_w=_SCREEN_W, screen_h=_SCREEN_H):
+            inner = _fill_doc_evaluator()
+            evaluator = _WrapEvaluator(inner, raise_on_frame=raise_on_frame)
+            id_maps = {'screen': 0, 'slots': {}, 'fields': {}, 'images': {}}
+            return evaluator, id_maps, _report(fills=1, instances=1)
 
-        @staticmethod
-        def feed_frame(compiled, t, id_maps):
-            if raise_on_feed:
-                raise RuntimeError("synthetic feed failure")
-            notes = id_maps['dynamic_id']
-            fu = 4
-            ff = 18
-            u = np.zeros((1, fu), dtype=np.uint32)
-            f = np.zeros((1, ff), dtype=np.float32)
-            # One fed fill item covering the whole 640x480 screen, opaque.
-            # Feed v2 f32 layout: mat3 lanes 0..9 (column-vector), then
-            # opacity, tint, crop, z. The mat3 scales the unit fill quad to
-            # 640x480: m00=640 (x' = 640*u), m11=480 (y' = 480*v).
-            u[0] = [sn.SRC_FILL, 0, 0, 0]
-            f[0, 0] = 640.0   # m00 (scale unit quad to full width)
-            f[0, 4] = 480.0   # m11 (full height)
-            f[0, 8] = 1.0     # m22 (homogeneous)
-            f[0, 9] = 1.0     # opacity
-            f[0, 10:13] = fed_color  # tint rgb
-            if bytes_feed:
-                # The real B3 shape: serialized buffers + a coverage dict.
-                coverage = {'translated': 1, 'total': 1, 'stale': False}
-                return [notes], [1], u.tobytes(), f.tobytes(), coverage
-            return [notes], [1], u, f
-
-    return Bridge()
+    return Doc()
 
 
-def _install_bridge(monkeypatch, bridge):
-    monkeypatch.setattr(pl, '_load_bridge', lambda: bridge)
+def _install_doc(monkeypatch, doc):
+    monkeypatch.setattr(pl, '_load_doc', lambda: doc)
 
 
-def _build_pipeline(monkeypatch, bridge):
-    _install_bridge(monkeypatch, bridge)
-    player = _Player(compiled={'field_instances': [object()]})
+def _build_pipeline(monkeypatch, doc):
+    _install_doc(monkeypatch, doc)
+    player = _Player(compiled={'field_instances': [{'name': 'i0'}]})
     pipe = pl.build_pipeline(player)
     assert pipe is not None
     return player, pipe
 
 
 def test_delegate_composes_and_blits_into_chart_rect(gl, monkeypatch):
-    player, pipe = _build_pipeline(monkeypatch, _fake_bridge())
+    player, pipe = _build_pipeline(monkeypatch, _fake_doc())
 
     ctx = _Ctx(t_now=1.0, player=player)
     drew, target = _GLTarget(CHART_RECT).present(pipe, ctx)
 
     assert drew is True
     x, y, w, h = CHART_RECT
-    # The fed red fill covers the whole screen drawable, presented into the
-    # chart rect: a pixel well inside the rect is red, one outside is clear.
+    # The static white fill covers the whole screen drawable, presented into
+    # the chart rect: a pixel well inside the rect is opaque white, one outside
+    # is clear.
     inside = target.pixelColor(x + w // 2, y + h // 2)
     outside = target.pixelColor(x + w + 5, y + h + 5)
-    assert inside.red() > 200 and inside.green() < 60 and inside.blue() < 60
+    assert (inside.alpha() > 200 and inside.red() > 200
+            and inside.green() > 200 and inside.blue() > 200)
     assert outside.alpha() == 0
 
 
-def test_delegate_accepts_bridge_bytes_and_coverage(gl, monkeypatch):
-    # The real B3 feed_frame returns serialized buffers + a coverage dict;
-    # the pipeline must unpack the 5-tuple and pass the bytes straight to
-    # the evaluator, drawing the same red fill.
-    player, pipe = _build_pipeline(
-        monkeypatch, _fake_bridge(bytes_feed=True))
-    ctx = _Ctx(t_now=0.5, player=player)
-    drew, target = _GLTarget(CHART_RECT).present(pipe, ctx)
-    assert drew is True
-    x, y, w, h = CHART_RECT
-    inside = target.pixelColor(x + w // 2, y + h // 2)
-    assert inside.red() > 200 and inside.green() < 60 and inside.blue() < 60
-
-
 def test_delegate_leaves_chart_rect_bounds(gl, monkeypatch):
-    player, pipe = _build_pipeline(monkeypatch, _fake_bridge())
+    player, pipe = _build_pipeline(monkeypatch, _fake_doc())
     ctx = _Ctx(t_now=0.0, player=player)
     _drew, target = _GLTarget(CHART_RECT).present(pipe, ctx)
     x, y, w, h = CHART_RECT
@@ -215,11 +241,11 @@ def test_delegate_leaves_chart_rect_bounds(gl, monkeypatch):
 
 def test_frame_exception_disables_permanently(gl, monkeypatch):
     player, pipe = _build_pipeline(
-        monkeypatch, _fake_bridge(raise_on_feed=True))
+        monkeypatch, _fake_doc(raise_on_frame=True))
     ctx = _Ctx(t_now=0.0, player=player)
     drew, _target = _GLTarget(CHART_RECT).present(pipe, ctx)
-    # The feed raised: the frame reports "not drawn" and the pipeline is
-    # now permanently disabled for the session.
+    # The frame sampling raised: the frame reports "not drawn" and the
+    # pipeline is now permanently disabled for the session.
     assert drew is False
     assert pipe.healthy is False
     # A subsequent delegate also returns False without re-raising.
@@ -227,21 +253,21 @@ def test_frame_exception_disables_permanently(gl, monkeypatch):
     assert drew2 is False
 
 
-def test_missing_bridge_reports_unavailable(monkeypatch):
-    monkeypatch.setattr(pl, '_load_bridge', lambda: None)
-    player = _Player(compiled={'field_instances': [object()]})
+def test_missing_doc_compiler_reports_unavailable(monkeypatch):
+    monkeypatch.setattr(pl, '_load_doc', lambda: None)
+    player = _Player(compiled={'field_instances': [{'name': 'i0'}]})
     assert pl.build_pipeline(player) is None
 
 
 def test_no_compiled_document_reports_unavailable(monkeypatch):
-    _install_bridge(monkeypatch, _fake_bridge())
+    _install_doc(monkeypatch, _fake_doc())
     player = _Player(compiled={})
     assert pl.build_pipeline(player) is None
 
 
 def test_pipeline_for_caches_and_marks_unavailable(monkeypatch):
-    monkeypatch.setattr(pl, '_load_bridge', lambda: None)
-    player = _Player(compiled={'field_instances': [object()]})
+    monkeypatch.setattr(pl, '_load_doc', lambda: None)
+    player = _Player(compiled={'field_instances': [{'name': 'i0'}]})
     assert pl.pipeline_for(player) is None
     # Cached as unavailable: a second probe does not rebuild (still None).
     assert pl.pipeline_for(player) is None
@@ -249,52 +275,40 @@ def test_pipeline_for_caches_and_marks_unavailable(monkeypatch):
 
 
 def test_pipeline_for_returns_healthy_then_caches(monkeypatch):
-    _install_bridge(monkeypatch, _fake_bridge())
-    player = _Player(compiled={'field_instances': [object()]})
+    _install_doc(monkeypatch, _fake_doc())
+    player = _Player(compiled={'field_instances': [{'name': 'i0'}]})
     first = pl.pipeline_for(player)
     assert first is not None and first.healthy
     # Same instance is returned on the next frame (cached on the player).
     assert pl.pipeline_for(player) is first
 
 
-def _field_bridge():
-    """A fake bridge whose screen root reads a command-less FIELD drawable
-    (via SRC_DRAWABLE) that carries no items of its own, and whose id_maps
-    map the 'field' scope to it. feed_frame emits a SRC_DRAWABLE blit of
-    that field, scaled to the full screen. With no fed content the field
-    reads empty; the pipeline must ingest a handed capture into it."""
+# --------------------------------------------------------------------------
+# Field-capture ingest (D1: bound texture in a command-less field drawable)
+# --------------------------------------------------------------------------
 
-    class Bridge:
+def _field_doc():
+    """A fake static-doc compiler whose screen root reads a command-less
+    FIELD drawable (a static SRC_DRAWABLE item scaled to the full screen)
+    with no items of its own, and whose id_maps map the 'field' scope to it.
+    With no capture bound the field reads empty; the pipeline binds a handed
+    capture into it. Replaces the old ``_field_bridge`` - the field blit is a
+    STATIC item, not a fed one."""
+
+    class Doc:
         @staticmethod
-        def build_doc(compiled, screen_w=640, screen_h=480):
+        def build_static_doc(compiled, screen_w=_SCREEN_W, screen_h=_SCREEN_H):
             b = sn.DocBuilder(float(screen_w), float(screen_h))
             field = b.drawable(float(screen_w), float(screen_h), False, False)
+            # The field's logical box is 640x480; the item maps it 1:1 onto
+            # the screen (unit zoom over the natural 640x480 size).
             b.item(0, sn.SRC_DRAWABLE, field)
             evaluator = b.finish()
-            id_maps = {
-                'images': {},
-                'drawable_sizes': [(screen_w, screen_h), (screen_w, screen_h)],
-                'fields': {'field': field},
-                'field_id': field,
-            }
-            return evaluator, id_maps
+            id_maps = {'screen': 0, 'slots': {}, 'images': {},
+                       'fields': {'field': field}}
+            return evaluator, id_maps, _report(proxy=1, fields=1)
 
-        @staticmethod
-        def feed_frame(compiled, t, id_maps):
-            field = id_maps['field_id']
-            u = np.zeros((1, 4), dtype=np.uint32)
-            f = np.zeros((1, 18), dtype=np.float32)
-            u[0] = [sn.SRC_DRAWABLE, field, 0, 0]
-            # Identity-ish mat3 that maps the field 1:1 onto the screen.
-            f[0, 0] = 1.0
-            f[0, 4] = 1.0
-            f[0, 8] = 1.0
-            f[0, 9] = 1.0  # opacity
-            f[0, 10:13] = (1.0, 1.0, 1.0)  # white tint (pass field through)
-            return [], [], u.tobytes(), f.tobytes(), {
-                'translated': 1, 'total': 1, 'stale': False}
-
-    return Bridge()
+    return Doc()
 
 
 class _FakeGLHandle:
@@ -317,7 +331,7 @@ def test_fed_field_capture_appears_in_the_composite(gl, monkeypatch):
     # capture; the pipeline binds its FBO texture into the mapped field
     # drawable so the SRC_DRAWABLE field blit draws those real pixels into the
     # chart rect - no readback.
-    player, pipe = _build_pipeline(monkeypatch, _field_bridge())
+    player, pipe = _build_pipeline(monkeypatch, _field_doc())
 
     field_capture = _FakeGLHandle(_SCREEN_W, _SCREEN_H,
                                   QColor(0, 180, 255, 255))
@@ -336,7 +350,7 @@ def test_no_field_capture_composites_transparently_not_black(gl, monkeypatch):
     # is TRANSPARENT over the chart rect - the black-region fix: the screen
     # root's clear override means the delegate overlays the backdrop instead
     # of covering it with opaque black.
-    player, pipe = _build_pipeline(monkeypatch, _field_bridge())
+    player, pipe = _build_pipeline(monkeypatch, _field_doc())
     ctx = _Ctx(t_now=0.0, player=player)
     drew, target = _GLTarget(
         CHART_RECT, backdrop=QColor(120, 40, 40, 255)).present(
@@ -348,11 +362,178 @@ def test_no_field_capture_composites_transparently_not_black(gl, monkeypatch):
     assert inside.red() > 100 and inside.green() < 70 and inside.blue() < 70
 
 
-def test_end_to_end_through_the_real_bridge(gl, monkeypatch):
-    # Integration with B3's ACTUAL drawable_bridge (not the fake): a
-    # synthetic single-proxy chart builds a real doc and feeds a real
-    # entry stream; the pipeline composes and blits without error.
-    bridge = pytest.importorskip('analysis.games.notitg.drawable_bridge')
+# --------------------------------------------------------------------------
+# Element images (this wave): a static-doc SRC_IMAGE blit loads real art
+# --------------------------------------------------------------------------
+
+def _write_solid_png(tmp_path, name, color):
+    """Write a solid-color PNG and return its absolute path (an element's
+    asset). The pipeline's lazy image table loads it as a QImage."""
+    path = tmp_path / name
+    img = QImage(16, 16, QImage.Format.Format_ARGB32)
+    img.fill(color)
+    assert img.save(str(path), 'PNG')
+    return str(path)
+
+
+def _image_doc(image_path):
+    """A fake static-doc compiler whose screen root draws ONE SRC_IMAGE item
+    (image id 0) scaled to the full screen, with ``id_maps['images']`` mapping
+    id 0 to ``image_path``. The pipeline must load that path as a QImage and
+    hand it to the executor so the image blit draws real art."""
+
+    class Doc:
+        @staticmethod
+        def build_static_doc(compiled, screen_w=_SCREEN_W, screen_h=_SCREEN_H):
+            b = sn.DocBuilder(float(screen_w), float(screen_h))
+            # A 16x16 image's logical box is its pixel size; scale it to the
+            # full screen via the item transform (sx = screen / 16).
+            b.item(0, sn.SRC_IMAGE, 0,
+                   sx_rest=float(screen_w) / 16.0,
+                   sy_rest=float(screen_h) / 16.0)
+            evaluator = b.finish()
+            id_maps = {'screen': 0, 'slots': {}, 'fields': {},
+                       'images': {0: image_path}}
+            return evaluator, id_maps, _report(images=1, elements_below=1)
+
+    return Doc()
+
+
+def test_static_doc_element_image_appears_in_composite(gl, monkeypatch, tmp_path):
+    # The element-image deliverable: id_maps['images'] {id -> path} is loaded
+    # lazily as a QImage and handed to the GL executor, so a SRC_IMAGE element
+    # blit draws the real art into the chart rect.
+    green = _write_solid_png(tmp_path, 'green.png', QColor(0, 200, 40, 255).rgba())
+    player, pipe = _build_pipeline(monkeypatch, _image_doc(green))
+    ctx = _Ctx(t_now=0.0, player=player)
+    drew, target = _GLTarget(CHART_RECT).present(pipe, ctx)
+    assert drew is True
+    x, y, w, h = CHART_RECT
+    inside = target.pixelColor(x + w // 2, y + h // 2)
+    # The loaded green image composited across the chart rect.
+    assert (inside.red() < 60 and inside.green() > 150
+            and inside.blue() < 80)
+
+
+def test_unreadable_element_image_skips_without_crashing(gl, monkeypatch):
+    # An unreadable image path must NOT crash the frame: the lazy table logs
+    # once, resolves to None, and the executor draws nothing for that id - the
+    # pipeline still presents (a transparent frame), never disabling.
+    player, pipe = _build_pipeline(
+        monkeypatch, _image_doc('/nonexistent/does_not_exist.png'))
+    ctx = _Ctx(t_now=0.0, player=player)
+    drew, _target = _GLTarget(CHART_RECT).present(pipe, ctx)
+    assert drew is True
+    assert pipe.healthy is True
+
+
+def test_lazy_images_table_loads_and_tolerates_bad_paths(tmp_path, _qapp):
+    # Unit-level: the lazy image table loads a real path as a QImage on first
+    # .get (cached), and resolves an unreadable path to None (logged once),
+    # never raising.
+    good = _write_solid_png(tmp_path, 'ok.png', QColor(255, 0, 0, 255).rgba())
+    table = pl._LazyImages({0: good, 1: '/no/such/file.png'})
+    first = table.get(0)
+    assert isinstance(first, QImage) and not first.isNull()
+    assert table.get(0) is first  # cached, one load
+    assert table.get(1) is None   # bad path -> None, no raise
+    assert table.get(1) is None   # cached None (logged once)
+
+
+# --------------------------------------------------------------------------
+# Staleness: rebuild the static doc when the provider's topology grows
+# --------------------------------------------------------------------------
+
+class _GrowingProvider:
+    """A lazy field-instance provider whose list GROWS on demand (mirrors the
+    sim sweep filling in topology). ``grow`` appends a named instance; each
+    call to the provider returns the current list."""
+
+    def __init__(self, names):
+        self._names = list(names)
+
+    def grow(self, name):
+        self._names.append(name)
+
+    def __call__(self):
+        return [{'name': n} for n in self._names]
+
+
+def _counting_field_doc(builds):
+    """A static-doc compiler that counts build_static_doc invocations and
+    returns a field-reading doc. ``builds`` is a one-element list mutated per
+    build, so a test can assert the pipeline rebuilt on topology growth."""
+
+    class Doc:
+        @staticmethod
+        def build_static_doc(compiled, screen_w=_SCREEN_W, screen_h=_SCREEN_H):
+            builds[0] += 1
+            b = sn.DocBuilder(float(screen_w), float(screen_h))
+            field = b.drawable(float(screen_w), float(screen_h), False, False)
+            b.item(0, sn.SRC_DRAWABLE, field)
+            evaluator = b.finish()
+            id_maps = {'screen': 0, 'slots': {}, 'images': {},
+                       'fields': {'field': field}}
+            return evaluator, id_maps, _report(proxy=1, fields=1)
+
+    return Doc()
+
+
+def test_topology_growth_triggers_a_rebuild(gl, monkeypatch):
+    # The static doc reflects a SNAPSHOT of the provider's instance list. When
+    # the lazy sweep grows that list (count changes), the pipeline must rebuild
+    # the doc so new topology renders - one build at first frame, another after
+    # growth, none on a steady frame.
+    provider = _GrowingProvider(['a', 'b'])
+    builds = [0]
+    _install_doc(monkeypatch, _counting_field_doc(builds))
+    player = _Player(compiled={'field_instances': provider})
+    pipe = pl.build_pipeline(player)
+    assert pipe is not None
+
+    ctx = _Ctx(t_now=0.0, player=player)
+    _drew, _t = _GLTarget(CHART_RECT).present(pipe, ctx)
+    assert builds[0] == 1  # built once at the first frame
+
+    # A steady frame (no growth) does NOT rebuild.
+    _drew, _t = _GLTarget(CHART_RECT).present(pipe, ctx)
+    assert builds[0] == 1
+
+    # The sweep grows the instance list. The SETTLE GATE means the next
+    # frame only starts tracking (no rebuild while topology churns); the
+    # rebuild fires once the signature has been stable for the settle
+    # window - simulated by rewinding the settle clock.
+    provider.grow('c')
+    _drew, _t = _GLTarget(CHART_RECT).present(pipe, ctx)
+    assert builds[0] == 1        # churn frame: tracked, not rebuilt
+    pipe._settle_since = -1e9    # the growth settled long ago
+    _drew, _t = _GLTarget(CHART_RECT).present(pipe, ctx)
+    assert builds[0] == 2
+    assert pipe.healthy is True
+
+
+def test_topology_signature_tracks_count_and_last_name():
+    # The cheap per-frame signature is (count, last instance name): growth
+    # changes the count; an equal-length in-place swap changes the last name.
+    prov = _GrowingProvider(['a', 'b'])
+    compiled = {'field_instances': prov}
+    sig0 = pl._topology_signature(compiled)
+    assert sig0 == (2, 'b')
+    prov.grow('c')
+    assert pl._topology_signature(compiled) == (3, 'c')
+    # An empty / absent provider is None (treated as unchanged, no rebuild).
+    assert pl._topology_signature({'field_instances': None}) is None
+
+
+# --------------------------------------------------------------------------
+# Real-doc integration (the actual drawable_doc, not a fake)
+# --------------------------------------------------------------------------
+
+def test_end_to_end_through_the_real_static_doc(gl, monkeypatch):
+    # Integration with the ACTUAL drawable_doc.build_static_doc (not a fake): a
+    # synthetic single-proxy chart builds a real static doc and the pipeline
+    # samples + presents it without error.
+    doc = pytest.importorskip('analysis.games.notitg.drawable_doc')
     fc = pytest.importorskip('analysis.games.notitg.field_compose')
     from analysis.player.render.effects.timeline import Keyframe
 
@@ -366,14 +547,14 @@ def test_end_to_end_through_the_real_bridge(gl, monkeypatch):
         fc.instance('copyB', 'proxy', 1, [link(x=-40.0, y=10.0, alpha=1.0)]),
     ]
     compiled = {'field_instances': list(instances), 'base_field_hidden': None}
-    monkeypatch.setattr(pl, '_load_bridge', lambda: bridge)
+    monkeypatch.setattr(pl, '_load_doc', lambda: doc)
     player = _Player(compiled=compiled)
 
     pipe = pl.build_pipeline(player)
     assert pipe is not None
     ctx = _Ctx(t_now=0.0, player=player)
     drew, _target = _GLTarget(CHART_RECT).present(pipe, ctx)
-    # The real bridge translated the proxy entries into the feed and the
-    # pipeline drew a frame without disabling itself.
+    # The real doc compiled the proxy instances and the pipeline drew a frame
+    # without disabling itself.
     assert drew is True
     assert pipe.healthy is True

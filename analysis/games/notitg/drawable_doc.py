@@ -49,6 +49,8 @@ No Qt import at module load - importable headless.
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from analysis.player.render.effects.timeline import EventTimeline
@@ -681,13 +683,52 @@ class _Builder:
         return {'frame_id': chan_id, 'frame_rest': rest}
 
     def _element_visible_kwarg(self, element) -> dict:
-        """The element's SM `hidden` bit inverted onto the item's visible gate
-        (visible = 1 - hidden), reusing the base-field inversion export."""
+        """The element's visible gate: its existence WINDOW [t_start, t_end)
+        (the legacy walk draws an element only inside it - render.py's
+        `child.t_start <= t < child.t_end`; without this every element drew
+        for the whole chart at once) ANDed with the SM `hidden` bit
+        inverted. Hidden flips are instant steps, so the merged gate is a
+        step channel: the inverted-hidden value inside the window, 0
+        outside it."""
         hidden = element.timelines.get('hidden')
-        if hidden is None:
+        t0 = float(element.t_start)
+        t1 = float(element.t_end)
+        open_start = t0 <= self._t0 + 1e-9
+        open_end = (not math.isfinite(t1)) or t1 >= self._t1 - 1e-9
+        if hidden is None and open_start and open_end:
             return {}
-        visible_id, visible_rest = self._visible_from_hidden(hidden)
-        return {'visible_id': visible_id, 'visible_rest': visible_rest}
+        if hidden is None:
+            ts, vals = [t0], [1.0]
+            if not open_end:
+                ts.append(t1)
+                vals.append(0.0)
+            chan_id = self._builder.channel(
+                ts, vals, [0.0] * len(ts), 0.0)
+            return {'visible_id': chan_id, 'visible_rest': 0.0}
+        hts, hvals, _durs, hrest = export_channel(hidden, self._t0, self._t1)
+        inv = [1.0 - float(v) for v in hvals]
+        inv_rest = 1.0 - float(hrest)
+
+        def gate_at(t):
+            value = inv_rest
+            for bt, bv in zip(hts, inv):
+                if bt > t:
+                    break
+                value = bv
+            return value
+
+        ts, vals = [t0], [gate_at(t0)]
+        for bt, bv in zip(hts, inv):
+            if t0 < bt and (open_end or bt < t1):
+                ts.append(float(bt))
+                vals.append(bv)
+        if not open_end:
+            ts.append(t1)
+            vals.append(0.0)
+        chan_id = self._builder.channel(ts, vals, [0.0] * len(ts),
+                                        0.0 if not open_start else inv_rest)
+        return {'visible_id': chan_id,
+                'visible_rest': 0.0 if not open_start else inv_rest}
 
 
 def build_static_doc(compiled, screen_w: float = _SCREEN_W,

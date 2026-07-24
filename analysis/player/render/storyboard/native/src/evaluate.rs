@@ -9,6 +9,14 @@
 //! evaluate before their consumers (dependency order, cycle edges =
 //! retained reads); the screen evaluates last.
 //!
+//! SortSpan interactions: a Snapshot inside a SortSpan is ALLOWED and
+//! participates in the sort with z 0 (Snapshot carries no z), landing
+//! among z-0 items in document order (stable) - it copies the composite
+//! as of its sorted position, not its authored index. Nested SortSpans
+//! are FORBIDDEN and rejected at DocBuilder::finish (the engine's
+//! SetDrawByZPosition has no such construct), so no inner span reaches
+//! this fold.
+//!
 //! The output is flat fixed-width SoA records (no per-op objects) so
 //! the schedule crosses Seam B as two buffers.
 
@@ -461,7 +469,10 @@ fn emit_commands(
                     match &commands[j] {
                         Cmd::Item(item) => emit_item(doc, item, t, events, cache, schedule),
                         Cmd::Snapshot { into } => schedule.op(OP_COPY, *into, 0),
-                        Cmd::SortSpan { .. } => {} // nested spans: forbid for now
+                        // Nested spans are rejected at DocBuilder::finish;
+                        // an inner span never reaches this fold. A doc built
+                        // outside the validated builder degrades to a no-op.
+                        Cmd::SortSpan { .. } => {}
                     }
                 }
                 i = span_end;
@@ -691,6 +702,24 @@ mod tests {
             blit_sources(&schedule),
             vec![(SRC_IMAGE, 0), (SRC_IMAGE, 1), (SRC_IMAGE, 2)]
         );
+    }
+
+    #[test]
+    fn mesh_source_carries_its_id_into_the_record() {
+        use crate::doc::MeshDesc;
+        let mut doc = DrawableDoc::with_screen([640.0, 480.0]);
+        let mesh = doc.add_mesh(MeshDesc {
+            vertices: vec![0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            mode: 0,
+            vert_shader: None,
+            vert_source: None,
+        });
+        doc.drawables[0]
+            .commands
+            .push(Cmd::Item(Item::of(Source::Mesh(mesh))));
+        let schedule = evaluate(&doc, 0.0, &[]);
+        // The BLIT record carries (SRC_MESH, mesh_id) in lanes 1/2.
+        assert_eq!(blit_sources(&schedule), vec![(SRC_MESH, mesh)]);
     }
 
     #[test]

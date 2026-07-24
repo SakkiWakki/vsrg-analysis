@@ -38,14 +38,15 @@ use pyo3::types::PyBytes;
 mod camera;
 mod channels;
 mod doc;
+mod ease;
 mod evaluate;
 mod schedule;
 mod transform;
 
 use crate::channels::ChannelRef;
 use crate::doc::{
-    Blend, CameraRef, ClipDesc, Cmd, DrawableDoc, Item, LinkRef, ShaderDesc, Source, Space,
-    TransformRef,
+    Blend, CameraRef, ClipDesc, Cmd, DrawableDoc, Item, LinkRef, MeshDesc, ShaderDesc, Source,
+    Space, TransformRef,
 };
 use crate::doc::Reaction;
 use crate::evaluate::{
@@ -134,12 +135,29 @@ impl DocBuilder {
     }
 
     /// Append a channel from parallel breakpoint lists; returns its id.
-    fn channel(&mut self, ts: Vec<f32>, vals: Vec<f32>, durs: Vec<f32>, rest: f32) -> u32 {
-        self.doc
+    /// `eases` (optional) carries one ease id per breakpoint shaping the
+    /// ramp toward the next value (see `ease.rs`); omitted / empty means
+    /// all-linear, which is bit-identical to the pre-ease behavior. A
+    /// non-empty `eases` must run parallel to `ts`.
+    #[pyo3(signature = (ts, vals, durs, rest, eases=Vec::new()))]
+    fn channel(
+        &mut self,
+        ts: Vec<f32>,
+        vals: Vec<f32>,
+        durs: Vec<f32>,
+        rest: f32,
+        eases: Vec<i32>,
+    ) -> u32 {
+        let channels = &mut self
+            .doc
             .as_mut()
             .expect("builder already finished")
-            .channels
-            .push(&ts, &vals, &durs, rest)
+            .channels;
+        if eases.is_empty() {
+            channels.push(&ts, &vals, &durs, rest)
+        } else {
+            channels.push_eased(&ts, &vals, &durs, &eases, rest)
+        }
     }
 
     fn drawable(&mut self, w: f32, h: f32, persistent: bool, dynamic: bool) -> u32 {
@@ -160,6 +178,31 @@ impl DocBuilder {
                 frag,
                 vert,
                 uniform_names,
+            })
+    }
+
+    /// Register a mesh; returns its id (for `Source::Mesh` items via
+    /// `item(..., source_kind=SRC_MESH, source_id=<this id>, ...)`).
+    /// `vertices` is flat interleaved [x, y, u, v] (4 floats/vertex);
+    /// `mode` is the executor's primitive mode; `vert_shader_id` (< 0 =
+    /// none) and `vert_source` (None = none) are the optional vertex-shader
+    /// program. The GL DRAW of the mesh is the executor tier.
+    #[pyo3(signature = (vertices, mode=0, vert_shader_id=-1, vert_source=None))]
+    fn mesh(
+        &mut self,
+        vertices: Vec<f32>,
+        mode: u32,
+        vert_shader_id: i64,
+        vert_source: Option<String>,
+    ) -> u32 {
+        self.doc
+            .as_mut()
+            .expect("builder already finished")
+            .add_mesh(MeshDesc {
+                vertices,
+                mode,
+                vert_shader: (vert_shader_id >= 0).then_some(vert_shader_id as u32),
+                vert_source,
             })
     }
 
@@ -452,14 +495,14 @@ impl DocBuilder {
         let Some((_, prop)) = out.props.into_iter().find(|(k, _)| *k == prop_key) else {
             return Ok(None);
         };
-        let LoweredProp { ts, vals, durs } = prop;
+        let LoweredProp { ts, vals, durs, eases } = prop;
         let rest = vals.first().copied().unwrap_or(0.0);
         let id = self
             .doc
             .as_mut()
             .expect("builder already finished")
             .channels
-            .push(&ts, &vals, &durs, rest);
+            .push_eased(&ts, &vals, &durs, &eases, rest);
         Ok(Some(id))
     }
 
@@ -486,12 +529,21 @@ impl DocBuilder {
         self.push(target, Cmd::SortSpan { len });
     }
 
-    /// Hand the finished doc to an evaluator (the builder empties).
-    fn finish(&mut self) -> Evaluator {
-        Evaluator {
-            doc: self.doc.take().expect("builder already finished"),
-            reaction_cache: RefCell::new(ReactionCache::new()),
+    /// Hand the finished doc to an evaluator (the builder empties). Rejects
+    /// structurally invalid docs (nested SortSpans - the engine has no such
+    /// construct) before the doc can reach the per-frame evaluator.
+    fn finish(&mut self) -> PyResult<Evaluator> {
+        let doc = self.doc.take().expect("builder already finished");
+        if let Err((d, outer, inner)) = doc.find_nested_sort_span() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "nested SortSpan on drawable {d}: the span at command {outer} covers \
+                 another SortSpan at command {inner} (the engine has no such construct)"
+            )));
         }
+        Ok(Evaluator {
+            doc,
+            reaction_cache: RefCell::new(ReactionCache::new()),
+        })
     }
 }
 
@@ -609,6 +661,10 @@ impl Evaluator {
 
     fn drawable_count(&self) -> usize {
         self.doc.drawables.len()
+    }
+
+    fn mesh_count(&self) -> usize {
+        self.doc.meshes.len()
     }
 }
 

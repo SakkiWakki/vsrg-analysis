@@ -60,6 +60,14 @@ def _frames(evaluator, t):
     return u, f
 
 
+def _frames_uf(evaluator, t):
+    u_raw, f_raw, uf_raw, n = evaluator.frame(t)
+    u = np.frombuffer(u_raw, dtype=np.uint32).reshape(n, evaluator.u_stride)
+    f = np.frombuffer(f_raw, dtype=np.float32).reshape(n, evaluator.f_stride)
+    uf = np.frombuffer(uf_raw, dtype=np.float32)
+    return u, f, uf
+
+
 def _solid(w, h, color):
     img = QImage(w, h, QImage.Format.Format_ARGB32_Premultiplied)
     img.fill(color)
@@ -227,3 +235,204 @@ def test_opacity_ramp_changes_intensity_between_times(gl):
     # arithmetic as the raster golden.
     assert v_early == pytest.approx(64, abs=8)
     assert v_late == pytest.approx(191, abs=8)
+
+
+# --- A4: retain decay (GL constant-alpha modulate) ---
+
+_U_STRIDE, _F_STRIDE, _CLEAR_RETAIN_CODE = 10, 20, 2
+
+
+def _rec_row(kind, a=0, b=0, mat=None, opacity=1.0, tint=(1.0, 1.0, 1.0)):
+    u = np.zeros(_U_STRIDE, dtype=np.uint32)
+    u[0], u[1], u[2] = kind, a, b
+    f = np.zeros(_F_STRIDE, dtype=np.float32)
+    f[:9] = mat if mat is not None else [1, 0, 0, 0, 1, 0, 0, 0, 1]
+    f[9] = opacity
+    f[10:13] = tint
+    return u, f
+
+
+def _stack(rows):
+    us, fs = zip(*rows)
+    return np.array(us, dtype=np.uint32), np.array(fs, dtype=np.float32)
+
+
+def _scale(sx, sy):
+    return [sx, 0, 0, 0, sy, 0, 0, 0, 1]
+
+
+def _paint_slot(slot):
+    # Prime the persistent slot with a full white image, blit onto screen.
+    return _stack([
+        _rec_row(sn.OP_BEGIN, a=slot, b=0),
+        _rec_row(sn.OP_BLIT, a=sn.SRC_IMAGE, b=0, mat=_scale(4.0, 4.0)),
+        _rec_row(sn.OP_END, a=slot),
+        _rec_row(sn.OP_BEGIN, a=0, b=1),  # screen OpaqueBlack
+        _rec_row(sn.OP_BLIT, a=sn.SRC_DRAWABLE, b=slot, mat=_scale(4.0, 4.0)),
+        _rec_row(sn.OP_END, a=0),
+    ])
+
+
+def _decay_only(slot):
+    # Retain BEGIN with no item (content fades), read over opaque black.
+    return _stack([
+        _rec_row(sn.OP_BEGIN, a=slot, b=_CLEAR_RETAIN_CODE),
+        _rec_row(sn.OP_END, a=slot),
+        _rec_row(sn.OP_BEGIN, a=0, b=1),
+        _rec_row(sn.OP_BLIT, a=sn.SRC_DRAWABLE, b=slot, mat=_scale(4.0, 4.0)),
+        _rec_row(sn.OP_END, a=0),
+    ])
+
+
+def test_retain_decay_leaves_one_eighth_after_three_frames(gl):
+    slot = 1
+    images = {0: _solid(1, 1, QColor(255, 255, 255, 255))}
+    ex = GLExecutor(images, [(4.0, 4.0), (4.0, 4.0)])
+    ex.set_decay(slot, 0.5)
+
+    primed = ex.execute(*_paint_slot(slot))
+    assert not ex.broken
+    assert primed.pixelColor(2, 2).red() == pytest.approx(255, abs=2)
+
+    u1, f1 = _decay_only(slot)
+    for _ in range(3):
+        screen = ex.execute(u1, f1)
+    # 0.5 ** 3 = 1/8 white over black -> ~32.
+    assert screen.pixelColor(2, 2).red() == pytest.approx(32, abs=8)
+
+
+def test_retain_decay_default_persists_forever(gl):
+    slot = 1
+    images = {0: _solid(1, 1, QColor(255, 255, 255, 255))}
+    ex = GLExecutor(images, [(4.0, 4.0), (4.0, 4.0)])
+
+    ex.execute(*_paint_slot(slot))
+    u1, f1 = _decay_only(slot)
+    for _ in range(3):
+        screen = ex.execute(u1, f1)
+    assert not ex.broken
+    assert screen.pixelColor(2, 2).red() == pytest.approx(255, abs=2)
+
+
+# --- B10: rect clips via glScissor (mirrors the raster clip golden) ---
+
+
+def test_clipped_fullscreen_fill_colors_only_the_clip_region(gl):
+    # A green fullscreen Fill clipped to a centered rect (2,2)-(6,6) on an
+    # 8x8 screen (OpaqueBlack). Inside the clip goes green; outside stays
+    # cleared black. The clip shape is in the TARGET's logical units and is
+    # consumed GL-side as a glScissor rect (mirrors the raster golden).
+    b = sn.DocBuilder(8.0, 8.0)
+    clip = b.clip_rect(2.0, 2.0, 6.0, 6.0)
+    b.item(0, sn.SRC_FILL, 0, sx_rest=8.0, sy_rest=8.0)
+    b.item_clip(0, clip)
+    ev = b.finish()
+
+    u, f = _frames(ev, 0.0)
+    f = f.copy()
+    for i in range(u.shape[0]):
+        if u[i, 0] == sn.OP_BLIT and u[i, 1] == sn.SRC_FILL:
+            f[i, 10:13] = (0.0, 1.0, 0.0)
+    ex = GLExecutor({}, [(8.0, 8.0)], clips=[("rect", 2.0, 2.0, 6.0, 6.0)])
+    screen = ex.execute(u, f)
+
+    assert not ex.broken
+    assert _rgb(screen, 4, 4) == (0, 255, 0)   # inside the clip: green
+    assert _rgb(screen, 0, 0) == (0, 0, 0)     # outside: cleared black
+    assert _rgb(screen, 7, 7) == (0, 0, 0)
+
+
+def test_rect_clip_scissor_is_not_y_flipped(gl):
+    # A clip covering the logical TOP band (y in [0,4)) must fill the TOP of
+    # the (y-down content) output image, not the bottom - locks the scissor
+    # y-flip (GL scissor is y-up, FBO content y-down).
+    b = sn.DocBuilder(8.0, 8.0)
+    clip = b.clip_rect(0.0, 0.0, 8.0, 4.0)
+    b.item(0, sn.SRC_FILL, 0, sx_rest=8.0, sy_rest=8.0)
+    b.item_clip(0, clip)
+    ev = b.finish()
+
+    u, f = _frames(ev, 0.0)
+    f = f.copy()
+    for i in range(u.shape[0]):
+        if u[i, 0] == sn.OP_BLIT and u[i, 1] == sn.SRC_FILL:
+            f[i, 10:13] = (0.0, 1.0, 0.0)
+    ex = GLExecutor({}, [(8.0, 8.0)], clips=[("rect", 0.0, 0.0, 8.0, 4.0)])
+    screen = ex.execute(u, f)
+
+    assert not ex.broken
+    assert _rgb(screen, 4, 1) == (0, 255, 0)   # top band: green
+    assert _rgb(screen, 4, 6) == (0, 0, 0)     # bottom: cleared black
+
+
+def test_poly_clip_draws_unclipped_todo(gl):
+    # A 'poly' clip is a logged-once TODO GL-side: the fill draws UNCLIPPED
+    # (never black / crash) - the raster QPainterPath clip is the reference.
+    tri = [(1.0, 1.0), (7.0, 1.0), (1.0, 7.0)]
+    b = sn.DocBuilder(8.0, 8.0)
+    clip = b.clip_polygon([c for xy in tri for c in xy])
+    b.item(0, sn.SRC_FILL, 0, sx_rest=8.0, sy_rest=8.0)
+    b.item_clip(0, clip)
+    ev = b.finish()
+
+    u, f = _frames(ev, 0.0)
+    f = f.copy()
+    for i in range(u.shape[0]):
+        if u[i, 0] == sn.OP_BLIT and u[i, 1] == sn.SRC_FILL:
+            f[i, 10:13] = (0.0, 0.0, 1.0)
+    ex = GLExecutor({}, [(8.0, 8.0)], clips=[("poly", tri)])
+    screen = ex.execute(u, f)
+
+    assert not ex.broken
+    # Unclipped: the far corner (outside the triangle) is still filled.
+    assert _rgb(screen, 6, 6) == (0, 0, 255)
+
+
+# --- B7: per-item GL shaders (the monitor / lumikey tier) ---
+
+
+def _shaded_doc(uniform_names):
+    b = sn.DocBuilder(4.0, 4.0)
+    sh = b.shader("dummy", None, uniform_names)   # id only; source via set_shaders
+    b.item(0, sn.SRC_IMAGE, 0, sx_rest=4.0, sy_rest=4.0)
+    b.item_shader(0, sh)
+    if uniform_names:
+        b.item_uniform(0, 0, -1, 1.0)             # tint_r = 1.0 (rest)
+    return b.finish(), sh
+
+
+_TINT_FRAG = ("uniform sampler2D sampler0;\n"
+              "uniform float tint_r;\n"
+              "void main(){ gl_FragColor = vec4(tint_r, 0.0, 0.0, 1.0); }\n")
+
+_BROKEN_FRAG = ("uniform sampler2D sampler0;\n"
+                "void main(){ this is not valid glsl @@@ }\n")
+
+
+def test_per_item_shader_changes_pixels(gl):
+    # A white image blit shaded through a trivial frag that outputs red
+    # (uniform tint_r = 1.0). The shader path must change the pixels: the
+    # screen shows red, not the source white.
+    ev, sh = _shaded_doc(["tint_r"])
+    images = {0: _solid(1, 1, QColor(255, 255, 255, 255))}
+    ex = GLExecutor(images, [(4.0, 4.0)])
+    ex.set_shaders([(_TINT_FRAG, None, ["tint_r"])])
+
+    u, f, uf = _frames_uf(ev, 0.0)
+    screen = ex.execute(u, f, uf)
+    assert not ex.broken
+    assert _rgb(screen, 2, 2) == pytest.approx((255, 0, 0), abs=4)
+
+
+def test_broken_shader_degrades_to_unshaded_not_black(gl):
+    # A frag that fails to build must degrade to an UNSHADED blit (the
+    # plain textured program), never black / crash. The white source shows.
+    ev, sh = _shaded_doc([])
+    images = {0: _solid(1, 1, QColor(255, 255, 255, 255))}
+    ex = GLExecutor(images, [(4.0, 4.0)])
+    ex.set_shaders([(_BROKEN_FRAG, None, [])])
+
+    u, f, uf = _frames_uf(ev, 0.0)
+    screen = ex.execute(u, f, uf)
+    assert not ex.broken
+    assert _rgb(screen, 2, 2) == pytest.approx((255, 255, 255), abs=4)

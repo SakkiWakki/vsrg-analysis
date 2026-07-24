@@ -62,14 +62,16 @@ impl Node {
     }
 }
 
-/// One lowered property: the `ChannelTable::push` breakpoint triple. `ts`
-/// ascending, `vals` the value at each breakpoint start, `durs` the ramp
-/// duration toward the next breakpoint (0 = hold).
+/// One lowered property: the `ChannelTable::push_eased` breakpoint quad.
+/// `ts` ascending, `vals` the value at each breakpoint start, `durs` the
+/// ramp duration toward the next breakpoint (0 = hold), `eases` the Seg
+/// ease id shaping that ramp (0 = linear; a hold's ease is unused, kept 0).
 #[derive(Clone, Debug, Default)]
 pub struct LoweredProp {
     pub ts: Vec<f32>,
     pub vals: Vec<f32>,
     pub durs: Vec<f32>,
+    pub eases: Vec<i32>,
 }
 
 /// The result of lowering one schedule: per-property breakpoint runs (in
@@ -277,11 +279,11 @@ fn to_props(emissions: &[Emission]) -> Vec<(u32, LoweredProp)> {
         }
         let lp = &mut props.iter_mut().find(|(k, _)| *k == prop).unwrap().1;
         match e {
-            Emission::Ramp { t0, t1, v0, v1, .. } => {
-                push_bp(lp, *t0, *v0, (*t1 - *t0).max(0.0));
-                push_bp(lp, *t1, *v1, 0.0);
+            Emission::Ramp { t0, t1, v0, v1, ease, .. } => {
+                push_bp(lp, *t0, *v0, (*t1 - *t0).max(0.0), *ease);
+                push_bp(lp, *t1, *v1, 0.0, 0);
             }
-            Emission::Hold { t, v, .. } => push_bp(lp, *t, *v, 0.0),
+            Emission::Hold { t, v, .. } => push_bp(lp, *t, *v, 0.0, 0),
         }
     }
     props
@@ -289,20 +291,24 @@ fn to_props(emissions: &[Emission]) -> Vec<(u32, LoweredProp)> {
 
 /// Append a breakpoint, coalescing when it repeats the previous one exactly
 /// (same start time and value) - the terminal hold of a ramp landing on the
-/// start of the next ramp is a single directory row, not two.
-fn push_bp(lp: &mut LoweredProp, t: f32, v: f32, dur: f32) {
+/// start of the next ramp is a single directory row, not two. The incoming
+/// ramp's ease id replaces the placeholder hold's on coalesce (the row's
+/// ramp now goes somewhere).
+fn push_bp(lp: &mut LoweredProp, t: f32, v: f32, dur: f32, ease: i32) {
     if let Some(&last_t) = lp.ts.last() {
         let last_v = *lp.vals.last().unwrap();
         let last_dur = *lp.durs.last().unwrap();
         if last_t == t && last_v == v && last_dur == 0.0 {
             // Overwrite the placeholder terminal hold with the real segment.
             *lp.durs.last_mut().unwrap() = dur;
+            *lp.eases.last_mut().unwrap() = ease;
             return;
         }
     }
     lp.ts.push(t);
     lp.vals.push(v);
     lp.durs.push(dur);
+    lp.eases.push(ease);
 }
 
 #[cfg(test)]

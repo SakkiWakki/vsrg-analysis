@@ -24,6 +24,7 @@ import pytest
 sn = pytest.importorskip("storyboard_native")
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import QRectF
 from PySide6.QtGui import QColor, QImage, QPainter
 
 from analysis.player.render.storyboard.executor import (  # noqa: E402
@@ -434,3 +435,129 @@ def test_oversized_content_normalizes_to_the_logical_box():
     # screen (~10 px), proving vertical normalization too.
     assert _rgb(screen, 320, 4) == (0, 0, 255)      # near the very top: blue
     assert _rgb(screen, 320, 240) in ((255, 0, 0), (0, 255, 0))  # mid: not blue
+
+
+# --- A4: retain decay (engine PreserveTexture accumulate-with-decay) ---
+
+# Op / lane codes for hand-built Seam-B records (the evaluator's frozen
+# layout; see the module docstring). A decay-only frame needs a Retain
+# BEGIN with NO item, which the current DocBuilder does not emit for an
+# item-less drawable - so these records are built directly, exactly as the
+# executor must consume them.
+_U_STRIDE, _F_STRIDE = 10, 20
+_CLEAR_RETAIN_CODE = 2
+
+
+def _rec_row(kind, a=0, b=0, mat=None, opacity=1.0, tint=(1.0, 1.0, 1.0)):
+    u = np.zeros(_U_STRIDE, dtype=np.uint32)
+    u[0], u[1], u[2] = kind, a, b
+    f = np.zeros(_F_STRIDE, dtype=np.float32)
+    f[:9] = mat if mat is not None else [1, 0, 0, 0, 1, 0, 0, 0, 1]
+    f[9] = opacity
+    f[10:13] = tint
+    return u, f
+
+
+def _stack(rows):
+    us, fs = zip(*rows)
+    return np.array(us, dtype=np.uint32), np.array(fs, dtype=np.float32)
+
+
+def _scale_mat(sx, sy):
+    return [sx, 0, 0, 0, sy, 0, 0, 0, 1]
+
+
+def _paint_slot_records(slot):
+    # BEGIN(slot, Transparent) - white fullscreen image - END, then
+    # BEGIN(screen, Retain) - blit the slot - END. Frame 1 primes the slot.
+    return _stack([
+        _rec_row(sn.OP_BEGIN, a=slot, b=0),
+        _rec_row(sn.OP_BLIT, a=sn.SRC_IMAGE, b=0, mat=_scale_mat(4.0, 4.0)),
+        _rec_row(sn.OP_END, a=slot),
+        _rec_row(sn.OP_BEGIN, a=SCREEN_ID, b=0),
+        _rec_row(sn.OP_BLIT, a=sn.SRC_DRAWABLE, b=slot, mat=_scale_mat(4.0, 4.0)),
+        _rec_row(sn.OP_END, a=SCREEN_ID),
+    ])
+
+
+def _decay_only_records(slot):
+    # BEGIN(slot, RETAIN) with NO item (the slot's content just decays),
+    # END, then composite it over an OPAQUE-BLACK screen so the decayed
+    # ALPHA reads out as a dimmer RGB intensity (white * 1/8 over black).
+    return _stack([
+        _rec_row(sn.OP_BEGIN, a=slot, b=_CLEAR_RETAIN_CODE),
+        _rec_row(sn.OP_END, a=slot),
+        _rec_row(sn.OP_BEGIN, a=SCREEN_ID, b=1),  # OpaqueBlack
+        _rec_row(sn.OP_BLIT, a=sn.SRC_DRAWABLE, b=slot, mat=_scale_mat(4.0, 4.0)),
+        _rec_row(sn.OP_END, a=SCREEN_ID),
+    ])
+
+
+def test_retain_decay_leaves_one_eighth_after_three_frames():
+    slot = 1
+    images = {0: _solid(1, 1, QColor(255, 255, 255, 255))}
+    ex = RasterExecutor(images, [(4.0, 4.0), (4.0, 4.0)])
+    ex.set_decay(slot, 0.5)
+
+    # Prime the slot with full-intensity white (over opaque black -> 255).
+    u0, f0 = _paint_slot_records(slot)
+    primed = ex.execute(u0, f0)
+    assert _rgb(primed, 2, 2) == (255, 255, 255)
+    assert _alpha(ex._targets[slot], 2, 2) == 255
+
+    # Decay-only three times: the slot's alpha fades 1 -> 1/8; composited
+    # over opaque black the white shows as ~1/8 intensity (~32).
+    u1, f1 = _decay_only_records(slot)
+    for _ in range(3):
+        screen = ex.execute(u1, f1)
+    assert _alpha(ex._targets[slot], 2, 2) == pytest.approx(32, abs=4)
+    assert screen.pixelColor(2, 2).red() == pytest.approx(32, abs=6)
+
+
+def test_retain_decay_default_factor_persists_forever():
+    # Default (no set_decay / 1.0) keeps today's persist-forever behavior:
+    # a decay-only frame leaves the primed content untouched.
+    slot = 1
+    images = {0: _solid(1, 1, QColor(255, 255, 255, 255))}
+    ex = RasterExecutor(images, [(4.0, 4.0), (4.0, 4.0)])
+
+    ex.execute(*_paint_slot_records(slot))
+    u1, f1 = _decay_only_records(slot)
+    for _ in range(3):
+        screen = ex.execute(u1, f1)
+    assert _alpha(ex._targets[slot], 2, 2) == 255   # unchanged: no decay
+    assert _rgb(screen, 2, 2) == (255, 255, 255)
+
+
+# --- A5: half-texel uv insets (filter-bleed guard) ---
+
+
+def test_half_texel_inset_moves_edges_inward_and_guards_inversion():
+    from analysis.player.render.storyboard.executor import _half_texel_inset
+
+    # A full-texture sample of a 100x50 image insets 0.5 px on each edge.
+    full = _half_texel_inset(QRectF(0.0, 0.0, 100.0, 50.0), 100, 50)
+    assert full.left() == pytest.approx(0.5)
+    assert full.top() == pytest.approx(0.5)
+    assert full.right() == pytest.approx(99.5)
+    assert full.bottom() == pytest.approx(49.5)
+
+    # A sub-1px-wide window would invert; it is left untouched (the guard).
+    tiny = QRectF(10.0, 10.0, 0.4, 0.4)
+    assert _half_texel_inset(tiny, 100, 100) == tiny
+
+
+def test_half_texel_inset_still_renders_the_image():
+    # Smoke: the inset never blanks a normal blit. A 2x2 red/green split
+    # scaled fullscreen still draws (the inset only trims filter bleed).
+    b = sn.DocBuilder(4.0, 4.0)
+    b.item(0, sn.SRC_IMAGE, 0, sx_rest=4.0, sy_rest=4.0)
+    ev = b.finish()
+    content = QImage(2, 2, QImage.Format.Format_ARGB32_Premultiplied)
+    content.fill(QColor(255, 0, 0, 255))
+    content.setPixelColor(1, 0, QColor(0, 255, 0, 255))
+    content.setPixelColor(1, 1, QColor(0, 255, 0, 255))
+    ex = RasterExecutor({0: content}, [(4.0, 4.0)])
+    screen = ex.execute(*_frames(ev, 0.0))
+    assert _alpha(screen, 1, 2) == 255            # opaque content, not blank
+    assert _rgb(screen, 0, 2)[0] > 120            # left column still reddish

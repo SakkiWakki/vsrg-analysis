@@ -5,9 +5,23 @@ field-instance blitting (``qt_renderer._blit_field_instances``) is routed
 through the game-agnostic Drawable core instead of the legacy capture
 machinery:
 
-    compiled chart --bridge.build_doc--> Evaluator (Seam A, once)
-    per frame:  bridge.feed_frame --> Evaluator.frame_with_feeds (Seam B)
+    compiled chart --drawable_doc.build_static_doc--> Evaluator (Seam A)
+    per frame:  Evaluator.frame(t) (Seam B)
                 --> GLExecutor.render_and_present --> chart_rect (GL quad)
+
+STATIC TREE-ORDER DOC (this wave): the pipeline crosses Seam A with
+``drawable_doc.build_static_doc(compiled)`` - the field-instance topology
+compiled ONCE, in engine tree order, as an ``item_link`` channel chain the
+evaluator samples itself. This is what makes storyboard BACKGROUNDS render:
+the static doc bands the chart's storyboard elements (``compiled['tree']``)
+around the field-instance stream and emits their sprite art as SRC_IMAGE
+items. There are no dynamic segments - the doc's Snapshots are static
+commands - so the per-frame path is just ``evaluator.frame(t)`` with NO
+feeds, which the executor presents.
+
+    (The feed-model sibling, ``drawable_bridge`` - build_doc + per-frame
+    feed_frame - stays the reference implementation and is untouched. This
+    pipeline no longer imports it.)
 
 GL-ONLY (user directive): the executor is a ``GLExecutor`` that binds the
 renderer's live capture FBO textures directly and presents the composite
@@ -26,17 +40,32 @@ Compiled-data plumbing (documented choice): the pipeline reaches the
 NotITG compiled document the same way every other adapter surface does -
 ``player._adapter._compiled_modfile(player.replay)``, which returns the
 per-replay-memoized ``compile_via_sim`` dict (the lazy document with the
-``field_instances`` provider, ``base_field_hidden`` and ``_live_sim``).
-That dict is exactly the ``compiled`` argument the B3 bridge's
-``build_doc`` / ``feed_frame`` take, so no new plumbing is introduced -
-the pipeline consumes the existing effect/adapter seam read-only.
+``field_instances`` provider, ``base_field_hidden``, ``player_fields``,
+``tree`` and ``_live_sim``). That dict is exactly the ``compiled`` argument
+``build_static_doc`` takes, so no new plumbing is introduced.
+
+Element images (this wave): ``id_maps['images']`` is
+``{image_id -> absolute path}``. Each path is loaded LAZILY as a ``QImage``
+and handed to the GL executor's image table (which uploads it on first use),
+so SRC_IMAGE element blits draw the real sprite art. An unreadable path is
+logged once and skipped - a missing image draws nothing, never a crash.
+
+Staleness (documented choice): the compiled provider's instance list GROWS
+during the lazy sim sweep (proxy/AFT binds fire as the chart plays), and the
+static doc reflects a SNAPSHOT of that list. The pipeline polls a cheap
+topology signature per frame - ``(instance count, last instance name)`` -
+and rebuilds the doc (re-applying clears / resolution / image table) when it
+changes. Count catches growth; the last name catches an in-place swap that
+keeps the count (a whole-list replacement of equal length) - together they
+are the cheapest signature that never misses a topology change while never
+sampling every instance every frame.
 
 Degradation rule (the glGenTextures lesson): the pipeline is individually
 fallible and never crashes a frame. ANY exception during build or a frame
 logs ONCE and permanently disables the pipeline for the rest of the
 session; the caller then falls through to the normal render path.
 
-The B3 bridge (``analysis.games.notitg.drawable_bridge``) is imported
+The doc compiler (``analysis.games.notitg.drawable_doc``) is imported
 lazily and guarded: if it is absent (built concurrently) the pipeline
 reports itself unavailable and the renderer uses the normal path.
 """
@@ -49,20 +78,19 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-def _load_bridge():
-    """Return the NotITG drawable bridge module, or None if unavailable.
+def _load_doc():
+    """Return the NotITG static-doc compiler module, or None if unavailable.
 
-    B3 owns this module and may not have landed yet; a missing bridge
-    means the pipeline simply degrades to the normal render path.
+    The module owns ``build_static_doc``; a missing one means the pipeline
+    simply degrades to the normal render path.
     """
     try:
-        from analysis.games.notitg import drawable_bridge
+        from analysis.games.notitg import drawable_doc
     except Exception:
         return None
-    if not (hasattr(drawable_bridge, 'build_doc')
-            and hasattr(drawable_bridge, 'feed_frame')):
+    if not hasattr(drawable_doc, 'build_static_doc'):
         return None
-    return drawable_bridge
+    return drawable_doc
 
 
 def _native_available() -> bool:
@@ -83,8 +111,8 @@ def pipeline_for(player):
 
     Returns a healthy ``DrawablePipeline`` or None (use the normal path).
     A one-time build that yields no pipeline (wrong game, no compiled doc,
-    native/bridge absent) is remembered as unavailable so the probe does
-    not repeat every frame. Never raises.
+    native/doc-compiler absent) is remembered as unavailable so the probe
+    does not repeat every frame. Never raises.
     """
     cached = getattr(player, _PLAYER_ATTR, None)
     if cached is _UNAVAILABLE:
@@ -104,17 +132,17 @@ def build_pipeline(player):
     else None. Called at most once per player by ``pipeline_for``.
 
     Returns None (not an exception) when the game is not NotITG, the
-    compiled document is absent, the native core is unbuilt, or the B3
-    bridge has not landed - all "use the normal path" conditions, not
-    failures.
+    compiled document is absent, the native core is unbuilt, or the
+    static-doc compiler has not landed - all "use the normal path"
+    conditions, not failures.
     """
-    bridge = _load_bridge()
-    if bridge is None or not _native_available():
+    doc = _load_doc()
+    if doc is None or not _native_available():
         return None
     compiled = _compiled_for(player)
     if not compiled or not compiled.get('field_instances'):
         return None
-    return DrawablePipeline(player, compiled, bridge)
+    return DrawablePipeline(player, compiled, doc)
 
 
 def _compiled_for(player):
@@ -131,19 +159,42 @@ def _compiled_for(player):
         return None
 
 
-class DrawablePipeline:
-    """Owns the lazy Seam-A build and the per-frame Seam-B -> raster ->
-    blit for one player. Self-disables permanently on any error."""
+def _topology_signature(compiled):
+    """A cheap per-frame topology signature: ``(instance count, last
+    instance name)``. The lazy provider's instance list grows during the
+    sim sweep, so the static doc must rebuild when it changes; this pair is
+    the cheapest signature that catches both growth (count) and an
+    equal-length in-place swap (last name) without sampling every instance.
+    Any failure to read the provider yields None (treated as unchanged)."""
+    provider = compiled.get('field_instances')
+    if provider is None:
+        return None
+    try:
+        instances = list(provider() if callable(provider) else provider)
+    except Exception:
+        return None
+    last = instances[-1].get('name') if instances else None
+    return (len(instances), last)
 
-    def __init__(self, player, compiled, bridge) -> None:
+
+class DrawablePipeline:
+    """Owns the lazy Seam-A build (the static tree-order doc) and the
+    per-frame Seam-B -> GL present for one player. Self-disables permanently
+    on any error; rebuilds the doc when the provider's topology grows."""
+
+    def __init__(self, player, compiled, doc) -> None:
         self._player = player
         self._compiled = compiled
-        self._bridge = bridge
+        self._doc = doc
         self._disabled = False
         self._evaluator = None
         self._executor = None
         self._id_maps = None
-        self._res_applied = False
+        # The rebuild settle gate's tracking (see _rebuild_if_stale).
+        self._settle_sig = None
+        self._settle_since = 0.0
+        self._signature = None
+        self._res_scale = None
 
     @property
     def healthy(self) -> bool:
@@ -177,13 +228,11 @@ class DrawablePipeline:
                   overscan) -> bool:
         if not self._ensure_built(painter):
             return False
+        self._rebuild_if_stale(painter)
         self._apply_resolution(ctx, painter)
         self._ingest_field_captures(field_captures, overscan,
                                     ctx.chart_rect)
-        t = float(ctx.t_now)
-        feed_ids, counts, feed_u, feed_f = _unpack_feed(
-            self._bridge.feed_frame(self._compiled, t, self._id_maps))
-        u, f = self._schedule(t, feed_ids, counts, feed_u, feed_f)
+        u, f = self._schedule(float(ctx.t_now))
         if u is None:
             return False
         # GL-ONLY present: composite onto the painter's GL target directly,
@@ -193,21 +242,23 @@ class DrawablePipeline:
         return self._executor.render_and_present(u, f, painter, ctx.chart_rect)
 
     def _apply_resolution(self, ctx, painter) -> None:
-        """Match the composite's FBO resolution to the chart rect's
-        device size ONCE (before any target allocates): a 640x480-pixel
-        composite stretched onto a ~1750px chart rect reads as ultra low
-        res. Geometry stays logical; only allocation scales."""
-        if self._res_applied:
-            return
-        self._res_applied = True
+        """Match the composite's FBO resolution to the chart rect's device
+        size (before any target allocates): a 640x480-pixel composite
+        stretched onto a ~1750px chart rect reads as ultra low res. Geometry
+        stays logical; only allocation scales. Kept idempotent (the executor
+        re-applies the same scale cheaply) so a doc rebuild - which drops the
+        allocated targets - restores it on the next frame."""
         try:
             dpr = float(painter.device().devicePixelRatioF())
         except Exception:
             dpr = 1.0
         chart_w = float(ctx.chart_rect[2]) * dpr
         chart_h = float(ctx.chart_rect[3]) * dpr
-        self._executor.set_resolution_scale(
-            max(chart_w / _SCREEN_W, chart_h / _SCREEN_H))
+        scale = max(chart_w / _SCREEN_W, chart_h / _SCREEN_H)
+        if self._res_scale is not None and abs(scale - self._res_scale) < 1e-6:
+            return
+        self._res_scale = scale
+        self._executor.set_resolution_scale(scale)
 
     def _ingest_field_captures(self, field_captures, overscan=None,
                                chart_rect=None) -> None:
@@ -235,7 +286,7 @@ class DrawablePipeline:
         A GL capture handle resolves to (texture id, pixel w, h) and binds
         via the GL executor; None / an unresolvable handle un-binds the
         drawable so it reads empty this frame (a command-less field drawable
-        carries only what is fed)."""
+        carries only what is bound)."""
         resolved = _resolve_gl_texture(handle)
         if resolved is None:
             self._executor.set_drawable_texture(drawable_id, 0, 0, 0)
@@ -262,59 +313,84 @@ class DrawablePipeline:
                                             w_px, h_px, uv_rect)
 
     def _ensure_built(self, painter) -> bool:
-        """Cross Seam A once: build the doc + evaluator + GL executor. GL-ONLY
-        (user directive): the executor binds the renderer's capture FBO
-        textures directly, so it is built only when the delegate's painter is
-        on a GL engine (the ``gl_capture.usable`` test). A non-GL painter (a
-        raster host, a headless frame) DISABLES the pipeline with the one-line
-        log - there is no raster app path and no QImage-readback fallback. A
-        build that raises disables the pipeline; a build that yields no
-        evaluator (bridge declined) reports unavailable without a crash."""
+        """Cross Seam A: build the static doc + evaluator + GL executor.
+        SYNCHRONOUS by necessity - the PyO3 Evaluator is unsendable (it
+        cannot be built on a worker thread and used on the render thread),
+        so the first build runs inline at chart open. The FREEZE class is
+        prevented by _rebuild_if_stale's settle gate instead: rebuilds
+        wait until topology growth STOPS. GL-ONLY (user directive): a
+        non-GL painter disables the pipeline."""
         if self._evaluator is not None:
             return True
         from analysis.player.render.gl_capture import usable
         if not usable(painter):
             self._disable("painter is not on a GL engine (GL-only pipeline)")
             return False
-        evaluator, id_maps = self._bridge.build_doc(
+        return self._build_doc()
+
+    def _build_doc(self) -> bool:
+        """Compile the static doc, mint the GL executor, and apply the
+        clears/bindings. Returns True on success; disables + returns False
+        if the compiler declined. Re-applies everything from scratch on a
+        rebuild (the executor is replaced)."""
+        signature = _topology_signature(self._compiled)
+        evaluator, id_maps, _report = self._doc.build_static_doc(
             self._compiled, screen_w=_SCREEN_W, screen_h=_SCREEN_H)
         if evaluator is None:
-            self._disable("bridge produced no evaluator")
+            self._disable("static-doc compiler produced no evaluator")
             return False
         from analysis.player.render.storyboard.gl_executor import GLExecutor
         from analysis.player.render.storyboard.executor import (
             CLEAR_TRANSPARENT, SCREEN_ID)
         self._evaluator = evaluator
         self._id_maps = id_maps
+        self._signature = signature
         self._executor = GLExecutor(
-            _images_of(id_maps),
+            _lazy_images(id_maps),
             _drawable_sizes_of(id_maps, evaluator))
-        # The screen root is minted OpaqueBlack (DocBuilder has no clear arg;
-        # that opaque clear IS the black-chart-region baseline). Make it
-        # TransparentBlack so the composed screen presents OVER the backdrop
-        # the renderer already painted, instead of covering it.
         self._executor.set_clear(SCREEN_ID, CLEAR_TRANSPARENT)
-        # Segment and field drawables are SLICES of the one screen surface,
-        # not independent screens: their doc-minted OpaqueBlack clears made
-        # every fullscreen segment blit an opaque slab that buried all
-        # earlier segments' content (the black chart region). They must
-        # composite as transparent overlays.
-        for segment_id in id_maps.get('segments') or ():
-            self._executor.set_clear(segment_id, CLEAR_TRANSPARENT)
+        # Field drawables are SLICES of the one screen surface: transparent
+        # overlays, never opaque slabs (the black-chart-region fix).
         for field_id in (id_maps.get('fields') or {}).values():
             self._executor.set_clear(field_id, CLEAR_TRANSPARENT)
+        self._res_scale = None
         return True
 
-    def _schedule(self, t, feed_ids, counts, feed_u, feed_f):
-        """Fold the doc + this frame's feeds into a DrawSchedule: return the
+    # The settle gate (the FREEZE fix): each rebuild costs seconds of
+    # inline compile, and the lazy sweep grows topology every few frames -
+    # rebuilding on every change froze the app for the whole sweep.
+    # A rebuild now waits until the signature is stale AND has stopped
+    # changing for _REBUILD_SETTLE_S (the sweep's churn ends), collapsing
+    # the storm to ONE rebuild after the sweep settles.
+    _REBUILD_SETTLE_S = 2.0
+
+    def _rebuild_if_stale(self, painter) -> None:
+        """Rebuild the static doc once the provider's topology signature
+        has changed AND settled (see the settle gate above). A failed
+        rebuild disables the pipeline (the caller falls through)."""
+        import time as _time
+        signature = _topology_signature(self._compiled)
+        if signature is None or signature == self._signature:
+            return
+        now = _time.monotonic()
+        if signature != self._settle_sig:
+            self._settle_sig = signature
+            self._settle_since = now
+            return
+        if now - self._settle_since < self._REBUILD_SETTLE_S:
+            return
+        try:
+            self._build_doc()
+        except Exception:
+            self._disable("static-doc rebuild failed")
+
+    def _schedule(self, t):
+        """Fold the static doc into a DrawSchedule at ``t``: return the
         (u, f) SoA record arrays for the executor, or (None, None) on failure.
-        Feed buffers are two flat SoA arrays (u32 kinds/ids + f32 state); the
-        evaluator ingests them zero-copy per the Seam-B contract."""
-        raw_u, raw_f = _feed_bytes(
-            feed_u, feed_f,
-            self._evaluator.feed_u_stride, self._evaluator.feed_f_stride)
-        u_raw, f_raw, _uf_raw, n = self._evaluator.frame_with_feeds(
-            t, list(feed_ids or []), list(counts or []), raw_u, raw_f)
+        The static doc has no dynamic feeds - its Snapshots are static
+        commands - so this is a plain ``evaluator.frame(t)`` (Seam B) with the
+        Rust core sampling every channel itself."""
+        u_raw, f_raw, _uf_raw, n = self._evaluator.frame(t)
         u = np.frombuffer(u_raw, dtype=np.uint32).reshape(
             n, self._evaluator.u_stride)
         f = np.frombuffer(f_raw, dtype=np.float32).reshape(
@@ -332,40 +408,6 @@ class DrawablePipeline:
 
 _SCREEN_W = 640
 _SCREEN_H = 480
-
-
-def _unpack_feed(result) -> tuple:
-    """Normalize the bridge's feed_frame return to
-    ``(feed_ids, counts, feed_u, feed_f)``.
-
-    The bridge returns a 5-tuple whose trailing element is a coverage dict
-    (diagnostics, not needed to draw); an earlier 4-tuple form omits it.
-    Either way the first four members are the two id/count lists and the
-    two feed buffers (bytes or numpy arrays - see _feed_bytes). Under feed
-    v2 the id/count lists are per-INTER-CAPTURE-SEGMENT (the bridge splits
-    the screen's entry stream at capture positions), and the feed f32
-    stride is 18 (a mat3 crossing verbatim); both are consumed generically
-    here - the evaluator getters (feed_f_stride, frame_with_feeds) carry
-    the stride and segment routing, so this stays layout-agnostic."""
-    feed_ids, counts, feed_u, feed_f = result[0], result[1], result[2], result[3]
-    return feed_ids, counts, feed_u, feed_f
-
-
-def _feed_bytes(feed_u, feed_f, u_stride, f_stride) -> tuple[bytes, bytes]:
-    """Feed buffers as raw bytes for ``frame_with_feeds``. The bridge may
-    hand them already serialized (bytes) or as numpy SoA arrays; both are
-    accepted, and an empty/None side yields a zero-row buffer of the
-    frozen feed stride."""
-    return (_as_feed_bytes(feed_u, u_stride, np.uint32),
-            _as_feed_bytes(feed_f, f_stride, np.float32))
-
-
-def _as_feed_bytes(buf, stride: int, dtype) -> bytes:
-    if isinstance(buf, (bytes, bytearray, memoryview)):
-        return bytes(buf)
-    if buf is not None and getattr(buf, 'size', 0) > 0:
-        return np.ascontiguousarray(buf, dtype=dtype).tobytes()
-    return np.zeros((0, stride), dtype=dtype).tobytes()
 
 
 def _resolve_gl_texture(handle):
@@ -390,22 +432,89 @@ def _resolve_gl_texture(handle):
     return int(texture), int(fbo.width()), int(fbo.height())
 
 
-def _images_of(id_maps) -> dict:
-    """Image-id -> QImage source textures from the bridge's id maps.
-    Absent -> empty (a doc that references no image sources draws fine)."""
-    if isinstance(id_maps, dict):
-        images = id_maps.get('images')
-        if isinstance(images, dict):
-            return images
-    images = getattr(id_maps, 'images', None)
-    return images if isinstance(images, dict) else {}
+class _LazyImages:
+    """The GL executor's image table backed by ``{image_id -> path}``,
+    loading each path as a ``QImage`` on first ``.get`` and caching it.
+
+    The GL executor consumes its ``images`` map by ``self._images.get(id)``
+    -> a QImage it uploads once; this table defers the file read until a
+    SRC_IMAGE blit actually asks for the id (many charts reference art that
+    never draws in a given run) and NEVER crashes on a bad path: an
+    unreadable / null image logs once and resolves to None, exactly the
+    "missing image draws nothing" degradation the executor already handles.
+
+    Only ``.get`` is used by the executor; the other read paths are provided
+    for API symmetry with a plain dict."""
+
+    def __init__(self, paths: dict[int, str]) -> None:
+        self._paths = dict(paths)
+        self._cache: dict[int, object] = {}
+        self._logged: set[int] = set()
+
+    def get(self, image_id, default=None):
+        if image_id in self._cache:
+            image = self._cache[image_id]
+            return default if image is None else image
+        image = self._load(image_id)
+        self._cache[image_id] = image
+        return default if image is None else image
+
+    def __contains__(self, image_id) -> bool:
+        return image_id in self._paths
+
+    def __len__(self) -> int:
+        return len(self._paths)
+
+    # SM pseudo-assets: a Texture="white"/"black" names a solid color,
+    # not a file (gat's curtains and glow quads use them). Synthesized as
+    # tiny solid images instead of warning-and-skipping.
+    _SOLID_COLORS = {'white': (255, 255, 255), 'black': (0, 0, 0)}
+
+    def _load(self, image_id):
+        import os
+
+        from PySide6.QtGui import QColor, QImage
+
+        path = self._paths.get(image_id)
+        if not path:
+            return None
+        stem = os.path.splitext(os.path.basename(str(path)))[0].lower()
+        if stem in self._SOLID_COLORS and not os.path.isfile(str(path)):
+            image = QImage(8, 8, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(QColor(*self._SOLID_COLORS[stem]))
+            return image
+        try:
+            image = QImage(str(path))
+        except Exception:
+            image = None
+        if image is None or image.isNull():
+            self._log_missing(image_id, path)
+            return None
+        return image
+
+    def _log_missing(self, image_id, path) -> None:
+        if image_id in self._logged:
+            return
+        self._logged.add(image_id)
+        logger.warning(
+            "DrawablePipeline: element image %s unreadable (%s), "
+            "drawing nothing", image_id, path)
+
+
+def _lazy_images(id_maps):
+    """A lazy image table from the static doc's ``id_maps['images']``
+    ({image_id -> absolute path}). Absent -> an empty table (a doc that
+    references no image sources composes fine)."""
+    paths = id_maps.get('images') if isinstance(id_maps, dict) else None
+    return _LazyImages(paths if isinstance(paths, dict) else {})
 
 
 def _drawable_sizes_of(id_maps, evaluator) -> list:
-    """Per-DrawableId logical sizes for the raster executor. The bridge
-    supplies them; absent, fall back to screen-sized drawables sized from
-    the evaluator's drawable_count so the screen (id 0) is at least
-    640x480."""
+    """Per-DrawableId logical sizes for the executor. The static doc mints
+    every drawable at the screen size (640x480), and does not export a
+    per-id size table, so fall back to screen-sized drawables sized from the
+    evaluator's drawable_count. An explicit ``drawable_sizes`` (a future doc
+    revision, or the feed-model bridge) still wins when present."""
     sizes = None
     if isinstance(id_maps, dict):
         sizes = id_maps.get('drawable_sizes')
