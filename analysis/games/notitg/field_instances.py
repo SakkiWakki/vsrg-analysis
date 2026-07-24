@@ -159,9 +159,18 @@ def _fold_stage_chain(stages, slots, inst, H, alpha, crop, extra):
     Returns the folded `(H, alpha, crop, extra)`: extra keys the ROOT
     slot when the walk lands on a materialized snapshot node, else the
     legacy (capture_source-or-name, live) pair untouched - the gat 1
-    whole-screen path, byte-identical."""
+    whole-screen path, byte-identical.
+
+    A consumer whose DIRECT source is a stage node with no stage record
+    this frame (its captured sprite is hidden - the isolation premise
+    is not currently observable) serves that node's own at-position
+    slot instead: the node is still live and capturing the whole screen
+    at its position, so the stale chain-root snapshot would be wrong
+    (gat 2's monitor sampler through the chickenstrips ending)."""
     node = inst.get('aft_node')
     folded = False
+    if node not in stages and node in slots and extra is not None:
+        return H, alpha, crop, (node,) + tuple(extra[1:])
     while node in stages:
         H_s, alpha_s, crop_s, source = stages[node]
         H = H_s @ H

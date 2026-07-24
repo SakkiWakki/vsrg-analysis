@@ -181,16 +181,20 @@ def test_chain_emits_capture_and_stage_instances():
         '<Sprite InitCommand="%function(self)'
         '  self:SetTexture(capB:GetTexture()) end" Var="s1"/>'
         '</children></ActorFrame>')
-    (capture,) = [i for i in insts if i['kind'] == 'capture']
+    root, node_slot = [i for i in insts if i['kind'] == 'capture']
     (stage,) = [i for i in insts if i['kind'] == 'stage']
     consumers = [i for i in insts if i['kind'] == 'aft']
-    assert stage['source'] == capture['name']
+    assert stage['source'] == root['name']
+    # The isolating node ALSO materializes its own at-position slot -
+    # the fold's fallback when its stage sprite hides while the node
+    # stays live (the isolation premise is optical, not permanent).
+    assert node_slot['name'] == stage['name']
     assert {c['aft_node'] for c in consumers} \
-        == {capture['name'], stage['name']}
+        == {root['name'], stage['name']}
     # Document order: the root's slot snapshots before its sampler
     # draws, and the stage record precedes the stage's consumers.
     kinds = [i['kind'] for i in insts]
-    assert kinds == ['capture', 'aft', 'stage', 'aft']
+    assert kinds == ['capture', 'aft', 'capture', 'stage', 'aft']
 
 
 def test_stage_chain_folds_into_consumer_entry():
@@ -226,6 +230,39 @@ def test_stage_chain_folds_into_consumer_entry():
     # Stage shifts +10, consumer +5: the folded blit lands +15.
     mapped = entry[0].map(QPointF(320.0, 240.0))
     assert (mapped.x(), mapped.y()) == pytest.approx((335.0, 240.0))
+
+
+def test_hidden_stage_falls_back_to_the_nodes_own_slot():
+    """When a stage node's captured sprite hides, the fold has no stage
+    record; its consumer must serve the NODE's own at-position slot (the
+    engine keeps capturing the live screen at the node's position), not
+    the stale chain-root snapshot. gat 2's gf2_monitor_aft: stage-
+    classified via the crumple polygon, but MonitorOn keeps it live
+    through the chickenstrips ending long after the polygon hides."""
+    from types import SimpleNamespace
+
+    from analysis.games.notitg import field_compose
+    from analysis.player.render.effects.timeline import Keyframe
+
+    def link(**props):
+        return field_compose.link_timelines(
+            {name: [Keyframe(0.0, (value,), 0.0, 0)]
+             for name, value in props.items()})
+
+    root = field_compose.instance('rootA', 'capture', 0, [link(x=320.0)])
+    node_slot = field_compose.instance('nodeB', 'capture', 0,
+                                       [link(x=320.0)])
+    stage = field_compose.instance('nodeB', 'stage', 0,
+                                   [link(x=330.0, hidden=1.0)])
+    stage['source'] = 'rootA'
+    consumer = field_compose.instance('s1', 'aft', 0, [link(x=320.0)])
+    consumer['aft_node'] = 'nodeB'
+    consumer['capture_source'] = 'rootA'
+
+    effect = NotitgFieldInstances([root, node_slot, stage, consumer])
+    frame = effect.at(SimpleNamespace(t_now=1.0, chart_rect=(0, 0, 640, 480)))
+    entry = next(e for e in frame.fields if e[2] == 'screen')
+    assert entry[3] == ('nodeB', True)
 
 
 def test_consumed_whole_screen_node_gets_at_position_slot():

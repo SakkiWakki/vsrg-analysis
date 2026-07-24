@@ -1077,11 +1077,9 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
         seen_actors[rec_id] = actor
         node_name = node_by_id.get(rec_id)
         if node_name is not None:
-            inst = _node_instance(node_name, actor, chain_graph, slot_nodes,
-                                  seen_actors, parents, env, actor_keyframes,
-                                  osc_context, live_sim, t0)
-            if inst is not None:
-                instances.append(inst)
+            instances.extend(_node_instances(
+                node_name, actor, chain_graph, slot_nodes, seen_actors,
+                parents, env, actor_keyframes, osc_context, live_sim, t0))
             continue
         aft_order = None
         aft_live = None
@@ -1318,36 +1316,49 @@ def _chain_slot_nodes(graph, aft_nodes, consumed) -> frozenset:
     return frozenset(roots | set(graph.feedback) | screen_nodes)
 
 
-def _node_instance(name, actor, graph, slot_nodes, seen_actors, parents,
-                   env, actor_keyframes, osc_context, live_sim, t0):
-    """The composed-capture instance for one AFT node actor: 'capture'
+def _node_instances(name, actor, graph, slot_nodes, seen_actors, parents,
+                    env, actor_keyframes, osc_context, live_sim, t0) -> list:
+    """The composed-capture instances for one AFT node actor: 'capture'
     (an at-position snapshot slot) for chain roots and feedback nodes,
     'stage' (the captured sprite's transform, folded into consumers at
-    sample time) for isolating nodes, None for nodes outside any chain
+    sample time) for isolating nodes, [] for nodes outside any chain
     (the legacy single-screen path). A 'capture' instance carries the
     NODE's own chain, so its hidden/alpha gate the slot update exactly
     like the engine's capture-only-while-drawn; a 'stage' instance
     carries the captured SPRITE's chain (it is what the node's texture
-    contains)."""
+    contains).
+
+    An isolating node emits its own at-position 'capture' slot ALONGSIDE
+    the stage record: the isolation classification is chart-lifetime
+    static, but its optical premise (curtains covering everything but
+    the captured sprite) can lapse while the node stays live. When the
+    stage sprite hides, the fold has no record and consumers fall back
+    to this slot - the engine's actual whole-screen-at-position capture
+    - instead of a stale chain-root snapshot (gat 2's gf2_monitor_aft
+    is stage-classified via the crumple polygon, but MonitorOn keeps it
+    capturing the LIVE screen through the chickenstrips ending, ~60s
+    after the polygon hides)."""
     upstream = graph.capture_of(name)
+    node_chain = _chain(actor, parents)
+    node_links = [_instance_link(link_actor, env, actor_keyframes,
+                                 osc_context, live_sim)
+                  for link_actor in reversed(node_chain)]
     if upstream is not None:
         sprite = seen_actors.get(graph.stage_of(name))
         if sprite is None:
-            return None
+            return []
         chain = _chain(sprite, parents)
         links = [_instance_link(link_actor, env, actor_keyframes,
                                 osc_context, live_sim)
                  for link_actor in reversed(chain)]
-        inst = field_compose.instance(name, 'stage', 0, links, t0=t0)
-        inst['source'] = upstream
-        return inst
+        stage = field_compose.instance(name, 'stage', 0, links, t0=t0)
+        stage['source'] = upstream
+        return [field_compose.instance(name, 'capture', 0, node_links,
+                                       t0=t0),
+                stage]
     if name not in slot_nodes:
-        return None
-    chain = _chain(actor, parents)
-    links = [_instance_link(link_actor, env, actor_keyframes,
-                            osc_context, live_sim)
-             for link_actor in reversed(chain)]
-    return field_compose.instance(name, 'capture', 0, links, t0=t0)
+        return []
+    return [field_compose.instance(name, 'capture', 0, node_links, t0=t0)]
 
 
 def _aft_chain_graph(doc, env, aft_nodes, proxy_players):
