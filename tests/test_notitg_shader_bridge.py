@@ -1,20 +1,14 @@
-"""NotITG tier-2 map-supplied fragment shaders: the shader_bridge path
-that registers a chart's own `.frag` files and drives their per-frame
-uniforms, verified against real Government Knows corpus frags.
+"""NotITG shader_bridge: the shader-flag pulse bridge, plus GL checks
+that real Government Knows corpus frags translate and run through the
+fullscreen pipeline (chart `Frag=` actors themselves compile as shaded
+field-instance blits - see test_notitg_chart_shaders.py - but the
+translator and pipeline these GL tests exercise are shared).
 
-Two layers are covered:
-- pure sampling (`chart_shader_effect` / `ChartShaderEffect`): which
-  frags are fullscreen-expressible, uniform stream sampling, identity
-  at rest, active windows;
-- GL (skipped without a context, like test_shaders.py): the registered
-  chart frags compile and run through the pipeline, and a broken frag
-  degrades gracefully instead of crashing.
-
-Real corpus frags live in the local NotITG library; the module is
+Real corpus frags live in the local NotITG library; those tests are
 skipped when that install is absent so CI without the songs stays green.
+The flag-bridge tests are pure lifetime logic and always run.
 """
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -25,7 +19,7 @@ _GK_SHADERS = Path(
     '/mnt/Yucky/Rhythm Games/Players/NotITG/Songs/FMS_Cat/'
     'The Government Knows [FMS_Cat]/fg/shaders')
 
-# The map-supplied-frag tests read the real corpus; the flag-bridge tests
+# The GL corpus tests read the real install; the flag-bridge tests
 # below do not (pure lifetime logic) and always run.
 _needs_corpus = pytest.mark.skipif(
     not _GK_SHADERS.is_dir(),
@@ -36,103 +30,11 @@ def _frag(name: str) -> str:
     return (_GK_SHADERS / name).read_text(encoding='utf-8')
 
 
-def _ctx(t: float):
-    return SimpleNamespace(t_now=t)
-
-
 @pytest.fixture(autouse=True)
 def _clean_registry():
     library.clear_registry()
     yield
     library.clear_registry()
-
-
-# ── which frags are fullscreen-expressible ---------------------------
-
-@_needs_corpus
-def test_fullscreen_frags_register_stage_b_frags_skipped():
-    # invert/unclesam2 are plain fullscreen post; vhs/cloud need engine
-    # noise textures (samplerRandom) the fullscreen pipeline can't feed.
-    entries = [
-        {'name': 'gk_invert', 'frag': _frag('invert.frag')},
-        {'name': 'gk_unclesam2', 'frag': _frag('unclesam2.frag')},
-        {'name': 'gk_vhs', 'frag': _frag('vhs.frag')},
-        {'name': 'gk_cloud', 'frag': _frag('cloud.frag')},
-    ]
-    assert sb.chart_shader_effect(entries) is not None
-    registered = {i for i in library.available() if i.startswith('chart:')}
-    assert 'chart:notitg:gk_invert' in registered
-    assert 'chart:notitg:gk_unclesam2' in registered
-    assert 'chart:notitg:gk_vhs' not in registered      # samplerRandom
-    assert 'chart:notitg:gk_cloud' not in registered    # samplerRandom
-
-
-@_needs_corpus
-def test_no_expressible_frags_gives_no_effect():
-    assert sb.chart_shader_effect(
-        [{'name': 'gk_vhs', 'frag': _frag('vhs.frag')}]) is None
-    assert sb.chart_shader_effect([]) is None
-    assert sb.chart_shader_effect(None) is None
-
-
-@_needs_corpus
-def test_frag_path_source_is_read():
-    eff = sb.chart_shader_effect(
-        [{'name': 'gk_invert', 'frag_path': str(_GK_SHADERS / 'invert.frag')}])
-    assert eff is not None
-    assert 'chart:notitg:gk_invert' in library.available()
-
-
-# ── uniform stream sampling ------------------------------------------
-
-@_needs_corpus
-def test_declared_uniform_is_sampled_from_its_stream():
-    eff = sb.chart_shader_effect([
-        {'name': 'gk_unclesam2', 'frag': _frag('unclesam2.frag'),
-         'uniforms': {'phase': [{'time': 1000, 'duration': 1000,
-                                 'strength': 1.0}]}}])
-    (sid, u0), = eff.at(_ctx(0.0)).shaders
-    (_, u_mid), = eff.at(_ctx(1.5)).shaders
-    (_, u_end), = eff.at(_ctx(2.5)).shaders
-    assert sid == 'chart:notitg:gk_unclesam2'
-    assert u0['phase'] == pytest.approx(0.0)     # rest before the event
-    assert u_mid['phase'] == pytest.approx(0.5)  # easing 0 -> 1
-    assert u_end['phase'] == pytest.approx(1.0)  # held after
-
-
-@_needs_corpus
-def test_undeclared_uniform_stream_is_dropped():
-    # A poke stream for a name the frag never declares must not appear in
-    # the emitted pass (it would set nothing and only add noise).
-    eff = sb.chart_shader_effect([
-        {'name': 'gk_invert', 'frag': _frag('invert.frag'),
-         'uniforms': {'nonexistent': [{'time': 0, 'strength': 1.0}]}}])
-    (_, uniforms), = eff.at(_ctx(1.0)).shaders
-    assert uniforms == {}
-
-
-@_needs_corpus
-def test_no_uniform_streams_sets_no_custom_uniforms():
-    # With no poke streams the pass carries no custom uniforms; each
-    # declared uniform keeps its GL default (0), which is the frag's
-    # rest state. The pass sets only the contract uniforms.
-    eff = sb.chart_shader_effect(
-        [{'name': 'gk_unclesam2', 'frag': _frag('unclesam2.frag')}])
-    (_, uniforms), = eff.at(_ctx(3.3)).shaders
-    assert uniforms == {}
-
-
-# ── active windows ----------------------------------------------------
-
-@_needs_corpus
-def test_window_gates_the_pass():
-    eff = sb.chart_shader_effect([
-        {'name': 'gk_invert', 'frag': _frag('invert.frag'),
-         'windows': [{'time': 2000, 'duration': 0, 'strength': 1.0},
-                     {'time': 3000, 'duration': 0, 'strength': 0.0}]}])
-    assert eff.at(_ctx(1.0)) is None    # before the window
-    assert eff.at(_ctx(2.5)) is not None  # inside
-    assert eff.at(_ctx(3.5)) is None    # after it closes
 
 
 # ── GL: real GK frags compile + run + degrade gracefully -------------
@@ -167,7 +69,7 @@ def test_gl_gk_frag_compiles(gl, frag):
     pipeline = ShaderGLPipeline()
     entry = pipeline._program(sid)
     assert entry is not None, f'{frag} failed to build'
-    _, locs = entry
+    _, locs, _samplers = entry
     # u_tex is used by every fullscreen post (they all sample the scene);
     # u_strength/u_time are stripped by the linker when a frag doesn't
     # read them, so only the always-used sampler is guaranteed present.

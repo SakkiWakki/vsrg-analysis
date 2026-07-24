@@ -24,6 +24,8 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
+import numpy as np
+
 from analysis.games.notitg import aft_chains, field_compose, modfile
 from analysis.games.notitg.sim.loop import (
     load_chart, run_declarative, run_sim)
@@ -172,21 +174,16 @@ def _compile_live(sm_path, end_seconds) -> dict | None:
             declarative + _mod_events(_SweptResult(painter_rows)))
         mod_channels._channels = full._channels
         mod_channels._players = full._players
-    # The chart's own fragment-shader passes need the swept uniform +
-    # visibility channels, so open hands the renderer an EMPTY live
-    # effect and the sweep swaps the real passes in (adapter recognizes
-    # the prebuilt object; previously the lazy path hardcoded [] and
-    # every shader moment silently rendered as nothing).
-    from analysis.games.notitg.shader_bridge import ChartShaderEffect
-    chart_shaders = ChartShaderEffect(())
+    from analysis.games.notitg.note_path import NotePathHandle
     screen_shake = ScreenShakeHandle()
     scroll_mult = ScrollMultiplierHandle()
+    note_path_handle = NotePathHandle()
     _spawn_background_upgrade(mod_channels, tree, field_instances,
                              sm_path, end, live_sim=shared_sim,
                              to_seconds=doc.to_seconds, doc=doc,
-                             chart_shaders=chart_shaders,
                              screen_shake=screen_shake,
-                             scroll_mult=scroll_mult)
+                             scroll_mult=scroll_mult,
+                             note_path_handle=note_path_handle)
 
     return {
         'mod_events': declarative, 'mod_channels': mod_channels,
@@ -195,8 +192,9 @@ def _compile_live(sm_path, end_seconds) -> dict | None:
         'has_background': modfile._has_background_actors(tree, sm_path),
         'field_instances': field_instances, 'screen_transform': screen_transform,
         'screen_oscillator': screen_shake, 'field_oscillators': [],
-        'field_vanish': None, 'chart_shaders': chart_shaders,
+        'field_vanish': None,
         'scroll_multiplier_timeline': scroll_mult,
+        'note_path': note_path_handle,
         'aft_bg_visible': None,
         'base_field_hidden': _base_field_hidden_live(live),
         '_live_sim': live,
@@ -507,8 +505,8 @@ class ScreenShakeHandle:
 def _spawn_background_upgrade(mod_channels, tree, field_provider,
                              sm_path, end_seconds, live_sim=None,
                              to_seconds=None, doc=None,
-                             chart_shaders=None, screen_shake=None,
-                             scroll_mult=None):
+                             screen_shake=None,
+                             scroll_mult=None, note_path_handle=None):
     """Background pass on a daemon thread: sweep to the chart end, then
     hot-swap three things the instant compile left approximate. With
     `live_sim` (the segment-read default) the sweep advances THAT sim -
@@ -625,20 +623,13 @@ def _spawn_background_upgrade(mod_channels, tree, field_provider,
             # the provider the swept env as its complete topology source.
             _mark_aft_fills(field_provider._doc, sweep.env)
             field_provider.set_topology_source(sweep.env)
-        if chart_shaders is not None and sweep_doc is not None:
-            # The chart's Frag= passes: harvest against the swept env
-            # (uniform pokes and hidden windows now recorded) and swap
-            # into the live effect the renderer already holds.
-            from analysis.games.notitg import shader_bridge
-            actor_keyframes = {rec_id: actor.keyframes()
-                               for rec_id, actor in sweep.env._actors.items()}
-            entries = _chart_shaders(sweep_doc, sweep.env, actor_keyframes)
-            chart_shaders.swap_passes(
-                shader_bridge._build_chart_passes(entries))
         if screen_shake is not None and sweep_doc is not None:
             osc_ctx = _osc_context(sweep.env, sweep_doc, end_seconds)
             screen_shake.channels = modfile._screen_oscillator_timelines(
                 sweep.env, osc_ctx)
+        if note_path_handle is not None:
+            from analysis.games.notitg import note_path
+            note_path_handle.swap(note_path.build_players(sweep.env))
         # Completion signal AFTER the hot-swaps: the channel swap above
         # is when driver-injected content actually appears on screen.
         print(f'[notitg] background compile done '
@@ -648,6 +639,13 @@ def _spawn_background_upgrade(mod_channels, tree, field_provider,
 
     threading.Thread(target=worker, daemon=True,
                      name='notitg-lazy-upgrade').start()
+
+
+def _note_path_handle(env):
+    """A NotePathHandle over the env's player actors (empty when no
+    chart poked the spline / arrowpath-gradient family)."""
+    from analysis.games.notitg import note_path
+    return note_path.NotePathHandle(note_path.build_players(env))
 
 
 def _print_unimplemented(env, doc) -> None:
@@ -671,11 +669,19 @@ def _print_unimplemented(env, doc) -> None:
         lines.append(f'  DROPPED {verb} x{count}: no dispatch matched '
                      '(unclassified - route or document it)')
     if doc is not None:
-        polygons = sum(1 for a in _iter_xml(doc.root)
-                       if a.kind == 'Polygon')
-        if polygons:
-            lines.append(f'  POLYGON actors x{polygons}: mesh tier not '
-                         'built (SetDrawMode/SetNumVertices deferred)')
+        # The mesh tier renders AFT-textured Polygons with recorded
+        # vertices; anything else still has no draw path.
+        unconsumed = 0
+        for a in _iter_xml(doc.root):
+            if a.kind != 'Polygon':
+                continue
+            sim = env.actors.get(env.actor_id(a))
+            if sim is None or not sim.mesh_positions or not sim.aft_source:
+                unconsumed += 1
+        if unconsumed:
+            lines.append(f'  POLYGON actors x{unconsumed}: no AFT texture '
+                         '+ mesh recorded - the mesh tier only draws '
+                         'capture-textured polygon grids')
         aft_nodes = {a.aft_texture_name: rec_id
                      for rec_id, a in env.actors.items() if a.is_aft}
         graph = _aft_chain_graph(doc, env, aft_nodes, {})
@@ -796,7 +802,6 @@ def _compile_via_sim(sm_path, end_seconds):
             env, osc_context),
         'field_oscillators': field_oscillators,
         'field_vanish': modfile._field_vanish_timelines(env),
-        'chart_shaders': _chart_shaders(doc, env, actor_keyframes),
         'aft_bg_visible': modfile._aft_bg_visible_timeline(
             doc.root, _bg_stem(sm_path), actor_keyframes),
         'base_field_hidden': modfile._base_field_hidden_timeline(env),
@@ -806,6 +811,9 @@ def _compile_via_sim(sm_path, end_seconds):
         'player_field_keyframes': {
             name: named_keyframes[name] for name in ('P1', 'P2')
             if named_keyframes.get(name)},
+        # Per-player note-path splines + arrowpath gradient (SetXSpline
+        # family), consumed by note_mods and the arrowpath ribbon.
+        'note_path': _note_path_handle(env),
         'named_actors': len(named_keyframes),
         'recorded_keyframes': sum(
             len(kfs) for frames in actor_keyframes.values()
@@ -1082,18 +1090,6 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
         frag_path = None
         frag_uniforms = None
         if sim.aft_source:
-            if actor.attrs.get('Frag') and _fullscreen_identity_draw(sim):
-                # A fullscreen-identity Frag= sampler draws its capture
-                # THROUGH its shader as the chart_shaders fullscreen
-                # pass (see _chart_shaders); a plain blit would paper
-                # the raw capture over everything drawn before it. A
-                # TRANSFORMED sampler compiles no pass, so it KEEPS the
-                # plain blit: the AFT curtain idiom blacks out the raw
-                # scene expecting the sampler to redraw the capture on
-                # top (kecak/afthell showed bare curtain without this),
-                # and the raw transformed blit approximates that until
-                # the per-actor shader tier draws it shaded.
-                continue
             kind, player = 'aft', 0
             node = aft_nodes.get(sim.aft_source)
             aft_order = ('pre' if node is not None and rec_id < node
@@ -1106,9 +1102,17 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
             capture_source = chain_graph.capture_of(sim.aft_source)
             frag = actor.attrs.get('Frag')
             if frag:
-                # A kept Frag= sampler (transformed draw): its blit runs
-                # THROUGH the shader on the GL tier (raster falls back
-                # to the unshaded blit). Uniforms ride their recorded
+                # A Frag= sampler's blit runs THROUGH the shader on the
+                # GL tier (raster falls back to the unshaded blit), with
+                # sampler0 = the source node's at-position capture slot -
+                # the engine contract (Sprite::DrawPrimitives samples
+                # m_pTexture). Sampling the slot rather than the finished
+                # frame is what honors the AFT curtain idiom: the black
+                # quad between node and sampler covers the raw scene, and
+                # the sampler redraws the pre-curtain capture on top
+                # (gat 2's MonitorOn window showed pass(black)=black when
+                # fullscreen-identity samplers compiled to a finished-
+                # frame post pass instead). Uniforms ride their recorded
                 # poke streams; the diffuse rgb tints even plain blits.
                 resolved = _resolve_frag(actor, frag)
                 if resolved is not None:
@@ -1185,6 +1189,19 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
             if frag_path is not None:
                 inst['frag'] = frag_path
                 inst['frag_uniforms'] = frag_uniforms
+                inst['frag_samplers'] = _file_sampler_binds(sim)
+            mesh = _mesh_payload(sim, actor)
+            if mesh is not None:
+                # A Polygon sampler: the blit draws this mesh (through
+                # its translated Vert= shader) instead of the quad. Its
+                # uniform pokes and uniformTexture binds ride the same
+                # frag_* slots the shaded-quad path uses.
+                inst['mesh'] = mesh
+                if frag_path is None:
+                    inst['frag_uniforms'] = _uniform_curves(
+                        sim, rec_id, live_sim, actor_keyframes,
+                        mesh.get('vert') or '')
+                    inst['frag_samplers'] = _file_sampler_binds(sim)
         z_group, z_link = _z_sort_group(chain, links, env)
         if z_group is not None:
             inst['z_group'] = z_group
@@ -1442,94 +1459,66 @@ def _iter_xml(actor):
         yield from _iter_xml(child)
 
 
-def _chart_shaders(doc, env, actor_keyframes) -> list:
-    """The map-supplied fragment-shader passes (shader_bridge's
-    `chart_shaders` contract), harvested from the actor tree.
+# The AftTexture size-API stubs (lua_api): charts scale their mesh UVs
+# by GetImageWidth()/GetTextureWidth() (the engine pads 640x480 captures
+# to the 1024x512 pow2 texture), so unscaling by the same ratios
+# recovers the content fraction exactly.
+_AFT_UV_SCALE_X = 640.0 / 1024.0
+_AFT_UV_SCALE_Y = 480.0 / 512.0
 
-    A `Frag=` attribute binds a per-actor GLSL program that samples the
-    actor's own texture (openitg Sprite::DrawPrimitives -> sampler0 =
-    m_pTexture). Only actors whose texture is a whole-screen
-    ActorFrameTexture capture (`aft_source` set - they drew
-    `SetTexture(<aft>:GetTexture())`) are fullscreen-expressible: there
-    sampler0 IS our finished-frame capture, so the frag maps onto the
-    fullscreen `u_tex` contract exactly. Per-actor frags on ordinary
-    small textures are Stage B (they would wrongly post-process the
-    whole screen) and skipped - the same fullscreen/per-actor split the
-    engine has no concept of but that our fullscreen pipeline requires.
-
-    Each pass carries the resolved `.frag` path, the per-uniform value
-    streams the actor's `GetShader():uniform*` pokes recorded, and a 0/1
-    visibility window from its `hidden` channel (these sprites sit
-    `hidden,1` until their section's show message)."""
-    passes = []
-    for actor in _iter_xml(doc.root):
-        frag = actor.attrs.get('Frag')
-        rec_id = env.actor_id(actor)
-        if not frag or rec_id is None:
-            continue
-        sim = env.actors.get(rec_id)
-        if sim is None or not sim.aft_source:
-            continue
-        frag_path = _resolve_frag(actor, frag)
-        if frag_path is None:
-            continue
-        frames = actor_keyframes.get(rec_id, {})
-        if not _fullscreen_identity_draw(sim, frames):
-            continue
-        uniforms = {prop[len('uniform:'):]: _uniform_events(kfs)
-                    for prop, kfs in frames.items()
-                    if prop.startswith('uniform:')}
-        passes.append({
-            'name': f'gf{rec_id}_{Path(frag).stem}',
-            'frag_path': str(frag_path),
-            'uniforms': uniforms,
-            'windows': _visibility_events(frames.get('hidden')),
-        })
-    return passes
+# GL_QUADS is not in core profiles; a quads mesh re-expands to the
+# triangle list (v0,v1,v2)(v0,v2,v3) per quad.
+_MESH_MODES = ('triangles', 'trianglestrip', 'trianglefan', 'quads')
 
 
-# Per-channel values compatible with a fullscreen-identity draw: any
-# other value means the quad covers a different region than the frame
-# (rotated, scaled, skewed, cropped). base_scale_y additionally allows
-# -1, the universal AFT flip-cancel idiom (basezoomy(-1) uprights the
-# GL-flipped capture; our capture is already upright, so the net draw
-# is identity - every corpus AFT sampler pokes it). Position channels
-# are deliberately absent: a translated fullscreen quad still shows the
-# whole capture, so a position shake compiles to an unshaken pass - an
-# approximation, not a wrong region.
-_FULLSCREEN_ALLOWED = {
-    'rotation': (0.0,), 'rotation_x': (0.0,), 'rotation_y': (0.0,),
-    'scale_x': (1.0,), 'scale_y': (1.0,),
-    'base_scale_x': (1.0,), 'base_scale_y': (1.0, -1.0),
-    'skew_x': (0.0,), 'skew_y': (0.0,),
-    'crop_top': (0.0,), 'crop_bottom': (0.0,),
-    'crop_left': (0.0,), 'crop_right': (0.0,),
-}
+def _mesh_payload(sim, actor) -> dict | None:
+    """The Polygon mesh draw payload for an AFT-textured Polygon actor:
+    positions in actor-LOCAL px (center origin, +y down, as poked - the
+    blit maps local -> capture -> NDC through the instance transform),
+    UVs unscaled from the chart's padded-AFT texture space (the pow2
+    image/texture ratio the AftTexture stubs served) to our unpadded
+    capture - NO v flip: our capture FBO textures are bottom-up exactly
+    like the engine's AFTs (the quad blit samples v = 1 - y/h for the
+    same reason), so the chart's UVs transfer directly - and the
+    resolved Vert= shader path. None when the actor recorded no mesh or
+    an unsupported primitive mode."""
+    if not sim.mesh_positions or actor.kind != 'Polygon':
+        return None
+    mode = sim.mesh_mode or 'triangles'
+    if mode not in _MESH_MODES:
+        print(f'[notitg] Polygon draw mode {mode!r} not supported; '
+              'mesh skipped')
+        return None
+    positions = np.asarray(sim.mesh_positions,
+                           dtype=np.float32)[:, :2]
+    uvs = np.asarray(sim.mesh_uvs, dtype=np.float32)
+    uvs = np.column_stack([uvs[:, 0] / _AFT_UV_SCALE_X,
+                           uvs[:, 1] / _AFT_UV_SCALE_Y])
+    if mode == 'quads':
+        quads = np.arange(len(positions) - len(positions) % 4)
+        order = quads.reshape(-1, 4)[:, (0, 1, 2, 0, 2, 3)].ravel()
+        positions, uvs, mode = positions[order], uvs[order], 'triangles'
+    vert = actor.attrs.get('Vert')
+    vert_path = _resolve_frag(actor, vert) if vert else None
+    return {'mode': mode,
+            'vertices': np.column_stack([positions, uvs])
+                          .astype(np.float32),
+            'vert': str(vert_path) if vert_path is not None else None,
+            # Local px per design px: the blit maps mesh-local coords
+            # into the capture through this basis (NotITG's 640x480
+            # design screen).
+            'design_size': (640.0, 480.0)}
 
 
-def _fullscreen_identity_draw(sim, frames=None) -> bool:
-    """Whether a Frag= capture sampler's DRAW stays fullscreen-identity,
-    the condition for compiling it to a fullscreen pass: the pass output
-    replaces the whole frame, so it is only faithful when the actor
-    draws the frame back over itself unchanged. A sampler the chart
-    transforms or oscillates is a picture-in-picture element; as a pass
-    it would paint over the entire scene, so it is skipped - that draw
-    belongs to the per-actor shader tier (composed captures).
-
-    Examples: getfucked2's horizon sampler bounces at 0.8 zoom with
-    rotation (chart t 134-161/218-260 - as a pass it blacked out both
-    windows) while its monitor sampler stays untransformed and keeps
-    its fullscreen pass."""
-    if getattr(sim, '_osc_spans', ()) or getattr(sim, '_osc_open', None):
-        return False
-    if frames is None:
-        # The lazy field-instance rebuild has no compiled keyframe map;
-        # the sim actor's own recorded stream is the same data.
-        frames = sim.keyframes()
-    return not any(value not in allowed
-                   for prop, allowed in _FULLSCREEN_ALLOWED.items()
-                   for kf in frames.get(prop, ())
-                   for value in kf.values)
+def _file_sampler_binds(sim) -> dict:
+    """The actor's uniformTexture binds that point at image FILES:
+    {glsl sampler name: absolute path}. AFT-sourced binds are left out -
+    a capture texture has no file to upload, so a frag needing one fails
+    to build and the blit falls back to its unshaded draw rather than
+    running black."""
+    return {name: marker[len('file:'):]
+            for name, marker in getattr(sim, 'sampler_binds', {}).items()
+            if marker.startswith('file:')}
 
 
 def _resolve_frag(actor, frag) -> Path | None:
@@ -1541,27 +1530,6 @@ def _resolve_frag(actor, frag) -> Path | None:
         return None
     candidate = Path(base_dir) / frag.lstrip('./')
     return candidate if candidate.is_file() else None
-
-
-def _uniform_events(keyframes) -> list:
-    """A uniform's `Keyframe` stream as the bridge's `.ffx`-shaped event
-    dicts (ms times, `strength` value): the same shape the shader-flag
-    path emits, so shader_bridge stays the one stable contract."""
-    return [{'time': kf.t * 1000.0, 'duration': kf.duration * 1000.0,
-             'ease': kf.easing, 'strength': kf.values[0]}
-            for kf in keyframes]
-
-
-def _visibility_events(hidden_kfs) -> list:
-    """A pass-liveness window stream from the actor's `hidden` channel
-    (1 hidden, 0 shown) inverted to `strength` (1 live, 0 off), or []
-    when the actor never toggled hidden (always live). Instant steps -
-    the hidden bit is immediate, never tweened."""
-    if not hidden_kfs:
-        return []
-    return [{'time': kf.t * 1000.0, 'duration': 0.0, 'ease': 0,
-             'strength': 0.0 if kf.values[0] else 1.0}
-            for kf in hidden_kfs]
 
 
 def _osc_context(env, doc, end_seconds, clock=None):
