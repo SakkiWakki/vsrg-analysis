@@ -88,7 +88,7 @@ def _load_doc():
         from analysis.games.notitg import drawable_doc
     except Exception:
         return None
-    if not hasattr(drawable_doc, 'build_static_doc'):
+    if not hasattr(drawable_doc, 'prepare_static_doc'):
         return None
     return drawable_doc
 
@@ -193,6 +193,11 @@ class DrawablePipeline:
         # The rebuild settle gate's tracking (see _rebuild_if_stale).
         self._settle_sig = None
         self._settle_since = 0.0
+        # Async build stages (see _ensure_built).
+        self._prepare_thread = None
+        self._prepared = None
+        self._prepare_error = None
+        self._assembly = None
         self._signature = None
         self._res_scale = None
 
@@ -313,32 +318,99 @@ class DrawablePipeline:
                                             w_px, h_px, uv_rect)
 
     def _ensure_built(self, painter) -> bool:
-        """Cross Seam A: build the static doc + evaluator + GL executor.
-        SYNCHRONOUS by necessity - the PyO3 Evaluator is unsendable (it
-        cannot be built on a worker thread and used on the render thread),
-        so the first build runs inline at chart open. The FREEZE class is
-        prevented by _rebuild_if_stale's settle gate instead: rebuilds
-        wait until topology growth STOPS. GL-ONLY (user directive): a
-        non-GL painter disables the pipeline."""
+        """Seam A without freezing a single frame. Three async stages:
+
+        1. PREPARE (worker thread): `prepare_static_doc` - the tens of
+           seconds of pure-Python channel export - recorded as plain ops
+           (no PyO3 objects cross threads; the Evaluator is unsendable).
+        2. REPLAY (render thread, BUDGETED): the recorded ops replay onto
+           a real DocBuilder a few milliseconds per frame.
+        3. ADOPT: finish() -> evaluator, mint the GL executor, apply
+           clears; the pipeline starts (or resumes) drawing.
+
+        Until adoption the delegate returns False and the normal path
+        draws - the pipeline takes over seamlessly when ready. GL-ONLY:
+        a non-GL painter disables the pipeline."""
+        if self._advance_assembly():
+            return True
         if self._evaluator is not None:
             return True
+        if self._prepared is not None:
+            self._start_assembly()
+            return self._advance_assembly()
+        if self._prepare_thread is not None and self._prepare_thread.is_alive():
+            return False
+        if self._prepare_error is not None:
+            self._disable(self._prepare_error)
+            return False
         from analysis.player.render.gl_capture import usable
         if not usable(painter):
             self._disable("painter is not on a GL engine (GL-only pipeline)")
             return False
-        return self._build_doc()
+        self._start_prepare()
+        return False
 
-    def _build_doc(self) -> bool:
-        """Compile the static doc, mint the GL executor, and apply the
-        clears/bindings. Returns True on success; disables + returns False
-        if the compiler declined. Re-applies everything from scratch on a
-        rebuild (the executor is replaced)."""
+    def _start_prepare(self) -> None:
+        """Kick the worker-side prepare. The signature is taken BEFORE the
+        prepare so growth during it registers as stale later."""
+        import threading
         signature = _topology_signature(self._compiled)
-        evaluator, id_maps, _report = self._doc.build_static_doc(
-            self._compiled, screen_w=_SCREEN_W, screen_h=_SCREEN_H)
-        if evaluator is None:
-            self._disable("static-doc compiler produced no evaluator")
+
+        def worker():
+            try:
+                ops, id_maps, _report = self._doc.prepare_static_doc(
+                    self._compiled, screen_w=_SCREEN_W, screen_h=_SCREEN_H)
+                self._prepared = (ops, id_maps, signature)
+            except Exception as exc:  # noqa: BLE001 - surfaced via disable
+                logger.warning("DrawablePipeline: prepare failed",
+                               exc_info=True)
+                self._prepare_error = f'static-doc prepare failed ({exc})'
+
+        self._prepare_thread = threading.Thread(
+            target=worker, daemon=True, name='drawable-doc-prepare')
+        self._prepare_thread.start()
+
+    # Replay budget per frame: the full replay is ~1.3s of FFI on gat 1
+    # (7k ops); this bound keeps each frame's share invisible.
+    _REPLAY_BUDGET_S = 0.006
+
+    def _start_assembly(self) -> None:
+        ops, id_maps, signature = self._prepared
+        self._prepared = None
+        self._prepare_thread = None
+        import storyboard_native as sn
+        builder = sn.DocBuilder(float(_SCREEN_W), float(_SCREEN_H))
+        self._assembly = [builder, ops, 0, id_maps, signature]
+
+    def _advance_assembly(self) -> bool:
+        """Replay a budget's worth of recorded ops; adopt the doc when the
+        replay completes. Returns True only when a doc is ready THIS frame
+        (adopted now or already live with no pending swap)."""
+        if self._assembly is None:
             return False
+        import time as _time
+        builder, ops, index, id_maps, signature = self._assembly
+        deadline = _time.perf_counter() + self._REPLAY_BUDGET_S
+        try:
+            while index < len(ops) and _time.perf_counter() < deadline:
+                method, args, kwargs = ops[index]
+                getattr(builder, method)(*args, **kwargs)
+                index += 1
+            if index < len(ops):
+                self._assembly[2] = index
+                return False
+            evaluator = builder.finish()
+        except Exception:
+            self._assembly = None
+            self._disable("static-doc assembly failed")
+            return False
+        self._assembly = None
+        self._adopt(evaluator, id_maps, signature)
+        return True
+
+    def _adopt(self, evaluator, id_maps, signature) -> None:
+        """Swap the freshly assembled doc in: mint the GL executor, apply
+        clears, force resolution + bindings to re-apply."""
         from analysis.player.render.storyboard.gl_executor import GLExecutor
         from analysis.player.render.storyboard.executor import (
             CLEAR_TRANSPARENT, SCREEN_ID)
@@ -347,28 +419,32 @@ class DrawablePipeline:
         self._signature = signature
         self._executor = GLExecutor(
             _lazy_images(id_maps),
-            _drawable_sizes_of(id_maps, evaluator))
+            _drawable_sizes_of(id_maps, evaluator),
+            image_grids=(id_maps.get('image_grids')
+                         if isinstance(id_maps, dict) else None))
         self._executor.set_clear(SCREEN_ID, CLEAR_TRANSPARENT)
         # Field drawables are SLICES of the one screen surface: transparent
         # overlays, never opaque slabs (the black-chart-region fix).
         for field_id in (id_maps.get('fields') or {}).values():
             self._executor.set_clear(field_id, CLEAR_TRANSPARENT)
         self._res_scale = None
-        return True
 
-    # The settle gate (the FREEZE fix): each rebuild costs seconds of
-    # inline compile, and the lazy sweep grows topology every few frames -
-    # rebuilding on every change froze the app for the whole sweep.
-    # A rebuild now waits until the signature is stale AND has stopped
-    # changing for _REBUILD_SETTLE_S (the sweep's churn ends), collapsing
-    # the storm to ONE rebuild after the sweep settles.
+    # The settle gate: re-prepares wait until the topology signature is
+    # stale AND has stopped changing (the sweep's churn ends) - combined
+    # with the async prepare + budgeted replay, no rebuild ever blocks.
     _REBUILD_SETTLE_S = 2.0
 
     def _rebuild_if_stale(self, painter) -> None:
-        """Rebuild the static doc once the provider's topology signature
-        has changed AND settled (see the settle gate above). A failed
-        rebuild disables the pipeline (the caller falls through)."""
+        """Start a background re-prepare once the provider's topology
+        signature has changed AND settled. The current doc keeps drawing
+        until the replacement is assembled and adopted."""
         import time as _time
+        if self._evaluator is None:
+            return
+        if self._prepare_thread is not None and self._prepare_thread.is_alive():
+            return
+        if self._assembly is not None or self._prepared is not None:
+            return
         signature = _topology_signature(self._compiled)
         if signature is None or signature == self._signature:
             return
@@ -379,10 +455,7 @@ class DrawablePipeline:
             return
         if now - self._settle_since < self._REBUILD_SETTLE_S:
             return
-        try:
-            self._build_doc()
-        except Exception:
-            self._disable("static-doc rebuild failed")
+        self._start_prepare()
 
     def _schedule(self, t):
         """Fold the static doc into a DrawSchedule at ``t``: return the

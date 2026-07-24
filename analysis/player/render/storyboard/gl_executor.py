@@ -283,6 +283,7 @@ class GLExecutor:
         drawable_sizes: list[tuple[float, float]],
         clips: list[tuple] | None = None,
         lines: dict[int, np.ndarray] | None = None,
+        image_grids: dict[int, tuple] | None = None,
     ) -> None:
         self._images = images
         self._sizes = drawable_sizes

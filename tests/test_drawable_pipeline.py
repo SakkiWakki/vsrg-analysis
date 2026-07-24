@@ -8,8 +8,9 @@ GL executor, and presents the composed screen image into the chart rect.
 
 STATIC-DOC ADAPTATION (this wave): the pipeline switched from the
 per-frame feed bridge (``drawable_bridge.build_doc`` + ``feed_frame``) to
-the static tree-order doc (``drawable_doc.build_static_doc``). Every fake
-here therefore exposes ``build_static_doc(compiled) -> (evaluator, id_maps,
+the static tree-order doc, ASYNC contract (``drawable_doc.prepare_static_doc``
+-> recorded ops the pipeline replays). Every fake
+here therefore exposes ``prepare_static_doc(compiled) -> (ops, id_maps,
 report)`` (a 3-tuple) whose doc carries its OWN items (no dynamic feed
 drawable), and the pipeline monkeypatch target is ``pl._load_doc``. The
 adaptations from the feed-model tests are documented at each fake:
@@ -136,20 +137,31 @@ class _Adapter:
 # Fake static-doc compilers (build_static_doc -> (evaluator, id_maps, report))
 # --------------------------------------------------------------------------
 
-def _fill_doc_evaluator():
-    """A real Evaluator whose screen root carries ONE static SRC_FILL item
-    scaled to the full screen (a white curtain). Composing it with a plain
-    ``frame(t)`` rasterizes that fill - the static-doc equivalent of the old
-    fed-fill bridge, with no feed drawable.
+def _fill_doc_ops():
+    """Recorded ops for a doc whose screen root carries ONE static SRC_FILL
+    item scaled to the full screen (a white curtain) - the async prepare
+    contract: plain (method, args, kwargs) tuples the pipeline replays onto a
+    real DocBuilder on the render thread."""
+    return [('item', (0, sn.SRC_FILL, 0),
+             {'sx_rest': float(_SCREEN_W), 'sy_rest': float(_SCREEN_H)})]
 
-    The native ``item`` seeds a BLIT's tint white and offers no per-channel
-    tint setter (see drawable_doc._z_channel), so the fill composes WHITE; the
-    compose test asserts an opaque white curtain rather than a colored one."""
-    b = sn.DocBuilder(float(_SCREEN_W), float(_SCREEN_H))
-    # A fill's unit quad (0,0)-(1,1) is scaled to the full screen by the item
-    # transform (sx=640, sy=480).
-    b.item(0, sn.SRC_FILL, 0, sx_rest=float(_SCREEN_W), sy_rest=float(_SCREEN_H))
-    return b.finish()
+
+def _spin_present(pipe, ctx, rect=CHART_RECT, tries=200, backdrop=None,
+                  **kw):
+    """Present repeatedly until the async build (worker prepare + budgeted
+    replay) completes and the pipeline draws, or tries run out. Returns the
+    last (drew, target). ``backdrop`` is the _GLTarget ctor arg; the rest
+    forwards to delegate."""
+    import time as _t
+    drew, target = False, None
+    for _ in range(tries):
+        gt = (_GLTarget(rect, backdrop=backdrop) if backdrop is not None
+              else _GLTarget(rect))
+        drew, target = gt.present(pipe, ctx, **kw)
+        if drew or not pipe.healthy:
+            break
+        _t.sleep(0.005)
+    return drew, target
 
 
 def _report(**over):
@@ -161,9 +173,9 @@ def _report(**over):
 
 
 class _WrapEvaluator:
-    """Wraps a real Evaluator to raise from ``frame`` on demand (the
-    static-doc analogue of the old raise-on-feed fake: the per-frame failure
-    now lives in the evaluator sampling, not a feed call)."""
+    """Wraps a real Evaluator to raise from ``frame`` on demand - installed
+    onto an already-built pipeline by the frame-failure test (the fakes can't
+    pre-wrap: the pipeline assembles the evaluator itself now)."""
 
     def __init__(self, inner, raise_on_frame=False):
         self._inner = inner
@@ -178,22 +190,16 @@ class _WrapEvaluator:
         return getattr(self._inner, name)
 
 
-def _fake_doc(raise_on_frame=False):
-    """A fake static-doc compiler: ``build_static_doc`` returns a real
-    Evaluator whose screen root draws one full-screen white fill (rasterized
-    by the executor), plus the 3-tuple id_maps/report the pipeline expects.
-
-    Replaces the old ``_fake_bridge`` (build_doc + feed_frame): the fill is a
-    STATIC item the plain ``frame(t)`` composes - there is no dynamic feed
-    drawable and no feed_frame call."""
+def _fake_doc():
+    """A fake static-doc compiler for the ASYNC contract:
+    ``prepare_static_doc`` returns (ops, id_maps, report); the pipeline
+    replays the ops onto a real DocBuilder on the render thread."""
 
     class Doc:
         @staticmethod
-        def build_static_doc(compiled, screen_w=_SCREEN_W, screen_h=_SCREEN_H):
-            inner = _fill_doc_evaluator()
-            evaluator = _WrapEvaluator(inner, raise_on_frame=raise_on_frame)
+        def prepare_static_doc(compiled, screen_w=_SCREEN_W, screen_h=_SCREEN_H):
             id_maps = {'screen': 0, 'slots': {}, 'fields': {}, 'images': {}}
-            return evaluator, id_maps, _report(fills=1, instances=1)
+            return _fill_doc_ops(), id_maps, _report(fills=1, instances=1)
 
     return Doc()
 
@@ -214,7 +220,7 @@ def test_delegate_composes_and_blits_into_chart_rect(gl, monkeypatch):
     player, pipe = _build_pipeline(monkeypatch, _fake_doc())
 
     ctx = _Ctx(t_now=1.0, player=player)
-    drew, target = _GLTarget(CHART_RECT).present(pipe, ctx)
+    drew, target = _spin_present(pipe, ctx)
 
     assert drew is True
     x, y, w, h = CHART_RECT
@@ -231,7 +237,7 @@ def test_delegate_composes_and_blits_into_chart_rect(gl, monkeypatch):
 def test_delegate_leaves_chart_rect_bounds(gl, monkeypatch):
     player, pipe = _build_pipeline(monkeypatch, _fake_doc())
     ctx = _Ctx(t_now=0.0, player=player)
-    _drew, target = _GLTarget(CHART_RECT).present(pipe, ctx)
+    _drew, target = _spin_present(pipe, ctx)
     x, y, w, h = CHART_RECT
     # Nothing presented above/left of the chart rect (the present quad covers
     # only the rect region).
@@ -240,12 +246,14 @@ def test_delegate_leaves_chart_rect_bounds(gl, monkeypatch):
 
 
 def test_frame_exception_disables_permanently(gl, monkeypatch):
-    player, pipe = _build_pipeline(
-        monkeypatch, _fake_doc(raise_on_frame=True))
+    player, pipe = _build_pipeline(monkeypatch, _fake_doc())
     ctx = _Ctx(t_now=0.0, player=player)
+    drew, _target = _spin_present(pipe, ctx)
+    assert drew is True
+    # Sabotage the LIVE evaluator: the next frame's sampling raises, the
+    # frame reports "not drawn", and the pipeline permanently disables.
+    pipe._evaluator = _WrapEvaluator(pipe._evaluator, raise_on_frame=True)
     drew, _target = _GLTarget(CHART_RECT).present(pipe, ctx)
-    # The frame sampling raised: the frame reports "not drawn" and the
-    # pipeline is now permanently disabled for the session.
     assert drew is False
     assert pipe.healthy is False
     # A subsequent delegate also returns False without re-raising.
@@ -297,16 +305,15 @@ def _field_doc():
 
     class Doc:
         @staticmethod
-        def build_static_doc(compiled, screen_w=_SCREEN_W, screen_h=_SCREEN_H):
-            b = sn.DocBuilder(float(screen_w), float(screen_h))
-            field = b.drawable(float(screen_w), float(screen_h), False, False)
-            # The field's logical box is 640x480; the item maps it 1:1 onto
-            # the screen (unit zoom over the natural 640x480 size).
-            b.item(0, sn.SRC_DRAWABLE, field)
-            evaluator = b.finish()
+        def prepare_static_doc(compiled, screen_w=_SCREEN_W, screen_h=_SCREEN_H):
+            # Recorded ops: drawable() mints id 1 (screen root is 0), the
+            # screen's item reads it 1:1.
+            ops = [('drawable', (float(screen_w), float(screen_h), False,
+                                 False), {}),
+                   ('item', (0, sn.SRC_DRAWABLE, 1), {})]
             id_maps = {'screen': 0, 'slots': {}, 'images': {},
-                       'fields': {'field': field}}
-            return evaluator, id_maps, _report(proxy=1, fields=1)
+                       'fields': {'field': 1}}
+            return ops, id_maps, _report(proxy=1, fields=1)
 
     return Doc()
 
@@ -336,8 +343,8 @@ def test_fed_field_capture_appears_in_the_composite(gl, monkeypatch):
     field_capture = _FakeGLHandle(_SCREEN_W, _SCREEN_H,
                                   QColor(0, 180, 255, 255))
     ctx = _Ctx(t_now=0.0, player=player)
-    drew, target = _GLTarget(CHART_RECT).present(
-        pipe, ctx, field_captures={'field': field_capture})
+    drew, target = _spin_present(pipe, ctx,
+                                 field_captures={'field': field_capture})
     assert drew is True
     x, y, w, h = CHART_RECT
     inside = target.pixelColor(x + w // 2, y + h // 2)
@@ -352,9 +359,9 @@ def test_no_field_capture_composites_transparently_not_black(gl, monkeypatch):
     # of covering it with opaque black.
     player, pipe = _build_pipeline(monkeypatch, _field_doc())
     ctx = _Ctx(t_now=0.0, player=player)
-    drew, target = _GLTarget(
-        CHART_RECT, backdrop=QColor(120, 40, 40, 255)).present(
-            pipe, ctx, field_captures=None)
+    drew, target = _spin_present(pipe, ctx,
+                                 backdrop=QColor(120, 40, 40, 255),
+                                 field_captures=None)
     assert drew is True
     # The backdrop shows through the transparent composite (not black).
     x, y, w, h = CHART_RECT
@@ -384,17 +391,13 @@ def _image_doc(image_path):
 
     class Doc:
         @staticmethod
-        def build_static_doc(compiled, screen_w=_SCREEN_W, screen_h=_SCREEN_H):
-            b = sn.DocBuilder(float(screen_w), float(screen_h))
-            # A 16x16 image's logical box is its pixel size; scale it to the
-            # full screen via the item transform (sx = screen / 16).
-            b.item(0, sn.SRC_IMAGE, 0,
-                   sx_rest=float(screen_w) / 16.0,
-                   sy_rest=float(screen_h) / 16.0)
-            evaluator = b.finish()
+        def prepare_static_doc(compiled, screen_w=_SCREEN_W, screen_h=_SCREEN_H):
+            ops = [('item', (0, sn.SRC_IMAGE, 0),
+                    {'sx_rest': float(screen_w) / 16.0,
+                     'sy_rest': float(screen_h) / 16.0})]
             id_maps = {'screen': 0, 'slots': {}, 'fields': {},
                        'images': {0: image_path}}
-            return evaluator, id_maps, _report(images=1, elements_below=1)
+            return ops, id_maps, _report(images=1, elements_below=1)
 
     return Doc()
 
@@ -406,7 +409,7 @@ def test_static_doc_element_image_appears_in_composite(gl, monkeypatch, tmp_path
     green = _write_solid_png(tmp_path, 'green.png', QColor(0, 200, 40, 255).rgba())
     player, pipe = _build_pipeline(monkeypatch, _image_doc(green))
     ctx = _Ctx(t_now=0.0, player=player)
-    drew, target = _GLTarget(CHART_RECT).present(pipe, ctx)
+    drew, target = _spin_present(pipe, ctx)
     assert drew is True
     x, y, w, h = CHART_RECT
     inside = target.pixelColor(x + w // 2, y + h // 2)
@@ -422,7 +425,7 @@ def test_unreadable_element_image_skips_without_crashing(gl, monkeypatch):
     player, pipe = _build_pipeline(
         monkeypatch, _image_doc('/nonexistent/does_not_exist.png'))
     ctx = _Ctx(t_now=0.0, player=player)
-    drew, _target = _GLTarget(CHART_RECT).present(pipe, ctx)
+    drew, _target = _spin_present(pipe, ctx)
     assert drew is True
     assert pipe.healthy is True
 
@@ -466,15 +469,14 @@ def _counting_field_doc(builds):
 
     class Doc:
         @staticmethod
-        def build_static_doc(compiled, screen_w=_SCREEN_W, screen_h=_SCREEN_H):
+        def prepare_static_doc(compiled, screen_w=_SCREEN_W, screen_h=_SCREEN_H):
             builds[0] += 1
-            b = sn.DocBuilder(float(screen_w), float(screen_h))
-            field = b.drawable(float(screen_w), float(screen_h), False, False)
-            b.item(0, sn.SRC_DRAWABLE, field)
-            evaluator = b.finish()
+            ops = [('drawable', (float(screen_w), float(screen_h), False,
+                                 False), {}),
+                   ('item', (0, sn.SRC_DRAWABLE, 1), {})]
             id_maps = {'screen': 0, 'slots': {}, 'images': {},
-                       'fields': {'field': field}}
-            return evaluator, id_maps, _report(proxy=1, fields=1)
+                       'fields': {'field': 1}}
+            return ops, id_maps, _report(proxy=1, fields=1)
 
     return Doc()
 
@@ -492,8 +494,8 @@ def test_topology_growth_triggers_a_rebuild(gl, monkeypatch):
     assert pipe is not None
 
     ctx = _Ctx(t_now=0.0, player=player)
-    _drew, _t = _GLTarget(CHART_RECT).present(pipe, ctx)
-    assert builds[0] == 1  # built once at the first frame
+    drew, _t = _spin_present(pipe, ctx)
+    assert drew and builds[0] == 1  # built once (async prepare + replay)
 
     # A steady frame (no growth) does NOT rebuild.
     _drew, _t = _GLTarget(CHART_RECT).present(pipe, ctx)
@@ -507,7 +509,13 @@ def test_topology_growth_triggers_a_rebuild(gl, monkeypatch):
     _drew, _t = _GLTarget(CHART_RECT).present(pipe, ctx)
     assert builds[0] == 1        # churn frame: tracked, not rebuilt
     pipe._settle_since = -1e9    # the growth settled long ago
-    _drew, _t = _GLTarget(CHART_RECT).present(pipe, ctx)
+    import time as _time
+    for _ in range(200):         # async re-prepare + replay + adopt
+        _drew, _t = _GLTarget(CHART_RECT).present(pipe, ctx)
+        if builds[0] == 2 and pipe._assembly is None \
+                and pipe._prepared is None:
+            break
+        _time.sleep(0.005)
     assert builds[0] == 2
     assert pipe.healthy is True
 
@@ -553,7 +561,7 @@ def test_end_to_end_through_the_real_static_doc(gl, monkeypatch):
     pipe = pl.build_pipeline(player)
     assert pipe is not None
     ctx = _Ctx(t_now=0.0, player=player)
-    drew, _target = _GLTarget(CHART_RECT).present(pipe, ctx)
+    drew, _target = _spin_present(pipe, ctx)
     # The real doc compiled the proxy instances and the pipeline drew a frame
     # without disabling itself.
     assert drew is True

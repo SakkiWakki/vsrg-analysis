@@ -337,14 +337,20 @@ class _Builder:
     slot drawables, exports channels (de-duplicating identical timelines), and
     emits each instance's commands. Not reused across builds."""
 
-    def __init__(self, compiled, screen_w, screen_h):
+    def __init__(self, compiled, screen_w, screen_h, builder=None):
         import storyboard_native as sn
 
         self._sn = sn
         self._compiled = compiled
         self._t0 = 0.0
         self._t1 = _horizon(compiled)
-        self._builder = sn.DocBuilder(float(screen_w), float(screen_h))
+        # `builder` injection: a _RecordingBuilder lets the EXPENSIVE part of
+        # a build (the channel exports - tens of seconds of pure Python) run
+        # on a worker thread; the recorded ops replay onto a real DocBuilder
+        # on the thread the unsendable Evaluator must live on (see
+        # prepare_static_doc / assemble_static_doc).
+        self._builder = builder if builder is not None \
+            else sn.DocBuilder(float(screen_w), float(screen_h))
         self._screen = (float(screen_w), float(screen_h))
         self._field_ids: dict[str, int] = {}
         self._slot_ids: dict[str, int] = {}
@@ -352,6 +358,7 @@ class _Builder:
         # (loading is the consumer's job). id_maps carries the {id -> path} map.
         self._image_ids: dict[str, int] = {}
         self._image_paths: dict[int, str] = {}
+        self._image_grids: dict[int, tuple] = {}
         # Per-band emitted counts + per-kind skip counts, surfaced in the report.
         self._elem_below = 0
         self._elem_above = 0
@@ -484,7 +491,8 @@ class _Builder:
         evaluator = self._builder.finish()
         id_maps = {'screen': _SCREEN_ID, 'slots': dict(self._slot_ids),
                    'fields': dict(self._field_ids),
-                   'images': dict(self._image_paths)}
+                   'images': dict(self._image_paths),
+                   'image_grids': dict(self._image_grids)}
         return evaluator, id_maps
 
     def _banded_elements(self):
@@ -640,7 +648,11 @@ class _Builder:
     def _image_id(self, element):
         """The image id for an element's asset (a 'frames' element uses its
         first frame path), minted once per distinct absolute path and recorded
-        in the image table. None when the element carries no asset."""
+        in the image table. A sheet sprite also records its (cols, rows) grid
+        so the executor can crop the CURRENT CELL (the `frame` lane indexes
+        it) instead of drawing the whole sheet. First grid wins per path (two
+        elements sharing a sheet with different grids would conflict; not
+        seen in practice). None when the element carries no asset."""
         path = element.asset or (element.frames[0] if element.frames else None)
         if not path:
             return None
@@ -649,6 +661,10 @@ class _Builder:
             image_id = len(self._image_ids)
             self._image_ids[path] = image_id
             self._image_paths[image_id] = path
+        cols = int(getattr(element, 'sheet_cols', 1) or 1)
+        rows = int(getattr(element, 'sheet_rows', 1) or 1)
+        if cols * rows > 1 and image_id not in self._image_grids:
+            self._image_grids[image_id] = (cols, rows)
         return image_id
 
     def _sn_image_item(self, image_id: int, element) -> None:
@@ -764,6 +780,78 @@ def build_static_doc(compiled, screen_w: float = _SCREEN_W,
     report['elements_above'] = b._elem_above
     report['element_skips'] = dict(b._elem_skips)
     return evaluator, id_maps, report
+
+
+class _RecordingBuilder:
+    """Records DocBuilder calls as (method, args, kwargs) ops, minting the
+    SAME sequential ids a real DocBuilder would (channels count from 0,
+    drawables from 1 - the screen root is 0). The point: `_Builder`'s
+    emission is tens of seconds of pure-Python channel export, but the PyO3
+    Evaluator is unsendable - so the emission runs against this recorder on
+    a WORKER thread, and `assemble_static_doc` replays the cheap FFI calls
+    where the evaluator must live (the render thread)."""
+
+    def __init__(self):
+        self.ops: list[tuple] = []
+        self._channels = 0
+        self._drawables = 1
+
+    def channel(self, *args, **kwargs) -> int:
+        self.ops.append(('channel', args, kwargs))
+        self._channels += 1
+        return self._channels - 1
+
+    def drawable(self, *args, **kwargs) -> int:
+        self.ops.append(('drawable', args, kwargs))
+        self._drawables += 1
+        return self._drawables - 1
+
+    def item(self, *args, **kwargs) -> None:
+        self.ops.append(('item', args, kwargs))
+
+    def item_link(self, *args, **kwargs) -> None:
+        self.ops.append(('item_link', args, kwargs))
+
+    def snapshot(self, *args, **kwargs) -> None:
+        self.ops.append(('snapshot', args, kwargs))
+
+    def sort_span(self, *args, **kwargs) -> None:
+        self.ops.append(('sort_span', args, kwargs))
+
+    def finish(self):
+        return None
+
+
+def prepare_static_doc(compiled, screen_w: float = _SCREEN_W,
+                       screen_h: float = _SCREEN_H):
+    """The worker-safe half of `build_static_doc`: run the full emission
+    against a `_RecordingBuilder` and return `(ops, id_maps, report)` - all
+    plain Python data, no PyO3 objects, safe to build on any thread. Feed
+    the ops to `assemble_static_doc` on the consuming thread."""
+    recorder = _RecordingBuilder()
+    b = _Builder(compiled, screen_w, screen_h, builder=recorder)
+    instances = _current_instances(compiled)
+    report = _report(instances)
+    _evaluator, id_maps = b.run()
+    report['fields'] = len(id_maps['fields'])
+    report['slots'] = len(id_maps['slots'])
+    report['images'] = len(id_maps['images'])
+    report['elements_below'] = b._elem_below
+    report['elements_above'] = b._elem_above
+    report['element_skips'] = dict(b._elem_skips)
+    return recorder.ops, id_maps, report
+
+
+def assemble_static_doc(ops, screen_w: float = _SCREEN_W,
+                        screen_h: float = _SCREEN_H):
+    """Replay recorded ops onto a real DocBuilder and finish it - the cheap
+    FFI half, run on the thread the Evaluator lives on."""
+    import storyboard_native as sn
+
+    builder = sn.DocBuilder(float(screen_w), float(screen_h))
+    for method, args, kwargs in ops:
+        getattr(builder, method)(*args, **kwargs)
+    return builder.finish()
 
 
 def _report(instances) -> dict:
