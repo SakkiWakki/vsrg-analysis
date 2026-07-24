@@ -435,21 +435,80 @@ def compile_element_tree(root, to_seconds, start_beat, named_keyframes=None,
     Background-layer subtrees (BGCHANGES actors tagged by _load_document)
     are HOISTED to top-level elements with a below-the-notes z, so SM's
     'background behind the notefield, foreground in front' draw order is
-    honoured (the StoryboardEffect only bands top-level elements)."""
+    honoured (the StoryboardEffect only bands top-level elements).
+
+    Documents with notefield copies additionally SPLIT around the first
+    ActorProxy (see _pre_field_split): content preceding every copy in
+    document order compiles into the pre-field below band, content at or
+    after the first copy stays above, so an opaque backdrop early in the
+    tree cannot paint over the field composite the copies land in."""
     start_time = to_seconds(start_beat)
     named_keyframes = named_keyframes or {}
-    children = []
-    below = []
+
+    def compile_pass(include):
+        below, tops = [], []
+        for child in root.children:
+            if include is not None and not include(child):
+                continue
+            element = _compile_actor(child, start_time, named_keyframes,
+                                     fonts, below, actor_keyframes,
+                                     osc_context, sim, include)
+            if element is not None:
+                tops.append(element)
+        return below, tops
+
+    split = _pre_field_split(root)
+    if split is None:
+        below, tops = compile_pass(None)
+        return below + tops
+
+    pre, straddling = split
+    under_hoists, under = compile_pass(
+        lambda a: id(a) in pre or id(a) in straddling)
+    over_hoists, over = compile_pass(lambda a: id(a) not in pre)
+    under = [_with_z(element, _PRE_FIELD_Z) for element in under]
+    return under_hoists + over_hoists + under + over
+
+
+def _pre_field_split(root):
+    """`(pre, straddling)` actor-id sets partitioning the document around
+    its first notefield copy, or None when it has no ActorProxy.
+
+    The engine draws the modfile tree in document order with the player
+    fields under the WHOLE tree; a copy (ActorProxy) re-renders field
+    content at its own tree position, so actors drawn before the first
+    copy sit under all field content while later ones can cover it. The
+    renderer composites every field copy at one point between the
+    storyboard's below and above bands, so the document splits there:
+    `pre` holds actors whose whole subtree precedes the first ActorProxy
+    (compiled into the pre-field below band), `straddling` holds that
+    proxy's ancestors (groups with content on both sides, compiled once
+    per side with the same recorded animation).
+
+    Background-layer subtrees stay atomic: they hoist wholesale to their
+    own band, so the walk never descends into one."""
+    pre, straddling = set(), set()
+
+    def walk(actor):
+        if actor.kind == 'ActorProxy':
+            return True
+        if not getattr(actor, '_background_layer', False):
+            for child in actor.children:
+                if walk(child):
+                    straddling.add(id(actor))
+                    return True
+        pre.add(id(actor))
+        return False
+
     for child in root.children:
-        element = _compile_actor(child, start_time, named_keyframes, fonts,
-                                 below, actor_keyframes, osc_context, sim)
-        if element is not None:
-            children.append(element)
-    return below + children
+        if walk(child):
+            return pre, straddling
+    return None
 
 
 def _compile_actor(actor, start_time, named_keyframes, fonts, below=None,
-                   actor_keyframes=None, osc_context=None, sim=None):
+                   actor_keyframes=None, osc_context=None, sim=None,
+                   include=None):
     if below is None:
         below = []
     if getattr(actor, '_aft_fill', False):
@@ -467,8 +526,11 @@ def _compile_actor(actor, start_time, named_keyframes, fonts, below=None,
 
     child_elements = []
     for child in actor.children:
+        if include is not None and not include(child):
+            continue
         element = _compile_actor(child, start_time, named_keyframes, fonts,
-                                 below, actor_keyframes, osc_context, sim)
+                                 below, actor_keyframes, osc_context, sim,
+                                 include)
         if element is not None:
             child_elements.append(element)
 
@@ -498,6 +560,13 @@ _BACKGROUND_Z = -100
 # field/copies (engine tree order: the rig's backdrops precede the
 # proxies).
 _AFT_BACKDROP_Z = -50
+
+# The pre-field band: foreground content that precedes the first
+# notefield copy in document order (see _pre_field_split). Above the
+# BGCHANGES background band but under the AFT rigs' backdrops, matching
+# engine tree order (bg layer, then the tree up to the copies, then the
+# rig backdrops right before the copies themselves).
+_PRE_FIELD_Z = -75
 
 # Message commands identifying the AFT rig's fullscreen backdrops.
 _AFT_BACKDROP_MESSAGES = ('ShowAFT', 'ShowAFTBG', 'HideAFT')

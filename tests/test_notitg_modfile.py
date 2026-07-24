@@ -694,6 +694,55 @@ def test_tree_wraps_nested_actorframe_as_group(tmp_path):
     assert child.sample('x', 0.0) == (10.0,)
 
 
+def test_tree_splits_below_and_above_first_proxy():
+    """Content preceding the first ActorProxy in document order compiles
+    into the pre-field below band; content after it stays above (z 0).
+    The renderer composites every notefield copy between those bands, so
+    an opaque backdrop early in the tree draws under the copies while
+    later overlays still cover them (engine document order)."""
+    from analysis.games.notitg import modfile
+
+    xml = ('<ActorFrame><children>'
+           '<Quad Type="Quad" OnCommand="x,1"/>'
+           '<Layer Type="ActorProxy"/>'
+           '<Quad Type="Quad" OnCommand="x,2"/>'
+           '</children></ActorFrame>')
+    parsed = xml_actors.parse_actor_xml(xml)
+    tree = modfile.compile_element_tree(parsed.root, _seconds,
+                                        start_beat=0.0)
+    backdrop, overlay = tree
+    assert backdrop.z == modfile._PRE_FIELD_Z
+    assert backdrop.sample('x', 0.0) == (1.0,)
+    assert overlay.z == 0
+    assert overlay.sample('x', 0.0) == (2.0,)
+
+
+def test_tree_split_keeps_straddling_group_on_both_sides():
+    """A group holding content on both sides of the first proxy compiles
+    once per side, each half carrying the group's own transform so the
+    children keep their screen placement across the split."""
+    from analysis.games.notitg import modfile
+
+    xml = ('<ActorFrame><children>'
+           '<ActorFrame OnCommand="rotationz,45"><children>'
+           '<Quad Type="Quad" OnCommand="x,1"/>'
+           '<ActorProxy/>'
+           '<Quad Type="Quad" OnCommand="x,2"/>'
+           '</children></ActorFrame>'
+           '</children></ActorFrame>')
+    parsed = xml_actors.parse_actor_xml(xml)
+    tree = modfile.compile_element_tree(parsed.root, _seconds,
+                                        start_beat=0.0)
+    under, over = tree
+    assert under.z == modfile._PRE_FIELD_Z
+    assert over.z == 0
+    for group, x in ((under, 1.0), (over, 2.0)):
+        assert group.kind == 'group'
+        assert group.sample('rotation', 0.0) == (45.0,)
+        (child,) = group.children
+        assert child.sample('x', 0.0) == (x,)
+
+
 # -- resilience -----------------------------------------------------------
 
 def test_compile_never_raises_on_missing_lua(tmp_path):
