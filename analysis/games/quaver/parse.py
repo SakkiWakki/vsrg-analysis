@@ -13,7 +13,8 @@ import numpy as np
 
 from analysis.games.quaver.qr_replay import (parse_qr_events,
                                               extract_key_events)
-from analysis.games.quaver.qua_chart import (parse_qua_file,
+from analysis.games.quaver.qua_chart import (DEFAULT_GROUP_ID,
+                                              parse_qua_file,
                                               find_qua_by_hash)
 from analysis.games.quaver.judge_sim import (simulate_mania, simulate_mines,
                                               windows_ms)
@@ -162,6 +163,10 @@ def _group_notes_by_col(hitobjects, keycount):
             continue
         record = {'time': int(h['time']), 'end_time': h['end_time']}
         if h.get('is_mine'):
+            # Mines never enter the judgment stream, so the renderer
+            # can't recover their TimingGroup from the note-group map;
+            # carry it on the record instead.
+            record['group'] = h.get('group', DEFAULT_GROUP_ID)
             mines_by_col[c].append(record)
             continue
         by_col[c].append(record)
@@ -178,27 +183,30 @@ def _build_mine_arrays(mines_by_col, mine_hits):
     """Chart-stream arrays for the renderer, same contract Etterna's
     adapter fills: `mine_times`/`mine_cols`/`mine_until` (time-sorted;
     no `mine_rows` -- Quaver is time-based, and empty rows route the SV
-    projection through time-space). Plus the detonations:
-    `mine_hit_idx` (index into the sorted mine arrays) and
-    `mine_hit_press` (press time, seconds)."""
-    flat = [(m['time'], c, m['end_time'] or 0)
+    projection through time-space), plus `mine_groups` (per-mine
+    TimingGroup id so mines project in the same SV stream as the taps
+    around them). Plus the detonations: `mine_hit_idx` (index into the
+    sorted mine arrays) and `mine_hit_press` (press time, seconds)."""
+    flat = [(m['time'], c, m['end_time'] or 0,
+             m.get('group', DEFAULT_GROUP_ID))
             for c, mines in enumerate(mines_by_col) for m in mines]
     if not flat:
         return {}
     flat.sort()
 
-    index_of = {(t, c): i for i, (t, c, _e) in enumerate(flat)}
+    index_of = {(t, c): i for i, (t, c, _e, _g) in enumerate(flat)}
     hit_pairs = [(index_of[(h['mine_time'], h['col'])],
                   h['press_time'] / 1000.0) for h in mine_hits]
     hit_pairs.sort()
 
     return {
-        'mine_times': np.array([t / 1000.0 for t, _c, _e in flat],
+        'mine_times': np.array([t / 1000.0 for t, _c, _e, _g in flat],
                                dtype=np.float64),
-        'mine_cols': np.array([c for _t, c, _e in flat], dtype=np.int32),
+        'mine_cols': np.array([c for _t, c, _e, _g in flat], dtype=np.int32),
         'mine_until': np.full(len(flat), np.inf, dtype=np.float64),
+        'mine_groups': np.array([g for _t, _c, _e, g in flat], dtype=object),
         'mine_end_times': np.array(
-            [e / 1000.0 if e else np.nan for _t, _c, e in flat],
+            [e / 1000.0 if e else np.nan for _t, _c, e, _g in flat],
             dtype=np.float64),
         'mine_hit_idx': np.array([i for i, _p in hit_pairs], dtype=np.int64),
         'mine_hit_press': np.array([p for _i, p in hit_pairs],

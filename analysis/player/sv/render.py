@@ -5,6 +5,7 @@ import os
 import numpy as np
 
 from analysis.player import scroll as scroll_registry
+from analysis.player.init.notes_model import stream_groups_or_none
 from analysis.player.sv.debug import LOGGER as _SV_DEBUG_LOGGER
 
 
@@ -275,15 +276,17 @@ class SvRenderController:
         else:
             notes.miss_hold_max_sv_dur = 0.0
 
-        notes.mine_sv = self._chart_stream_to_sv(notes.mine_times, notes.mine_rows)
+        notes.mine_sv = self._chart_stream_to_sv(
+            notes.mine_times, notes.mine_rows,
+            groups=stream_groups_or_none(notes.mine_groups))
         notes.lift_sv = self._chart_stream_to_sv(notes.lift_times, notes.lift_rows)
         notes.fake_sv = self._chart_stream_to_sv(notes.fake_times, notes.fake_rows)
 
-    def _chart_stream_to_sv(self, times, rows):
+    def _chart_stream_to_sv(self, times, rows, groups=None):
         engine = self.p._sv_engine
         if rows.size and hasattr(engine, 'project_beats'):
             return engine.project_beats(rows.astype(np.float64) / 48.0)
-        return self.times_to_sv(times)
+        return self.times_to_sv(times, groups=groups)
 
     def cumulative_sv_at(self, t):
         return self.p._sv_engine.cumulative_at(float(t))
@@ -462,7 +465,7 @@ class SvRenderController:
         return (judge_y - self.visual_sv_distance_from_frame(frame, t)
                 * self.effective_scroll_speed(t_now))
 
-    def batch_time_to_y(self, times, frame, groups=None):
+    def batch_time_to_y(self, times, frame, groups=None, cum=None):
         """Project an array of chart-times to screen-y at `frame`. The
         optional `groups` array (parallel to `times`) routes each entry
         through its Quaver TimingGroup ; everything else uses the
@@ -473,9 +476,17 @@ class SvRenderController:
         not `note_pos - playhead_pos_in_default_group`. Mixing the two
         produces order-of-magnitude wrong y for any group whose stream
         diverges from the default's (e.g. Quaver charts with negative
-        SV in some groups but not others)."""
+        SV in some groups but not others).
+
+        `cum` optionally supplies precomputed cull-space positions
+        (parallel to `times`); chart streams pass their cached
+        projection so beat-space engines keep row-space anchoring for
+        old negative-BPM warp aliases. When omitted, `times` is
+        projected through the engine."""
         p = self.p
         arr = np.asarray(times, dtype=np.float64)
+        if cum is not None:
+            cum = np.asarray(cum, dtype=np.float64)
 
         if arr.size == 0:
             return np.empty(0, dtype=np.float64)
@@ -488,7 +499,8 @@ class SvRenderController:
         else:
             engine = p._sv_engine
             if groups is not None and hasattr(engine, 'cumulative_at_groups'):
-                cum = engine.project_times(arr, groups=groups)
+                if cum is None:
+                    cum = engine.project_times(arr, groups=groups)
                 # Per-note playhead cum, evaluated in each note's own
                 # stream -- matches Quaver's `GetSpritePosition`.
                 playhead_cum = engine.cumulative_at_groups(
@@ -504,7 +516,8 @@ class SvRenderController:
                     mult = float(frame.render_multiplier)
                 dist = (cum - playhead_cum) * mult
             else:
-                cum = engine.project_times(arr)
+                if cum is None:
+                    cum = engine.project_times(arr)
                 dist = (
                     (cum - float(frame.visual_cum_now))
                     * float(frame.render_multiplier)

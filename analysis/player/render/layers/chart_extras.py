@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from PySide6.QtCore import QPointF
+from analysis.player.init.notes_model import stream_groups_or_none
 from analysis.player.render.primitives import _line, _rect
 
 if TYPE_CHECKING:
@@ -34,6 +35,7 @@ def draw_mines(ctx: RenderContext, painter) -> None:
     _draw_chart_sprites(ctx, painter,
                         p.notes.mine_times, p.notes.mine_cols, p.notes.mine_sv,
                         p.notes.mine_until,
+                        groups=stream_groups_or_none(p.notes.mine_groups),
                         sprite='mine', keyed=False, rows=p.notes.mine_rows)
     _draw_hold_mine_spans(ctx, painter)
     _draw_mine_detonations(ctx, painter)
@@ -51,13 +53,14 @@ def _draw_hold_mine_spans(ctx, painter) -> None:
 
     margin = ctx.screen_margin
     lo, hi = -margin, p.H + margin
+    groups = stream_groups_or_none(n.mine_groups)
     end_pm = ctx.sprite_cache.get('mine', ctx)
     for k in np.nonzero(np.isfinite(ends))[0]:
         c = int(n.mine_cols[k])
         if c >= p.keycount:
             continue
-        y_head = _chart_sprite_y(ctx, float(n.mine_times[k]), n.mine_sv, k)
-        y_end = ctx.time_to_y(float(ends[k]))
+        y_head = _chart_sprite_y(ctx, n.mine_times, n.mine_sv, groups, k)
+        y_end = _stream_time_y(ctx, float(ends[k]), groups, k)
         if (y_head < lo and y_end < lo) or (y_head > hi and y_end > hi):
             continue
         lx = ctx.lane_x(c)
@@ -82,12 +85,13 @@ def _draw_mine_detonations(ctx, painter) -> None:
         return
     pm = ctx.sprite_cache.get('miss_x', ctx, jcolor=p.judge_colors['miss'])
     margin = ctx.screen_margin
+    groups = stream_groups_or_none(n.mine_groups)
     for k in shown:
         i = int(idx[k])
         c = int(n.mine_cols[i])
         if c >= p.keycount:
             continue
-        y = _chart_sprite_y(ctx, float(n.mine_times[i]), n.mine_sv, i)
+        y = _chart_sprite_y(ctx, n.mine_times, n.mine_sv, groups, i)
         if not (-margin <= y <= p.H + margin):
             continue
         painter.drawPixmap(
@@ -99,6 +103,7 @@ def draw_lifts(ctx: RenderContext, painter) -> None:
     _draw_chart_sprites(ctx, painter,
                         p.notes.lift_times, p.notes.lift_cols, p.notes.lift_sv,
                         p.notes.lift_until,
+                        groups=None,
                         sprite='lift', keyed=True)
 
 
@@ -107,6 +112,7 @@ def draw_fakes(ctx: RenderContext, painter) -> None:
     _draw_chart_sprites(ctx, painter,
                         p.notes.fake_times, p.notes.fake_cols, p.notes.fake_sv,
                         p.notes.fake_until,
+                        groups=None,
                         sprite='fake', keyed=True)
 
 
@@ -223,9 +229,11 @@ def _cull_indices(sorted_keys: np.ndarray,
 
 
 def _draw_chart_sprites(ctx, painter, times, cols, sv_times, active_until, *,
-                        sprite, keyed, rows=None):
+                        groups, sprite, keyed, rows=None):
     """Cull + blit a chart-stream sprite bucket (mines/lifts/fakes).
 
+    - `groups` ; per-entry SV group ids (Quaver TimingGroups), or None
+      when the whole stream rides the engine's default stream.
     - `sprite` ; sprite cache key
     - `keyed`  ; True when the sprite keys on `col` (lifts, fakes).
       False for palette-independent glyphs like mines.
@@ -250,8 +258,7 @@ def _draw_chart_sprites(ctx, painter, times, cols, sv_times, active_until, *,
 
     cache = ctx.sprite_cache
     lane_x = ctx.lane_x
-    ys = np.array([_chart_sprite_y(ctx, float(times[k]), sv_times, k)
-                   for k in indices], dtype=np.float64)
+    ys = _chart_stream_ys(ctx, times, sv_times, groups, indices)
     mods = _chart_stream_mods(ctx, cols[indices], ys, rows, indices)
 
     # Both pixmap shapes anchor `y` at the pixmap's vertical center
@@ -326,15 +333,34 @@ def _blit_chart_sprite(painter, pm, lx, y, col, ctx, mod) -> None:
     painter.restore()
 
 
-def _chart_sprite_y(ctx, t, sv_times, k):
-    # Need this otherwise warps don't render correctly
-    if ctx.use_sv_space and sv_times.size:
-        dist = (
-            (float(sv_times[k]) - float(ctx.frame.visual_cum_now))
-            * float(ctx.frame.render_multiplier)
-        )
-        return ctx.judge_y - dist * float(ctx.scroll_speed)
-    return ctx.time_to_y(t)
+def _chart_stream_ys(ctx, times, sv_times, groups, indices):
+    """Screen y for chart-stream sprites at `indices`, routed through
+    the same projection primitive taps use (`batch_time_to_y`) so every
+    stream inherits the taps' direction/rate/per-group handling.
+
+    The cached `sv_times` projection rides along as `cum` (row-space
+    for beat-space engines ; without it, old negative-BPM warp aliases
+    render at the wrong position)."""
+    cum = sv_times[indices] if sv_times.size else None
+    sub_groups = groups[indices] if groups is not None else None
+    return ctx.player.batch_time_to_y(times[indices], ctx.frame,
+                                       groups=sub_groups, cum=cum)
+
+
+def _chart_sprite_y(ctx, times, sv_times, groups, k) -> float:
+    """Single-entry `_chart_stream_ys` for the low-count draw sites
+    (hold-mine spans, detonations)."""
+    idx = np.array([k], dtype=np.intp)
+    return float(_chart_stream_ys(ctx, times, sv_times, groups, idx)[0])
+
+
+def _stream_time_y(ctx, t, groups, k) -> float:
+    """Screen y for an arbitrary chart-time in stream entry `k`'s group.
+    Used for hold-mine end times, which have no cached projection."""
+    sub_groups = groups[k:k + 1] if groups is not None else None
+    times = np.array([t], dtype=np.float64)
+    return float(ctx.player.batch_time_to_y(times, ctx.frame,
+                                             groups=sub_groups)[0])
 
 
 def _visible_miss_hold_indices(ctx) -> np.ndarray:

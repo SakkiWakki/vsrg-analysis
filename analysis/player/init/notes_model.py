@@ -76,6 +76,11 @@ class NotesModel:
         default_factory=lambda: np.empty(0, dtype=np.float64))
     mine_sv: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.float64))
+    # Per-mine SV group ids (Quaver TimingGroups, parallel to
+    # mine_times). Empty when every mine rides the default stream
+    # (all other games).
+    mine_groups: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=object))
     # Hold-mine spans (Quaver): end time per mine, NaN for point mines.
     mine_end_times: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.float64))
@@ -111,11 +116,20 @@ class NotesModel:
 
 
 _CHART_STREAM_FIELDS = (
-    'mine_times', 'mine_rows', 'mine_cols', 'mine_until',
+    'mine_times', 'mine_rows', 'mine_cols', 'mine_until', 'mine_groups',
     'mine_end_times', 'mine_hit_idx', 'mine_hit_press',
     'lift_times', 'lift_rows', 'lift_cols', 'lift_until',
     'fake_times', 'fake_rows', 'fake_cols', 'fake_until',
 )
+
+
+def stream_groups_or_none(groups) -> np.ndarray | None:
+    """Normalize a chart-stream group array for the SV projection: an
+    empty (or absent) array means every entry uses the engine's default
+    stream, which the projection expresses as `groups=None`."""
+    if groups is None or not len(groups):
+        return None
+    return groups
 
 
 def copy_chart_streams(model: NotesModel, replay) -> None:

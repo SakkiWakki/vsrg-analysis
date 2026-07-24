@@ -541,19 +541,34 @@ def test_cull_indices_real_time():
     assert list(indices) == [1]  # only t=2.0 is in [1.5, 2.5]
 
 
+def _chart_sprite_ctx(frame):
+    """Minimal ctx for `_chart_sprite_y`: a stub player whose
+    `batch_time_to_y` runs the real SvRenderController projection.
+    judge_y = 800 * 0.5 = 400 ; scroll_speed = 10."""
+    from types import SimpleNamespace
+
+    from analysis.player.sv.engine import IdentitySVEngine
+    from analysis.player.sv.render import SvRenderController
+
+    player = SimpleNamespace(H=800, hit_line_y_frac=0.5, scroll_speed=10.0,
+                             _sv_engine=IdentitySVEngine())
+    player.batch_time_to_y = SvRenderController(player).batch_time_to_y
+    return SimpleNamespace(player=player, frame=frame)
+
+
 def test_chart_sprite_y_uses_row_space_sv_coordinate():
+    """The cached row-space projection (`sv_times`) positions the
+    sprite ; the raw chart-time must not be re-projected, or old
+    negative-BPM warp aliases render at the wrong y."""
     from types import SimpleNamespace
 
     from analysis.player.render.layers.chart_extras import _chart_sprite_y
 
-    ctx = SimpleNamespace(
-        use_sv_space=True,
-        judge_y=400.0,
-        scroll_speed=10.0,
-        frame=SimpleNamespace(visual_cum_now=100.0, render_multiplier=2.0),
-        time_to_y=lambda _t: -999.0,
-    )
-    y = _chart_sprite_y(ctx, 31.94, np.array([112.0], dtype=np.float64), 0)
+    frame = SimpleNamespace(use_sv=True, raw_t=31.0,
+                            visual_cum_now=100.0, render_multiplier=2.0)
+    ctx = _chart_sprite_ctx(frame)
+    y = _chart_sprite_y(ctx, np.array([31.94]),
+                        np.array([112.0], dtype=np.float64), None, 0)
     assert y == pytest.approx(160.0)
 
 
@@ -562,6 +577,9 @@ def test_chart_sprite_y_falls_back_to_time_without_sv():
 
     from analysis.player.render.layers.chart_extras import _chart_sprite_y
 
-    ctx = SimpleNamespace(use_sv_space=False, time_to_y=lambda t: t + 10.0)
-    y = _chart_sprite_y(ctx, 3.0, np.array([112.0], dtype=np.float64), 0)
-    assert y == pytest.approx(13.0)
+    frame = SimpleNamespace(use_sv=False, raw_t=2.0)
+    ctx = _chart_sprite_ctx(frame)
+    y = _chart_sprite_y(ctx, np.array([3.0]),
+                        np.array([112.0], dtype=np.float64), None, 0)
+    # dist = 3.0 - 2.0 ; y = 400 - dist * 10
+    assert y == pytest.approx(390.0)
