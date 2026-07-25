@@ -703,15 +703,15 @@ _GAT_SM = ('/mnt/Yucky/Rhythm Games/Players/NotITG/Songs/UKSRT8/'
 
 @functools.lru_cache(maxsize=1)
 def _gat_channels_cached():
-    """gat's mod channels, off the session-wide compile every real-chart test
-    shares (`tests.chart_cache`); compiling per parametrized case would blow
-    the timeout. Returns None when the install is absent."""
+    """Compile gat's modfile ONCE and share the channels across every
+    parametrized real-state case (compile is ~7s; 30+ recompiles would blow
+    the timeout). Returns None when the install is absent."""
     import os
     if not os.path.exists(_GAT_SM):
         return None
     from analysis.games.notitg.mod_channels import compile_mod_channels
-    from tests.chart_cache import compiled_chart
-    compiled = compiled_chart(_GAT_SM)
+    from analysis.games.notitg.sim.producers import compile_via_sim
+    compiled = compile_via_sim(_GAT_SM)
     if not compiled or not compiled.get('mod_events'):
         return None
     return compile_mod_channels(compiled['mod_events'])

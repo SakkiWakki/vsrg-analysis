@@ -471,12 +471,15 @@ def test_gat2_smoke_static_doc_parity():
     camera-area math (rotation_x/y, quat, z, skew, fov) diverge BY DESIGN - the
     report SURFACES those rather than asserting zero; the assertion is only that
     the compile + evaluate + compare runs cleanly and produces a report."""
-    from tests.chart_cache import compiled_chart
+    from analysis.games.notitg.sim.producers import (
+        compile_via_sim, wait_for_upgrade)
 
-    compiled = compiled_chart(_GAT2)
+    compiled = compile_via_sim(_GAT2)
     assert compiled is not None
     provider = compiled.get('field_instances')
     assert provider is not None
+
+    assert wait_for_upgrade(compiled)
 
     count = len(list(provider() if callable(provider) else provider))
     print(f'[gat2] provider instance count: {count}')
@@ -1089,10 +1092,12 @@ def test_real_chart_element_parity(chart_path, label, doc_elements):
     shown equivalent rather than eyeballed. The assertion is deliberately
     loose - it reports the number and fails only on a gross divergence, so
     the measurement lands in CI output either way."""
-    from tests.chart_cache import compiled_chart
+    from analysis.games.notitg.sim.producers import (
+        compile_via_sim, wait_for_upgrade)
 
-    compiled = compiled_chart(chart_path)
+    compiled = compile_via_sim(chart_path)
     assert compiled is not None
+    assert wait_for_upgrade(compiled)
 
     evaluator, id_maps, report = dd.build_static_doc(compiled)
     order = id_maps['element_order']
@@ -1157,3 +1162,70 @@ def test_a_zero_size_rect_draws_nothing_like_legacy(doc_elements):
     assert rows, 'the item is still emitted'
     assert tuple(f[rows[0], 19:21]) == (0.0, 0.0), (
         'a zero-size fill must reach the executor as zero, which it skips')
+
+
+def _bitmap_font(tmp_path, cols=16, rows=16, advance=10.0):
+    from analysis.player.render.storyboard.bitmap_font import BitmapFont
+    atlas = tmp_path / 'font.png'
+    atlas.write_bytes(b'')
+    return BitmapFont(texture_path=str(atlas), cols=cols, rows=rows,
+                      line_spacing=0.0, default_advance=advance, advances={})
+
+
+def test_bitmaptext_emits_one_glyph_item_per_character(doc_elements, tmp_path):
+    # An SM bitmap font is a GRID atlas, so a glyph is a sheet cell: the
+    # codepoint IS the frame index, and no machinery a sheet sprite lacks is
+    # needed.
+    font = _bitmap_font(tmp_path)
+    el = _element('bitmaptext', 0, text='AB', font=font)
+    evaluator, id_maps, report = dd.build_static_doc(_compiled([], tree=[el]))
+
+    assert 'bitmaptext' not in report['element_skips'], 'bitmaptext draws now'
+    assert [role for _e, role, _a in id_maps['element_order']] == ['glyph'] * 2
+
+    u, f = _blit_lanes(evaluator, 1.0)
+    blits = [i for i in range(len(u)) if u[i, 0] == sn.OP_BLIT]
+    assert len(blits) == 2
+    assert [int(u[i, 3]) for i in blits] == [ord('A'), ord('B')], 'frame = codepoint'
+    # Centred on the actor: two 10px advances span [-10, +10], so the glyph
+    # centres sit at -5 and +5.
+    assert [round(float(f[i, 2]), 3) for i in blits] == [-5.0, 5.0]
+    assert all(round(float(f[i, 5]), 3) == 0.0 for i in blits), 'centres on y=0'
+    assert all(tuple(f[i, 17:19]) == (0.5, 0.5) for i in blits)
+
+
+def test_bitmaptext_glyph_offsets_ride_inside_the_element_rotation(
+        doc_elements, tmp_path):
+    # The per-glyph offset is a LINK, not an x lane, so it composes inside the
+    # element's own rotation - a rotated string must rotate as a string, not
+    # smear along the unrotated axis.
+    font = _bitmap_font(tmp_path)
+    el = _element('bitmaptext', 0, text='AB', font=font)
+    el.timelines['rotation'] = EventTimeline([], rest=(90.0,))
+    evaluator, _id_maps, _report = dd.build_static_doc(
+        _compiled([], tree=[el]))
+
+    u, f = _blit_lanes(evaluator, 1.0)
+    blits = [i for i in range(len(u)) if u[i, 0] == sn.OP_BLIT]
+    assert len(blits) == 2
+    # Rotated 90 degrees, the run advances along Y instead of X.
+    xs = [round(float(f[i, 2]), 3) for i in blits]
+    ys = [round(float(f[i, 5]), 3) for i in blits]
+    assert all(abs(x) < 1e-3 for x in xs), f'x should not advance: {xs}'
+    assert ys == [-5.0, 5.0] or ys == [5.0, -5.0], f'y should advance: {ys}'
+
+
+def test_a_codepoint_outside_the_atlas_grid_draws_nothing_but_advances(
+        doc_elements, tmp_path):
+    # legacy's `font.cell` returns None outside the grid and draws nothing,
+    # but the pen still moved - so the REST of the string must not shift.
+    font = _bitmap_font(tmp_path, cols=8, rows=8)  # 64 cells; 'A' is 65
+    el = _element('bitmaptext', 0, text='A!', font=font)
+    evaluator, _id_maps, _report = dd.build_static_doc(
+        _compiled([], tree=[el]))
+
+    u, f = _blit_lanes(evaluator, 1.0)
+    blits = [i for i in range(len(u)) if u[i, 0] == sn.OP_BLIT]
+    assert len(blits) == 1, "'A' (65) is outside an 8x8 grid; '!' (33) is not"
+    assert int(u[blits[0], 3]) == ord('!')
+    assert round(float(f[blits[0], 2]), 3) == 5.0, 'the dropped glyph still advanced'

@@ -1236,6 +1236,8 @@ class _Builder:
         if element.kind in _FILL_KINDS:
             self._sn_element_item(self._sn.SRC_FILL, 0, element, ancestors)
             return True
+        if element.kind == 'bitmaptext':
+            return self._emit_bitmaptext(element, ancestors)
         if element.kind not in _IMAGE_KINDS:
             self._count_skip(element.kind)
             return False
@@ -1327,6 +1329,74 @@ class _Builder:
                                 b_id=b_id, b_rest=b_rest)
         if ancestors:
             self._emit_element_links(element, ancestors)
+
+    def _emit_bitmaptext(self, element, ancestors=()) -> bool:
+        """Emit one item per character: an SM bitmap font is a GRID atlas, so a
+        glyph is a sheet cell and needs no machinery a sheet sprite lacks - the
+        codepoint IS the cell index on the frame lane.
+
+        Layout needs only the advances, all known at compile time. Legacy's
+        destination is `pen + (advance - cell_w)/2` sized `cell_w`, so the
+        glyph CENTRE is `pen + advance/2` and the cell size cancels; the same
+        cancellation puts every centre on y=0. That matters because the cell's
+        logical size depends on the atlas pixels, which only the executor
+        knows.
+
+        The run is centred on the actor, which is SM's BitmapText default and
+        what the engine draws. It deliberately does NOT reproduce legacy, which
+        shifts by `-origin * (text width, cell height)` in `_paint_element` and
+        THEN starts its pen at another `-width/2, -cell_h/2` inside
+        `_paint_bitmaptext` - a double shift a sprite does not get (a sprite
+        draws `QRectF(0, 0, w, h)` in that same shifted space). That is the
+        centring bug this compiler just fixed on its own side, so copying it
+        would be bug-for-bug against a reference that is not the oracle.
+        """
+        font = element.font
+        if font is None or not element.text:
+            self._count_skip('bitmaptext')
+            return False
+        image_id = self._image_ids.get(font.texture_path)
+        if image_id is None:
+            image_id = len(self._image_ids)
+            self._image_ids[font.texture_path] = image_id
+            self._image_paths[image_id] = font.texture_path
+        cells = max(1, int(font.cols)) * max(1, int(font.rows))
+        self._image_grids.setdefault(image_id, (int(font.cols), int(font.rows)))
+
+        codepoints = [ord(char) for char in element.text]
+        advances = [font.advance(cp) for cp in codepoints]
+        pen = -sum(advances) / 2.0
+        emitted = 0
+        for codepoint, advance in zip(codepoints, advances):
+            centre = pen + advance / 2.0
+            pen += advance
+            if not 0 <= codepoint < cells:
+                # Outside the atlas grid: legacy's `font.cell` returns None and
+                # draws nothing, but the pen still advanced.
+                continue
+            self._sn_glyph_item(image_id, codepoint, centre, element, ancestors)
+            emitted += 1
+        if not emitted:
+            self._count_skip('bitmaptext')
+        return bool(emitted)
+
+    def _sn_glyph_item(self, image_id: int, codepoint: int, centre: float,
+                       element, ancestors) -> None:
+        """One glyph of a bitmaptext run, placed by a constant offset link so
+        the offset rides INSIDE the element's own rotation and scale."""
+        kwargs = self._element_visible_kwarg(element)
+        kwargs['frame_rest'] = float(codepoint)
+        self._builder.item(_SCREEN_ID, self._sn.SRC_IMAGE, image_id,
+                           additive=bool(element.additive), **kwargs)
+        self._builder.item_tag(
+            _SCREEN_ID, self._tag_element(element, 'glyph', ancestors))
+        self._builder.item_box(_SCREEN_ID, origin_x=0.5, origin_y=0.5)
+        self._emit_element_tint(element)
+        for link_element in (*ancestors, element):
+            self._builder.item_link(
+                _SCREEN_ID, **self._element_link_kwargs(link_element))
+        self._builder.item_link(_SCREEN_ID, x_rest=float(centre), y_rest=0.0,
+                                natural_w_rest=0.0, natural_h_rest=0.0)
 
     def _tag_element(self, element, role: str, ancestors=()) -> int:
         """Record `(element, role, ancestors)` in emission order and return its
@@ -2079,13 +2149,23 @@ def element_parity_report(evaluator, element_order, natural_of, sample_times,
         n_compared = 0
         n_unsized = 0
         n_projected = 0
+        n_unverified = 0
         for index, entry in enumerate(element_order):
             element, role, ancestors = entry
             record = drawn.get(index + 1)
             # Absent means the evaluator CULLED it - outside its time window,
             # hidden, or fully transparent. That is a legitimate per-frame
             # outcome, not a mismatch, so only drawn items are compared.
-            if record is None or role != 'content':
+            if record is None:
+                continue
+            if role != 'content':
+                # A glow pass draws the content's own quad, so its placement is
+                # already covered. A GLYPH is not: bitmaptext is centred
+                # engine-true here and legacy double-shifts it (see
+                # `_emit_bitmaptext`), so comparing them would report a
+                # systematic offset against a reference that is wrong. Counted
+                # so the gap is visible rather than silently uncompared.
+                n_unverified += role == 'glyph'
                 continue
             kind, frec = record
             # The two sides size a FILL differently and both are right: legacy
@@ -2123,7 +2203,7 @@ def element_parity_report(evaluator, element_order, natural_of, sample_times,
         times.append({'t': float(t), 'ok': not diffs, 'diffs': diffs,
                       'n_blit': len(drawn), 'n_compared': n_compared,
                       'n_unsized': n_unsized, 'n_projected': n_projected,
-                      'max_corner_err': worst})
+                      'n_unverified': n_unverified, 'max_corner_err': worst})
     return {
         'times': times,
         'all_ok': all(r['ok'] for r in times),
@@ -2155,6 +2235,7 @@ def format_element_parity_report(report) -> str:
         detail = '' if r['ok'] else f"  diffs={[d[:2] for d in r['diffs'][:4]]}"
         unsized = f" unsized={r['n_unsized']}" if r['n_unsized'] else ''
         unsized += f" 3d={r['n_projected']}" if r['n_projected'] else ''
+        unsized += f" glyphs={r['n_unverified']}" if r['n_unverified'] else ''
         lines.append(f"  t={r['t']:8.3f}  drawn={r['n_blit']:>4} "
                      f"compared={r['n_compared']:>4}{unsized} "
                      f"corner_err={r['max_corner_err']:.3f}px{detail}")
