@@ -225,6 +225,15 @@ fn mat3_to_mat4(m: &Mat3) -> crate::camera::Mat4 {
     o
 }
 
+/// A 4x4 translation, for lifting the content-centring offset into the
+/// projected path (row-vector convention, matching `camera::compose`).
+fn translate4(tx: f32, ty: f32) -> crate::camera::Mat4 {
+    let mut m = crate::camera::IDENTITY;
+    m[12] = tx;
+    m[13] = ty;
+    m
+}
+
 fn mat4_to_mat3(m: &crate::camera::Mat4) -> Mat3 {
     let mut o = [0.0f32; 9];
     for (row, src) in [0usize, 1, 3].iter().enumerate() {
@@ -286,7 +295,11 @@ fn local(link: &TransformState, flip: bool, leaf: bool) -> Mat3 {
 /// mapping capture coords onto the design screen; crop is the leaf's
 /// `(left, top, right, bottom)` insets (top/bottom swapped under flip),
 /// or None when no edge is cropped.
-pub fn compose_links(links: &[TransformState], flip_base_y: bool) -> Option<(Mat3, f32, [f32; 4])> {
+pub fn compose_links(
+    links: &[TransformState],
+    flip_base_y: bool,
+    projection: Option<&crate::camera::Mat4>,
+) -> Option<(Mat3, f32, [f32; 4])> {
     if links.is_empty() {
         return None;
     }
@@ -323,23 +336,36 @@ pub fn compose_links(links: &[TransformState], flip_base_y: bool) -> Option<(Mat
         return None;
     }
 
-    // _TO_CONTENT = translate(-320, -240) applied on the content side.
-    // Under the centered design projection the z=0 plane maps 1:1, so
-    // the normalized homography IS this affine 3x3. A chain carrying
-    // out-of-plane terms folds through its camera at the item level
-    // (evaluate.rs::fold_projection), so the z=0 block is the right
-    // hand-off here too.
-    let world = match world4 {
-        Some(w4) => mat4_to_mat3(&w4),
-        None => world.expect("non-empty links"),
-    };
     // Content is centred about its OWN box, so the offset is the leaf's
     // natural size - a drawable sized to what it draws still composes
     // correctly. The 640x480 default keeps every design-sized leaf identical.
     let leaf_link = &links[leaf];
-    let to_content = translate3(-(leaf_link.natural_w / 2.0),
-                                -(leaf_link.natural_h / 2.0));
-    let h = mul3(&to_content, &world);
+    let (tcx, tcy) = (-(leaf_link.natural_w / 2.0), -(leaf_link.natural_h / 2.0));
+
+    // THE PROJECTION MUST HAPPEN BEFORE THE COLLAPSE. `homography(model, proj)`
+    // (transform3d.py:366) is `minor{0,1,3}(model @ proj)` - the 4x4s multiply
+    // first and the z row/column is dropped only afterwards. Collapsing to a
+    // Mat3 up front and folding the camera onto THAT (the old shape) throws
+    // away the Z the perspective divide takes its w from, so an out-of-plane
+    // chain came out a flat squash: the fold measured as a 0.00px change.
+    // Mirrors field_compose.py:216-218 - `project_with_verdict(_TO_CONTENT @
+    // world, projection, _CORNERS)` - with _TO_CONTENT lifted into 4D too.
+    let h = match (world4, projection) {
+        (Some(w4), Some(proj)) => {
+            // `mat_mul(a, b) = a @ b`, so this is `_TO_CONTENT @ world` -
+            // the content centring applies INNERMOST, matching the Mat3 path's
+            // `mul3(&to_content, &world)`. (`camera::compose(parent, local)`
+            // is `local @ parent`, i.e. reversed; using it here silently
+            // produced `world @ _TO_CONTENT` and 2780px of corner error.)
+            let model = crate::camera::mat_mul(&translate4(tcx, tcy), &w4);
+            mat4_to_mat3(&crate::camera::mat_mul(&model, proj))
+        }
+        (Some(w4), None) => mul3(&translate3(tcx, tcy), &mat4_to_mat3(&w4)),
+        // A planar chain never leaves z=0, where the centered design
+        // projection maps 1:1 - the affine Mat3 IS the homography, and the
+        // exact 2D path stays exact.
+        (None, _) => mul3(&translate3(tcx, tcy), &world.expect("non-empty links")),
+    };
     if det3(&h).abs() < MIN_DET {
         return None;
     }
@@ -534,7 +560,7 @@ mod tests {
         let mut max_err = 0.0f32;
         let mut checked = 0;
         for case in &cases {
-            let got = compose_links(&case.links, case.flip_base_y);
+            let got = compose_links(&case.links, case.flip_base_y, None);
             match (&case.expected, got) {
                 (None, None) => {}
                 (Some(_), None) => panic!("{}: expected visible, got None", case.name),
@@ -584,7 +610,7 @@ mod tests {
     fn identity_link_is_centered_translate() {
         // A single rest link sits at the design centre offset by
         // _TO_CONTENT: content (320,240) -> (0,0). H maps that way.
-        let (h, alpha, crop) = compose_links(&[TransformState::default()], false).unwrap();
+        let (h, alpha, crop) = compose_links(&[TransformState::default()], false, None).unwrap();
         assert_eq!(alpha, 1.0);
         assert!(crop_is_rest(&crop));
         // v @ H for v=(320,240,1): x' = 320 - 320 = 0.
@@ -604,7 +630,7 @@ mod tests {
             natural_h: 100.0,
             ..Default::default()
         };
-        let (h, _, _) = compose_links(&[leaf], false).unwrap();
+        let (h, _, _) = compose_links(&[leaf], false, None).unwrap();
         let (vx, vy) = (100.0f32, 50.0f32);
         let px = vx * h[0] + vy * h[3] + h[6];
         let py = vx * h[1] + vy * h[4] + h[7];
@@ -645,12 +671,71 @@ mod tests {
             ..Default::default()
         };
         assert!(is_planar(&planar) && is_planar(&parent));
-        let (h, _, _) = compose_links(&[parent, planar], false).unwrap();
+        let (h, _, _) = compose_links(&[parent, planar], false, None).unwrap();
         let expect = mul3(
             &translate3(-(DESIGN_W / 2.0), -(DESIGN_H / 2.0)),
             &mul3(&local(&planar, false, true), &local(&parent, false, false)),
         );
         assert_eq!(h, expect);
+    }
+
+    #[test]
+    fn a_tipped_chain_with_a_camera_makes_a_trapezoid_not_a_squash() {
+        // The perspective divide has to happen while the 4x4 still has its Z:
+        // `homography(model, proj)` is `minor{0,1,3}(model @ proj)`, so the
+        // projection multiplies BEFORE the z row/column is dropped. Collapsing
+        // first and folding a camera onto the resulting Mat3 (the shape this
+        // replaced) is arithmetic on data with no depth left, and measured as
+        // a 0.00px change on a chart whose whole effect is `rotationy`.
+        //
+        // A y-axis tip must therefore make the near edge GROW and the far edge
+        // SHRINK. Without the fold both edges keep the same height and the
+        // quad merely narrows - the flat-squash signature.
+        let tipped = TransformState {
+            rotation_y: 45.0,
+            ..Default::default()
+        };
+        assert!(!is_planar(&tipped));
+        let proj = crate::camera::design_projection(
+            45.0, DESIGN_W, DESIGN_H, [DESIGN_W / 2.0, DESIGN_H / 2.0], 1772.7);
+
+        let edge_height = |h: &Mat3, x: f32| {
+            let top = project_point(h, x, 0.0);
+            let bottom = project_point(h, x, DESIGN_H);
+            (bottom.1 - top.1).abs()
+        };
+
+        let (flat, _, _) = compose_links(&[tipped.clone()], false, None).unwrap();
+        let (proj_h, _, _) =
+            compose_links(&[tipped], false, Some(&proj)).unwrap();
+
+        // Unprojected: both edges identical (the squash).
+        let (fl, fr) = (edge_height(&flat, 0.0), edge_height(&flat, DESIGN_W));
+        assert!((fl - fr).abs() < 1e-3, "unprojected edges differ: {fl} vs {fr}");
+
+        // Projected: one edge genuinely taller than the other. NOTE this
+        // pins that a camera is APPLIED, not that it is applied correctly -
+        // a reversed `_TO_CONTENT @ world` still trapezoids, just in the
+        // wrong place. The order is guarded by the Python parity harness
+        // (test_out_of_plane_chain_matches_the_legacy_homography), which
+        // compares the whole homography against TransformChannel.
+        // Projected: one edge genuinely taller than the other.
+        let (pl, pr) = (edge_height(&proj_h, 0.0), edge_height(&proj_h, DESIGN_W));
+        assert!(
+            (pl - pr).abs() > 0.1 * pl.max(pr),
+            "a camera must make a trapezoid, got {pl} vs {pr}"
+        );
+    }
+
+    /// Apply a column-vector Mat3 to a content point, with the divide.
+    fn project_point(h: &Mat3, x: f32, y: f32) -> (f32, f32) {
+        let px = x * h[0] + y * h[3] + h[6];
+        let py = x * h[1] + y * h[4] + h[7];
+        let pw = x * h[2] + y * h[5] + h[8];
+        if pw.abs() < 1e-9 {
+            return (px, py);
+        }
+        (px / pw, py / pw)
     }
 
     #[test]
@@ -664,7 +749,7 @@ mod tests {
             ..Default::default()
         };
         assert!(!is_planar(&tipped));
-        let (h, _, _) = compose_links(&[tipped], false).unwrap();
+        let (h, _, _) = compose_links(&[tipped], false, None).unwrap();
         // A content point one unit "down" from centre: (320, 241).
         let (vx, vy) = (320.0f32, 241.0f32);
         let px = vx * h[0] + vy * h[3] + h[6];
@@ -688,7 +773,7 @@ mod tests {
             rotation_x: 60.0,
             ..Default::default()
         };
-        let (h, _, _) = compose_links(&[parent, child], false).unwrap();
+        let (h, _, _) = compose_links(&[parent, child], false, None).unwrap();
         let (vx, vy) = (320.0f32, 240.0f32);
         let px = vx * h[0] + vy * h[3] + h[6];
         let py = vx * h[1] + vy * h[4] + h[7];
@@ -702,17 +787,17 @@ mod tests {
             hidden: 1.0,
             ..Default::default()
         };
-        assert!(compose_links(&[hidden], false).is_none());
+        assert!(compose_links(&[hidden], false, None).is_none());
         let faint = TransformState {
             alpha: 0.0,
             ..Default::default()
         };
-        assert!(compose_links(&[faint], false).is_none());
+        assert!(compose_links(&[faint], false, None).is_none());
         let flat = TransformState {
             zoom_x: 0.0,
             ..Default::default()
         };
-        assert!(compose_links(&[flat], false).is_none());
+        assert!(compose_links(&[flat], false, None).is_none());
     }
 
     #[test]

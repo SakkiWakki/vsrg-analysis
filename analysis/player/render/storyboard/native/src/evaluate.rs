@@ -574,7 +574,11 @@ fn item_transform(
 
     let links: Vec<crate::transform::TransformState> =
         item.links.iter().map(|l| sample_link(ch, l, t)).collect();
-    let (h, alpha, crop) = crate::transform::compose_links(&links, item.flip_base_y)?;
+    // The camera goes INTO the chain fold, not onto its result: the 4x4s must
+    // multiply before the z row/column is dropped (see compose_links).
+    let cam = item.projection.map(|c| c.matrix(ch, t));
+    let (h, alpha, crop) =
+        crate::transform::compose_links(&links, item.flip_base_y, cam.as_ref())?;
     // compose_links returns row-vector H (translation in the bottom row,
     // indices 6/7); the BLIT record is column-vector (M @ p), so transpose.
     let mat = [
@@ -657,26 +661,21 @@ fn emit_feed(
 
     let states: Vec<crate::transform::TransformState> =
         links.iter().map(|l| sample_link(ch, l, t)).collect();
-    let Some((h, alpha, _crop)) = crate::transform::compose_links(&states, flip_base_y) else {
+    let cam = projection.map(|c| c.matrix(ch, t));
+    let Some((h, alpha, _crop)) =
+        crate::transform::compose_links(&states, flip_base_y, cam.as_ref())
+    else {
         return; // hidden / degenerate / faint chain drops the whole feed
     };
     // compose_links returns row-vector H; fed mats and the record are
     // column-vector, so transpose once before composing over each item.
     // The chain's crop is not applied: per-item crop fractions are of the
     // item's own box, not the chain's content box.
-    let mut chain = [
+    let chain = [
         h[0], h[3], h[6], //
         h[1], h[4], h[7], //
         h[2], h[5], h[8],
     ];
-    // The consumer chain's own camera. A field copy carrying rotation_x/y or
-    // z is a 3D turn, and without this fold it composes as a flat squash -
-    // the same perspective divide `emit_item_folded` applies per item, done
-    // once on the chain because every fed item shares it.
-    if let Some(cam) = projection {
-        let p = cam.matrix(ch, t);
-        chain = crate::camera::fold_projection(&chain, &p);
-    }
     for item in feed.items {
         emit_item_folded(doc, item, t, events, cache, schedule, Some((&chain, alpha)));
     }
@@ -749,9 +748,14 @@ fn emit_item_folded(
             *m *= zoom;
         }
     }
-    if let Some(cam) = item.projection {
-        let p = cam.matrix(ch, t);
-        mat = crate::camera::fold_projection(&mat, &p);
+    // A LINKED item already projected inside compose_links, where the 4x4
+    // still had its Z. Only the linkless TRS path folds here, and there the
+    // content is flat by construction so the collapse costs nothing.
+    if item.links.is_empty() {
+        if let Some(cam) = item.projection {
+            let p = cam.matrix(ch, t);
+            mat = crate::camera::fold_projection(&mat, &p);
+        }
     }
 
     let (src_kind, src_id, src_aux) = match item.source {

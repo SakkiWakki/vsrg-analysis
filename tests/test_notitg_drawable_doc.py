@@ -597,3 +597,29 @@ def test_each_sheet_element_gets_its_own_frame_lane():
     # And the lanes carry each sheet's OWN frames, not the first one's.
     assert set(rec.channels[slow['frame_id']]) == {0.0, 1.0}
     assert set(rec.channels[fast['frame_id']]) == {7.0, 9.0}
+
+
+def test_out_of_plane_chain_matches_the_legacy_homography(captured_notefield):
+    # A field chain that leaves the z=0 plane must carry the perspective
+    # divide, and carry it the RIGHT way round. Two failure modes this pins:
+    #   - no camera at all -> a flat squash (both edges the same height);
+    #     gat measured 72-235px of corner error against legacy.
+    #   - the camera applied as `world @ _TO_CONTENT` instead of
+    #     `_TO_CONTENT @ world` -> still a trapezoid, wrong place, 2780px.
+    # The Rust unit tests cannot see either: none of them compose a
+    # non-planar chain WITH a camera, and a shape assertion cannot tell the
+    # two multiplication orders apart. Comparing the whole homography against
+    # TransformChannel can.
+    tipped = fc.link_timelines({
+        'rotation_y': [Keyframe(0.0, (55.0,), 0.0, _EASE_LINEAR)],
+        'x': _instant(320.0), 'y': _instant(240.0),
+    })
+    inst = fc.instance('tippedA', 'proxy', 1, [tipped])
+    compiled = _compiled([inst])
+    evaluator, id_maps, _report = dd.build_static_doc(compiled)
+
+    rep = dd.parity_report(evaluator, id_maps, _effect(compiled),
+                           (0.0, 1.0, 2.5))
+    assert rep['all_ok'], dd.format_parity_report(rep)
+    assert rep['max_mat_err'] < 1e-3, (
+        f"out-of-plane chain diverges from legacy: {rep['max_mat_err']:.2e}")
