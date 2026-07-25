@@ -341,7 +341,11 @@ def _set_sample_params(f, texture) -> None:
     f.glBindTexture(GL_TEXTURE_2D, 0)
 
 
-def _build_program(frag_src, uniforms, vert_src=None):
+def _build_program(frag_src, uniforms, vert_src=None, quiet=False):
+    """Compile+link one program, or None. `quiet` suppresses the failure log
+    for an attempt the caller intends to RETRY - a chart frag is tried
+    faithfully first and again with int literals promoted, and shouting about
+    the first attempt made a recovered shader read as a broken one."""
     program = QOpenGLShaderProgram()
     built = (program.addShaderFromSourceCode(
                  QOpenGLShader.ShaderTypeBit.Vertex,
@@ -352,8 +356,9 @@ def _build_program(frag_src, uniforms, vert_src=None):
     program.bindAttributeLocation('a_pos', 0)
     program.bindAttributeLocation('a_uv', 1)
     if not (built and program.link()):
-        logger.warning('GLExecutor: quad program failed to build: %s',
-                       program.log())
+        if not quiet:
+            logger.warning('GLExecutor: quad program failed to build: %s',
+                           program.log())
         return None
     return program, {u: program.uniformLocation(u) for u in uniforms}
 
@@ -1251,12 +1256,21 @@ class GLExecutor:
         base = ('u_mat', 'u_tex', 'u_resolution', 'u_opacity')
         try:
             contract = notitg_compat.translate(frag_src, uv_source='varying')
-            built = _build_program(contract, base + tuple(names))
+            # Quiet: a chart authored desktop GLSL 1.20, whose implicit
+            # int->float casts an ES context rejects, is EXPECTED to fail here
+            # and build on the retry. Logging the first attempt made every
+            # recovered shader look like a broken one.
+            built = _build_program(contract, base + tuple(names), quiet=True)
             if built is None:
                 relaxed = notitg_compat.translate(
                     notitg_compat.promote_int_literals(frag_src),
                     uv_source='varying')
                 built = _build_program(relaxed, base + tuple(names))
+                if built is not None:
+                    self._log_once(
+                        'shader_promoted',
+                        'GLExecutor: per-item frag built after int-literal '
+                        'promotion (the chart is desktop GLSL 1.20)')
         except (ValueError, OSError) as exc:
             self._log_once('shader_build', f'GLExecutor: per-item frag failed to translate ({exc}), drawn unshaded')
             return None
