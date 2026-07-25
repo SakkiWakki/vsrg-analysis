@@ -404,3 +404,14 @@ def test_an_interrupted_ramp_replays_its_partial_value():
     assert _replay(ts, vals, durs, eases, tl._rest, 1.999) == pytest.approx(
         20.0, abs=0.1)
     assert _replay(ts, vals, durs, eases, tl._rest, 2.001) == 0.0
+
+
+def test_an_interrupted_curved_ease_keeps_its_shape():
+    # Shortening the DURATION of an eased span replays the whole ease curve
+    # over the surviving part: right at both ends, wrong through the middle.
+    # Corrupted's alpha came out 13% low that way.
+    tl = SegmentTimeline(rest=0.0)
+    tl.add_ramp(0.0, 10.0, 0.0, 100.0, -3)   # an SM tween curve
+    tl.add_hold(2.0, 0.0)
+    tl.finish()
+    assert _replays_the_timeline(tl, 0.0, 4.0) < 0.5

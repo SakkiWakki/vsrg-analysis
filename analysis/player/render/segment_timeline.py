@@ -38,6 +38,11 @@ KIND_SLAB = 3
 
 _EASE_LINEAR = 0
 
+# Step for tracing an interrupted CURVED ease, whose duration can no longer
+# stand in for its parameter (`_trace`). One display frame: finer than the
+# thing being reconstructed is sampled at.
+_EASE_TRACE_DT = 1.0 / 60.0
+
 
 def _sin_cycles(u: float) -> float:
     return math.sin(u * 2.0 * math.pi)
@@ -446,8 +451,16 @@ class SegmentTimeline:
                 state['cut'] = True
                 return
             if dur and t + dur > cutoff:
-                dur = cutoff - t
                 state['cut'] = True
+                if ease_id != _EASE_LINEAR:
+                    # Shortening the DURATION of an eased span would replay
+                    # the whole ease curve over the surviving part, so the
+                    # value is only right at the two ends and wrong through
+                    # the middle - 13% low across Corrupted's alpha. Trace the
+                    # survivor instead, at the resolution a curved ease needs.
+                    state['last'] = self._trace(idx, t, cutoff, emit)
+                    return
+                dur = cutoff - t
             state['last'] = t
             emit(t, v, dur, ease_id)
 
@@ -457,6 +470,21 @@ class SegmentTimeline:
 
         clipped.finish = finish
         return clipped
+
+    def _trace(self, idx: int, a: float, b: float, emit) -> float:
+        """Emit `[a, b)` of segment `idx` as linear steps following its own
+        value, and return the last breakpoint's time.
+
+        For a span whose shape the consumer's single linear ramp cannot
+        carry - a curved ease that got interrupted, so its duration can no
+        longer stand in for its parameter."""
+        steps = max(1, int(math.ceil((b - a) / _EASE_TRACE_DT)))
+        step = (b - a) / steps
+        last = a
+        for k in range(steps):
+            last = a + k * step
+            emit(last, self._segment_value(idx, last), step)
+        return last
 
     def _segment_breakpoints(self, idx: int, t0: float, emit, osc_dt) -> None:
         """Append one segment's breakpoints through `emit` (see
