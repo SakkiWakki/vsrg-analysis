@@ -588,3 +588,28 @@ def test_a_doubleres_image_draws_at_half_its_pixel_size(gl):
 def test_a_sheet_without_a_spec_still_divides_by_its_grid(gl):
     ex = GLExecutor({}, [(16.0, 16.0)])
     assert ex._logical_of(0, 64.0, 32.0, 4, 2) == (16.0, 16.0)
+
+
+def test_a_curtain_fill_covers_the_target_not_one_pixel(gl):
+    # A field-instance curtain is a SCREEN-SIZED quad the chart stretches, and
+    # the link chain maps a 640x480 content box onto the screen. Sizing a fill
+    # from a unit box drew every curtain one design pixel wide, so it masked
+    # nothing - which is what AFT rigs use curtains for.
+    b = sn.DocBuilder(8.0, 8.0)
+    b.item(0, sn.SRC_IMAGE, 0, sx_rest=8.0, sy_rest=8.0)   # something to mask
+    b.item(0, sn.SRC_FILL, 0)                              # the curtain
+    ev = b.finish()
+
+    images = {0: _solid(1, 1, QColor(0, 0, 255, 255))}
+    ex = GLExecutor(images, [(8.0, 8.0)])
+    u, f = _frames(ev, 0.0)
+    f = f.copy()
+    fill = next(i for i in range(u.shape[0])
+                if u[i, 0] == sn.OP_BLIT and u[i, 1] == sn.SRC_FILL)
+    f[fill, 10:13] = (1.0, 0.0, 0.0)
+
+    screen = ex.execute(u, f)
+    assert not ex.broken
+    # The curtain must cover the blue image everywhere, not just one texel.
+    assert _rgb(screen, 6, 6) == pytest.approx((255, 0, 0), abs=2)
+    assert _rgb(screen, 1, 1) == pytest.approx((255, 0, 0), abs=2)

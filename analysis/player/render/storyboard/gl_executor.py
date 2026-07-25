@@ -1000,12 +1000,16 @@ class GLExecutor:
         entry = self._programs[1]
         if entry is None:
             return
-        # A fill has no texture to size from, so its natural box is the UNIT
-        # quad the mat3 scales - which is what an AFT curtain relies on. An
-        # item that DOES declare a size (a storyboard Quad, whose w/h are its
-        # zoomto) gets that box instead, and the origin then centres it the
-        # same way it centres a sprite.
-        lw, lh = _draw_box((1.0, 1.0), frec)
+        # A fill has no texture to size from, so its natural box is the
+        # TARGET's own box - the 640x480 design content a link chain maps onto
+        # the screen. A field-instance curtain is a screen-sized quad the
+        # chart then stretches (`stretchto(sw*-0.5, ...)`), so a unit box drew
+        # every curtain one design pixel wide and masked nothing.
+        #
+        # An item that DECLARES a size (a storyboard Quad, whose w/h are its
+        # zoomto) overrides this, and the origin then centres it the same way
+        # it centres a sprite.
+        lw, lh = _draw_box((float(tw), float(th)), frec)
         if lw <= 0.0 or lh <= 0.0:
             return
         cx0, cy0, cx1, cy1 = _crop_unit_quad(frec)
