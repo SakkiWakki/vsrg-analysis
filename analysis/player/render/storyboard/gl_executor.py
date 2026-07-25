@@ -13,12 +13,13 @@ pops the target stack. ``execute`` returns the screen drawable's FBO read
 back as a ``QImage`` (``toImage``) for tests.
 
 Record layout (frozen; mirrors native/src/evaluate.rs, U_STRIDE=10 /
-F_STRIDE=20) - identical to RasterExecutor:
+F_STRIDE=22) - identical to RasterExecutor:
 
   U lanes: [kind, a, b, c, blend, shader+1, clip+1, screen_space,
             uf_offset, uf_count]
   F lanes: mat3 [0..9], opacity [9], tint rgb [10..13],
-           crop l,t,r,b [13..17], reserved [17..20]
+           crop l,t,r,b [13..17], origin x,y [17..19],
+           size w,h [19..21] (< 0 = natural), reserved [21]
 
 The mat3 is the RECORD's column-vector convention (p' = M @ p, translation
 in lanes 2/5), source logical -> target logical; homographies welcome (the
@@ -100,6 +101,13 @@ _U_UF_COUNT = 9
 _F_OPACITY = 9
 _F_TINT = 10  # ..13
 _F_CROP = 13  # ..17 (l, t, r, b fractions of the SOURCE logical size)
+_F_ORIGIN = 17  # ..19 (x, y fractions of the item's own drawn size)
+_F_SIZE = 19  # ..21 (absolute w, h overriding the natural box; < 0 = natural)
+
+# The record strides this executor reads, so a hand-built record can bind to
+# them instead of restating a number that drifts when a lane is added.
+_U_STRIDE_LANES = 10
+_F_STRIDE_LANES = 22
 
 # Op / source / clear codes (kept in sync with storyboard_native; the
 # executor runs without importing it at module load so tests importorskip
@@ -940,7 +948,15 @@ class GLExecutor:
         texture, sw, sh = uploaded[0], uploaded[1], uploaded[2]
         bound_sub = uploaded[3] if len(uploaded) > 3 else None
         sub = _compose_cell(bound_sub, cell)
+        # An absolute size REPLACES the natural box rather than scaling it
+        # (SM zoomto/setsize); the item's scale lanes still multiply on top,
+        # already folded into mat3.
         lw, lh = logical
+        size_w, size_h = float(frec[_F_SIZE]), float(frec[_F_SIZE + 1])
+        if size_w >= 0.0:
+            lw = size_w
+        if size_h >= 0.0:
+            lh = size_h
         if lw <= 0.0 or lh <= 0.0 or sw <= 0 or sh <= 0:
             return
         # Crops are fractions of the source's LOGICAL box; inset the quad
@@ -976,7 +992,12 @@ class GLExecutor:
                                 sw, sh, shaded, (x0, y0, x1, y1),
                                 (u0, v0, u1, v1))
             return
-        x0, y0 = crop_l * lw, crop_t * lh
+        # The origin shifts the whole draw box before the transform, so a
+        # centred actor (0.5, 0.5) draws about its own middle instead of
+        # hanging down-right of its position by half its size.
+        off_x = float(frec[_F_ORIGIN]) * lw
+        off_y = float(frec[_F_ORIGIN + 1]) * lh
+        x0, y0 = crop_l * lw - off_x, crop_t * lh - off_y
         x1, y1 = x0 + vis_fw * lw, y0 + vis_fh * lh
         # Sample fractions compose into the bound sub-rect (an overscanned
         # capture's design-box region); the flip to the y-up FBO texture

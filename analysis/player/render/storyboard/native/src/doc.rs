@@ -219,6 +219,16 @@ pub struct Item {
     /// (None = the parent's/no projection, a plain 2D blit).
     pub projection: Option<CameraRef>,
     pub space: Space,
+    /// Draw-box origin as a fraction of the item's own size, subtracted from
+    /// the quad before the transform (SM's `translate(-origin*w, -origin*h)`).
+    /// Rests at the top-left (0, 0); a centred actor is (0.5, 0.5). Static,
+    /// not a channel - SM's halign/valign are set, not tweened.
+    pub origin: [f32; 2],
+    /// Absolute draw size overriding the source's NATURAL box, per axis,
+    /// sampled each frame. Negative means "use the natural size" - the same
+    /// sentinel `_draw_size` tests, because `zoomto`/`setsize` REPLACE the
+    /// basis that `scale_x/y` then multiplies rather than scaling it.
+    pub size: [ChannelRef; 2],
     pub opacity: ChannelRef,
     pub tint: [ChannelRef; 3],
     /// Additive-blend gate, sampled every frame: >= 0.5 draws Additive,
@@ -252,6 +262,8 @@ impl Item {
             fed_mat: None,
             projection: None,
             space: Space::Scene,
+            origin: [0.0, 0.0],
+            size: [ChannelRef::constant(-1.0); 2],
             opacity: ChannelRef::constant(1.0),
             tint: [ChannelRef::constant(1.0); 3],
             blend_add: ChannelRef::constant(0.0),

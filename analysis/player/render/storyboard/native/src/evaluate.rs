@@ -62,8 +62,8 @@ pub const SRC_LINES: u32 = 4;
 /// count == 0 => the op binds no uniforms (offset is then unused).
 pub const U_STRIDE: usize = 10;
 /// f32 lanes per op record: mat3 (row-major) + opacity + tint rgb +
-/// crop ltrb + 3 reserved.
-pub const F_STRIDE: usize = 20;
+/// crop ltrb + origin xy + size xy + 1 reserved.
+pub const F_STRIDE: usize = 22;
 
 #[derive(Default)]
 pub struct DrawSchedule {
@@ -830,6 +830,10 @@ fn emit_item_folded(
             }
         }
     }
+    f[17] = item.origin[0];
+    f[18] = item.origin[1];
+    f[19] = ch.sample(item.size[0], t);
+    f[20] = ch.sample(item.size[1], t);
 
     let (uniform_offset, uniform_count) = if item.shader.is_some() && !item.uniforms.is_empty() {
         let offset = schedule.uf.len() as u32;

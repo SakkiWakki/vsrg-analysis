@@ -30,6 +30,7 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtGui import QColor, QImage
 
+from analysis.player.render.storyboard import gl_executor as _gl
 from analysis.player.render.storyboard.gl_executor import GLExecutor
 
 
@@ -239,7 +240,12 @@ def test_opacity_ramp_changes_intensity_between_times(gl):
 
 # --- A4: retain decay (GL constant-alpha modulate) ---
 
-_U_STRIDE, _F_STRIDE, _CLEAR_RETAIN_CODE = 10, 20, 2
+# Taken from the executor rather than restated: a hand-built record must
+# match the stride the evaluator emits, and a stale copy silently indexes
+# past the end of the row.
+_U_STRIDE = _gl._U_STRIDE_LANES
+_F_STRIDE = _gl._F_STRIDE_LANES
+_CLEAR_RETAIN_CODE = 2
 
 
 def _rec_row(kind, a=0, b=0, mat=None, opacity=1.0, tint=(1.0, 1.0, 1.0)):
@@ -249,6 +255,9 @@ def _rec_row(kind, a=0, b=0, mat=None, opacity=1.0, tint=(1.0, 1.0, 1.0)):
     f[:9] = mat if mat is not None else [1, 0, 0, 0, 1, 0, 0, 0, 1]
     f[9] = opacity
     f[10:13] = tint
+    # Negative size = "use the source's natural box"; a zeroed lane would
+    # mean an explicit zero-size draw, which is correctly invisible.
+    f[_gl._F_SIZE:_gl._F_SIZE + 2] = -1.0
     return u, f
 
 

@@ -1176,8 +1176,48 @@ class _Builder:
         kwargs.update(self._element_visible_kwarg(element))
         self._builder.item(_SCREEN_ID, self._sn.SRC_IMAGE, image_id,
                            additive=bool(element.additive), **kwargs)
+        self._emit_element_box(element)
+        self._emit_element_tint(element)
         if ancestors:
             self._emit_element_links(element, ancestors)
+
+    def _emit_element_box(self, element) -> None:
+        """Attach the element's draw-box origin and any absolute size.
+
+        The origin is why an unforwarded element lands displaced: SM draws an
+        actor about `origin` (0.5, 0.5 by default) while a bare item quad
+        spans (0,0)-(w,h), so every element hung down-right by half its own
+        size. `size_x`/`size_y` carry `zoomto`/`setsize`, which REPLACE the
+        natural basis - a negative rest keeps the natural size.
+
+        `fit_mode`/`fit_*` (ScaleToCover / ScaleToFitInside) are NOT handled:
+        the fitted size is a function of the natural size, which only the
+        executor knows, so it needs its own lanes rather than this override."""
+        origin_x, origin_y = getattr(element, 'origin', (0.0, 0.0))
+        kwargs = {'origin_x': float(origin_x), 'origin_y': float(origin_y)}
+        for axis in ('x', 'y'):
+            timeline = element.timelines.get(f'size_{axis}')
+            if timeline is None:
+                continue
+            chan_id, rest = self._channel(timeline)
+            kwargs[f'size_{axis}_id'] = chan_id
+            kwargs[f'size_{axis}_rest'] = rest
+        self._builder.item_box(_SCREEN_ID, **kwargs)
+
+    def _emit_element_tint(self, element) -> None:
+        """Attach the element's flat diffuse rgb, when it carries one.
+
+        Per-corner gradients (`color_ul`/`ur`/`ll`/`lr`) are NOT handled - the
+        item tint is one colour for the whole quad, so a gradient would need
+        per-vertex colour."""
+        color = element.timelines.get('color')
+        if color is None:
+            return
+        chans = [self._channel(color, prop) for prop in range(3)]
+        (r_id, r_rest), (g_id, g_rest), (b_id, b_rest) = chans
+        self._builder.item_tint(_SCREEN_ID, r_id=r_id, r_rest=r_rest,
+                                g_id=g_id, g_rest=g_rest,
+                                b_id=b_id, b_rest=b_rest)
 
     def _emit_element_links(self, element, ancestors) -> None:
         """Attach the leaf's ancestor chain (root-first, leaf last) to the item

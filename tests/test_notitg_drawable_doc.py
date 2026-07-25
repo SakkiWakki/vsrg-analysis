@@ -842,3 +842,25 @@ def test_prepare_replay_carries_a_shaded_sampler(tmp_path):
         got_u, got_f = _blit_lanes(replayed, t)
         assert np.array_equal(got_u, want_u), f'u lanes differ at t={t}'
         assert np.allclose(got_f, want_f, atol=1e-6), f'f lanes differ at t={t}'
+
+
+def test_element_origin_and_size_reach_the_record(doc_elements, tmp_path):
+    # SM draws an actor about its `origin` (0.5, 0.5 by default) while a bare
+    # item quad spans (0,0)-(w,h), so an unforwarded origin hangs every
+    # element down-right by half its own size. `size_x/y` carry zoomto, which
+    # REPLACES the natural basis rather than scaling it.
+    asset = tmp_path / 'bar.png'
+    asset.write_bytes(b'')
+    el = _sprite(0, str(asset))
+    el.timelines['size_x'] = EventTimeline(
+        [Keyframe(0.0, (20.0,), 0.0, _EASE_LINEAR)], rest=(20.0,))
+    evaluator, _id_maps, _report = dd.build_static_doc(
+        _compiled([], tree=[el]))
+
+    u, f = _blit_lanes(evaluator, 0.0)
+    blits = [i for i in range(len(u)) if u[i, 0] == sn.OP_BLIT]
+    assert len(blits) == 1
+    row = blits[0]
+    assert tuple(f[row, 17:19]) == (0.5, 0.5), 'element origin not forwarded'
+    assert float(f[row, 19]) == 20.0, 'zoomto width not forwarded'
+    assert float(f[row, 20]) < 0.0, 'unset height must stay natural'

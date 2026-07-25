@@ -300,6 +300,35 @@ impl DocBuilder {
         self.last_item(target).clip = Some(clip_id);
     }
 
+    /// Draw-box origin and absolute size on the item most recently pushed
+    /// onto `target`.
+    ///
+    /// `origin` is a fraction of the item's own drawn size, subtracted from
+    /// the quad before the transform - SM's `translate(-origin*w, -origin*h)`.
+    /// It rests at the TOP-LEFT, so an actor the chart centres (the SM
+    /// default, origin 0.5/0.5) must set it or it draws half its size off.
+    ///
+    /// `size_*` overrides the source's natural box per axis, sampled each
+    /// frame; negative keeps the natural size. `zoomto`/`setsize` REPLACE the
+    /// basis that scale then multiplies, so this is not another scale lane.
+    #[pyo3(signature = (target, origin_x=0.0, origin_y=0.0,
+                        size_x_id=-1, size_x_rest=-1.0,
+                        size_y_id=-1, size_y_rest=-1.0))]
+    fn item_box(
+        &mut self,
+        target: u32,
+        origin_x: f32,
+        origin_y: f32,
+        size_x_id: i64,
+        size_x_rest: f32,
+        size_y_id: i64,
+        size_y_rest: f32,
+    ) {
+        let item = self.last_item(target);
+        item.origin = [origin_x, origin_y];
+        item.size = [chan(size_x_id, size_x_rest), chan(size_y_id, size_y_rest)];
+    }
+
     /// Additive-blend gate on the item most recently pushed onto `target`,
     /// sampled every frame (>= 0.5 additive). Use instead of `item`'s
     /// `additive=` flag whenever the chart can change blending at runtime -
