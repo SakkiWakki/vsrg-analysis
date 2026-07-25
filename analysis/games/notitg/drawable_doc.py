@@ -2721,18 +2721,23 @@ def _legacy_field_draws(instances, base_hidden, t) -> dict:
             h, alpha, _crop, _extra = _fold_stage_chain(
                 stages, slots, inst, h, alpha, inst['transform'].crop_at(t),
                 None)
-        # A curtain covers the chart region outright - legacy's `batch.fill`
-        # takes the colour and the crop and ignores the transform entirely
-        # (qt_renderer._blit_field_instance), so its quad is the design box.
-        #
         # TRANSPOSED: a field transform is a ROW-vector homography ([x y 1] @ H,
         # the Qt QTransform layout `transform3d.qtransform_from_h` hands
         # straight to Qt), while the record mat3 and `_apply_h` are
         # column-vector. Comparing them untransposed reports every instance as
         # degenerate rather than as a placement difference.
-        quad = _DESIGN_QUAD if kind == 'fill' \
-            else _apply_h(np.asarray(h, dtype=float).reshape(3, 3).T,
-                          _DESIGN_QUAD)
+        #
+        # A CURTAIN IS TRANSFORMED TOO. Legacy's `batch.fill` takes the colour
+        # and the crop and paints the whole chart region, ignoring the
+        # transform it just computed (qt_renderer._blit_field_instance) - a
+        # simplification that coincides with the engine only while the curtain
+        # sits at identity, which is the common case and gat's. Anomaly parks
+        # one at x=-204480: the engine draws it off screen, the doc draws it
+        # off screen, and legacy fills the screen. Comparing against the
+        # design box there would report the doc's correctness as a 204480px
+        # defect, so the transform applies to every kind.
+        quad = _apply_h(np.asarray(h, dtype=float).reshape(3, 3).T,
+                        _DESIGN_QUAD)
         draws[_instance_key(inst)] = (quad, min(1.0, alpha), kind)
     return draws
 
