@@ -696,3 +696,29 @@ def test_capture_sorts_by_its_z_inside_a_sort_span():
     assert blit_at < copy_at, (
         'the z=5 sibling must draw before the z=10 capture; '
         f'ops={ops}')
+
+
+def test_prepare_replay_matches_a_direct_build():
+    # The async path records every DocBuilder call on a worker thread and
+    # replays it where the unsendable Evaluator lives. Nothing covered it,
+    # so a builder method added for the direct path (item_tint) recorded
+    # fine in tests and AttributeError'd in the app.
+    scene = _synthetic_scene()
+    direct, _id_maps, _report = dd.build_static_doc(_compiled(scene))
+    ops, _rec_maps, _rec_report = dd.prepare_static_doc(_compiled(scene))
+    replayed = dd.assemble_static_doc(ops)
+
+    for t in (0.0, 1.0, 2.5):
+        want_u, want_f = _blit_lanes(direct, t)
+        got_u, got_f = _blit_lanes(replayed, t)
+        assert got_u.shape == want_u.shape, f'op count differs at t={t}'
+        assert np.array_equal(got_u, want_u), f'u lanes differ at t={t}'
+        assert np.allclose(got_f, want_f, atol=1e-6), f'f lanes differ at t={t}'
+
+
+def test_recording_builder_rejects_a_name_docbuilder_lacks():
+    recorder = dd._RecordingBuilder()
+    recorder.item_tint(0, r_id=-1, r_rest=0.0)  # a real method records
+    assert recorder.ops[-1][0] == 'item_tint'
+    with pytest.raises(AttributeError, match='neither does DocBuilder'):
+        recorder.item_tnit(0)

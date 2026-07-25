@@ -1293,9 +1293,14 @@ class _RecordingBuilder:
     where the evaluator must live (the render thread)."""
 
     def __init__(self):
+        import storyboard_native as sn
+
         self.ops: list[tuple] = []
         self._channels = 0
         self._drawables = 1
+        # Resolved once: __getattr__ validates against it on every miss, and
+        # the module import is lazy everywhere else in this file.
+        self._api = sn.DocBuilder
 
     def channel(self, *args, **kwargs) -> int:
         self.ops.append(('channel', args, kwargs))
@@ -1315,22 +1320,30 @@ class _RecordingBuilder:
     def feed_inline(self, *args, **kwargs) -> None:
         self.ops.append(('feed_inline', args, kwargs))
 
-    def item(self, *args, **kwargs) -> None:
-        self.ops.append(('item', args, kwargs))
+    def __getattr__(self, name: str):
+        """Record any other DocBuilder call generically.
 
-    def item_link(self, *args, **kwargs) -> None:
-        self.ops.append(('item_link', args, kwargs))
+        The alternative - hand-listing every void method - lets a new builder
+        method compile, pass every test that builds synchronously, and then
+        AttributeError only on the async prepare path at runtime. Validating
+        against the real class keeps a typo failing HERE, at the call site,
+        instead of at replay on the render thread."""
+        if name.startswith('_') or not hasattr(self._api, name):
+            raise AttributeError(
+                f'{type(self).__name__} has no attribute {name!r} '
+                '(and neither does DocBuilder)')
 
-    def item_projection(self, *args, **kwargs) -> None:
-        self.ops.append(('item_projection', args, kwargs))
+        def record(*args, **kwargs) -> None:
+            self.ops.append((name, args, kwargs))
 
-    def snapshot(self, *args, **kwargs) -> None:
-        self.ops.append(('snapshot', args, kwargs))
-
-    def sort_span(self, *args, **kwargs) -> None:
-        self.ops.append(('sort_span', args, kwargs))
+        # Cache on the instance so the next call resolves normally - a miss
+        # is what routes here, and the emitter calls these per item.
+        setattr(self, name, record)
+        return record
 
     def finish(self):
+        """Not recorded: `assemble_static_doc` finishes the real builder
+        itself, after the replay loop."""
         return None
 
 
