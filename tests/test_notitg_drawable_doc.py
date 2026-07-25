@@ -1290,3 +1290,26 @@ def test_an_empty_text_element_is_skipped_not_drawn(doc_elements):
     _evaluator, _id_maps, report = dd.build_static_doc(
         _compiled([], tree=[_element('text', 0, text='')]))
     assert report['element_skips'].get('text') == 1
+
+
+def test_legacy_storyboard_is_suppressed_when_the_doc_owns_elements(
+        monkeypatch, tmp_path):
+    # Both paths read the same compiled['tree'] and neither knows about the
+    # other, so leaving legacy's on composites every element TWICE - and the
+    # doubling reads as a placement bug, since the copies agree to a fraction
+    # of a pixel.
+    from analysis.games.notitg.adapter import NotitgAdapter
+
+    element = _element('rect', 0)
+    compiled = {'tree': [element], 'field_instances': [],
+                'base_field_hidden': None}
+    adapter = NotitgAdapter.__new__(NotitgAdapter)
+    monkeypatch.setattr(adapter, '_compiled_modfile', lambda _r: compiled,
+                        raising=False)
+
+    monkeypatch.setenv('VSRG_DRAWABLE_ELEMENTS', '0')
+    assert adapter.storyboard(object()) is not None, 'legacy draws when the doc does not'
+
+    monkeypatch.setenv('VSRG_DRAWABLE_ELEMENTS', '1')
+    monkeypatch.setenv('VSRG_DRAWABLE_PIPELINE', '1')
+    assert adapter.storyboard(object()) is None, 'exactly one owner'

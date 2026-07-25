@@ -376,8 +376,24 @@ class NotitgAdapter(EtternaAdapter):
         groups) render through the storyboard pipeline in SM's 640x480
         screen space. The hierarchical `tree` (XML nesting = groups whose
         transforms compose onto children) is preferred; the flat
-        `elements` list is the fallback for charts with no hierarchy."""
+        `elements` list is the fallback for charts with no hierarchy.
+
+        None when the DRAWABLE DOC is drawing these elements itself. Both
+        paths read the same `compiled['tree']` and neither knows about the
+        other, so leaving this on composites every element TWICE - and the
+        doubling is easy to misread as a placement bug, since the two copies
+        agree to a fraction of a pixel.
+
+        Suppressing THIS copy rather than the doc's is the subtraction that
+        keeps one owner: the doc is the path being migrated to, and its
+        element rendering is what the parity harness measures."""
         from analysis.player.render.storyboard import Storyboard
+        from analysis.games.notitg.drawable_doc import elements_in_doc
+        from analysis.player.render.qt_renderer import (
+            _drawable_pipeline_enabled)
+
+        if elements_in_doc() and _drawable_pipeline_enabled():
+            return None
         compiled = self._compiled_modfile(replay) or {}
         elements = compiled.get('tree') or compiled.get('elements')
         if not elements:
