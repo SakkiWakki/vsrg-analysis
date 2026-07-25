@@ -138,16 +138,29 @@ _FADE_OFF = 0.0
 _GLOW_OFF = 0.0
 
 
+def _has_motion(timeline) -> bool:
+    """Whether a curve ever leaves its rest.
+
+    The two curve families answer this differently, and each one's natural
+    probe is WRONG for the other: a `SegCurve` implements `is_static()` but
+    has no `__bool__` and so is unconditionally truthy, while an
+    `EventTimeline` has no probe and is falsy exactly when it holds no
+    keyframes. Asking only one of them mislabels every curve of the other
+    kind as moving."""
+    probe = getattr(timeline, 'is_static', None)
+    return not probe() if probe is not None else bool(timeline)
+
+
 def _moves_off(timeline, unset: float, prop: int = 0) -> bool:
     """Whether `timeline` ever leaves `unset` on component `prop`.
 
-    A timeline with no keyframes never leaves its rest, so it is untouched
-    when that rest IS the sentinel. `_is_static` is the WRONG probe for this:
-    it answers False for a plain keyframe-less EventTimeline - the safe
-    direction for export, but here it reports everything as poked, which
-    silently built a glow item for every element in the chart."""
+    A timeline that never moves is untouched when its rest IS the sentinel.
+    `_is_static` alone is the WRONG probe: it answers False for a plain
+    keyframe-less EventTimeline - the safe direction for export, but here it
+    reports everything as poked, which silently built a glow item for every
+    element in the chart."""
     return timeline is not None and (
-        bool(timeline) or _rest_value(timeline, prop) != unset)
+        _has_motion(timeline) or _rest_value(timeline, prop) != unset)
 
 
 def _is_poked(element, props, unset: float) -> bool:
@@ -2462,7 +2475,7 @@ def _legacy_field_draws(instances, base_hidden, t) -> dict:
 
 
 def field_parity_report(evaluator, compiled, instance_order, sample_times,
-                        atol: float = 1e-3) -> dict:
+                        atol: float = 1e-2) -> dict:
     """Compare the doc's FIELD-INSTANCE commands against the legacy effect at
     each of `sample_times`, per instance.
 
@@ -2486,6 +2499,10 @@ def field_parity_report(evaluator, compiled, instance_order, sample_times,
     `NotitgFieldInstances.at` about how many entries legacy draws. That means
     the reference is wrong, so the whole row is untrustworthy rather than a
     finding about the doc.
+
+    `atol` is looser than the element harness's: a field quad is the whole
+    640x480 design box folded through a chain of f32 record lanes, and lands
+    within ~2e-3px of legacy. A tighter bar reports that rounding as a defect.
     """
     from types import SimpleNamespace
 
