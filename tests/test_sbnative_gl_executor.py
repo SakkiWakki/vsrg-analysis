@@ -563,3 +563,28 @@ def test_content_overflowing_a_drawable_is_clipped_at_its_box(gl):
     assert _rgb(screen, 48, 48) == (0, 0, 0), (
         'content overflowing a drawable is destroyed at its box - the '
         'drawable must be sized to what it draws')
+
+
+def test_a_doubleres_image_draws_at_half_its_pixel_size(gl):
+    # `(doubleres)` halves an asset's logical size. Dividing pixels by the
+    # sheet grid alone ignores that and draws it at DOUBLE size - most
+    # visibly a bitmap font, whose text then runs off the screen.
+    b = sn.DocBuilder(16.0, 16.0)
+    b.item(0, sn.SRC_IMAGE, 0)
+    ev = b.finish()
+    images = {0: _solid(8, 8, QColor(0, 0, 255, 255))}
+    u, f = _frames(ev, 0.0)
+
+    plain = GLExecutor(images, [(16.0, 16.0)])
+    plain.execute(u, f)
+    assert plain._logical_of(0, 8.0, 8.0, 1, 1) == (8.0, 8.0)
+
+    # cols, rows, doubleres, logical, res
+    halved = GLExecutor(images, [(16.0, 16.0)],
+                        image_specs={0: (1, 1, True, None, None)})
+    assert halved._logical_of(0, 8.0, 8.0, 1, 1) == (4.0, 4.0)
+
+
+def test_a_sheet_without_a_spec_still_divides_by_its_grid(gl):
+    ex = GLExecutor({}, [(16.0, 16.0)])
+    assert ex._logical_of(0, 64.0, 32.0, 4, 2) == (16.0, 16.0)

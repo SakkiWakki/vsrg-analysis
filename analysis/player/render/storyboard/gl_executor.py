@@ -405,6 +405,7 @@ class GLExecutor:
         lines: dict[int, np.ndarray] | None = None,
         image_grids: dict[int, tuple] | None = None,
         image_natural: dict[int, tuple] | None = None,
+        image_specs: dict[int, tuple] | None = None,
     ) -> None:
         self._images = images
         self._sizes = drawable_sizes
@@ -417,6 +418,10 @@ class GLExecutor:
         # size. A fed note registers (1, 1) because its mat3 already carries
         # the on-screen size over a unit source box.
         self._image_natural: dict[int, tuple] = dict(image_natural or {})
+        # Per-image size CONVENTIONS (cols, rows, doubleres, logical, res).
+        # Resolved through the asset-size funnel at draw time, when the
+        # uploaded pixel size is finally known.
+        self._image_specs: dict[int, tuple] = dict(image_specs or {})
         self.shader_uniforms: dict[int, list[float]] = {}
         # Per-drawable retain-decay factors (DrawableId -> alpha kept per
         # frame); see set_decay. A Retain BEGIN fades surviving content by
@@ -898,7 +903,8 @@ class GLExecutor:
                     logical = (None if uploaded is None else natural)
                 else:
                     logical = (None if uploaded is None
-                               else (uploaded[1] / cols, uploaded[2] / rows))
+                               else self._logical_of(image_id, uploaded[1],
+                                                     uploaded[2], cols, rows))
                 # Uploaded QImages are top-down already - no FBO v-flip.
                 self._draw_texture(gf, mat3, tw, th, frec, tint, opacity,
                                    uploaded, logical, shaded,
@@ -924,6 +930,25 @@ class GLExecutor:
             gf.glDisable(GL_SCISSOR_TEST)
 
     # -- source draws ------------------------------------------------------
+
+    def _logical_of(self, image_id: int, px_w: float, px_h: float,
+                    cols: int, rows: int) -> tuple:
+        """An image's logical box: its declared size CONVENTIONS resolved
+        against the uploaded pixel size, else simply pixels over the grid.
+
+        The funnel, not a grid divide, because a `(doubleres)` page is half
+        its pixel size - and dividing by the grid alone drew every doubleres
+        asset at DOUBLE size, most visibly a bitmap font whose text then ran
+        off the screen."""
+        spec = self._image_specs.get(image_id)
+        if spec is None:
+            return (px_w / cols, px_h / rows)
+        from analysis.player.render.storyboard.asset_size import (
+            AssetSizeSpec, resolve)
+        spec_cols, spec_rows, doubleres, logical, res = spec
+        return resolve(px_w, px_h, AssetSizeSpec(
+            cols=spec_cols, rows=spec_rows, doubleres=doubleres,
+            logical=logical, res=res)).natural
 
     def _image_texture(self, gf, image_id: int):
         """(texture, w, h) for an ImageId, uploaded once; None (logged

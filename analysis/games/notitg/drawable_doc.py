@@ -795,6 +795,9 @@ class _Builder:
         # `text` elements whose glyphs the consumer rasterises: image id ->
         # (text, pixel size). See `_text_image_id`.
         self._text_images: dict[int, tuple] = {}
+        # Asset size CONVENTIONS per image id (see `_record_size_spec`): the
+        # consumer needs them to resolve a logical box the way the funnel does.
+        self._image_specs: dict[int, tuple] = {}
         # Per-item fragment programs: one id per distinct (frag, vert, names),
         # with the descs exported positionally for GLExecutor.set_shaders.
         self._shader_ids: dict[tuple, int] = {}
@@ -1089,6 +1092,7 @@ class _Builder:
                    'note_feeds': dict(self._notes_slots),
                    'shaders': list(self._shader_descs),
                    'text_images': dict(self._text_images),
+                   'image_specs': dict(self._image_specs),
                    'element_order': list(self._element_order)}
         return evaluator, id_maps
 
@@ -1325,7 +1329,28 @@ class _Builder:
         rows = int(getattr(element, 'sheet_rows', 1) or 1)
         if cols * rows > 1 and image_id not in self._image_grids:
             self._image_grids[image_id] = (cols, rows)
+        self._record_size_spec(image_id, element.size_spec)
         return image_id
+
+    def _record_size_spec(self, image_id: int, spec) -> None:
+        """Remember an asset's size CONVENTIONS so the consumer resolves its
+        logical size the same way the asset-size funnel does.
+
+        Without this the executor takes an image's logical box as its pixel
+        box divided by the sheet grid, which silently ignores `(doubleres)` -
+        and a doubleres page then draws at DOUBLE size. The compiler cannot
+        resolve it here: the funnel needs the asset's pixel dimensions, and
+        reading those needs an image decoder this module deliberately does not
+        import."""
+        if spec is None or image_id in self._image_specs:
+            return
+        self._image_specs[image_id] = (
+            int(getattr(spec, 'cols', 1) or 1),
+            int(getattr(spec, 'rows', 1) or 1),
+            bool(getattr(spec, 'doubleres', False)),
+            getattr(spec, 'logical', None),
+            getattr(spec, 'res', None),
+        )
 
     def _sn_element_item(self, source_kind: int, image_id: int, element,
                          ancestors=()) -> None:
@@ -1438,6 +1463,7 @@ class _Builder:
             self._image_paths[image_id] = font.texture_path
         cells = max(1, int(font.cols)) * max(1, int(font.rows))
         self._image_grids.setdefault(image_id, (int(font.cols), int(font.rows)))
+        self._record_size_spec(image_id, font.size_spec)
 
         codepoints = [ord(char) for char in element.text]
         advances = [font.advance(cp) for cp in codepoints]

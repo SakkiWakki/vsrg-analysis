@@ -532,6 +532,8 @@ class DrawablePipeline:
             images,
             _drawable_sizes_of(id_maps, evaluator),
             image_grids=(id_maps.get('image_grids')
+                         if isinstance(id_maps, dict) else None),
+            image_specs=(id_maps.get('image_specs')
                          if isinstance(id_maps, dict) else None))
         self._executor.set_clear(SCREEN_ID, CLEAR_TRANSPARENT)
         # Per-item `Frag=` programs, positional by the shader id the doc's
