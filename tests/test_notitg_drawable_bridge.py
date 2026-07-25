@@ -330,15 +330,13 @@ def test_gat2_smoke_build_and_feed():
     stats. The lazy provider only carries the proxy/AFT binds that have fired
     so far, so the doc is built after the background upgrade hands over the
     complete topology."""
-    from analysis.games.notitg.sim.producers import (
-        compile_via_sim, wait_for_upgrade)
+    from tests.chart_cache import compiled_chart
 
-    compiled = compile_via_sim(_GAT2)
+    compiled = compiled_chart(_GAT2)
     assert compiled is not None
     provider = compiled.get('field_instances')
     assert provider is not None
 
-    assert wait_for_upgrade(compiled)
     count = len(list(provider() if callable(provider) else provider))
     print(f'[gat2] provider instance count: {count}')
 

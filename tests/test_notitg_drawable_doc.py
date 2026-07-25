@@ -471,15 +471,13 @@ def test_gat2_smoke_static_doc_parity():
     camera-area math (rotation_x/y, quat, z, skew, fov) diverge BY DESIGN - the
     report SURFACES those rather than asserting zero; the assertion is only that
     the compile + evaluate + compare runs cleanly and produces a report."""
-    from analysis.games.notitg.sim.producers import (
-        compile_via_sim, wait_for_upgrade)
+    from tests.chart_cache import compiled_chart
 
-    compiled = compile_via_sim(_GAT2)
+    compiled = compiled_chart(_GAT2)
     assert compiled is not None
     provider = compiled.get('field_instances')
     assert provider is not None
 
-    assert wait_for_upgrade(compiled)
     count = len(list(provider() if callable(provider) else provider))
     print(f'[gat2] provider instance count: {count}')
 
@@ -1090,12 +1088,10 @@ def test_real_chart_element_parity(chart_path, label, doc_elements):
     shown equivalent rather than eyeballed. The assertion is deliberately
     loose - it reports the number and fails only on a gross divergence, so
     the measurement lands in CI output either way."""
-    from analysis.games.notitg.sim.producers import (
-        compile_via_sim, wait_for_upgrade)
+    from tests.chart_cache import compiled_chart
 
-    compiled = compile_via_sim(chart_path)
+    compiled = compiled_chart(chart_path)
     assert compiled is not None
-    assert wait_for_upgrade(compiled)
 
     evaluator, id_maps, report = dd.build_static_doc(compiled)
     order = id_maps['element_order']
