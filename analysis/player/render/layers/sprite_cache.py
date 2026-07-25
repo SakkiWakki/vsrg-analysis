@@ -70,6 +70,12 @@ class NoteSpriteCache:
     _specs: dict[str, SpriteSpec] = field(default_factory=dict)
     _buffers: dict[str, dict[tuple, QPixmap]] = field(default_factory=dict)
     _geom: tuple = (0, 0)
+    # Bumped every time the cached pixmaps are dropped. A consumer that keeps
+    # its OWN copy of a rasterized sprite - the drawable pipeline uploads them
+    # as GL textures and records the box it draws them at - re-reads when this
+    # changes. Without it a skin toggle or a palette fade leaves that copy
+    # showing the old art forever, since the geometry never moved.
+    generation: int = 0
 
     def bind(self, specs: dict[str, SpriteSpec]) -> None:
         """Replace the declared sprite set. Called once per replay load.
@@ -78,6 +84,7 @@ class NoteSpriteCache:
         self._specs = dict(specs)
         self._buffers = {name: {} for name in specs}
         self._geom = (0, 0)
+        self.generation += 1
 
     def check_geometry(self, w: int, h: int) -> None:
         """Invalidate every pixmap when the play window resizes. The
@@ -92,9 +99,13 @@ class NoteSpriteCache:
     def invalidate(self) -> None:
         """Drop every cached pixmap. Used by changes that affect
         rasterization but not geometry -- e.g. a skin toggle, where the
-        same `(lane_w, note_h)` rasterizes to a different shape."""
+        same `(lane_w, note_h)` rasterizes to a different shape.
+
+        The single choke point for every "the art changed" event, so bumping
+        `generation` here is all a copy-holding consumer has to watch."""
         for bucket in self._buffers.values():
             bucket.clear()
+        self.generation += 1
 
     def get(self, name: str, ctx, **key_kwargs) -> QPixmap:
         """Return a rasterized pixmap for `name` at the given key.

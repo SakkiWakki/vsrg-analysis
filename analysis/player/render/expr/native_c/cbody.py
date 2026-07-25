@@ -14,12 +14,65 @@ from __future__ import annotations
 
 import ctypes
 import os
+import struct
+from enum import IntEnum
 
 from analysis.player.render.expr import ast as _ast
 from analysis.player.render.expr.frame_eval import (
     UNRESOLVED, _NO_BUILTIN, _builtin_call)
 
 _LIB = None
+
+# The NaN-box layout, mirroring cvalue.h: a boxed non-double carries the
+# sign+exponent+quiet signature in the top 13 bits, then a 3-bit tag and a
+# 48-bit payload; anything else IS an IEEE-754 double. The tags must stay in
+# the enum's order.
+_CV_SIG = 0xFFF8000000000000
+_CV_SIG_MASK = 0xFFF8000000000000
+_CV_TAG_SHIFT = 48
+_CV_TAG_MASK = 0x7 << _CV_TAG_SHIFT
+_CV_PAYLOAD_MASK = 0x0000FFFFFFFFFFFF
+
+
+class _Tag(IntEnum):
+    """The 3-bit box tags. Values ARE the C enum's - an IntEnum rather than
+    loose constants so `_from_cv` can match on them (a bare name in a `case`
+    is a capture pattern, not a value one)."""
+    NIL = 0
+    FALSE = 1
+    TRUE = 2
+    UNRESOLVED = 3
+    STR = 4
+    TABLE = 5
+    FUNC = 6
+    HANDLE = 7
+
+
+def _boxed(tag: _Tag, payload: int = 0) -> int:
+    return _CV_SIG | (tag << _CV_TAG_SHIFT) | (payload & _CV_PAYLOAD_MASK)
+
+
+_CV_NIL = _boxed(_Tag.NIL)
+_CV_FALSE = _boxed(_Tag.FALSE)
+_CV_TRUE = _boxed(_Tag.TRUE)
+_CV_UNRESOLVED = _boxed(_Tag.UNRESOLVED)
+_CV_HANDLE_BASE = _boxed(_Tag.HANDLE)
+
+_f64_to_bits = struct.Struct('<d').pack
+_bits_to_f64 = struct.Struct('<d').unpack
+_u64_to_bits = struct.Struct('<Q').pack
+_bits_to_u64 = struct.Struct('<Q').unpack
+
+
+def _pack_f64(v: float) -> int:
+    """A Python number as its IEEE-754 bit pattern - the Num CValue itself."""
+    return _bits_to_u64(_f64_to_bits(v))[0]
+
+
+def _unpack_f64(cv: int) -> float:
+    """A Num CValue's bits back as a Python float."""
+    return _bits_to_f64(_u64_to_bits(cv))[0]
+
 
 # Cache sentinel: a snapshot candidate not yet resolved. Distinct from a cached
 # None (resolved, not snapshottable -> use the crossing path) so each name is
@@ -154,20 +207,29 @@ class CompiledBodyC:
         self._install_frontier()
 
     # -- marshalling --------------------------------------------------------
+    #
+    # Boxing and unboxing happen HERE, in Python integer arithmetic, not
+    # through the ABI's cv_* helpers. The NaN-box layout is a documented,
+    # frozen bit contract (cvalue.h, mirrored by the _CV_* constants above),
+    # and asking C about it cost a ctypes round-trip PER PREDICATE - up to
+    # seven of them to unbox one value, on a path that runs ~170x per tick.
+    # The helpers stay exported for the ABI tests; nothing hot calls them.
+
     def _to_cv(self, v):
         """Python value -> CValue uint64."""
-        lib = self._lib
         if v is UNRESOLVED:
-            return lib.cbody_unresolved()
+            return _CV_UNRESOLVED
         if v is None:
-            return lib.cbody_nil()
-        if isinstance(v, bool):
-            return lib.cbody_true() if v else lib.cbody_false()
+            return _CV_NIL
+        if v is True:
+            return _CV_TRUE
+        if v is False:
+            return _CV_FALSE
         if isinstance(v, (int, float)):
-            return lib.cbody_num(float(v))
+            return _pack_f64(v)
         if isinstance(v, str):
             e = v.encode('utf-8', 'surrogatepass')
-            return lib.cbody_intern(self._b, e, len(e))
+            return self._lib.cbody_intern(self._b, e, len(e))
         # non-scalar: register a handle
         key = id(v)
         h = self._obj_to_handle.get(key)
@@ -175,32 +237,34 @@ class CompiledBodyC:
             h = self._handle_next; self._handle_next += 1
             self._handles[h] = v
             self._obj_to_handle[key] = h
-        return lib.cbody_handle(h)
+        return _CV_HANDLE_BASE | h
 
     def _from_cv(self, cv):
         """CValue uint64 -> Python value."""
-        lib = self._lib
-        if lib.cbody_is_num(cv):
-            return lib.cbody_as_num(cv)
-        if lib.cbody_is_nil(cv):
-            return None
-        if lib.cbody_is_unres(cv):
-            return UNRESOLVED
-        if lib.cbody_is_bool(cv):
-            return bool(lib.cbody_bool_val(cv))
-        if lib.cbody_is_str(cv):
-            ln = ctypes.c_int()
-            p = lib.cbody_str(self._b, cv, ctypes.byref(ln))
-            return p[:ln.value].decode('utf-8', 'surrogatepass')
-        if lib.cbody_is_handle(cv):
-            hid = lib.cbody_handle_id(cv)
-            return self._handles.get(hid)
-        if lib.cbody_is_table(cv):
-            # A snapshotted load-set table crossing back to Python (type()/#/
-            # passed to a host fn): return the ORIGINAL host object so its
-            # semantics match the non-snapshot path. INDEX never reaches here -
-            # it resolves in C against the arena.
-            return self._table_origin.get(lib.cbody_handle_id(cv))
+        if (cv & _CV_SIG_MASK) != _CV_SIG:
+            return _unpack_f64(cv)
+        payload = cv & _CV_PAYLOAD_MASK
+        match (cv & _CV_TAG_MASK) >> _CV_TAG_SHIFT:
+            case _Tag.NIL:
+                return None
+            case _Tag.UNRESOLVED:
+                return UNRESOLVED
+            case _Tag.TRUE:
+                return True
+            case _Tag.FALSE:
+                return False
+            case _Tag.STR:
+                ln = ctypes.c_int()
+                p = self._lib.cbody_str(self._b, cv, ctypes.byref(ln))
+                return p[:ln.value].decode('utf-8', 'surrogatepass')
+            case _Tag.HANDLE:
+                return self._handles.get(payload)
+            case _Tag.TABLE:
+                # A snapshotted load-set table crossing back to Python (type()/
+                # #/ passed to a host fn): return the ORIGINAL host object so
+                # its semantics match the non-snapshot path. INDEX never
+                # reaches here - it resolves in C against the arena.
+                return self._table_origin.get(payload)
         return None
 
     def _args(self, arr, argc):

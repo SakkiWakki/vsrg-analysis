@@ -39,6 +39,12 @@ from analysis.player.render.mods.channels import ModChannels
 # the Lua path stays the baseline until the compiled path is the default.
 _TRUE = {'1', 'true', 'yes', 'on'}
 
+# Chart-seconds the background sweep advances per lock hold. Bounds how long
+# the worker can keep the render thread's nudge out of the sim, so it is a
+# LATENCY budget, not a throughput one: gat sweeps ~100x realtime, so a chunk
+# costs ~10ms of lock.
+_SWEEP_CHUNK_S = 1.0
+
 
 def _compiled_body_flag() -> bool:
     on = os.environ.get('VSRG_NOTITG_COMPILED_BODY', '').lower() in _TRUE
@@ -580,11 +586,18 @@ def _spawn_background_upgrade(mod_channels, tree, field_provider,
                 # sim-seconds, the sweep crawling at ~1x realtime while
                 # the tick loop alone runs ~100x.
                 with lock:
-                    sweep.advance_frontier(min(sweep.now + 0.25,
+                    sweep.advance_frontier(min(sweep.now + _SWEEP_CHUNK_S,
                                               end_seconds))
-                _time.sleep(0.001)
+                # A bare GIL yield, NOT a timed sleep: the render thread
+                # takes the sweep back through `render_seen` at the top
+                # of the loop, so this only has to let it run. A 1ms
+                # sleep here is the whole handover on an idle machine
+                # (the OS rounds it to ~1.05ms), and at one per chunk it
+                # cost 2.2s of gat's 5.4s sweep doing nothing.
+                _time.sleep(0)
             else:
-                sweep.advance_frontier(min(sweep.now + 0.25, end_seconds))
+                sweep.advance_frontier(min(sweep.now + _SWEEP_CHUNK_S,
+                                           end_seconds))
             if sweep.now - last_print >= 30.0:
                 last_print = sweep.now
                 print(f'[notitg] background compile: {sweep.now:.0f}s '

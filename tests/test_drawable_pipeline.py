@@ -565,6 +565,31 @@ def test_topology_signature_tracks_count_and_last_name():
     assert pl._topology_signature({'field_instances': None}) is None
 
 
+def test_sprite_generation_notices_a_skin_toggle():
+    # A skin toggle re-rasterizes every sprite to a different SHAPE at the
+    # very same (lane_w, note_h) - so a signature built from the geometry
+    # never moves and the pipeline keeps uploading the old art. The cache's
+    # invalidation generation is the signal that catches it.
+    from types import SimpleNamespace
+
+    from analysis.player.render.layers.note_sprites import default_note_sprites
+    from analysis.player.render.layers.sprite_cache import NoteSpriteCache
+
+    cache = NoteSpriteCache()
+    cache.bind(default_note_sprites())
+    ctx = SimpleNamespace(sprite_cache=cache, keycount=4)
+
+    before = pl._sprite_generation(ctx)
+    assert pl._sprite_generation(ctx) == before, 'stable while nothing changes'
+    cache.invalidate()  # what playback.set_skin does
+    assert pl._sprite_generation(ctx) != before
+
+    # A resize invalidates through the same choke point.
+    after_skin = pl._sprite_generation(ctx)
+    cache.check_geometry(80, 20)
+    assert pl._sprite_generation(ctx) != after_skin
+
+
 # --------------------------------------------------------------------------
 # Real-doc integration (the actual drawable_doc, not a fake)
 # --------------------------------------------------------------------------

@@ -62,9 +62,12 @@ static CValue call_math(int fn, const CValue *a, int argc) {
 }
 
 int cexec_run(CExecState *st, CValue self_val) {
-    /* clear locals, rebind self */
+    /* clear locals, rebind self. The for-cursor stack resets too: a tick the
+     * frontier aborted mid-loop leaves cursors parked, and carrying them into
+     * the next tick would resume the wrong table. */
     for (int i = 0; i < st->nslots; i++) st->frame[i] = cv_nil();
     st->frame[0] = self_val;
+    st->niter = 0;
     int sp = 0;
     const COp *ops = st->ops;
     CFrontier *fe = st->fe;
@@ -286,18 +289,44 @@ int cexec_run(CExecState *st, CValue self_val) {
     OP(RETURN_HALT) { return 0; }
     OP(ITER_SETUP) {
         /* ipairs/pairs form: a=mode (0 ipairs, 1 pairs), stack top = the table.
-         * iter_setup builds the (k,v) row iterator; returns an opaque id. */
+         * An ARENA table walks in-C (see CArenaIter) and leaves the TABLE on
+         * the stack as its cursor marker; anything else crosses to the host's
+         * iter_setup, which leaves an opaque HANDLE. ITER_NEXT tells them apart
+         * by tag. */
         int mode = ops[pc].a;
         CValue table = POP();
+        if (cv_is_table(table) && st->niter < CEXEC_ITER_DEPTH) {
+            CArenaIter *ai = &st->iters[st->niter++];
+            ai->tid = cv_payload(table);
+            ai->i = 0;
+            ai->n = carena_table_len(st->arena, ai->tid);
+            PUSH(table); pc++; NEXT();
+        }
         CValue two[2] = { cv_num((double)mode), table };
         uint64_t it = fe->iter_setup(fe->ctx, two, 2);
         PUSH(cv_handle(it)); pc++; NEXT();
     }
     OP(ITER_NEXT) {
-        uint64_t it = cv_payload(PEEK());   /* iterator handle stays on stack */
+        CValue cursor = PEEK();   /* iterator cursor stays on the stack */
         int nvars = ops[pc].b;
+        int fill = nvars < 8 ? nvars : 8;
         CValue vars[8];
-        int got = fe->iter_next(fe->ctx, it, vars, nvars < 8 ? nvars : 8);
+        int got;
+        if (cv_is_table(cursor)) {
+            CArenaIter *ai = &st->iters[st->niter - 1];
+            got = ai->i < ai->n;
+            if (got) {
+                ai->i++;
+                if (fill > 0) vars[0] = cv_num((double)ai->i);
+                if (fill > 1) vars[1] = carena_table_geti(st->arena, ai->tid,
+                                                          ai->i);
+                for (int i = 2; i < fill; i++) vars[i] = cv_nil();
+            } else {
+                st->niter--;
+            }
+        } else {
+            got = fe->iter_next(fe->ctx, cv_payload(cursor), vars, fill);
+        }
         if (!got) { sp--; pc = ops[pc].c; NEXT(); }  /* pop iter, exit */
         for (int i = 0; i < nvars; i++) st->frame[ops[pc].a + i] = vars[i];
         pc++; NEXT();

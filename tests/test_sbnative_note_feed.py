@@ -43,27 +43,43 @@ def _stream_view(**kw):
 
 
 def _ctx(note_views, keycount=4, lane_w=64.0, judge_y=400.0, note_h=14.0,
-         receptor_offsets=None, stream_views=None):
+         receptor_offsets=None, stream_views=None, lane_widths=None):
     """A stub with the RenderContext reads the emitter uses: keycount,
-    lane geometry (lane_x/lane_width/lane_center), judge_y, note_h,
-    note_views, and optional receptor_offsets / stream_views."""
+    lane geometry (lane_w/lane_x/lane_width/lane_center), judge_y, note_h,
+    note_views, and optional receptor_offsets / stream_views.
+
+    `lane_widths` overrides the per-column width while `lane_w` stays the base,
+    which is how a lane switch presents (the sprite squeezes by their ratio)."""
     ctx = SimpleNamespace(
         keycount=keycount,
         judge_y=judge_y,
+        lane_w=lane_w,
         note_h=note_h,
         note_views=note_views,
         stream_views=stream_views or [],
         receptor_offsets=receptor_offsets,
     )
-    ctx.lane_width = lambda col: lane_w
+    ctx.lane_width = (lambda col: lane_w) if lane_widths is None \
+        else (lambda col: lane_widths[col])
     ctx.lane_x = lambda col: col * lane_w
     ctx.lane_center = lambda col: col * lane_w + lane_w / 2.0
     return ctx
 
 
-_IMAGE_MAP = {'receptor': 100, 'tap': 200,
-              'mine': 300, 'lift': 301, 'fake': 302,
-              'ln_head': 220, 'ln_tail': 230, 'ln_body': 240}
+# A head sprite's design box, deliberately NOT (lane_w, note_h): the raster
+# cache sizes heads at `(lane_w, note_h + 2 * HEAD_PAD)` for the bar skin and
+# `(lane_w, lane_w)` for the circle skin, so the emitter must place the
+# SPRITE's box rather than reconstruct one from note_h.
+_SPRITE_W, _SPRITE_H = 64.0, 26.0
+
+_IMAGE_MAP = {'receptor': (100, 1.0, 1.0),
+              'tap': (200, _SPRITE_W, _SPRITE_H),
+              'mine': (300, _SPRITE_W, _SPRITE_H),
+              'lift': (301, _SPRITE_W, _SPRITE_H),
+              'fake': (302, _SPRITE_W, _SPRITE_H),
+              'ln_head': (220, _SPRITE_W, _SPRITE_H),
+              'ln_tail': (230, _SPRITE_W, _SPRITE_H),
+              'ln_body': (240, _SPRITE_W, 1.0)}
 
 
 # ── SoA layout ───────────────────────────────────────────────────────
@@ -117,7 +133,9 @@ def test_receptors_first_then_note_order():
 
 
 def test_ln_head_and_tail_draw_with_their_own_sprites():
-    image_map = {'receptor': 100, 'tap': 200, 'ln_head': 220, 'ln_tail': 230}
+    image_map = {'receptor': (100, 1.0, 1.0), 'tap': (200, _SPRITE_W, _SPRITE_H),
+                 'ln_head': (220, _SPRITE_W, _SPRITE_H),
+                 'ln_tail': (230, _SPRITE_W, _SPRITE_H)}
     views = [_note_view(col=1, lx=64.0, y=150.0, is_ln=True, y_end=40.0)]
     u, _f, count, report = nf.feed_from_context(_ctx(views), image_map)
     assert (report['taps'], report['ln_tails']) == (1, 1)
@@ -135,7 +153,9 @@ def test_ln_tail_rides_the_body_path_tangent():
     path = (_np.array([64.0, 64.0]), _np.array([100.0, 140.0]))  # heading DOWN
     views = [_note_view(col=1, lx=64.0, y=150.0, is_ln=True, y_end=40.0,
                         body_path=path)]
-    image_map = {'receptor': 100, 'tap': 200, 'ln_head': 220, 'ln_tail': 230}
+    image_map = {'receptor': (100, 1.0, 1.0), 'tap': (200, _SPRITE_W, _SPRITE_H),
+                 'ln_head': (220, _SPRITE_W, _SPRITE_H),
+                 'ln_tail': (230, _SPRITE_W, _SPRITE_H)}
     _u, f, _count, report = nf.feed_from_context(_ctx(views), image_map)
     assert report['ln_tails'] == 1
     row = f[5 * nf.FEED_F_STRIDE:6 * nf.FEED_F_STRIDE]
@@ -241,18 +261,33 @@ def test_tap_mat3_centers_unit_box_on_note():
     assert cy == pytest.approx(300.0)
 
 
-def test_tap_mat3_scales_to_note_size():
+def test_tap_mat3_scales_to_the_sprite_box_not_note_h():
+    # The raster path blits the head pixmap at its OWN size, centred on the
+    # note's y (notes._blit_lane_pixmap); sizing the item to note_h instead
+    # squashes every sprite - flat ellipses under the circle skin.
     ctx = _ctx([_note_view(col=0, lx=0.0, y=100.0)], lane_w=64.0, note_h=14.0)
     _, f, count, _ = nf.feed_from_context(ctx, _IMAGE_MAP)
     mat9 = _tap_row(f, count, count - 1)[nf._F_MAT:nf._F_MAT + 9]
-    # unit box corners (0,0)-(1,1) span the note's screen rect: width 64,
-    # height 14, centered at (32, 100).
     x0, y0 = _apply_mat(mat9, 0.0, 0.0)
     x1, y1 = _apply_mat(mat9, 1.0, 1.0)
-    assert (x1 - x0) == pytest.approx(64.0)
-    assert (y1 - y0) == pytest.approx(14.0)
+    assert (x1 - x0) == pytest.approx(_SPRITE_W)
+    assert (y1 - y0) == pytest.approx(_SPRITE_H)
+    assert y0 == pytest.approx(100.0 - _SPRITE_H / 2.0)
     assert x0 == pytest.approx(0.0)
     assert x1 == pytest.approx(64.0)
+
+
+def test_tap_squeezes_horizontally_with_the_lane_never_vertically():
+    # A lane switch collapses the lane width; the raster blit scales the
+    # sprite's WIDTH by lane_width/lane_w and leaves its height alone.
+    ctx = _ctx([_note_view(col=0, lx=0.0, y=100.0)], lane_w=64.0,
+               lane_widths={0: 32.0, 1: 64.0, 2: 64.0, 3: 64.0})
+    _, f, count, _ = nf.feed_from_context(ctx, _IMAGE_MAP)
+    mat9 = _tap_row(f, count, count - 1)[nf._F_MAT:nf._F_MAT + 9]
+    x0, y0 = _apply_mat(mat9, 0.0, 0.0)
+    x1, y1 = _apply_mat(mat9, 1.0, 1.0)
+    assert (x1 - x0) == pytest.approx(_SPRITE_W / 2.0)
+    assert (y1 - y0) == pytest.approx(_SPRITE_H)
 
 
 def test_tap_zoom_scales_about_center():
@@ -341,7 +376,8 @@ def test_zero_width_lane_receptor_skipped():
 # ── per-column image override + missing sprite ───────────────────────
 
 def test_per_column_tap_override():
-    image_map = {'receptor': 100, 'tap': 200, 'tap_1': 201}
+    image_map = {'receptor': (100, 1.0, 1.0), 'tap': (200, _SPRITE_W, _SPRITE_H),
+                 'tap_1': (201, _SPRITE_W, _SPRITE_H)}
     ctx = _ctx([_note_view(col=1, lx=64.0, y=100.0),
                 _note_view(col=0, lx=0.0, y=120.0)])
     u, _, count, _ = nf.feed_from_context(ctx, image_map)
@@ -353,7 +389,7 @@ def test_per_column_tap_override():
 
 def test_missing_tap_sprite_counts_skip():
     ctx = _ctx([_note_view(col=0, lx=0.0, y=100.0)], keycount=1)
-    u, _, count, report = nf.feed_from_context(ctx, {'receptor': 100})
+    u, _, count, report = nf.feed_from_context(ctx, {'receptor': (100, 1.0, 1.0)})
     assert report['taps'] == 0
     assert report['skipped'] >= 1
     assert count == 1  # only the receptor
@@ -374,7 +410,7 @@ def test_gat1_smoke_prints_counts():
         player = player_fn('gat')
     except Exception as exc:  # harness fights us -> synthetic tests stand
         pytest.skip(f'gat 1 player did not resolve: {exc}')
-    image_map = {'receptor': 0, 'tap': 1}
+    image_map = {'receptor': (0, 1.0, 1.0), 'tap': (1, _SPRITE_W, _SPRITE_H)}
     for t in (2.0, 20.0, 40.0):
         _, _, count, report = nf.feed_notes(player, t, image_map)
         print(f'gat1 t={t}: items={count} report={report}')
@@ -414,8 +450,10 @@ def test_a_lit_note_draws_both_fill_and_glow():
 def test_head_sprite_resolves_by_column_and_state():
     # The raster cache keys heads on (col, state); the feed resolves the same
     # variant, most specific key first.
-    image_map = {'receptor': 100, 'tap': 200, 'tap_1': 201,
-                 'tap_miss_tap': 210, 'tap_2_miss_tap': 211}
+    box = (_SPRITE_W, _SPRITE_H)
+    image_map = {'receptor': (100, 1.0, 1.0), 'tap': (200, *box),
+                 'tap_1': (201, *box), 'tap_miss_tap': (210, *box),
+                 'tap_2_miss_tap': (211, *box)}
     views = [_note_view(col=0, lx=0.0, y=50.0),                    # tap
              _note_view(col=1, lx=64.0, y=60.0),                   # tap_1
              _note_view(col=3, lx=192.0, y=70.0, miss=True),       # tap_miss_tap
@@ -471,3 +509,65 @@ def test_ln_body_narrows_where_it_dives_toward_the_camera():
     # The segment runs straight down, rotated -90+90=0... width rides m01/m11.
     width = _np.hypot(mat[0, 0], mat[1, 0])
     assert width == pytest.approx(64.0 * 0.5, abs=1e-3)
+
+
+# ── screen -> design conversion ──────────────────────────────────────
+
+def _notitg_ctx(note_views=(), chart_rect=(100.0, 40.0, 1750.0, 900.0)):
+    """A ctx shaped like the real NotITG one: `field_geometry` has already
+    stretched the engine's 64-design-px grid onto the chart rect, so every
+    lane/judge value the emitter reads is in SCREEN px."""
+    x, y, w, h = chart_rect
+    kx, ky = w / 640.0, h / 480.0
+    lane_w = 64.0 * kx
+    x0 = x + (320.0 - 64.0 * 4 / 2.0) * kx
+    ctx = _ctx(list(note_views), keycount=4, lane_w=lane_w,
+               judge_y=y + 115.0 * ky)
+    ctx.chart_rect = chart_rect
+    ctx.lane_x = lambda col: x0 + col * lane_w
+    ctx.lane_center = lambda col: x0 + col * lane_w + lane_w / 2.0
+    return ctx
+
+
+def test_design_converts_screen_geometry_back_to_the_documents_space():
+    # The consuming doc's screen is 640x480 and the executor stretches it onto
+    # the chart rect at present time; without the conversion that stretch is
+    # applied TWICE and every note lands scaled + offset by the rect ratio.
+    ctx = _notitg_ctx()
+    _u, f, n, _r = nf.feed_from_context(ctx, _IMAGE_MAP, design=(640, 480))
+    mat9 = f.reshape(n, nf.FEED_F_STRIDE)[0][nf._F_MAT:nf._F_MAT + 9]
+    cx, cy = _apply_mat(mat9, 0.5, 0.5)
+    # Column 0's centre on the engine's 64px grid, at the reverse receptor row.
+    assert cx == pytest.approx(320.0 - 128.0 + 32.0)
+    assert cy == pytest.approx(115.0)
+    # The notch spans _RECEPTOR_LANE_FRAC of a 64-design-px lane.
+    x0, _ = _apply_mat(mat9, 0.0, 0.5)
+    x1, _ = _apply_mat(mat9, 1.0, 0.5)
+    assert (x1 - x0) == pytest.approx(64.0 * nf._RECEPTOR_LANE_FRAC)
+
+
+def test_no_design_leaves_the_ctx_space_untouched():
+    # A consumer whose document IS the ctx's screen passes no design size and
+    # must get the mat3s verbatim.
+    ctx = _notitg_ctx()
+    _u, f, n, _r = nf.feed_from_context(ctx, _IMAGE_MAP)
+    mat9 = f.reshape(n, nf.FEED_F_STRIDE)[0][nf._F_MAT:nf._F_MAT + 9]
+    cx, _cy = _apply_mat(mat9, 0.5, 0.5)
+    assert cx == pytest.approx(ctx.lane_center(0))
+
+
+def test_design_conversion_preserves_a_projective_placement():
+    # The bottom row rides through, so a 3D-modded head's homography converts
+    # like any other placement instead of collapsing to an affine one.
+    mat = (2.0, 0.0, 10.0, 0.0, 3.0, 20.0, 0.001, 0.002, 1.0)
+    converted = nf._to_design_mat((0.5, 0.25, -50.0, -10.0), mat)
+    assert converted[6:] == mat[6:]
+    # A point maps the same as applying the affine after the original mat.
+    x, y, w = (mat[0] * 1.0 + mat[1] * 1.0 + mat[2],
+               mat[3] * 1.0 + mat[4] * 1.0 + mat[5],
+               mat[6] * 1.0 + mat[7] * 1.0 + mat[8])
+    want = (0.5 * (x / w) - 50.0, 0.25 * (y / w) - 10.0)
+    gx, gy, gw = (converted[0] + converted[1] + converted[2],
+                  converted[3] + converted[4] + converted[5],
+                  converted[6] + converted[7] + converted[8])
+    assert (gx / gw, gy / gw) == pytest.approx(want)

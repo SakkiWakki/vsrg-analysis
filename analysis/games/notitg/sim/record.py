@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+from operator import itemgetter
 
 from analysis.games.notitg.mod_channels import (
     parse_modstring, parse_speed_mods)
@@ -65,19 +66,28 @@ class ModWindow:
 
 
 @lru_cache(maxsize=4096)
-def _parsed(modstring: str) -> tuple:
-    return tuple(parse_modstring(modstring))
-
-
-@lru_cache(maxsize=4096)
-def _parsed_speed(modstring: str) -> tuple:
-    return tuple(parse_speed_mods(modstring))
+def _row_plan(modstring: str) -> tuple:
+    """Everything one ApplyModifiers string contributes to a frame, derived
+    ONCE: whether it clears every channel, its (value, speed, name) mods, its
+    speed-token mods, and the mod names to union into `seen`. A per-frame
+    driver re-applies the SAME string every tick, so the cache collapses the
+    whole per-row parse - including the `clearall` scan, which used to run a
+    fresh `.lower()` over every one of the 350K rows - into one lookup."""
+    mods = tuple(parse_modstring(modstring))
+    return ('clearall' in modstring.lower(), mods,
+            tuple(parse_speed_mods(modstring)),
+            frozenset(name for _value, _speed, name in mods))
 
 
 # The template's per-frame `clearall` retargets every mod to 0 at this
 # approach speed before the live windows reapply (same constant the
 # harvest decode used); within one frame the reapply wins per-channel.
 _CLEARALL_SPEED = 1.0
+
+
+# The resolved-row sort key (row[2] is `t`). A C-level itemgetter, not a
+# lambda: the sort runs over 2.6M rows on a heavy chart.
+_row_t = itemgetter(2)
 
 
 def _player_indexes(raw) -> tuple:
@@ -95,8 +105,10 @@ def _frame_resolved(applied) -> list:
     0-target for every channel that player has ever applied.
 
     This is the single hottest pass of the mod-channel compile (350K+ rows x
-    ~9 channels each on a heavy chart), so the flush is inlined (no per-key
-    closure call, ~3M avoided) and the hot names are locals."""
+    ~9 channels each on a heavy chart), so the flush is INLINED at its three
+    sites (a closure call per key was ~3M of them) and the hot names are
+    locals. Flushing does not `del pending[key]`: every site overwrites the
+    key on the next statement, so the delete only ever undid itself."""
     pending: dict = {}
     seen: dict = {}
     out: list = []
@@ -104,39 +116,54 @@ def _frame_resolved(applied) -> list:
     out_append = out.append
     same_frame = _SAME_FRAME_S
 
-    def flush(key, next_t) -> None:
-        held = pending_get(key)
-        if held is not None and next_t - held[0] >= same_frame:
-            name, index = key
-            out_append((name, index, *held))
-            del pending[key]
-
     for t, beat, modstring, player in applied:
         indexes = _player_indexes(player)
-        if 'clearall' in modstring.lower():
+        clears, mods, speed_mods, names = _row_plan(modstring)
+
+        if clears:
             # The classic reader's row is `clearall, <live windows>`: the
             # clearall retargets every seen mod to 0, then the SAME row's
             # trailing tokens re-apply theirs (parsed below, overwriting
             # the 0 per channel exactly as the engine's in-frame order).
+            cleared = (t, beat, 0.0, _CLEARALL_SPEED)
             for index in indexes:
                 for name in seen.get(index, ()):
                     key = (name, index)
-                    flush(key, t)
-                    pending[key] = (t, beat, 0.0, _CLEARALL_SPEED)
-        for value, speed, name in _parsed(modstring):
+                    held = pending_get(key)
+                    if held is not None and t - held[0] >= same_frame:
+                        out_append((name, index, *held))
+                    pending[key] = cleared
+
+        for value, speed, name in mods:
             for index in indexes:
-                seen.setdefault(index, set()).add(name)
                 key = (name, index)
-                flush(key, t)
+                held = pending_get(key)
+                if held is not None and t - held[0] >= same_frame:
+                    out_append((name, index, *held))
                 pending[key] = (t, beat, value, speed)
-        for speed, kind, value in _parsed_speed(modstring):
+
+        for speed, kind, value in speed_mods:
+            name = _SPEED_CHANNELS[kind]
             for index in indexes:
-                key = (_SPEED_CHANNELS[kind], index)
-                flush(key, t)
+                key = (name, index)
+                held = pending_get(key)
+                if held is not None and t - held[0] >= same_frame:
+                    out_append((name, index, *held))
                 pending[key] = (t, beat, value, speed)
+
+        # `seen` grows by the WHOLE row at once (the clearall above already
+        # read it, so a per-name update inside the loop above bought
+        # nothing but 650K set operations).
+        for index in indexes:
+            known = seen.get(index)
+            if known is None:
+                seen[index] = set(names)
+            else:
+                known |= names
+
     for (name, index), held in pending.items():
         out_append((name, index, *held))
-    out.sort(key=lambda row: row[2])
+    out.sort(key=_row_t)
     return out
 
 

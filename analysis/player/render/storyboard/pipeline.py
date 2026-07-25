@@ -214,6 +214,7 @@ class DrawablePipeline:
         self._signature_polled = 0.0
         self._topology_final = False
         self._note_images = None
+        self._note_generation = None
         self._note_feed_failed = False
         self._wait_logged = False
         # Async build stages (see _ensure_built).
@@ -523,6 +524,7 @@ class DrawablePipeline:
         # nothing can grow behind it, so staleness polling can stop.
         self._topology_final = _sweep_in_progress(self._compiled) is False
         self._note_images = None
+        self._note_generation = None
         images = _lazy_images(id_maps)
         images.warm()
         self._executor = GLExecutor(
@@ -602,8 +604,12 @@ class DrawablePipeline:
         if image_map is None:
             return None
         from analysis.player.render.storyboard import note_feed
+        # The ctx's field geometry is in SCREEN px (the adapter already
+        # stretched its design grid onto the chart rect); this doc's screen is
+        # the design box the executor stretches at present time, so the feed
+        # must convert or the stretch lands twice.
         u_soa, f_soa, count, _report = note_feed.feed_from_context(
-            ctx, image_map)
+            ctx, image_map, design=(_SCREEN_W, _SCREEN_H))
         if not count:
             return None
         slot_ids = sorted(int(s) for s in slots.values())
@@ -622,8 +628,8 @@ class DrawablePipeline:
                       'released')
 
     def _ensure_note_images(self, ctx):
-        """`{key: image_id}` for the note feed, registering each sprite into
-        the executor's image table once.
+        """`{key: (image_id, w, h)}` for the note feed, registering each
+        sprite into the executor's image table once.
 
         Every feed image declares natural size (1, 1): a fed item's mat3
         already carries its on-screen rect over a unit source box, so the
@@ -631,9 +637,19 @@ class DrawablePipeline:
         rasterised per (column, state) exactly as the raster cache keys them,
         so the feed resolves the same noteskin variant.
 
+        The `(w, h)` the map carries is that rasterised pixmap's DESIGN SIZE,
+        which is what the raster path blits it at (`notes._blit_lane_pixmap`
+        draws the pixmap at its own dimensions, centred on the note's y). It
+        has to travel with the id rather than be recomputed by the emitter:
+        a sprite's box is skin-dependent (a circle head is `lane_w` square, a
+        bar head is `note_h + 2 * HEAD_PAD` tall) and an adapter may replace
+        the specs outright via `GameAdapter.note_sprites`, so the rasterised
+        pixmap is the only honest source.
+
         Returns None when the sprite cache is unavailable - the caller then
         skips the feed rather than drawing wrong art."""
-        if self._note_images is not None:
+        generation = _sprite_generation(ctx)
+        if self._note_images is not None and generation == self._note_generation:
             return self._note_images
         images = getattr(self._executor, '_images', None)
         cache = getattr(ctx, 'sprite_cache', None)
@@ -642,19 +658,26 @@ class DrawablePipeline:
             return None
         from PySide6.QtGui import QColor, QImage
 
+        # The cache just dropped its pixmaps (resize / skin toggle / palette
+        # fade), so the ids minted below must re-upload rather than hit the
+        # executor's texture cache holding the previous art.
+        self._drop_note_textures()
+
         next_id = 1 + max((self._id_maps.get('images') or {}), default=-1)
         image_map = {}
 
-        def register(key, image):
+        def register(key, image, size=None):
             nonlocal next_id
             put(next_id, image)
             self._executor._image_natural[next_id] = (1.0, 1.0)
-            image_map[key] = next_id
+            image_map[key] = (next_id, *(size or (image.width(), image.height())))
             next_id += 1
 
+        # The receptor is not a cache sprite - the field layer strokes a plain
+        # notch - so it registers as a solid whose box the emitter names.
         solid = QImage(1, 1, QImage.Format.Format_ARGB32_Premultiplied)
         solid.fill(QColor(255, 255, 255, 255))
-        register('receptor', solid)
+        register('receptor', solid, size=(1.0, 1.0))
 
         keycount = int(getattr(ctx, 'keycount', 0) or 0)
         for key, sprite in self._NOTE_SPRITES:
@@ -664,7 +687,16 @@ class DrawablePipeline:
                     if pixmap is not None:
                         register(f'{key}_{col}_{state}', pixmap)
         self._note_images = image_map
+        self._note_generation = generation
         return image_map
+
+    def _drop_note_textures(self) -> None:
+        """Forget the GPU textures behind the previously registered note
+        sprites, so re-registering the same ids uploads the new art."""
+        textures = getattr(self._executor, '_image_textures', None)
+        for entry in (self._note_images or {}).values():
+            if textures is not None:
+                textures.pop(entry[0], None)
 
     def _schedule_with_feeds(self, t, ctx):
         """`_schedule`, plus this frame's inline note feed when the doc has
@@ -717,6 +749,21 @@ class DrawablePipeline:
 
 _SCREEN_W = 640
 _SCREEN_H = 480
+
+
+def _sprite_generation(ctx):
+    """The sprite cache's invalidation generation, paired with the keycount.
+
+    The pipeline keeps its own copy of every rasterised sprite - uploaded as a
+    GL texture, with the design box it draws at - so it has to re-read whenever
+    the cache drops its pixmaps. `NoteSpriteCache.invalidate` is the one choke
+    point for all of those (a resize, a SKIN TOGGLE, a palette fade), so its
+    generation is the whole signal; watching `(lane_w, note_h)` instead misses
+    a skin toggle entirely, which rasterises a different shape at the very same
+    geometry. The keycount rides along because it decides how many per-column
+    variants get registered at all."""
+    cache = getattr(ctx, 'sprite_cache', None)
+    return (getattr(cache, 'generation', 0), getattr(ctx, 'keycount', None))
 
 
 def _sprite_image(cache, name, ctx, col, state):

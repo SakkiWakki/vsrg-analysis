@@ -80,6 +80,17 @@ typedef struct {
     CValue clock_beat, clock_time;
 } CTrim;
 
+/* A generic-for over an ARENA table walked entirely in the executor. A
+ * snapshotted (or body-built) arena table is a dense pure array, so ipairs and
+ * pairs agree on the 1..n run and there is nothing for the host to decide -
+ * crossing per ROW instead was what made the op-stream body SLOWER than the
+ * Lua one it replaces (gat iterates ~2.2K rows/tick, each a Python generator
+ * resume plus two ctypes calls). Loops nest, so the cursors form a stack; a
+ * for over a HOST table still crosses through `iter_setup`/`iter_next`. */
+#define CEXEC_ITER_DEPTH 16
+
+typedef struct { uint64_t tid; int64_t i, n; } CArenaIter;
+
 /* Execution state for one body, persisted across ticks (the frame's globals /
  * accumulators live host-side behind the frontier; the slot frame is cleared
  * each tick except slot 0 = self). */
@@ -92,6 +103,7 @@ typedef struct {
     CValue      *frame;  int nslots;      /* slot array (self at [0]) */
     CValue      *regs;   int reg_cap;     /* eval register stack */
     CTrim       *trim;                    /* NULL = trim disabled */
+    CArenaIter   iters[CEXEC_ITER_DEPTH]; int niter;  /* in-C for cursors */
 } CExecState;
 
 /* Run the body once (one tick). `self_val` is rebound into slot 0; other slots

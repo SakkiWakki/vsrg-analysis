@@ -720,21 +720,25 @@ class SimActor:
     # -- poke dispatch ---------------------------------------------------
 
     def poke(self, verb: str, args: list) -> None:
+        """Apply one actor-command verb, routed to the stage that owns it.
+
+        The stage is MEMOIZED per verb (`_POKE_STAGE`). Which stage consumes a
+        verb is a pure function of the verb - every stage's return keys on
+        `verb` alone, never on the arguments - so a verb's first poke walks the
+        chain and every later one calls its stage directly. The chain is nine
+        predicates deep and the scalar setters that dominate a chart sit at the
+        far end of it, so the walk was ~6M failed calls over a heavy chart's
+        sweep."""
+        stage = _POKE_STAGE.get(verb)
+        if stage is None:
+            _learn_poke_stage(self, verb, args)
+            return
+        stage(self, verb, args)
+
+    def _poke_named(self, verb: str, args: list) -> bool:
+        """The chain's terminal stage: the one-off verbs, plus the reporting
+        of anything no stage modelled. Always consumes the verb."""
         arg0 = args[0] if args else None
-        if self._poke_multi_arg(verb, args) or self._poke_bulk(verb, args):
-            return
-        if self._poke_note_path(verb, args):
-            return
-        if self._poke_mesh(verb, args):
-            return
-        if self._poke_effect(verb, args):
-            return
-        if self._poke_color(verb, args):
-            return
-        if self._poke_uniform(verb, args):
-            return
-        if self._poke_channel(verb, arg0) or self._poke_tween(verb, arg0):
-            return
         match verb:
             case 'diffuse':
                 self._diffuse(args)
@@ -807,6 +811,7 @@ class SimActor:
                 # tail is a silent drop - report it.
                 if self.dropped_notify is not None:
                     self.dropped_notify(verb)
+        return True
 
     def queue_command(self, name: str) -> None:
         """`queuecommand(name)`: a zero-length tween carrying the command
@@ -968,7 +973,8 @@ class SimActor:
                 return True
         return False
 
-    def _poke_channel(self, verb, arg0) -> bool:
+    def _poke_channel(self, verb, args) -> bool:
+        arg0 = args[0] if args else None
         if verb in _SIM_TWEEN_EASING:
             self._begin_tweening(_arg_float(arg0, 0.0),
                                  _SIM_TWEEN_EASING[verb])
@@ -1077,7 +1083,8 @@ class SimActor:
         self._set_scalar('fit_bottom', bottom)
         self._set_scalar('fit_mode', mode)
 
-    def _poke_tween(self, verb, arg0) -> bool:
+    def _poke_tween(self, verb, args) -> bool:
+        arg0 = args[0] if args else None
         match verb:
             case 'sleep':
                 self._sleep(_arg_float(arg0, 0.0))
@@ -1452,11 +1459,16 @@ class SimActor:
             self._track_driven(t)
 
     def _seg_emit(self, t, prop, values, dur, ease_id, start) -> None:
-        if not all(isinstance(v, (int, float)) for v in values):
-            ts, vals = self._seg_tokens.setdefault(prop, ([], []))
-            ts.append(t)
-            vals.append(values)
-            return
+        # A plain loop, not `all(isinstance(v, ...) for v in values)`: this
+        # runs once per emission (775K on a heavy chart) and almost always
+        # over a 1-tuple, where building and draining a generator frame cost
+        # more than the test it wraps.
+        for value in values:
+            if not isinstance(value, (int, float)):
+                ts, vals = self._seg_tokens.setdefault(prop, ([], []))
+                ts.append(t)
+                vals.append(values)
+                return
 
         lanes = self._seg.setdefault(prop, [])
         while len(lanes) < len(values):
@@ -1490,3 +1502,26 @@ class SimActor:
             spans[-1][1] = max(spans[-1][1], t)
         elif not spans or t > spans[-1][1]:
             spans.append([t, t])
+
+
+# The poke dispatch chain in engine order, then the verb -> stage memo `poke`
+# consults. Unbound functions, so a stage costs one call with no attribute
+# lookup; SimActor is not subclassed (RecordingActor is a separate class with
+# its own chain), so binding the stages here cannot shadow an override.
+_POKE_CHAIN = (
+    SimActor._poke_multi_arg, SimActor._poke_bulk, SimActor._poke_note_path,
+    SimActor._poke_mesh, SimActor._poke_effect, SimActor._poke_color,
+    SimActor._poke_uniform, SimActor._poke_channel, SimActor._poke_tween,
+    SimActor._poke_named,
+)
+_POKE_STAGE: dict = {}
+
+
+def _learn_poke_stage(actor, verb: str, args: list) -> None:
+    """Apply a verb seen for the first time by walking the chain, and memo the
+    stage that consumed it. `_poke_named` is terminal, so the walk always
+    lands."""
+    for stage in _POKE_CHAIN:
+        if stage(actor, verb, args):
+            _POKE_STAGE[verb] = stage
+            return

@@ -41,7 +41,11 @@ so the unit box's center lands on `(cx, cy)` before the spin/scale.
 
 ## image_map vocabulary (documented, kept simple)
 
-`image_map` is `{key: image_id}`; the emitter looks up:
+`image_map` is `{key: (image_id, w, h)}`, where `(w, h)` is the sprite's own
+design box - what the raster path blits it at. It travels with the id because
+a sprite's box is skin-dependent (a circle head is `lane_w` square; a bar head
+is `note_h + 2 * HEAD_PAD` tall) and an adapter may replace the specs outright,
+so nothing but the rasterised sprite knows it. The emitter looks up:
 
 - 'receptor'         : the per-column receptor notch
 - 'tap'              : a tap / note head (all columns)
@@ -94,16 +98,9 @@ _F_Z = 17
 _RECEPTOR_H = 4.0
 _RECEPTOR_LANE_FRAC = 0.82
 
-# A note head's design height. The raster head pixmap is note_h + 2*pad
-# tall (note_sprites.HEAD_PAD), but the head's VISIBLE extent is one
-# note_h band centered on its y; the feed emits that visible band, so
-# the unit box scales to (lane_w, note_h). Sourced from the ctx when
-# present (note_h is a RenderContext field), else this default.
-_DEFAULT_NOTE_H = 14.0
-
 # Stream-record kind -> image_map key (notes_model.KIND_*). Mines are
 # palette-independent glyphs; lifts/fakes key on the column like note heads,
-# so both consult the per-column override first (see _lookup_image).
+# so both consult the per-column override first (see _lookup_sprite).
 _STREAM_KEYS = {0: 'mine', 1: 'lift', 2: 'fake'}
 
 # Feed flags (evaluate.rs FEED_FLAG_*): bit 0 = additive blend.
@@ -116,7 +113,7 @@ _WHITE = (1.0, 1.0, 1.0)
 _NO_CROP = (0.0, 0.0, 0.0, 0.0)
 
 
-def feed_notes(player, t, image_map):
+def feed_notes(player, t, image_map, design=None):
     """Emit the visible receptors + note heads at time `t` as feed-v2
     SoA buffers for the notefield dynamic drawable.
 
@@ -127,17 +124,23 @@ def feed_notes(player, t, image_map):
 
     `image_map` maps sprite keys to image ids (see module docstring for
     the key vocabulary). `player` is a replay Player; its render context
-    (note_views + receptor offsets) is built for `t` and read per note."""
+    (note_views + receptor offsets) is built for `t` and read per note.
+    `design` is the consuming document's screen size (see
+    `feed_from_context`)."""
     ctx = _resolve_ctx(player, t)
-    return feed_from_context(ctx, image_map)
+    return feed_from_context(ctx, image_map, design=design)
 
 
-def feed_from_context(ctx, image_map):
+def feed_from_context(ctx, image_map, design=None):
     """The pure emitter: build the SoA from an already-prepared render
     context (its `note_views` + receptor state). Split out from
     `feed_notes` so tests drive it with a synthetic ctx and the real
-    path shares one code body."""
-    rows = _EmitBuffer()
+    path shares one code body.
+
+    `design` is the consuming document's screen size, e.g. `(640, 480)`; pass
+    it whenever that document is NOT the ctx's own screen. See
+    `_screen_to_design` for why the fed mat3s must be converted."""
+    rows = _EmitBuffer(_screen_to_design(ctx, design))
     report = {'receptors': 0, 'taps': 0, 'streams': 0, 'glows': 0,
               'ln_tails': 0, 'ln_body_segments': 0,
               'skipped': 0, 'seams': []}
@@ -166,10 +169,11 @@ def _emit_receptors(ctx, image_map, rows, report):
         lane_w = float(ctx.lane_width(col))
         if lane_w <= 0.5:
             continue
-        image_id = _lookup_image(image_map, 'receptor', col)
-        if image_id is None:
+        sprite = _lookup_sprite(image_map, 'receptor', col)
+        if sprite is None:
             report['skipped'] += 1
             continue
+        image_id = sprite[0]
         cx = float(ctx.lane_center(col)) + float(dx[col])
         cy = judge_y + float(dy[col])
         w = lane_w * _RECEPTOR_LANE_FRAC
@@ -201,7 +205,6 @@ def _emit_note_heads(ctx, image_map, rows, report):
     renderer's cull + back-to-front prepass order). LN heads/bodies,
     stream records, and 3D-projected heads are counted in
     `report['skipped']` - this wave emits flat taps only."""
-    note_h = float(getattr(ctx, 'note_h', _DEFAULT_NOTE_H))
     for n in getattr(ctx, 'note_views', ()):
         if n is None:
             continue
@@ -213,22 +216,23 @@ def _emit_note_heads(ctx, image_map, rows, report):
             report['skipped'] += 1
             continue
         kind = 'ln_head' if n.is_ln else 'tap'
-        image_id = _lookup_image(image_map, kind, n.col, state)
-        if image_id is None:
+        sprite = _lookup_sprite(image_map, kind, n.col, state)
+        if sprite is None:
             report['skipped'] += 1
             continue
         lane_w = float(ctx.lane_width(n.col))
         cx = float(n.lx) + lane_w / 2.0
-        mat = _head_mat(n, cx, cy, lane_w, note_h)
+        mat = _head_mat(n, cx, cy, *_sprite_box(ctx, sprite, n.col))
         if mat is None:
             report['skipped'] += 1
             continue
+        image_id = sprite[0]
         if float(n.alpha) >= _MIN_ALPHA:
             rows.add(image_id, mat, float(n.alpha))
             report['taps'] += 1
         _emit_glow(n, image_id, mat, rows, report)
-        _emit_ln_body(n, image_map, lane_w, rows, report)
-        _emit_ln_tail(ctx, n, image_map, lane_w, note_h, rows, report)
+        _emit_ln_body(ctx, n, image_map, lane_w, rows, report)
+        _emit_ln_tail(ctx, n, image_map, lane_w, rows, report)
 
 
 def _emit_streams(ctx, image_map, rows, report):
@@ -240,7 +244,6 @@ def _emit_streams(ctx, image_map, rows, report):
     `_place`; `kind` selects only the sprite. Span records whose head fell
     outside the cull window (`head_in_window` false) are pulled in for their
     body stroke alone and draw no head, exactly as the raster layer does."""
-    note_h = float(getattr(ctx, 'note_h', _DEFAULT_NOTE_H))
     for v in getattr(ctx, 'stream_views', ()) or ():
         if v is None:
             continue
@@ -251,23 +254,23 @@ def _emit_streams(ctx, image_map, rows, report):
             report['skipped'] += 1
             continue
         key = _STREAM_KEYS.get(v.kind)
-        image_id = _lookup_image(image_map, key, v.col) if key else None
-        if image_id is None:
+        sprite = _lookup_sprite(image_map, key, v.col) if key else None
+        if sprite is None:
             report['skipped'] += 1
             continue
         lane_w = float(ctx.lane_width(v.col))
         cx = float(v.lx) + lane_w / 2.0
-        mat = _head_mat(v, cx, float(v.y), lane_w, note_h)
+        mat = _head_mat(v, cx, float(v.y), *_sprite_box(ctx, sprite, v.col))
         if mat is None:
             report['skipped'] += 1
             continue
         if float(v.alpha) >= _MIN_ALPHA:
-            rows.add(image_id, mat, float(v.alpha))
+            rows.add(sprite[0], mat, float(v.alpha))
             report['streams'] += 1
-        _emit_glow(v, image_id, mat, rows, report)
+        _emit_glow(v, sprite[0], mat, rows, report)
 
 
-def _emit_ln_body(n, image_map, lane_w, rows, report):
+def _emit_ln_body(ctx, n, image_map, lane_w, rows, report):
     """The hold BODY as a strip of quads along its path - one item per path
     segment, each rotated to that segment's angle.
 
@@ -275,14 +278,15 @@ def _emit_ln_body(n, image_map, lane_w, rows, report):
     segment is an ordinary image item placed by its own mat3, exactly like a
     note head. `body_scale` narrows a cross-section that dives toward the
     camera (per-sample depth foreshortening), so the width is sampled per
-    segment rather than held constant."""
+    segment rather than held constant. The body sprite is a one-row tile whose
+    length comes from the path, so only its WIDTH is the sprite's."""
     if not n.is_ln:
         return
     path = getattr(n, 'body_path', None)
     if path is None:
         return
-    image_id = _lookup_image(image_map, 'ln_body', n.col, _tail_state(n))
-    if image_id is None:
+    sprite = _lookup_sprite(image_map, 'ln_body', n.col, _tail_state(n))
+    if sprite is None:
         report['skipped'] += 1
         return
     alpha = float(n.alpha)
@@ -291,6 +295,7 @@ def _emit_ln_body(n, image_map, lane_w, rows, report):
     xs, ys = path[0], path[1]
     scale = getattr(n, 'body_scale', None)
     half = lane_w / 2.0
+    body_w, _body_h = _sprite_box(ctx, sprite, n.col, n.zoom)
     for i in range(len(ys) - 1):
         x0, y0 = float(xs[i]) + half, float(ys[i])
         x1, y1 = float(xs[i + 1]) + half, float(ys[i + 1])
@@ -298,16 +303,16 @@ def _emit_ln_body(n, image_map, lane_w, rows, report):
         length = math.hypot(dx, dy)
         if length <= 1e-6:
             continue
-        width = lane_w * n.zoom
+        width = body_w
         if scale is not None and i < len(scale):
             width *= float(scale[i])
         mat = _place((x0 + x1) / 2.0, (y0 + y1) / 2.0, width, length,
                      math.degrees(math.atan2(dy, dx)) - 90.0)
-        rows.add(image_id, mat, alpha)
+        rows.add(sprite[0], mat, alpha)
         report['ln_body_segments'] += 1
 
 
-def _emit_ln_tail(ctx, n, image_map, lane_w, note_h, rows, report):
+def _emit_ln_tail(ctx, n, image_map, lane_w, rows, report):
     """The hold's TAIL cap, seated on the end of its body path and rotated to
     the local tangent (mirrors `notes._draw_tail_on_curve`), or at the plain
     `y_end` when the path is absent/degenerate.
@@ -317,19 +322,19 @@ def _emit_ln_tail(ctx, n, image_map, lane_w, note_h, rows, report):
     explicit vertical mirror."""
     if not n.is_ln:
         return
-    image_id = _lookup_image(image_map, 'ln_tail', n.col, _tail_state(n))
-    if image_id is None:
+    sprite = _lookup_sprite(image_map, 'ln_tail', n.col, _tail_state(n))
+    if sprite is None:
         report['skipped'] += 1
         return
     end = _tail_end(n, lane_w)
     if end is None:
         return
     cx, cy, angle = end
-    mat = _place(cx, cy, lane_w * n.zoom, note_h * n.zoom, angle)
+    mat = _place(cx, cy, *_sprite_box(ctx, sprite, n.col, n.zoom), angle)
     if float(n.alpha) >= _MIN_ALPHA:
-        rows.add(image_id, mat, float(n.alpha))
+        rows.add(sprite[0], mat, float(n.alpha))
         report['ln_tails'] = report.get('ln_tails', 0) + 1
-    _emit_glow(n, image_id, mat, rows, report)
+    _emit_glow(n, sprite[0], mat, rows, report)
 
 
 def _tail_state(n) -> str:
@@ -361,13 +366,16 @@ def _tail_end(n, lane_w):
             math.degrees(math.atan2(dy, dx)) - 90.0)
 
 
-def _head_mat(n, cx, cy, lane_w, note_h):
-    """The item mat3 for a head at `(cx, cy)`: the plain 2D placement, or the
-    field's perspective homography when the note carries out-of-plane mods.
-    None = fully behind the eye, which draws nothing."""
+def _head_mat(n, cx, cy, w, h):
+    """The item mat3 placing a `w` x `h` head centred on `(cx, cy)`: the plain
+    2D placement, or the field's perspective homography when the note carries
+    out-of-plane mods. None = fully behind the eye, which draws nothing.
+
+    `zoom` scales the box here rather than at the call site because the 3D path
+    folds it into the model instead (see `_place_3d`)."""
     if _is_3d(n):
-        return _place_3d(n, cx, cy, lane_w, note_h)
-    return _place(cx, cy, lane_w * n.zoom, note_h * n.zoom, n.rotation_deg)
+        return _place_3d(n, cx, cy, w, h)
+    return _place(cx, cy, w * n.zoom, h * n.zoom, n.rotation_deg)
 
 
 def _is_3d(n):
@@ -479,15 +487,16 @@ def _place(cx, cy, w, h, rotation_deg):
 
 # ── image lookup ─────────────────────────────────────────────────────
 
-def _lookup_image(image_map, kind, col, state=None):
-    """The image id for `kind` at `col` in sprite `state`, most specific key
-    first: `kind_col_state`, `kind_state`, `kind_col`, `kind`.
+def _lookup_sprite(image_map, kind, col, state=None):
+    """`(image_id, w, h)` for `kind` at `col` in sprite `state`, most specific
+    key first: `kind_col_state`, `kind_state`, `kind_col`, `kind`.
 
     The raster cache keys its head sprites on (col, state) - the noteskin
     varies the head by column AND by judgment state (normal / miss / tick) -
     so the feed resolves the same variant through the image map rather than
-    flattening every note onto one sprite. Returns None only when no key
-    matches; the caller decides whether that's a required kind (raise) or a
+    flattening every note onto one sprite. `(w, h)` is the sprite's own design
+    box, which is what places it (see `_sprite_box`). Returns None only when no
+    key matches; the caller decides whether that's a required kind (raise) or a
     per-note skip (count)."""
     keys = ((f'{kind}_{col}_{state}', f'{kind}_{state}') if state else ())
     for key in (*keys, f'{kind}_{col}', kind):
@@ -495,6 +504,22 @@ def _lookup_image(image_map, kind, col, state=None):
         if found is not None:
             return found
     return None
+
+
+def _sprite_box(ctx, sprite, col, zoom=1.0):
+    """The on-screen `(w, h)` a sprite draws at in column `col`, scaled by a
+    per-note `zoom`.
+
+    Mirrors `notes._blit_lane_pixmap`: the pixmap draws at its OWN dimensions,
+    squeezed horizontally by the lane's animated width (a lane switch collapses
+    the lane, and notes ride its centre) and never vertically. The height is
+    therefore the sprite's, NOT `note_h` - a circle head is a `lane_w` square
+    and a bar head carries `2 * HEAD_PAD` of outline room, so sizing every
+    sprite to `note_h` flattens it."""
+    _image_id, sw, sh = sprite
+    base = float(getattr(ctx, 'lane_w', 0.0) or 0.0)
+    squeeze = (float(ctx.lane_width(col)) / base) if base else 1.0
+    return sw * squeeze * zoom, sh * zoom
 
 
 def _head_state(ctx, n):
@@ -530,17 +555,66 @@ def _sprite_state(ctx, n):
     return visible, state, y
 
 
+# ── screen -> design space ───────────────────────────────────────────
+
+def _screen_to_design(ctx, design):
+    """`(a, b, c, d)` for the screen -> design affine `x' = a*x + c`,
+    `y' = b*y + d`, or None when no conversion is needed.
+
+    The ctx's field geometry is in SCREEN pixels: a game adapter's
+    `field_geometry` already stretches its design grid onto `ctx.chart_rect`
+    (NotITG: `lane_w = 64 * chart_w / 640`), and `note_views` inherit that
+    space. A consuming document with its OWN screen - the drawable doc's fixed
+    640x480, which the executor stretches onto the chart rect at present time -
+    would then apply that same stretch a SECOND time, so fed notes and
+    receptors land scaled and offset by the chart-rect ratio.
+
+    Converting here rather than at each call site keeps the emitter writing one
+    space: every mat3 goes through `_EmitBuffer.add`, so one pre-multiply
+    covers heads, receptors, stream records, LN ribbons and glow passes alike.
+    """
+    if design is None:
+        return None
+    rect = getattr(ctx, 'chart_rect', None)
+    if rect is None:
+        return None
+    x, y, w, h = (float(v) for v in rect)
+    design_w, design_h = float(design[0]), float(design[1])
+    if w <= 0.0 or h <= 0.0 or design_w <= 0.0 or design_h <= 0.0:
+        return None
+    a, b = design_w / w, design_h / h
+    return a, b, -x * a, -y * b
+
+
+def _to_design_mat(to_design, mat):
+    """`S @ mat`, where S is the screen -> design affine `to_design` names.
+
+    The bottom row rides through untouched, so a PROJECTIVE placement (a
+    3D-modded head's homography) converts as correctly as a plain affine
+    one."""
+    a, b, c, d = to_design
+    m0, m1, m2, m3, m4, m5, m6, m7, m8 = mat
+    return (a * m0 + c * m6, a * m1 + c * m7, a * m2 + c * m8,
+            b * m3 + d * m6, b * m4 + d * m7, b * m5 + d * m8,
+            m6, m7, m8)
+
+
 # ── SoA writer ───────────────────────────────────────────────────────
 
 class _EmitBuffer:
     """Accumulates fed items as Python-list rows, then freezes them into
     the two fixed-stride SoA numpy buffers. One image blit per row,
     uncropped and with no z (2D taps, receptors and stream records), so
-    only the mat3, opacity, tint and blend vary."""
+    only the mat3, opacity, tint and blend vary.
 
-    def __init__(self):
+    `to_design` (see `_screen_to_design`) pre-multiplies every mat3 into the
+    consuming document's space. It is applied here, at the one point every
+    item passes through, rather than threaded into each placement."""
+
+    def __init__(self, to_design=None):
         self._u = []
         self._f = []
+        self._to_design = to_design
         self.count = 0
 
     # Lanes 13..17: every fed item is uncropped and carries no z - a
@@ -551,7 +625,8 @@ class _EmitBuffer:
             frame=0):
         self._u.extend((SRC_IMAGE, image_id, frame,
                         _FEED_FLAG_ADDITIVE if additive else 0))
-        self._f.extend(mat)
+        self._f.extend(mat if self._to_design is None else
+                       _to_design_mat(self._to_design, mat))
         self._f.extend((opacity, tint[0], tint[1], tint[2], *self._TAIL))
         self.count += 1
 
