@@ -211,6 +211,7 @@ impl DocBuilder {
                 links: Vec::new(),
                 flip_base_y: false,
                 visible: chan(visible_id, visible_rest),
+                projection: None,
             });
     }
 
@@ -473,7 +474,7 @@ impl DocBuilder {
         w: f32,
         h: f32,
     ) {
-        self.last_item(target).projection = Some(CameraRef {
+        let camera = Some(CameraRef {
             fov_deg: chan(fov_id, fov_rest),
             vanish_x: chan(vanish_x_id, vanish_x_rest),
             vanish_y: chan(vanish_y_id, vanish_y_rest),
@@ -481,6 +482,7 @@ impl DocBuilder {
             w,
             h,
         });
+        *self.last_projection(target) = camera;
     }
 
     /// Append one item command. Channel args are (id, rest) with id<0
@@ -635,6 +637,21 @@ impl DocBuilder {
         match commands.last_mut() {
             Some(Cmd::Item(item)) => item,
             _ => panic!("last command on target {target} is not an Item"),
+        }
+    }
+
+    /// The camera slot of the tail command - an Item or a Feed. A linked
+    /// feed is a field copy re-rendering the notes, so its chain takes a
+    /// perspective fold exactly as an item's does; restricting this to Items
+    /// left the inline-notes path (the default) unable to carry one at all.
+    /// Panics if the tail is neither.
+    fn last_projection(&mut self, target: u32) -> &mut Option<CameraRef> {
+        let commands =
+            &mut self.doc.as_mut().expect("builder already finished").drawables[target as usize].commands;
+        match commands.last_mut() {
+            Some(Cmd::Item(item)) => &mut item.projection,
+            Some(Cmd::Feed { projection, .. }) => projection,
+            _ => panic!("last command on target {target} takes no projection"),
         }
     }
 

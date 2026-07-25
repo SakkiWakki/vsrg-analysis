@@ -456,6 +456,7 @@ fn emit_commands(
                 links,
                 flip_base_y,
                 visible,
+                projection,
             } => {
                 // Inline: the slot's fed items draw HERE, as ordinary items of
                 // the enclosing drawable, so nothing bounds them but the real
@@ -466,6 +467,7 @@ fn emit_commands(
                     links,
                     *flip_base_y,
                     *visible,
+                    *projection,
                     t,
                     feeds,
                     events,
@@ -506,12 +508,14 @@ fn emit_commands(
                             links,
                             flip_base_y,
                             visible,
+                            projection,
                         } => emit_feed(
                             doc,
                             *slot,
                             links,
                             *flip_base_y,
                             *visible,
+                            *projection,
                             t,
                             feeds,
                             events,
@@ -630,6 +634,7 @@ fn emit_feed(
     links: &[crate::doc::LinkRef],
     flip_base_y: bool,
     visible: ChannelRef,
+    projection: Option<crate::doc::CameraRef>,
     t: f32,
     feeds: &[Feed],
     events: &[Event],
@@ -659,11 +664,19 @@ fn emit_feed(
     // column-vector, so transpose once before composing over each item.
     // The chain's crop is not applied: per-item crop fractions are of the
     // item's own box, not the chain's content box.
-    let chain = [
+    let mut chain = [
         h[0], h[3], h[6], //
         h[1], h[4], h[7], //
         h[2], h[5], h[8],
     ];
+    // The consumer chain's own camera. A field copy carrying rotation_x/y or
+    // z is a 3D turn, and without this fold it composes as a flat squash -
+    // the same perspective divide `emit_item_folded` applies per item, done
+    // once on the chain because every fed item shares it.
+    if let Some(cam) = projection {
+        let p = cam.matrix(ch, t);
+        chain = crate::camera::fold_projection(&chain, &p);
+    }
     for item in feed.items {
         emit_item_folded(doc, item, t, events, cache, schedule, Some((&chain, alpha)));
     }
@@ -1071,6 +1084,7 @@ mod tests {
             links: Vec::new(),
             flip_base_y: false,
             visible: ChannelRef::constant(1.0),
+            projection: None,
         });
         doc.drawables[0]
             .commands
@@ -1124,6 +1138,7 @@ mod tests {
             links: vec![faded],
             flip_base_y: false,
             visible: ChannelRef::constant(1.0),
+            projection: None,
         });
         let mut fed = Item::of(Source::Fill);
         fed.fed_mat = Some([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
@@ -1166,6 +1181,7 @@ mod tests {
                 links: vec![hidden],
                 flip_base_y: false,
                 visible: ChannelRef::constant(if hide_via_chain { 1.0 } else { 0.0 }),
+                projection: None,
             });
             let mut fed = Item::of(Source::Fill);
             fed.fed_mat = Some([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);

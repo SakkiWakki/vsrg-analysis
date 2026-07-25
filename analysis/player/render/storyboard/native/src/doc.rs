@@ -293,6 +293,12 @@ pub enum Cmd {
         links: Vec<LinkRef>,
         flip_base_y: bool,
         visible: ChannelRef,
+        /// The consumer chain's camera, folded onto the composed chain before
+        /// it composes over each fed item (see evaluate.rs::emit_feed). A
+        /// linked feed is a field copy re-rendering the notes, so its chain
+        /// needs the same perspective divide an Item's does - without it a
+        /// rotated field is a flat squash, not a 3D turn.
+        projection: Option<CameraRef>,
     },
 }
 

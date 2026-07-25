@@ -502,6 +502,32 @@ def elements_in_doc() -> bool:
     return os.environ.get('VSRG_DRAWABLE_ELEMENTS', '0').lower() in ('1', 'true', 'yes')
 
 
+# The link props that take a chain off the z=0 plane, with their rest values.
+# Mirrors `transform::is_planar` (native/src/transform.rs): while every one of
+# these rests, the design projection is the identity and the camera fold is a
+# no-op; the moment one moves, the fold is what turns a rotation into a 3D turn
+# rather than a horizontal squash.
+_OUT_OF_PLANE_RESTS = (('rotation_x', 0.0), ('rotation_y', 0.0), ('z', 0.0),
+                       ('scale_z', 1.0), ('base_scale_z', 1.0))
+
+
+def _link_is_planar(link) -> bool:
+    """Whether one link stays on the z=0 plane for the whole chart.
+
+    A prop counts as off-plane when it MOVES (not static) or when it rests
+    somewhere other than its identity value - a chain pinned at rotation_y=30
+    needs the camera just as much as one sweeping through it."""
+    for prop, rest in _OUT_OF_PLANE_RESTS:
+        timeline = link.get(prop)
+        if timeline is None:
+            continue
+        if not _is_static(timeline):
+            return False
+        if abs(_rest_value(timeline, 0) - rest) > _REST_EPS:
+            return False
+    return True
+
+
 def _rotation_order_of(element) -> str:
     """The element's Euler rotation-order token (SetRotationOrder), or the
     stock RageMatrix 'xyz'. The order is a token rather than an animatable
@@ -698,14 +724,56 @@ class _Builder:
 
     def _emit_links(self, target: int, inst) -> None:
         """Attach the instance's full leaf-link chain (root-first) to the item
-        most recently pushed onto `target`. The leaf link carries the aft flip
-        (field_compose sets TransformChannel.flip_base_y for aft/stage kinds)."""
+        most recently pushed onto `target`, plus the chain's perspective camera
+        when the chain leaves the z=0 plane. The leaf link carries the aft flip
+        (field_compose sets TransformChannel.flip_base_y for aft/stage kinds).
+
+        Legacy ALWAYS folds through `field_projection.design_projection`
+        (field_compose.py:216) - the camera is not optional there. Without an
+        `item_projection` the native fold takes the z=0 block and skips
+        `fold_projection` (evaluate.rs), so a rotated field comes out a flat
+        horizontal squash instead of a 3D turn: at gat's t=78 legacy gives a
+        trapezoid (near edge 745px tall, far edge 354px) where the unfolded
+        block gives a plain rectangle, ~232px of corner error."""
         links = inst['transform']._links
         flip = getattr(inst['transform'], '_flip_base_y', False)
         leaf = len(links) - 1
         for i, link in enumerate(links):
             self._builder.item_link(
                 target, **self._link_kwargs(link, flip and i == leaf))
+        camera = self._chain_camera(links)
+        if camera is not None:
+            fov_id, fov_rest = camera
+            self._builder.item_projection(
+                target, fov_id=fov_id, fov_rest=fov_rest,
+                vanish_x_rest=_SCREEN_W / 2.0,
+                vanish_y_rest=_SCREEN_H / 2.0)
+
+    def _chain_camera(self, links):
+        """`(fov channel id, rest)` for a field chain's camera, or None when
+        the chain never leaves the z=0 plane.
+
+        The gate is PLANARITY, not fov - which is where this differs from the
+        element chain's `_chain_fov`. At the default fov the projection is the
+        identity only ON the z=0 plane; the moment a link carries rotation_x,
+        rotation_y, z, scale_z or base_scale_z the fold is required even though
+        the fov never moved. gat is exactly that case (its fov is static at the
+        default while `rotationy` sweeps), so an fov-based gate would skip the
+        camera and change nothing. Mirrors `transform::is_planar`.
+
+        The fov itself still follows the engine: a frame's fov projects its
+        whole subtree and the INNERMOST one that set a non-default value wins
+        (field_compose.py:203-209)."""
+        if all(_link_is_planar(link) for link in links):
+            return None
+        for link in reversed(links):
+            timeline = link.get('fov')
+            if timeline is None:
+                continue
+            chan_id, rest = self._channel(timeline)
+            if abs(rest - _DEFAULT_FOV) > _FOV_EPS or not _is_static(timeline):
+                return chan_id, rest
+        return -1, _DEFAULT_FOV
 
     # -- instance emission ------------------------------------------------
 
