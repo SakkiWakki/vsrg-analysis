@@ -722,3 +722,123 @@ def test_recording_builder_rejects_a_name_docbuilder_lacks():
     assert recorder.ops[-1][0] == 'item_tint'
     with pytest.raises(AttributeError, match='neither does DocBuilder'):
         recorder.item_tnit(0)
+
+
+def test_frag_sampler_registers_a_shader_and_binds_its_uniforms(tmp_path):
+    # A NotITG `Frag=` on a sampler is a per-actor program over that actor's
+    # own texture. The doc emitted none, so every shaded sampler blitted the
+    # raw capture and a rig whose whole visual IS the shader degraded to a
+    # plain copy of the screen.
+    frag = tmp_path / 'monitor.frag'
+    frag.write_text('uniform float fAmt = 200.0;\nvoid main(){}\n')
+
+    aft = fc.instance('shaded', 'aft', 0, [_link(x=320.0, y=240.0)])
+    aft['aft_node'] = 'nodeX'
+    aft['frag'] = str(frag)
+    aft['frag_uniforms'] = {
+        'fAmt': EventTimeline([Keyframe(0.0, (200.0,), 0.0, _EASE_LINEAR)],
+                              rest=(200.0,)),
+        'glitch': EventTimeline([Keyframe(2.0, (0.75,), 0.0, _EASE_LINEAR)],
+                                rest=(0.0,)),
+    }
+    cap = fc.instance('nodeX', 'capture', 0, [_link()])
+    evaluator, id_maps, _report = dd.build_static_doc(_compiled([cap, aft]))
+
+    # The source travels in the doc, so the render thread never reads a file.
+    assert len(id_maps['shaders']) == 1
+    frag_src, vert_src, names = id_maps['shaders'][0]
+    assert 'uniform float fAmt' in frag_src
+    assert vert_src is None
+    assert names == ['fAmt', 'glitch']  # sorted: item_uniform's index order
+
+    u_bytes, _f, uf_bytes, n = evaluator.frame(3.0)
+    u = np.frombuffer(u_bytes, dtype=np.uint32).reshape(n, evaluator.u_stride)
+    uf = np.frombuffer(uf_bytes, dtype=np.float32)
+    blits = [i for i in range(n) if u[i, 0] == sn.OP_BLIT]
+    assert len(blits) == 1
+    row = blits[0]
+    assert int(u[row, 5]) == 1, 'shader lane is id+1 (0 means unshaded)'
+    offset, count = int(u[row, 8]), int(u[row, 9])
+    assert count == 2
+    # Sampled at t=3, i.e. AFTER glitch's keyframe - the values must be live,
+    # not the rests, and must pair with `names` positionally.
+    assert list(uf[offset:offset + count]) == [200.0, 0.75]
+
+
+def test_a_sampler_without_a_frag_stays_unshaded():
+    aft = fc.instance('plain', 'aft', 0, [_link(x=320.0, y=240.0)])
+    aft['aft_node'] = 'nodeX'
+    cap = fc.instance('nodeX', 'capture', 0, [_link()])
+    evaluator, id_maps, _report = dd.build_static_doc(_compiled([cap, aft]))
+
+    assert id_maps['shaders'] == []
+    u, _f = _blit_lanes(evaluator, 0.0)
+    blits = [i for i in range(len(u)) if u[i, 0] == sn.OP_BLIT]
+    assert all(int(u[i, 5]) == 0 for i in blits)
+
+
+def test_unreadable_frag_degrades_to_unshaded_rather_than_failing_the_build():
+    aft = fc.instance('missing', 'aft', 0, [_link(x=320.0, y=240.0)])
+    aft['aft_node'] = 'nodeX'
+    aft['frag'] = '/nonexistent/does_not_exist.frag'
+    cap = fc.instance('nodeX', 'capture', 0, [_link()])
+    evaluator, id_maps, _report = dd.build_static_doc(_compiled([cap, aft]))
+
+    assert id_maps['shaders'] == []
+    u, _f = _blit_lanes(evaluator, 0.0)
+    assert all(int(u[i, 5]) == 0 for i in range(len(u))
+               if u[i, 0] == sn.OP_BLIT)
+
+
+def test_recording_builder_mints_the_same_ids_as_a_real_builder(tmp_path):
+    # Every id-returning DocBuilder method must mint on the recorder too. A
+    # method missing from _MINTING records fine and returns None, which then
+    # travels into replay as a null id - `shader` did exactly that, and only
+    # the async path would have shown it.
+    calls = {
+        'channel': (([0.0], [1.0], [0.0], 1.0, [0]), {}),
+        'drawable': ((64.0, 64.0, False, False), {}),
+        'feed_slot': ((), {}),
+        'shader': (('void main(){}',), {}),
+        'mesh': (([0.0] * 6, 0, -1), {}),
+        'clip_rect': ((0.0, 0.0, 1.0, 1.0), {}),
+        'clip_polygon': (([0.0, 0.0, 1.0, 0.0, 1.0, 1.0],), {}),
+    }
+    assert set(calls) == set(dd._RecordingBuilder._MINTING), (
+        'a minting method changed - update this test AND _MINTING')
+
+    real = sn.DocBuilder(640.0, 480.0)
+    recorder = dd._RecordingBuilder()
+    for name, (args, kwargs) in calls.items():
+        want = getattr(real, name)(*args, **kwargs)
+        got = getattr(recorder, name)(*args, **kwargs)
+        assert got == want, f'{name}: recorder minted {got}, builder {want}'
+
+
+def test_prepare_replay_carries_a_shaded_sampler(tmp_path):
+    # The round-trip over a scene whose sampler is SHADED: this is what
+    # catches an id-minting method the recorder does not know about, since a
+    # null shader id only fails once it reaches the real builder at replay.
+    frag = tmp_path / 'lumikey.frag'
+    frag.write_text('uniform float pixelSize = 0.00001;\nvoid main(){}\n')
+    scene = _synthetic_scene()
+    shaded = fc.instance('shadedA', 'aft', 0, [_link(x=320.0, y=240.0)])
+    shaded['aft_node'] = 'nodeX'
+    shaded['frag'] = str(frag)
+    shaded['frag_uniforms'] = {
+        'pixelSize': EventTimeline(
+            [Keyframe(1.0, (0.02,), 0.0, _EASE_LINEAR)], rest=(0.00001,)),
+    }
+    scene.append(shaded)
+
+    direct, direct_maps, _r = dd.build_static_doc(_compiled(scene))
+    ops, rec_maps, _r2 = dd.prepare_static_doc(_compiled(scene))
+    replayed = dd.assemble_static_doc(ops)
+
+    assert rec_maps['shaders'] == direct_maps['shaders']
+    assert len(rec_maps['shaders']) == 1
+    for t in (0.0, 2.0):
+        want_u, want_f = _blit_lanes(direct, t)
+        got_u, got_f = _blit_lanes(replayed, t)
+        assert np.array_equal(got_u, want_u), f'u lanes differ at t={t}'
+        assert np.allclose(got_f, want_f, atol=1e-6), f'f lanes differ at t={t}'

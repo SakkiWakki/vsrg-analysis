@@ -261,14 +261,15 @@ class DrawablePipeline:
         self._apply_resolution(ctx, painter)
         self._ingest_field_captures(field_captures, overscan,
                                     ctx.chart_rect)
-        u, f = self._schedule_with_feeds(float(ctx.t_now), ctx)
+        u, f, uf = self._schedule_with_feeds(float(ctx.t_now), ctx)
         if u is None:
             return False
         # GL-ONLY present: composite onto the painter's GL target directly,
         # no QImage readback (the user directive). render_and_present returns
         # False if it could not draw (broken context, bind failure) - the
         # caller then falls through to the normal render path.
-        return self._executor.render_and_present(u, f, painter, ctx.chart_rect)
+        return self._executor.render_and_present(u, f, painter,
+                                                ctx.chart_rect, uf=uf)
 
     def _apply_resolution(self, ctx, painter) -> None:
         """Match the composite's FBO resolution to the chart rect's device
@@ -533,6 +534,12 @@ class DrawablePipeline:
             image_grids=(id_maps.get('image_grids')
                          if isinstance(id_maps, dict) else None))
         self._executor.set_clear(SCREEN_ID, CLEAR_TRANSPARENT)
+        # Per-item `Frag=` programs, positional by the shader id the doc's
+        # BLIT lanes carry. Without this the executor's table is empty, every
+        # shader lane resolves to None, and a shaded sampler silently blits
+        # through the default textured program.
+        self._executor.set_shaders(
+            (id_maps.get('shaders') or []) if isinstance(id_maps, dict) else [])
         logger.warning(
             "DrawablePipeline: static doc LIVE (drawables=%d, fields=%s, "
             "note_feeds=%s)", evaluator.drawable_count(),
@@ -718,17 +725,17 @@ class DrawablePipeline:
             fed = None
         if fed is None:
             if self._has_note_slots():
-                return None, None
+                return None, None, None
             return self._schedule(t)
         slots, count, u_bytes, f_bytes = fed
-        u_raw, f_raw, _uf_raw, n = self._evaluator.frame_with_feeds(
+        u_raw, f_raw, uf_raw, n = self._evaluator.frame_with_feeds(
             float(t), slots, [count] * len(slots),
             u_bytes * len(slots), f_bytes * len(slots))
         u = np.frombuffer(u_raw, dtype=np.uint32).reshape(
             n, self._evaluator.u_stride)
         f = np.frombuffer(f_raw, dtype=np.float32).reshape(
             n, self._evaluator.f_stride)
-        return u, f
+        return u, f, np.frombuffer(uf_raw, dtype=np.float32)
 
     def _has_note_slots(self) -> bool:
         """Whether the doc draws its notes as INLINE fed items. When it does,
@@ -745,16 +752,22 @@ class DrawablePipeline:
 
     def _schedule(self, t):
         """Fold the static doc into a DrawSchedule at ``t``: return the
-        (u, f) SoA record arrays for the executor, or (None, None) on failure.
-        The static doc has no dynamic feeds - its Snapshots are static
-        commands - so this is a plain ``evaluator.frame(t)`` (Seam B) with the
-        Rust core sampling every channel itself."""
-        u_raw, f_raw, _uf_raw, n = self._evaluator.frame(t)
+        (u, f, uf) SoA record arrays for the executor. The static doc has no
+        dynamic feeds - its Snapshots are static commands - so this is a plain
+        ``evaluator.frame(t)`` (Seam B) with the Rust core sampling every
+        channel itself.
+
+        ``uf`` is the flat per-BLIT shader-uniform window each op indexes by
+        its (offset, count) lanes. Dropping it leaves every chart uniform at
+        its GLSL zero, which is not merely unstyled: monitor.frag divides by
+        `fAmt`, so a zeroed uniform renders NaN black rather than a plain
+        copy."""
+        u_raw, f_raw, uf_raw, n = self._evaluator.frame(t)
         u = np.frombuffer(u_raw, dtype=np.uint32).reshape(
             n, self._evaluator.u_stride)
         f = np.frombuffer(f_raw, dtype=np.float32).reshape(
             n, self._evaluator.f_stride)
-        return u, f
+        return u, f, np.frombuffer(uf_raw, dtype=np.float32)
 
     def _disable(self, why: str) -> None:
         if not self._disabled:

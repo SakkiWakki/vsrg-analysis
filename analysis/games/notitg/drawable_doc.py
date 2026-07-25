@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import math
 import os
+from pathlib import Path
 
 import numpy as np
 
@@ -369,6 +370,18 @@ class _FrameCurve:
         return ts, [float(f) for f in frames], [0.0] * len(ts), [0] * len(ts)
 
 
+def _read_shader_source(path):
+    """A chart shader's GLSL text, or None when there is no path or it cannot
+    be read. Read at COMPILE time (a worker thread) so the doc carries its own
+    source and the render thread never touches the filesystem."""
+    if not path:
+        return None
+    try:
+        return Path(path).read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return None
+
+
 def _flatten_elements(elements) -> list:
     """The element tree flattened to a leaf list in tree order, each leaf paired
     with its ANCESTOR CHAIN (root-first, groups only). Returns
@@ -634,6 +647,10 @@ class _Builder:
         self._chan_keyed: list = []
         # The shared 'player'-kind visibility gate (see _base_hidden_gate).
         self._base_gate = None
+        # Per-item fragment programs: one id per distinct (frag, vert, names),
+        # with the descs exported positionally for GLExecutor.set_shaders.
+        self._shader_ids: dict[tuple, int] = {}
+        self._shader_descs: list[tuple] = []
 
     # -- drawable minting -------------------------------------------------
 
@@ -794,6 +811,7 @@ class _Builder:
                            visible_id=visible_id, visible_rest=visible_rest)
         self._emit_tint(_SCREEN_ID, inst)
         self._emit_blend(_SCREEN_ID, inst)
+        self._emit_shader(_SCREEN_ID, inst)
         self._emit_links(_SCREEN_ID, inst)
 
     def _emit_tint(self, target: int, inst) -> None:
@@ -808,6 +826,58 @@ class _Builder:
         self._builder.item_tint(target, r_id=r_id, r_rest=r_rest,
                                 g_id=g_id, g_rest=g_rest,
                                 b_id=b_id, b_rest=b_rest)
+
+    def _emit_shader(self, target: int, inst) -> None:
+        """Attach the instance's `Frag=` program and bind its uniform curves
+        to the item just pushed.
+
+        A NotITG `Frag=` on a Sprite is a per-actor program run over that
+        actor's own texture - here the source node's AFT capture. Without it
+        the sampler blits the capture unshaded, which is not a cosmetic loss:
+        a rig whose whole visual IS the shader (horizon, monitor, lumikey)
+        degrades to a plain copy of the screen."""
+        registered = self._shader_for(inst)
+        if registered is None:
+            return
+        shader_id, names = registered
+        self._builder.item_shader(target, shader_id)
+        uniforms = inst.get('frag_uniforms') or {}
+        for index, name in enumerate(names):
+            chan_id, rest = self._channel(uniforms[name])
+            self._builder.item_uniform(target, index, ch_id=chan_id,
+                                       ch_rest=rest)
+
+    def _shader_for(self, inst):
+        """`(shader_id, uniform names)` for an instance carrying a `Frag=`,
+        or None. Registered once per (source, vert, names) so samplers that
+        share a program share its id - the executor stashes each BLIT's own
+        uniform window before resolving, so a shared id stays per-item.
+
+        The uniform NAME ORDER is the contract between `item_uniform`'s index
+        and the executor's `uniform_names` lookup, so it is sorted here and
+        exported unchanged rather than re-derived downstream."""
+        frag_path = inst.get('frag')
+        mesh = inst.get('mesh') or {}
+        vert_path = mesh.get('vert') or None
+        if frag_path is None and vert_path is None:
+            return None
+
+        frag_src = _read_shader_source(frag_path)
+        vert_src = _read_shader_source(vert_path)
+        if frag_src is None and vert_src is None:
+            self._elem_skips['shader_unreadable'] = (
+                self._elem_skips.get('shader_unreadable', 0) + 1)
+            return None
+
+        names = tuple(sorted(inst.get('frag_uniforms') or {}))
+        key = (frag_src, vert_src, names)
+        registered = self._shader_ids.get(key)
+        if registered is None:
+            registered = self._builder.shader(frag_src or '', vert=vert_src,
+                                              uniform_names=list(names))
+            self._shader_ids[key] = registered
+            self._shader_descs.append((frag_src, vert_src, list(names)))
+        return registered, names
 
     def _emit_blend(self, target: int, inst) -> None:
         """Attach the instance's additive-blend gate to the item just pushed.
@@ -868,7 +938,8 @@ class _Builder:
                    'drawable_sizes': [self._drawable_sizes[i]
                                       for i in sorted(self._drawable_sizes)],
                    'notes_slot': self._notes_slots.get('field'),
-                   'note_feeds': dict(self._notes_slots)}
+                   'note_feeds': dict(self._notes_slots),
+                   'shaders': list(self._shader_descs)}
         return evaluator, id_maps
 
     def _banded_elements(self):
@@ -1285,40 +1356,39 @@ def build_static_doc(compiled, screen_w: float = _SCREEN_W,
 
 class _RecordingBuilder:
     """Records DocBuilder calls as (method, args, kwargs) ops, minting the
-    SAME sequential ids a real DocBuilder would (channels count from 0,
-    drawables from 1 - the screen root is 0). The point: `_Builder`'s
+    SAME sequential ids a real DocBuilder would. The point: `_Builder`'s
     emission is tens of seconds of pure-Python channel export, but the PyO3
     Evaluator is unsendable - so the emission runs against this recorder on
     a WORKER thread, and `assemble_static_doc` replays the cheap FFI calls
     where the evaluator must live (the render thread)."""
 
+    # The DocBuilder methods that RETURN an id, mapped to the counter they
+    # draw from. Hand-maintained because the id spaces are not inferable:
+    # `feed_slot` shares the drawable counter and the two clip constructors
+    # share one clip space. A minting method MISSING from this table records
+    # through __getattr__ and hands back None, which reaches replay as a null
+    # id - so add an entry when adding an id-returning builder method.
+    # `test_recording_builder_mints_the_same_ids_as_a_real_builder` pins it.
+    _MINTING = {
+        'channel': 'channels',
+        'drawable': 'drawables',
+        'shader': 'shaders',
+        'feed_slot': 'drawables',
+        'mesh': 'meshes',
+        'clip_rect': 'clips',
+        'clip_polygon': 'clips',
+    }
+
     def __init__(self):
         import storyboard_native as sn
 
         self.ops: list[tuple] = []
-        self._channels = 0
-        self._drawables = 1
+        # The screen root owns drawable 0; every other space counts from 0.
+        self._next = {'channels': 0, 'drawables': 1, 'shaders': 0,
+                      'meshes': 0, 'clips': 0}
         # Resolved once: __getattr__ validates against it on every miss, and
         # the module import is lazy everywhere else in this file.
         self._api = sn.DocBuilder
-
-    def channel(self, *args, **kwargs) -> int:
-        self.ops.append(('channel', args, kwargs))
-        self._channels += 1
-        return self._channels - 1
-
-    def drawable(self, *args, **kwargs) -> int:
-        self.ops.append(('drawable', args, kwargs))
-        self._drawables += 1
-        return self._drawables - 1
-
-    def feed_slot(self) -> int:
-        self.ops.append(('feed_slot', (), {}))
-        self._drawables += 1
-        return self._drawables - 1
-
-    def feed_inline(self, *args, **kwargs) -> None:
-        self.ops.append(('feed_inline', args, kwargs))
 
     def __getattr__(self, name: str):
         """Record any other DocBuilder call generically.
@@ -1332,9 +1402,15 @@ class _RecordingBuilder:
             raise AttributeError(
                 f'{type(self).__name__} has no attribute {name!r} '
                 '(and neither does DocBuilder)')
+        space = self._MINTING.get(name)
 
-        def record(*args, **kwargs) -> None:
+        def record(*args, **kwargs):
             self.ops.append((name, args, kwargs))
+            if space is None:
+                return None
+            minted = self._next[space]
+            self._next[space] = minted + 1
+            return minted
 
         # Cache on the instance so the next call resolves normally - a miss
         # is what routes here, and the emitter calls these per item.

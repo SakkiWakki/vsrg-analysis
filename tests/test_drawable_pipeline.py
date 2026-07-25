@@ -752,7 +752,7 @@ def test_an_empty_inline_feed_declines_the_frame_instead_of_drawing_no_notes(
     pipe._id_maps = dict(pipe._id_maps or {}, note_feeds={'field': 1})
     monkeypatch.setattr(pipe, '_note_feed', lambda ctx: None)
     assert pipe._has_note_slots() is True
-    assert pipe._schedule_with_feeds(1.0, ctx) == (None, None)
+    assert pipe._schedule_with_feeds(1.0, ctx) == (None, None, None)
 
     gt = _GLTarget(CHART_RECT)
     assert gt.present(pipe, ctx)[0] is False, 'must decline, not draw empty'
@@ -768,5 +768,5 @@ def test_a_captured_notefield_doc_still_folds_without_a_feed(gl, monkeypatch):
     _spin_present(pipe, ctx)
     monkeypatch.setattr(pipe, '_note_feed', lambda ctx: None)
     assert pipe._has_note_slots() is False
-    u, _f = pipe._schedule_with_feeds(1.0, ctx)
+    u, _f, _uf = pipe._schedule_with_feeds(1.0, ctx)
     assert u is not None
