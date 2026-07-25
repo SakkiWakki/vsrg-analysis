@@ -1096,10 +1096,11 @@ class _Builder:
         the leaves are sorted by the renderer's `(z, z_index, t_start)` key. This
         is the starting point - a true tree-order interleave of elements and
         instances replaces it once the producers emit element tree positions."""
-        below, above = self._banded_elements() if elements_in_doc() else ((), ())
+        instances = self._current_instances_ensured()
+        below, above = (self._banded_elements(instances)
+                        if elements_in_doc() else ((), ()))
         self._elem_below = self._emit_element_band(below)
 
-        instances = self._current_instances_ensured()
         self._emit_base_field(instances)
         i = 0
         n = len(instances)
@@ -1131,16 +1132,32 @@ class _Builder:
                    'instance_order': list(self._instance_order)}
         return evaluator, id_maps
 
-    def _banded_elements(self):
+    def _banded_elements(self, instances):
         """(below, above) storyboard-element bands from `compiled['tree']`, each
         entry a `(leaf, ancestors)` pair banded by the leaf's own z. The group
         count is folded into the skip tally so the report accounts for it (a
-        group is not drawn, but it is composed - see _flatten_elements)."""
+        group is not drawn, but it is composed - see _flatten_elements).
+
+        Leaves already owned by a FIELD INSTANCE are dropped. An AFT-rig
+        curtain quad is one actor that both producers claim: the field walk
+        emits it as a 'fill' at its true tree position, and the element tree
+        compiles the same actor as a rect - which then draws a SECOND time in
+        the above band, after the AFT sampler that is supposed to hide behind
+        it. gat 1 at 5:48 is that exact frame, and the video oracle shows the
+        black background with the frozen playfield ON TOP; the doubled copy
+        painted over the freeze and blacked out the whole section."""
         tree = self._compiled.get('tree') or ()
         leaves, groups = _flatten_elements(tree)
         if groups:
             self._elem_skips['group'] = self._elem_skips.get('group', 0) + groups
-        return _band_elements(leaves)
+        claimed = {inst['tree_index'] for inst in instances
+                   if inst.get('tree_index') is not None}
+        kept = [pair for pair in leaves if pair[0].tree_index not in claimed]
+        dropped = len(leaves) - len(kept)
+        if dropped:
+            self._elem_skips['owned_by_field'] = (
+                self._elem_skips.get('owned_by_field', 0) + dropped)
+        return _band_elements(kept)
 
     def _current_instances_ensured(self) -> list:
         instances = _current_instances(self._compiled)

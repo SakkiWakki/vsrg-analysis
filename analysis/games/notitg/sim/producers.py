@@ -46,6 +46,18 @@ _TRUE = {'1', 'true', 'yes', 'on'}
 # costs ~10ms of lock.
 _SWEEP_CHUNK_S = 1.0
 
+# The render-thread nudge's budget controller (see _nudge_budget). The frame
+# we aim to fit inside, the share of whatever is spare that the sweep may
+# take, the ceiling on any one slice, and the floor that keeps the frontier
+# moving even when a frame has no headroom left at all. An interval longer
+# than _NUDGE_STALE_S is not a frame (a pause, a menu, the first call), so it
+# yields the cap rather than a nonsense measurement.
+_NUDGE_FRAME_S = 1.0 / 60.0
+_NUDGE_SHARE = 0.5
+_NUDGE_CAP_S = 0.003
+_NUDGE_FLOOR_S = 0.0005
+_NUDGE_STALE_S = 0.5
+
 
 def _compiled_body_flag() -> bool:
     on = os.environ.get('VSRG_NOTITG_COMPILED_BODY', '').lower() in _TRUE
@@ -255,6 +267,9 @@ class _LiveFieldInstances:
         self._cache = None
         self._cache_sig = None
         self._cache_expiry = 0.0
+        # Wall seconds the last nudge slice actually consumed - the term that
+        # separates "this frame was slow" from "WE made this frame slow".
+        self._nudge_spent = 0.0
         # The topology source: which actors are proxies/AFTs/fills, their
         # targets, and the NoteField synthetic-child mapping. The PLAYBACK sim
         # only knows the topology GetChild/SetTarget calls have fired UP TO the
@@ -300,27 +315,52 @@ class _LiveFieldInstances:
             return self._cache or []
 
     def _nudge_sweep(self) -> None:
-        """A WALL-budgeted slice of the sweep on the render thread (~3ms
-        per frame): a guaranteed frontier floor that no GIL handoff can
-        starve, costing a bounded fraction of the frame regardless of
-        how expensive the chart region is to simulate. Non-blocking: if
-        the worker holds the lock it is already making progress."""
+        """A WALL-budgeted slice of the sweep on the render thread: a
+        guaranteed frontier floor that no GIL handoff can starve, costing a
+        bounded share of the frame regardless of how expensive the chart
+        region is to simulate. Non-blocking: if the worker holds the lock it
+        is already making progress.
+
+        The budget is what is LEFT of the frame after everything else, not a
+        constant. A fixed slice spends the same milliseconds on a machine with
+        11ms of headroom and one with none - which is precisely backwards, and
+        the slower machine is the one that also needs the most sweep (its
+        per-tick cost is higher, so the same slice buys less chart). Measuring
+        the frame around our own slice makes it self-correcting: the sweep
+        settles at `_NUDGE_SHARE` of the spare frame, and a machine already
+        missing frame time drops to `_NUDGE_FLOOR_S` so the sweep still
+        advances without deepening the miss."""
         import time as _time
 
         live = self._live
         lock = getattr(live, 'sweep_lock', None)
         if lock is None or live.frontier >= live._end_seconds:
             return
-        live.render_seen = _time.monotonic()
-        if lock.acquire(blocking=False):
-            try:
-                deadline = _time.perf_counter() + 0.003
-                while (_time.perf_counter() < deadline
-                       and live.frontier < live._end_seconds):
-                    live.advance_frontier(min(live.frontier + 0.02,
-                                              live._end_seconds))
-            finally:
-                lock.release()
+        now = _time.monotonic()
+        frame = now - (live.render_seen or now)
+        live.render_seen = now
+        if not lock.acquire(blocking=False):
+            return
+        started = _time.perf_counter()
+        try:
+            deadline = started + self._nudge_budget(frame)
+            while (_time.perf_counter() < deadline
+                   and live.frontier < live._end_seconds):
+                live.advance_frontier(min(live.frontier + 0.02,
+                                          live._end_seconds))
+        finally:
+            self._nudge_spent = _time.perf_counter() - started
+            lock.release()
+
+    def _nudge_budget(self, frame: float) -> float:
+        """Seconds of sweep this frame may afford: a share of the frame time
+        NOT already spent, where "everything else" is the last frame's
+        interval minus our own last slice. A first frame (no interval yet)
+        gets the cap, matching the old fixed budget."""
+        if frame <= 0.0 or frame > _NUDGE_STALE_S:
+            return _NUDGE_CAP_S
+        spare = _NUDGE_FRAME_S - (frame - self._nudge_spent)
+        return min(_NUDGE_CAP_S, max(_NUDGE_FLOOR_S, _NUDGE_SHARE * spare))
 
     def _build_instances(self):
         env = self._live.env
@@ -1234,6 +1274,11 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
         inst = field_compose.instance(name, kind, player, links,
                                       t0=t0, aft_order=aft_order,
                                       aft_live=aft_live, color=color)
+        # Document order, stamped once by `modfile.stamp_tree_order` on the
+        # SAME actors the element tree is built from - the key that lets the
+        # drawable doc interleave the two streams instead of banding one
+        # wholesale before the other.
+        inst['tree_index'] = modfile._tree_index_of(actor)
         if capture_source is not None:
             inst['capture_source'] = capture_source
         if kind == 'aft':

@@ -214,6 +214,13 @@ class Element:
     # pixels into the frame's LOGICAL size. None = a plain asset whose
     # logical size is its pixel size divided by the grid (the default).
     size_spec: object = None  # AssetSizeSpec | None
+    # Document order of the actor this came from, or -1 when the producer
+    # tracks none. A consumer that draws elements ALONGSIDE something else
+    # built from the same tree (NotITG's field instances) needs one key to
+    # interleave them, and z cannot be it: a chart's blackout curtain and the
+    # AFT sampler it hides behind both sit at z=0 and are ordered purely by
+    # where they appear in the tree.
+    tree_index: int = -1
 
     def sample(self, prop: str, t: float):
         return self.timelines[prop].sample(t)

@@ -412,6 +412,33 @@ def _compile_elements(classic_commands, to_seconds, start_beat,
     return elements
 
 
+def stamp_tree_order(root) -> None:
+    """Number every actor under `root` in document order, on `_tree_index`.
+
+    The one key that lets a consumer interleave storyboard elements with the
+    field instances built from the SAME tree. z cannot do it: gat's blackout
+    curtain and the AFT sampler it belongs behind are both z=0, and only their
+    tree positions say which draws first.
+
+    Stamped on the actor rather than derived twice, because the two producers
+    traverse differently (this one builds a nested tree and prunes; the
+    field-instance walk is flat) and two independent counters would drift the
+    moment either changed what it visits."""
+    for index, actor in enumerate(_iter_actors(root)):
+        actor._tree_index = index
+
+
+def _iter_actors(actor):
+    """Every actor under `actor`, itself first - SM's own draw order."""
+    yield actor
+    for child in actor.children:
+        yield from _iter_actors(child)
+
+
+def _tree_index_of(actor) -> int:
+    return getattr(actor, '_tree_index', -1)
+
+
 def compile_element_tree(root, to_seconds, start_beat, named_keyframes=None,
                          fonts=None, actor_keyframes=None, osc_context=None,
                          sim=None):
@@ -445,6 +472,7 @@ def compile_element_tree(root, to_seconds, start_beat, named_keyframes=None,
     section's copies land in."""
     start_time = to_seconds(start_beat)
     named_keyframes = named_keyframes or {}
+    stamp_tree_order(root)
 
     def compile_pass(include):
         below, tops = [], []
@@ -1237,7 +1265,7 @@ def _group_element(actor, start_time, keyframes, children, sim=None):
         t_start=start_time, t_end=float('inf'),
         anchor=(0.0, 0.0), origin=(0.5, 0.5),
         timelines=_element_timelines(actor, _drawable_props(keyframes), sim),
-        children=children,
+        children=children, tree_index=_tree_index_of(actor),
     )
 
 
@@ -1278,7 +1306,7 @@ def _leaf_element(actor, start_time, named_keyframes, precomputed=None,
         text=str(text), font=font,
         additive=_is_additive(actor),
         sheet_cols=spec.cols, sheet_rows=spec.rows, sheet_states=states,
-        size_spec=spec, state_pin=state_pin,
+        size_spec=spec, state_pin=state_pin, tree_index=_tree_index_of(actor),
     )
 
 
