@@ -1067,12 +1067,30 @@ def test_the_legacy_field_reference_is_read_row_vector(captured_notefield):
     # against a doc that is exactly right.
     scene = _synthetic_scene()
     proxy = next(i for i in scene if i.get('name') == 'proxyA')
-    quad = dd._legacy_field_draws(scene, False, 0.0)[id(proxy)][0]
+    quad = dd._legacy_field_draws(scene, False, 0.0)[dd._instance_key(proxy)][0]
 
     width = max(x for x, _y in quad) - min(x for x, _y in quad)
     height = max(y for _x, y in quad) - min(y for _x, y in quad)
     assert width == pytest.approx(320.0)   # 640 design px at the proxy's 0.5x
     assert height == pytest.approx(240.0)
+
+
+def test_field_parity_survives_a_provider_that_rebuilds(captured_notefield):
+    # The lazy provider rebuilds its instance list whenever the topology
+    # signature changes, so the list the doc was built from and the one the
+    # harness samples are EQUAL BUT NOT IDENTICAL. Keyed on `id()` the harness
+    # matched nothing and reported all 21 of LINARIA's comparisons as phantom
+    # extras.
+    scene = _synthetic_scene()
+    evaluator, id_maps, _report = dd.build_static_doc(_compiled(scene))
+    # Fresh dicts, same transforms - what a rebuild actually produces.
+    rebuilt = _compiled([])
+    rebuilt['field_instances'] = lambda: [dict(inst) for inst in scene]
+
+    rep = dd.field_parity_report(evaluator, rebuilt,
+                                 id_maps['instance_order'], _SAMPLE_TIMES)
+    assert rep['n_extra'] == 0 and rep['n_missing'] == 0
+    assert rep['n_compared'] > 0
 
 
 def test_field_parity_harness_catches_a_moved_instance(captured_notefield,

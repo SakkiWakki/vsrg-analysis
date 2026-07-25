@@ -2421,8 +2421,19 @@ _DESIGN_QUAD = ((0.0, 0.0), (_SCREEN_W, 0.0), (_SCREEN_W, _SCREEN_H),
                 (0.0, _SCREEN_H))
 
 
+def _instance_key(inst):
+    """A stable identity for one field instance ACROSS provider calls.
+
+    NOT `id()`: the lazy provider rebuilds its instance list whenever the
+    topology signature changes, so the list the doc was built from and the one
+    the harness samples are different objects describing the same actors. An
+    id-keyed lookup then matches nothing - on LINARIA it reported every drawn
+    instance as EXTRA and every legacy draw as unaccounted for."""
+    return inst['kind'], inst.get('name')
+
+
 def _legacy_field_draws(instances, base_hidden, t) -> dict:
-    """`id(instance) -> (quad, alpha, kind)` for every field instance the
+    """`_instance_key -> (quad, alpha, kind)` for every field instance the
     legacy effect DRAWS at `t`.
 
     The gate is legacy's own: `transform.at(t)` is the very object
@@ -2470,7 +2481,7 @@ def _legacy_field_draws(instances, base_hidden, t) -> dict:
         quad = _DESIGN_QUAD if kind == 'fill' \
             else _apply_h(np.asarray(h, dtype=float).reshape(3, 3).T,
                           _DESIGN_QUAD)
-        draws[id(inst)] = (quad, min(1.0, alpha), kind)
+        draws[_instance_key(inst)] = (quad, min(1.0, alpha), kind)
     return draws
 
 
@@ -2529,9 +2540,15 @@ def field_parity_report(evaluator, compiled, instance_order, sample_times,
         missing, extra, diffs = [], [], []
         worst = 0.0
         n_compared = n_uncomparable = n_projected = 0
+        # An instance legacy draws that the doc emitted NO command for is
+        # invisible to the walk below, which only iterates what the doc
+        # emitted. Naming those first is the whole point of the report.
+        emitted = {_instance_key(inst) for inst, _cmd in instance_order}
+        for key in want.keys() - emitted:
+            missing.append((-1, key[1] or key[0], key[0]))
         for index, (inst, command) in enumerate(instance_order):
             record = got.get(_INSTANCE_TAG_BASE + index + 1)
-            expected = want.get(id(inst))
+            expected = want.get(_instance_key(inst))
             name = inst.get('name') or inst['kind']
             if expected is None:
                 if record is not None:
@@ -2577,7 +2594,12 @@ def field_parity_report(evaluator, compiled, instance_order, sample_times,
             'max_corner_err': worst,
             # `at()` prepends a base-field entry when the base is visible; the
             # walk above only sees real instances, so that one is expected.
-            'self_check': n_frame - (0 if base_hidden else 1) == len(want),
+            # The second clause catches two instances sharing a
+            # `_instance_key`, which would merge them and report the loser as
+            # both missing and extra.
+            'self_check': (n_frame - (0 if base_hidden else 1) == len(want)
+                           and len({_instance_key(i) for i in instances or ()})
+                           == len(instances or ())),
             'ok': not (missing or extra or diffs),
         })
     return {
