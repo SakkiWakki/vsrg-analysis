@@ -2196,6 +2196,17 @@ def _legacy_element_quad(element, t, natural, ancestors=()):
     `element_parity_report` counts those separately rather than comparing them
     against the wrong renderer. See `_chain_is_3d`.
 
+    KNOWN RESIDUAL, and it is legacy's: this bracket is `R . S` (QPainter
+    rotates then scales, so the content scales FIRST), while the engine
+    applies an actor's pushes innermost-first as
+    `skew -> rotation -> scale -> translate` (openitg Actor::BeginDraw, cited
+    in field_compose's header) - scale AFTER the spin. The doc's link chain
+    follows the engine; legacy's element painter does not. They agree wherever
+    scale is uniform, which is nearly everywhere, and diverge on the
+    flip-after-a-spin idiom (negative scale with rotation) that the engine
+    model calls a chart staple. A sub-pixel residual on such an element is
+    EXPECTED, and is the reference being wrong rather than the doc.
+
     The quad spans the UNZOOMED draw size `render._draw_size` picks, shifted by
     the origin - that shift is the leaf's alone; a group carries no size."""
     from analysis.player.render.storyboard.render import _draw_size
