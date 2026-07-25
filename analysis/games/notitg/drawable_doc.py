@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import math
 import os
+from typing import NamedTuple
 from pathlib import Path
 
 import numpy as np
@@ -568,16 +569,101 @@ def _flatten_elements(elements) -> list:
     return pairs, groups
 
 
-def _band_elements(pairs):
-    """Split flattened `(leaf, ancestors)` pairs into (below, above) bands, each
-    band internally sorted by the renderer's `(z, z_index, t_start)` key.
-    Below-band (z < 0) draws before the field instances, above-band (z >= 0)
-    after (true tree-order interleave replaces this in a later wave)."""
-    ordered = sorted(pairs, key=lambda p: (_band_z(p), p[0].z_index,
-                                           p[0].t_start))
-    below = [p for p in ordered if _band_z(p) < 0]
-    above = [p for p in ordered if _band_z(p) >= 0]
-    return below, above
+class _Unit(NamedTuple):
+    """One thing the doc draws, with the key that orders it.
+
+    `kind` is 'element' (payload `(leaf, ancestors)`), 'instance' (payload the
+    instance dict), 'z_run' (payload a list of instances sharing a z_group,
+    which must stay contiguous so the SortSpan that wraps them can name its
+    own length) or 'base_field' (no payload)."""
+    band: float
+    z: int
+    z_index: int
+    tree_index: int
+    seq: int
+    kind: str
+    payload: object
+
+
+# The band/z/z_index a FIELD INSTANCE sorts at: the notefield's own, which is
+# the plain z=0 layer everything unbanded shares.
+_FIELD_BAND = (0.0, 0, 0)
+
+
+def _tree_order_units(elements, instances):
+    """Elements and field instances as ONE stream, in the order the engine
+    draws them.
+
+    The engine walks its actor tree once, and charts rely on that: an AFT-rig
+    curtain has to land between the node that captured the scene and the
+    sampler that redraws it, and both sit at z=0. Emitting elements in a band
+    before the instance stream and a band after cannot express that, so
+    anything in the middle came out at one end.
+
+    Key, outermost first:
+
+    - BAND, because the compiler HOISTS a BGCHANGES subtree to a
+      below-the-notes z (`modfile._with_z`) and it must stay behind the field
+      wherever its actors sit;
+    - the leaf's own Z and Z_INDEX, the storyboard layer sort
+      `render.StoryboardRenderer` applies, so an explicit layering still wins;
+    - TREE INDEX, document order - the engine's own, and the tiebreak that
+      matters, since a NotITG chart leaves nearly everything at z=0;
+    - SEQ, so the sort is stable for entries carrying no tree index.
+
+    A z_group run is ONE unit: its members must stay contiguous, because the
+    SortSpan the emitter wraps them in names how many commands follow it.
+
+    An instance with no tree index (a synthetic player) inherits the last one
+    seen, keeping its place in the instance list instead of sorting to the
+    front.
+    """
+    units: list[_Unit] = []
+    seq = 0
+    for leaf, ancestors in elements:
+        units.append(_Unit(_band_z((leaf, ancestors)), leaf.z, leaf.z_index,
+                           leaf.tree_index, seq, 'element', (leaf, ancestors)))
+        seq += 1
+
+    # The base field is legacy's prepended `(None, 1.0, 'field')` entry, so it
+    # leads the band rather than taking a tree position of its own.
+    units.append(_Unit(*_FIELD_BAND, -1, seq, 'base_field', None))
+    seq += 1
+
+    index = -1
+    run: list = []
+    run_group = None
+
+    def close_run():
+        nonlocal run, run_group, seq
+        if run:
+            units.append(_Unit(*_FIELD_BAND, _instance_index(run[0], index),
+                               seq, 'z_run', run))
+            seq += 1
+        run, run_group = [], None
+
+    for inst in instances:
+        index = _instance_index(inst, index)
+        group = inst.get('z_group')
+        if group is not None and group == run_group:
+            run.append(inst)
+            continue
+        close_run()
+        if group is not None:
+            run, run_group = [inst], group
+            continue
+        units.append(_Unit(*_FIELD_BAND, index, seq, 'instance', inst))
+        seq += 1
+    close_run()
+
+    units.sort(key=lambda u: (u.band, u.z, u.z_index, u.tree_index, u.seq))
+    return units
+
+
+def _instance_index(inst, fallback: int) -> int:
+    """An instance's document position, or the last one seen."""
+    index = inst.get('tree_index')
+    return fallback if index is None else index
 
 
 def _band_z(pair) -> float:
@@ -1088,33 +1174,41 @@ class _Builder:
     # -- entry point ------------------------------------------------------
 
     def run(self):
-        """Emit the below-band storyboard elements, then the field-instance
-        stream in tree order, then the above-band elements, and finish.
+        """Emit ONE draw stream in tree order - storyboard elements and field
+        instances interleaved by where their actors sit in the document - and
+        finish.
 
-        Reproducing today's banding: below-band (z < 0) storyboard elements draw
-        BEFORE the field instances, above-band (z >= 0) AFTER. Within each band
-        the leaves are sorted by the renderer's `(z, z_index, t_start)` key. This
-        is the starting point - a true tree-order interleave of elements and
-        instances replaces it once the producers emit element tree positions."""
+        The engine draws its actor tree in one pass, and a chart relies on
+        that: an AFT-rig curtain quad has to land between the node that
+        captured the scene and the sampler that redraws it, and both sit at
+        z=0. Splitting elements into a band before the instance stream and a
+        band after cannot express that, so anything a chart put in the middle
+        came out at one end - which is how gat 1's freeze went black.
+
+        The SORT KEY is `(band z, tree index)`. Band z first because a
+        BGCHANGES subtree is HOISTED to a below-the-notes z by the compiler
+        (`modfile._with_z`) and must stay behind the field wherever its actors
+        happen to sit; tree index within a band because that is the engine's
+        own order. Instances take band 0, the notefield's own band.
+        """
         instances = self._current_instances_ensured()
-        below, above = (self._banded_elements(instances)
-                        if elements_in_doc() else ((), ()))
-        self._elem_below = self._emit_element_band(below)
+        elements = (self._owned_elements(instances)
+                    if elements_in_doc() else ())
 
-        self._emit_base_field(instances)
-        i = 0
-        n = len(instances)
-        while i < n:
-            inst = instances[i]
-            group = inst.get('z_group')
-            if group is not None:
-                span_len = self._emit_z_run(instances, i, group)
-                i += span_len if span_len else 1
-                continue
-            self._emit_instance(inst)
-            i += 1
-
-        self._elem_above = self._emit_element_band(above)
+        below = above = 0
+        for unit in _tree_order_units(elements, instances):
+            match unit.kind:
+                case 'element':
+                    if self._emit_element(*unit.payload):
+                        below += unit.band < 0
+                        above += unit.band >= 0
+                case 'z_run':
+                    self._emit_z_run_units(unit.payload)
+                case 'base_field':
+                    self._emit_base_field(instances)
+                case _:
+                    self._emit_instance(unit.payload)
+        self._elem_below, self._elem_above = below, above
 
         evaluator = self._builder.finish()
         id_maps = {'screen': _SCREEN_ID, 'slots': dict(self._slot_ids),
@@ -1132,20 +1226,18 @@ class _Builder:
                    'instance_order': list(self._instance_order)}
         return evaluator, id_maps
 
-    def _banded_elements(self, instances):
-        """(below, above) storyboard-element bands from `compiled['tree']`, each
-        entry a `(leaf, ancestors)` pair banded by the leaf's own z. The group
-        count is folded into the skip tally so the report accounts for it (a
-        group is not drawn, but it is composed - see _flatten_elements).
+    def _owned_elements(self, instances):
+        """The `(leaf, ancestors)` pairs the DOC draws, from `compiled['tree']`.
+        The group count is folded into the skip tally so the report accounts
+        for it (a group is not drawn, but it is composed - `_flatten_elements`).
 
         Leaves already owned by a FIELD INSTANCE are dropped. An AFT-rig
         curtain quad is one actor that both producers claim: the field walk
-        emits it as a 'fill' at its true tree position, and the element tree
-        compiles the same actor as a rect - which then draws a SECOND time in
-        the above band, after the AFT sampler that is supposed to hide behind
-        it. gat 1 at 5:48 is that exact frame, and the video oracle shows the
-        black background with the frozen playfield ON TOP; the doubled copy
-        painted over the freeze and blacked out the whole section."""
+        emits it as a 'fill', and the element tree compiles the same actor as
+        a rect. Drawing both put a second copy of gat 1's blackout curtain
+        after the AFT sampler that is supposed to hide behind it, and the
+        section went black - the video oracle shows the black background with
+        the frozen playfield ON TOP."""
         tree = self._compiled.get('tree') or ()
         leaves, groups = _flatten_elements(tree)
         if groups:
@@ -1157,7 +1249,7 @@ class _Builder:
         if dropped:
             self._elem_skips['owned_by_field'] = (
                 self._elem_skips.get('owned_by_field', 0) + dropped)
-        return _band_elements(kept)
+        return kept
 
     def _current_instances_ensured(self) -> list:
         instances = _current_instances(self._compiled)
@@ -1212,24 +1304,18 @@ class _Builder:
                      if inst.get('kind') in ('proxy', 'player')
                      and (player := inst.get('player') or 1) > 1})
 
-    def _emit_z_run(self, instances, start: int, group) -> int:
-        """Emit a SortSpan wrapping the maximal run of z_group==`group`
-        instances starting at `start`; returns the run length. Only emitted
-        (drawable-producing) members count toward the span length."""
-        members = []
-        i = start
-        while i < len(instances) and instances[i].get('z_group') == group:
-            members.append(instances[i])
-            i += 1
-        run_len = i - start
-        # The SortSpan precedes its members and names how many commands follow,
-        # so its length counts only members that actually emit a command (a
-        # 'stage' emits none). captures/fills/blits each emit exactly one.
+    def _emit_z_run_units(self, members) -> None:
+        """Emit a SortSpan wrapping one z_group run, then its members.
+
+        `_tree_order_units` keeps a run contiguous precisely so this can
+        work: the SortSpan precedes its members and names how many commands
+        follow, so anything sorted into the middle would be swept into the
+        span's z ordering. The length counts only members that actually emit
+        a command - a 'stage' emits none; captures/fills/blits emit one."""
         span_len = sum(1 for inst in members if inst.get('kind') != 'stage')
         self._builder.sort_span(_SCREEN_ID, span_len)
         for inst in members:
             self._emit_instance(inst)
-        return run_len
 
     def _emit_instance(self, inst) -> None:
         sn = self._sn
@@ -1318,15 +1404,6 @@ class _Builder:
         return getattr(spec, 'note_mods', {}) if spec is not None else {}
 
     # -- storyboard element emission --------------------------------------
-
-    def _emit_element_band(self, pairs) -> int:
-        """Emit each `(leaf, ancestors)` pair as an Image item (or count its
-        skip); returns the number of items actually emitted."""
-        emitted = 0
-        for element, ancestors in pairs:
-            if self._emit_element(element, ancestors):
-                emitted += 1
-        return emitted
 
     def _emit_element(self, element, ancestors=()) -> bool:
         """Emit one leaf element as an item, or count it as a per-kind skip.

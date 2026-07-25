@@ -315,8 +315,32 @@ def _sprite(z, path, **kw):
     return _element('sprite', z, asset=path, **kw)
 
 
+def test_an_element_draws_between_two_field_instances_by_tree_order(
+        captured_notefield, doc_elements):
+    # THE CASE BANDING CANNOT EXPRESS. A curtain quad sits between the AFT
+    # node that captured the scene and the sampler that redraws it, and all
+    # three are z=0 - so a below-band/above-band split can only put the quad
+    # before both or after both. After both, it paints over the freeze, which
+    # is what blacked out gat 1 at 5:48.
+    first = _proxy('first', x=100.0, y=240.0)
+    second = _proxy('second', x=500.0, y=240.0)
+    first['tree_index'], second['tree_index'] = 10, 30
+    middle = _sprite(0, '/tmp/curtain.png', keyframes={'x': _instant(320.0)})
+    object.__setattr__(middle, 'tree_index', 20)
+
+    compiled = _compiled([first, second], tree=[middle])
+    evaluator, id_maps, _report = dd.build_static_doc(compiled)
+
+    kinds = [k for (k, _sid, _m, _a) in dd._blit_stream(evaluator, 0.0)]
+    image_at = kinds.index(dd._SRC_IMAGE)
+    drawables = [i for i, k in enumerate(kinds) if k == sn.SRC_DRAWABLE]
+    assert drawables, 'expected the field instances to blit'
+    assert drawables[0] < image_at < drawables[-1], (
+        f'element must land BETWEEN the instances, got kinds={kinds}')
+
+
 def test_below_and_above_bands_split_around_the_field_stream(captured_notefield,
-                                                            doc_elements):
+                                                             doc_elements):
     # A background sprite (z<0) and a foreground sprite (z>=0) around one proxy:
     # the below sprite draws first, the field instance next, the above last.
     below = _sprite(_BACKGROUND_Z, '/tmp/bg.png',
