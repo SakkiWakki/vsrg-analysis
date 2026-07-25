@@ -2255,6 +2255,38 @@ _OUT_OF_PLANE_ELEMENT_PROPS = (('rotation_x', 0.0), ('rotation_y', 0.0),
                                ('scale_z', 1.0))
 
 
+# How far apart the two axis scales have to be before the transform-ORDER
+# difference between the engine and legacy's painter shows up at all. Equal
+# scales commute with rotation exactly; a hair apart is sub-pixel.
+_SCALE_RATIO_EPS = 1e-3
+
+
+def _chain_order_diverges(chain, t) -> bool:
+    """Whether legacy's ROTATE-THEN-SCALE bracket parts company with the
+    engine's scale-after-the-spin on this chain, at `t`.
+
+    `_legacy_element_quad` documents the residual: QPainter rotates then
+    scales, so the content scales FIRST, while `Actor::BeginDraw` pushes
+    skew -> rotation -> scale -> translate and the scale lands AFTER the
+    spin. The two agree exactly when the axis scales are equal (a uniform
+    scale commutes with rotation) and diverge in proportion to how far apart
+    they are - Bonfire spins a 243:1 bar through 725 degrees and the quads
+    end up 1014px apart.
+
+    Not compared, for the same reason as `_chain_is_3d`: the doc follows the
+    engine here and legacy does not, so grading one against the other would
+    report the doc's correctness as a defect."""
+    for link in chain:
+        rotation = link.timelines.get('rotation')
+        if rotation is None or abs(rotation.sample(t)[0]) <= 1e-9:
+            continue
+        sx = link.sample('scale_x', t)[0]
+        sy = link.sample('scale_y', t)[0]
+        if abs(sx - sy) > _SCALE_RATIO_EPS * max(1.0, abs(sx), abs(sy)):
+            return True
+    return False
+
+
 def _chain_is_3d(chain, t) -> bool:
     """Whether legacy would paint this chain through its perspective camera.
 
@@ -2505,6 +2537,11 @@ def element_parity_report(evaluator, element_order, natural_of, sample_times,
                 # separately - folding it into the diffs would make `all_ok`
                 # mean "every element agreed AND every file was readable".
                 n_unsized += 1
+                continue
+            if _chain_order_diverges((*ancestors, element), t):
+                # Counted with the 3D chains: another case where the doc
+                # follows the engine and legacy does not.
+                n_projected += 1
                 continue
             if _chain_is_3d((*ancestors, element), t):
                 # Counted, not compared - legacy's projected path is not the

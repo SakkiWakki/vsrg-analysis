@@ -368,3 +368,39 @@ def test_breakpoints_stop_at_the_requested_end():
     tl.finish()
     ts, _vals, _durs, _eases = tl.breakpoints(3.5)
     assert ts == [1.0, 2.0, 3.0]
+
+
+def test_breakpoints_stay_ordered_when_a_ramp_is_interrupted():
+    # A segment ends where the NEXT one begins, whatever span its own row
+    # claims: `sample` picks by bisect over the directory, so a later segment
+    # takes over and truncates whatever was still ramping. Exporting the full
+    # span pushed breakpoints PAST the interrupting segment, and since the
+    # consumer binary-searches a non-monotonic array it then read arbitrary
+    # values - 1979 of Bonfire's 5447 alpha breakpoints went backwards and an
+    # element at alpha 0.99 composited at 0.0009.
+    tl = SegmentTimeline(rest=0.0)
+    tl.add_ramp(0.0, 10.0, 0.0, 100.0)   # a long ramp ...
+    tl.add_hold(1.0, 7.0)                # ... cut off after one second
+    tl.add_ramp(2.0, 9.0, 7.0, 70.0)     # and itself cut off
+    tl.add_hold(3.0, 42.0)
+    tl.finish()
+
+    ts, _vals, _durs, _eases = tl.breakpoints(20.0)
+    assert ts == sorted(ts), f'breakpoints went backwards: {ts}'
+    assert _replays_the_timeline(tl, 0.0, 12.0) < 1e-6
+
+
+def test_an_interrupted_ramp_replays_its_partial_value():
+    # The truncation has to keep the interrupted span's OWN shape, not ramp
+    # straight to whatever the next segment holds: at the cut the curve is
+    # partway up its original ramp.
+    tl = SegmentTimeline(rest=0.0)
+    tl.add_ramp(0.0, 10.0, 0.0, 100.0)
+    tl.add_hold(2.0, 0.0)
+    tl.finish()
+
+    ts, vals, durs, eases = tl.breakpoints(20.0)
+    # 20% into a 0->100 ramp when the hold takes over.
+    assert _replay(ts, vals, durs, eases, tl._rest, 1.999) == pytest.approx(
+        20.0, abs=0.1)
+    assert _replay(ts, vals, durs, eases, tl._rest, 2.001) == 0.0

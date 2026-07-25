@@ -406,7 +406,19 @@ class SegmentTimeline:
         for idx, t0 in enumerate(self._dir_t0):
             if t0 > t1:
                 break
-            self._segment_breakpoints(idx, t0, emit, osc_dt)
+            # A segment ends where the NEXT one begins, whatever span its own
+            # row claims: `sample` picks by bisect over `_dir_t0`, so a later
+            # segment takes over from its own start and truncates whatever was
+            # still ramping. Exporting the full span instead pushed
+            # breakpoints PAST the interrupting segment and the array came out
+            # non-monotonic - 1979 of Bonfire's 5447 alpha breakpoints went
+            # backwards, and the consumer binary-searches, so it read
+            # arbitrary values (0.0009 where the curve says 0.9927).
+            cutoff = (self._dir_t0[idx + 1] if idx + 1 < len(self._dir_t0)
+                      else math.inf)
+            clipped = self._truncating(idx, cutoff, emit)
+            self._segment_breakpoints(idx, t0, clipped, osc_dt)
+            clipped.finish()
 
         if not self._run_n:
             return ts, vals, durs, eases
@@ -414,6 +426,37 @@ class SegmentTimeline:
             return None
         self._run_breakpoints(emit)
         return ts, vals, durs, eases
+
+    def _truncating(self, idx: int, cutoff: float, emit):
+        """`emit` clipped to `[.., cutoff)` for segment `idx`.
+
+        A breakpoint at or past `cutoff` belongs to a span the next segment
+        already took over, so it is dropped; the one before it is shortened to
+        end exactly at `cutoff` and followed by the segment's own value THERE,
+        read from `_segment_value` rather than re-derived per kind. That last
+        breakpoint shares its time with the next segment's first, and the
+        consumer's bisect takes the later one - so the interrupted span
+        interpolates correctly and the handover still lands on the new
+        segment."""
+        state = {'last': None, 'cut': False}
+
+        def clipped(t, v, dur=0.0, ease_id=_EASE_LINEAR):
+            t = float(t)
+            if t >= cutoff:
+                state['cut'] = True
+                return
+            if dur and t + dur > cutoff:
+                dur = cutoff - t
+                state['cut'] = True
+            state['last'] = t
+            emit(t, v, dur, ease_id)
+
+        def finish():
+            if state['cut'] and state['last'] is not None:
+                emit(cutoff, self._segment_value(idx, cutoff))
+
+        clipped.finish = finish
+        return clipped
 
     def _segment_breakpoints(self, idx: int, t0: float, emit, osc_dt) -> None:
         """Append one segment's breakpoints through `emit` (see
