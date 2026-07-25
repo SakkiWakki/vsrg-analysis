@@ -446,7 +446,15 @@ class _FillSizeTimeline:
 
     @staticmethod
     def _pick(size: float, natural: float) -> float:
-        return size if size >= 0.0 else natural
+        """The extent, or ZERO when neither source gives a real one.
+
+        A shape has no natural box to fall back to, so "unset" has to mean
+        "draws nothing" - which is what legacy's `w > 0 and h > 0` decides.
+        Letting a negative through means "keep the natural box" to
+        `record.draw_box`, and a fill's natural box is its TARGET: an unsized
+        rect then covered the whole screen instead of drawing nothing."""
+        extent = size if size >= 0.0 else natural
+        return extent if extent >= 0.0 else 0.0
 
     def is_static(self) -> bool:
         return ((self._size is None or _is_static(self._size))
@@ -2371,6 +2379,15 @@ def _legacy_element_drawn(element, ancestors, t, role: str = 'content') -> bool:
     for prop in ('scale_x', 'scale_y'):
         if any(link.sample(prop, t)[0] == 0.0 for link in chain):
             return False
+    if element.kind in _FILL_KINDS and not (element.sample('w', t)[0] > 0.0
+                                            and element.sample('h', t)[0] > 0.0):
+        # `render._element_size` returns None for a shape whose w/h are not
+        # both positive, and the painter returns without drawing - BEFORE
+        # `_draw_size` would have let size_x/size_y override the box. A fill
+        # primitive's w/h ARE its absolute size (`modfile
+        # ._fill_size_timelines`), so this now means a genuinely zero-size
+        # shape on both paths.
+        return False
     if role == 'glow':
         # The GLOW pass has its own gate: `_paint_glow` returns on a glow
         # alpha at rest, whatever the element's diffuse alpha is doing.
@@ -2419,6 +2436,15 @@ def element_parity_report(evaluator, element_order, natural_of, sample_times,
             # draws one frame too long blacks out the whole composite while
             # every measured element still reports 0.000px.
             wanted = _legacy_element_drawn(element, ancestors, t, role)
+            # A record is not yet a draw. A FILL whose size lanes resolve to
+            # zero emits a row that the executors then skip (`_draw_fill`
+            # returns on a degenerate box), so counting the row as a draw
+            # would report every unsized shape as EXTRA against a reference
+            # that is right.
+            if record is not None and record[0] == _rec.SRC_FILL:
+                w, h = _rec.draw_box((0.0, 0.0), record[1])
+                if w <= 0.0 or h <= 0.0:
+                    record = None
             if record is None:
                 if wanted:
                     missing.append((index, element.kind, role))
