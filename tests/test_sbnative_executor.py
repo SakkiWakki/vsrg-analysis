@@ -439,22 +439,29 @@ def test_oversized_content_normalizes_to_the_logical_box():
 
 # --- A4: retain decay (engine PreserveTexture accumulate-with-decay) ---
 
-# Op / lane codes for hand-built Seam-B records (the evaluator's frozen
-# layout; see the module docstring). A decay-only frame needs a Retain
-# BEGIN with NO item, which the current DocBuilder does not emit for an
-# item-less drawable - so these records are built directly, exactly as the
-# executor must consume them.
-_U_STRIDE, _F_STRIDE = 10, 20
-_CLEAR_RETAIN_CODE = 2
+# Hand-built Seam-B records: a decay-only frame needs a Retain BEGIN with NO
+# item, which the current DocBuilder does not emit for an item-less drawable,
+# so these rows are built directly.
+#
+# Strides and lane offsets come from the record mirror, NEVER restated. A
+# literal `_F_STRIDE = 20` here indexed past the end of its own row the moment
+# the doc grew the box lanes, and the failure surfaced inside the executor
+# rather than in the test that was wrong.
+from analysis.player.render.storyboard import record as _rec  # noqa: E402
+
+_CLEAR_RETAIN_CODE = _rec.CLEAR_RETAIN
 
 
 def _rec_row(kind, a=0, b=0, mat=None, opacity=1.0, tint=(1.0, 1.0, 1.0)):
-    u = np.zeros(_U_STRIDE, dtype=np.uint32)
-    u[0], u[1], u[2] = kind, a, b
-    f = np.zeros(_F_STRIDE, dtype=np.float32)
+    u = np.zeros(_rec.U_STRIDE, dtype=np.uint32)
+    u[_rec.U_KIND], u[_rec.U_A], u[_rec.U_B] = kind, a, b
+    f = np.zeros(_rec.F_STRIDE, dtype=np.float32)
     f[:9] = mat if mat is not None else [1, 0, 0, 0, 1, 0, 0, 0, 1]
-    f[9] = opacity
-    f[10:13] = tint
+    f[_rec.F_OPACITY] = opacity
+    f[_rec.F_TINT:_rec.F_TINT + 3] = tint
+    # A record the evaluator builds carries "keep the natural box" on the
+    # size lanes; zeros would mean an explicit zero-size draw.
+    f[_rec.F_SIZE:_rec.F_SIZE + 2] = _rec.SIZE_NATURAL
     return u, f
 
 
@@ -561,3 +568,66 @@ def test_half_texel_inset_still_renders_the_image():
     screen = ex.execute(*_frames(ev, 0.0))
     assert _alpha(screen, 1, 2) == 255            # opaque content, not blank
     assert _rgb(screen, 0, 2)[0] > 120            # left column still reddish
+
+
+# --- the box lanes: origin / absolute size / scale-to-fit ---------------
+
+def test_an_item_draws_about_its_origin_not_its_top_left():
+    # The origin shifts the draw box before the transform (SM's
+    # translate(-origin*w, -origin*h)). Reading the logical box straight
+    # hangs every centred actor down-right by half its own size, which is
+    # what this backend did for as long as it restated the record layout
+    # and so never saw the origin lane at all.
+    b = sn.DocBuilder(8.0, 8.0)
+    b.item(0, sn.SRC_IMAGE, 0, x_rest=4.0, y_rest=4.0)
+    b.item_box(0, origin_x=0.5, origin_y=0.5)
+    ev = b.finish()
+
+    ex = RasterExecutor({0: _solid(4, 4, QColor(0, 0, 255, 255))}, [(8.0, 8.0)])
+    ex.set_clear(SCREEN_ID, CLEAR_TRANSPARENT)   # else the opaque clear is the alpha
+    screen = ex.execute(*_frames(ev, 0.0))
+    # Centred on (4, 4): the 4x4 image spans x,y in [2, 6).
+    assert _alpha(screen, 3, 3) == 255
+    assert _alpha(screen, 5, 5) == 255
+    assert _alpha(screen, 7, 7) == 0    # would be covered if top-left anchored
+
+
+def test_an_absolute_size_replaces_the_natural_box():
+    # zoomto/setsize REPLACE the natural basis rather than scaling it, so a
+    # 2x2 image sized to 8x8 covers the target.
+    b = sn.DocBuilder(8.0, 8.0)
+    b.item(0, sn.SRC_IMAGE, 0)
+    b.item_box(0, size_x_rest=8.0, size_y_rest=8.0)
+    ev = b.finish()
+
+    ex = RasterExecutor({0: _solid(2, 2, QColor(0, 200, 0, 255))}, [(8.0, 8.0)])
+    screen = ex.execute(*_frames(ev, 0.0))
+    assert _rgb(screen, 7, 7) == (0, 200, 0)
+
+
+def test_a_zero_size_item_draws_nothing():
+    # A zero on a size lane is an explicit zero-size draw, not "natural" -
+    # only a negative lane means natural. A storyboard rect at zoomto(0, 0)
+    # relies on this; drawing it at the target's box would cover the screen.
+    b = sn.DocBuilder(8.0, 8.0)
+    b.item(0, sn.SRC_FILL, 0)
+    b.item_box(0, size_x_rest=0.0, size_y_rest=0.0)
+    ev = b.finish()
+
+    ex = RasterExecutor({}, [(8.0, 8.0)])
+    ex.set_clear(SCREEN_ID, CLEAR_TRANSPARENT)
+    screen = ex.execute(*_frames(ev, 0.0))
+    assert _alpha(screen, 4, 4) == 0
+
+
+def test_a_curtain_fill_covers_its_target():
+    # A fill has no texture to size from, so its box is the TARGET's. A unit
+    # box drew every AFT-rig curtain one design pixel wide, masking nothing.
+    b = sn.DocBuilder(8.0, 8.0)
+    b.item(0, sn.SRC_FILL, 0)
+    ev = b.finish()
+
+    ex = RasterExecutor({}, [(8.0, 8.0)])
+    ex.set_clear(SCREEN_ID, CLEAR_TRANSPARENT)
+    screen = ex.execute(*_frames(ev, 0.0))
+    assert _alpha(screen, 7, 7) == 255

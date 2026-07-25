@@ -8,20 +8,19 @@ backend: it walks those records with painter's-algorithm semantics onto
 per-drawable ``QImage`` targets, mapping each target's logical units to
 device pixels exactly once. It never sees a timeline, a tree, or a game.
 
-Record layout (frozen; mirrors native/src/evaluate.rs):
+Record layout: `storyboard.record` is the one Python statement of it, and
+this module reads its lane offsets from there. Restating them here is how
+this backend silently fell behind the GL one - it kept a 10/20 stride and
+its own offsets while the doc grew origin, absolute size, scale-to-fit and
+edge-fade lanes, so it drew every element top-left-anchored at its natural
+size.
 
-  U_STRIDE = 10 u32 lanes per op:
-    [kind, a, b, c, blend, shader+1, clip+1, screen_space,
-     uf_offset, uf_count]
-      BEGIN: a = drawable id, b = clear mode
-      BLIT:  a = source kind, b = source id, c = frame index;
-             shader+1/clip+1 are 1-based (0 = none); uf_offset/uf_count
-             window into the third `uf` buffer of sampled uniform values.
-      COPY:  a = destination drawable id (source is the OPEN target)
-      END:   a = drawable id
-  F_STRIDE = 20 f32 lanes per op:
-    mat3 row-major [0..9], opacity [9], tint rgb [10..13],
-    crop l,t,r,b [13..17], reserved [17..20]
+  BEGIN: a = drawable id, b = clear mode
+  BLIT:  a = source kind, b = source id, c = frame index;
+         shader+1/clip+1 are 1-based (0 = none); uf_offset/uf_count
+         window into the third `uf` buffer of sampled uniform values.
+  COPY:  a = destination drawable id (source is the OPEN target)
+  END:   a = drawable id
 
 Clip shapes and polyline vertices arrive out-of-band via the ctor
 (``clips`` mirrors the doc's ClipDesc table; ``lines`` seeds polyline
@@ -49,26 +48,20 @@ import numpy as np
 from PySide6.QtCore import QPointF, QRectF
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPolygonF, QTransform
 
+from analysis.player.render.storyboard import record as _rec
+
 logger = logging.getLogger(__name__)
 
 _SCREEN_ID = 0
 
-# u32 lane offsets.
-_U_KIND = 0
-_U_A = 1
-_U_B = 2
-_U_C = 3
-_U_BLEND = 4
-_U_SHADER = 5
-_U_CLIP = 6
-_U_SCREEN_SPACE = 7
-_U_UF_OFFSET = 8  # index into the third `uf` buffer (uniform values)
-_U_UF_COUNT = 9   # 0 = the op binds no uniforms
-
-# f32 lane offsets.
-_F_OPACITY = 9
-_F_TINT = 10  # ..13
-_F_CROP = 13  # ..17 (l, t, r, b fractions of the SOURCE logical size)
+# Lane offsets come from the record mirror, never restated here.
+_U_KIND, _U_A, _U_B, _U_C = _rec.U_KIND, _rec.U_A, _rec.U_B, _rec.U_C
+_U_BLEND, _U_SHADER, _U_CLIP = _rec.U_BLEND, _rec.U_SHADER, _rec.U_CLIP
+_U_SCREEN_SPACE = _rec.U_SCREEN_SPACE
+_U_UF_OFFSET, _U_UF_COUNT = _rec.U_UF_OFFSET, _rec.U_UF_COUNT
+_F_OPACITY, _F_TINT, _F_CROP = _rec.F_OPACITY, _rec.F_TINT, _rec.F_CROP
+_F_ORIGIN, _F_FADE = _rec.F_ORIGIN, _rec.F_FADE
+_draw_box = _rec.draw_box
 
 # Polyline stroke width, in the target's logical units (drawable-ir.md
 # B2: fixed for now; a future width channel would replace this).
@@ -350,7 +343,7 @@ class RasterExecutor:
         if painter is None or not target_stack:
             return
         self._stash_uniforms(urec, uf)
-        self._log_skipped_lanes(urec)
+        self._log_skipped_lanes(urec, frec)
 
         src_kind = int(urec[_U_A])
         opacity = float(frec[_F_OPACITY])
@@ -368,7 +361,8 @@ class RasterExecutor:
 
         match src_kind:
             case n if n == _SRC_FILL:
-                self._draw_fill(painter, tint)
+                self._draw_fill(painter, frec, self._sizes[target_stack[-1]],
+                                tint)
             case n if n == _SRC_IMAGE:
                 self._draw_image(painter, urec, frec, tint)
             case n if n == _SRC_DRAWABLE:
@@ -422,17 +416,24 @@ class RasterExecutor:
             float(m[2]), float(m[5]),
         )
 
-    def _draw_fill(self, painter: QPainter, tint: tuple[float, float, float]) -> None:
-        # A unit rect in source space (0,0)-(1,1) colored tint. Opacity is
-        # already applied via painter.setOpacity, so the color carries
-        # only tint * full alpha; premultiplied-safe by construction.
+    def _draw_fill(self, painter: QPainter, frec: np.ndarray, target_size,
+                   tint: tuple[float, float, float]) -> None:
+        # A fill has no texture to size from, so its natural box is the
+        # TARGET's - a field-instance curtain is a screen-sized quad the
+        # chart then stretches. An item that DECLARES a size (a storyboard
+        # Quad, whose w/h are its zoomto) overrides that. Opacity is already
+        # applied via painter.setOpacity, so the color carries only
+        # tint * full alpha; premultiplied-safe by construction.
+        box = _placed_box(_draw_box(target_size, frec), frec)
+        if box is None:
+            return
         color = QColor.fromRgbF(
             max(0.0, min(1.0, tint[0])),
             max(0.0, min(1.0, tint[1])),
             max(0.0, min(1.0, tint[2])),
             1.0,
         )
-        painter.fillRect(QRectF(0.0, 0.0, 1.0, 1.0), color)
+        painter.fillRect(_cropped(box, frec), color)
 
     def _draw_image(
         self,
@@ -523,27 +524,66 @@ class RasterExecutor:
         pw, ph = source.width(), source.height()
         if logical_w <= 0.0 or logical_h <= 0.0 or pw <= 0 or ph <= 0:
             return
+        # The DRAW box, not the logical box: `zoomto`/`setsize` replace the
+        # natural basis and scale-to-fit rescales it, and the origin then
+        # shifts the quad so the item draws about its own anchor. Reading
+        # the logical box straight drew every element top-left-anchored at
+        # its natural size, which on the GL side hung each one down-right by
+        # half of itself.
+        box = _placed_box(_draw_box((logical_w, logical_h), frec), frec)
+        if box is None:
+            return
         crop_l = float(frec[_F_CROP])
         crop_t = float(frec[_F_CROP + 1])
-        crop_r = float(frec[_F_CROP + 2])
-        crop_b = float(frec[_F_CROP + 3])
-        vis_fw = max(0.0, 1.0 - crop_l - crop_r)
-        vis_fh = max(0.0, 1.0 - crop_t - crop_b)
+        vis_fw = max(0.0, 1.0 - crop_l - float(frec[_F_CROP + 2]))
+        vis_fh = max(0.0, 1.0 - crop_t - float(frec[_F_CROP + 3]))
         if vis_fw <= 0.0 or vis_fh <= 0.0:
             return
-        target = QRectF(crop_l * logical_w, crop_t * logical_h,
-                        vis_fw * logical_w, vis_fh * logical_h)
+        target = _cropped(box, frec)
         sub = _half_texel_inset(
             QRectF(crop_l * pw, crop_t * ph, vis_fw * pw, vis_fh * ph), pw, ph)
         painter.drawImage(target, src, sub)
 
-    def _log_skipped_lanes(self, urec: np.ndarray) -> None:
-        # Clip and uniform lanes are now consumed (see _apply_clip /
-        # _stash_uniforms). The shader itself is still not applied - the
-        # raster reference backend draws unshaded but binds the uniforms.
+    def _log_skipped_lanes(self, urec: np.ndarray, frec: np.ndarray) -> None:
+        # Clip, uniform and box lanes are consumed (see _apply_clip /
+        # _stash_uniforms / _placed_box). The shader itself is still not
+        # applied - the raster reference backend draws unshaded but binds
+        # the uniforms - and SetFade needs a per-edge alpha ramp this
+        # backend has no equivalent for, so a faded item draws at full
+        # opacity. Both are announced rather than silently dropped.
         if int(urec[_U_SHADER]) != 0 and "shader" not in self._skipped_lanes:
             self._skipped_lanes.add("shader")
             logger.warning("RasterExecutor: shader lane not implemented (TODO), drawn unshaded")
+        if any(frec[_F_FADE:_F_FADE + 4]) and "fade" not in self._skipped_lanes:
+            self._skipped_lanes.add("fade")
+            logger.warning("RasterExecutor: fade lanes not implemented (TODO), drawn unfaded")
+
+
+def _placed_box(size, frec) -> QRectF | None:
+    """The item's drawn box in source space, shifted by its origin.
+
+    The origin is a fraction of the item's OWN drawn size, subtracted before
+    the transform - SM's `translate(-origin*w, -origin*h)`. None for a
+    degenerate box, which is a legitimate zero-size draw (a Quad with
+    `zoomto(0, 0)`), not an error."""
+    w, h = size
+    if w <= 0.0 or h <= 0.0:
+        return None
+    return QRectF(-float(frec[_F_ORIGIN]) * w, -float(frec[_F_ORIGIN + 1]) * h,
+                  w, h)
+
+
+def _cropped(box: QRectF, frec) -> QRectF:
+    """`box` inset by the record's crop fractions. SM crops hide bands of
+    the drawn quad and leave the surviving content where it was, so the
+    inset is of the box itself rather than a rescale of it."""
+    crop_l = float(frec[_F_CROP])
+    crop_t = float(frec[_F_CROP + 1])
+    vis_fw = max(0.0, 1.0 - crop_l - float(frec[_F_CROP + 2]))
+    vis_fh = max(0.0, 1.0 - crop_t - float(frec[_F_CROP + 3]))
+    return QRectF(box.x() + crop_l * box.width(),
+                  box.y() + crop_t * box.height(),
+                  vis_fw * box.width(), vis_fh * box.height())
 
 
 def _half_texel_inset(sub: QRectF, pw: int, ph: int) -> QRectF:

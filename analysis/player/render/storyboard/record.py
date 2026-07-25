@@ -76,3 +76,31 @@ BLEND_ADDITIVE = 1
 SIZE_NATURAL = -1.0
 FIT_OFF_BELOW = 0.5
 FIT_COVER = 1.0
+
+
+def draw_box(logical, frec):
+    """The item's UNZOOMED draw size: the source's natural box unless the
+    record overrides it. Mirrors `render._draw_size` - fit wins over the
+    absolute size, and the item's scale still multiplies on top (already
+    folded into the mat3), because SM applies zoom AFTER zoomto/scaletofit.
+
+    A per-axis absolute size REPLACES the natural basis, so a zero is an
+    explicit zero-size draw and only a NEGATIVE lane means "keep natural".
+
+    Lives here rather than in one executor because BOTH backends have to
+    resolve the box identically: the raster reference read neither the size
+    nor the fit lanes for as long as it restated the record layout itself,
+    so it drew every sized element at its natural size and every fitted one
+    unfitted."""
+    nat_w, nat_h = logical
+    fit_mode = float(frec[F_FIT])
+    if fit_mode >= FIT_OFF_BELOW:
+        rect_w, rect_h = float(frec[F_FIT + 1]), float(frec[F_FIT + 2])
+        ratio_x = abs(rect_w / nat_w) if nat_w else 0.0
+        ratio_y = abs(rect_h / nat_h) if nat_h else 0.0
+        zoom = max(ratio_x, ratio_y) if fit_mode == FIT_COVER \
+            else min(ratio_x, ratio_y)
+        return nat_w * zoom, nat_h * zoom
+    size_w, size_h = float(frec[F_SIZE]), float(frec[F_SIZE + 1])
+    return (size_w if size_w >= 0.0 else nat_w,
+            size_h if size_h >= 0.0 else nat_h)

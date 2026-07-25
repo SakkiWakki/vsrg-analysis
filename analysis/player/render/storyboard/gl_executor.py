@@ -227,26 +227,9 @@ def _crop_unit_quad(frec):
     return left, top, 1.0 - right, 1.0 - bottom
 
 
-def _draw_box(logical, frec):
-    """The item's UNZOOMED draw size: the source's natural box unless the
-    record overrides it. Mirrors `render._draw_size` - fit wins over the
-    absolute size, and the item's scale still multiplies on top (already
-    folded into the mat3), because SM applies zoom AFTER zoomto/scaletofit.
-
-    A per-axis absolute size REPLACES the natural basis, so a zero is an
-    explicit zero-size draw and only a NEGATIVE lane means "keep natural"."""
-    nat_w, nat_h = logical
-    fit_mode = float(frec[_F_FIT])
-    if fit_mode >= 0.5:
-        rect_w, rect_h = float(frec[_F_FIT + 1]), float(frec[_F_FIT + 2])
-        ratio_x = abs(rect_w / nat_w) if nat_w else 0.0
-        ratio_y = abs(rect_h / nat_h) if nat_h else 0.0
-        zoom = max(ratio_x, ratio_y) if fit_mode == _FIT_COVER \
-            else min(ratio_x, ratio_y)
-        return nat_w * zoom, nat_h * zoom
-    size_w, size_h = float(frec[_F_SIZE]), float(frec[_F_SIZE + 1])
-    return (size_w if size_w >= 0.0 else nat_w,
-            size_h if size_h >= 0.0 else nat_h)
+# The draw box lives with the record layout, so the raster backend resolves
+# it identically instead of carrying its own copy (or, as it did, none).
+_draw_box = _rec.draw_box
 
 
 def _expanded_extent(sub, lw, lh):
