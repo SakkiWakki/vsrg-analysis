@@ -1,17 +1,27 @@
-"""Sweep NotITG charts through the element parity harness.
+"""Sweep NotITG charts through both drawable-doc parity harnesses.
 
 Two charts is not a corpus. This compiles every chart it is pointed at,
-builds the static doc, and reports two things per chart:
+builds the static doc, and reports, per chart:
 
-  - PLACEMENT: the drawn-quad corner error against the legacy painter, in
-    design pixels (`drawable_doc.element_parity_report`).
-  - COVERAGE: the element kinds and verbs the doc SKIPS. A placement number
+  - ELEMENT PLACEMENT: the drawn-quad corner error against the legacy
+    painter, in design pixels (`drawable_doc.element_parity_report`).
+  - FIELD PLACEMENT: the same measure for field instances, against
+    `NotitgFieldInstances` (`drawable_doc.field_parity_report`), plus which
+    instances each side draws that the other does not.
+  - COVERAGE: the element kinds the doc SKIPS, and any field-link prop the
+    chart POKES that the doc's link table does not carry. A placement number
     only describes what the doc emitted; it cannot see what was never
     emitted at all, which is how 118 missing rects hid behind a 0.001px
     result on gat 1.
 
+Field parity is measured with the CAPTURED-notefield representation
+(`VSRG_DRAWABLE_NOTES=0`), because that is the representation the legacy
+effect models: one blit per instance. Under the default inline-notes path a
+field copy re-renders the notes as many items and has no single quad to
+compare, so the sweep would silently measure almost nothing.
+
 Usage:
-    python -m analysis.games.notitg.element_sweep [--limit N] [--root DIR] [--json OUT]
+    python -m analysis.games.notitg.doc_sweep [--limit N] [--root DIR] [--json OUT]
 
 Charts compile in ~10-25s each, so a full library run is hours - start with
 a limit and widen once the fast failures are gone.
@@ -84,6 +94,58 @@ def _natural_lookup():
     return natural
 
 
+def _uncarried_link_props(compiled) -> dict:
+    """`prop -> link count` for every field-link prop the chart POKES that the
+    doc's link table does not carry.
+
+    The gap a placement harness structurally cannot see: a prop the doc never
+    reads is not a difference in where an instance lands, it is a missing
+    input, and the quad comes out plausible. `_LINK_PROP_ORDER` omitting the
+    out-of-plane terms discarded every 3D field transform and measured clean
+    while doing it."""
+    from analysis.games.notitg import drawable_doc as dd
+    from analysis.games.notitg import field_compose as fc
+
+    carried = {prop for _param, prop in dd._LINK_PROP_ORDER}
+    carried |= {'rotation_order', 'fov'}
+    provider = compiled.get('field_instances')
+    instances = provider() if callable(provider) else (provider or [])
+    poked: Counter = Counter()
+    for inst in instances:
+        for link in inst['transform']._links:
+            for prop, rest in fc._LINK_RESTS.items():
+                if prop not in carried and dd._moves_off(link.get(prop), rest):
+                    poked[prop] += 1
+    return dict(poked)
+
+
+def _field_measure(compiled, times) -> dict:
+    """Field-instance parity for one chart, under the captured-notefield
+    representation the legacy effect models (see the module note)."""
+    from analysis.games.notitg import drawable_doc as dd
+
+    previous = os.environ.get('VSRG_DRAWABLE_NOTES')
+    os.environ['VSRG_DRAWABLE_NOTES'] = '0'
+    try:
+        evaluator, id_maps, _report = dd.build_static_doc(compiled)
+        order = id_maps['instance_order']
+        rep = dd.field_parity_report(evaluator, compiled, order, times)
+    finally:
+        if previous is None:
+            del os.environ['VSRG_DRAWABLE_NOTES']
+        else:
+            os.environ['VSRG_DRAWABLE_NOTES'] = previous
+    return {
+        'instances': len(order),
+        'field_compared': rep['n_compared'],
+        'field_3d': rep['n_projected'],
+        'field_missing': rep['n_missing'],
+        'field_extra': rep['n_extra'],
+        'field_err': round(float(rep['max_corner_err']), 4),
+        'field_ok': bool(rep['all_ok']),
+    }
+
+
 def sweep_chart(sm_path: str) -> dict:
     """Compile one chart and measure it. Never raises - a chart that fails to
     compile is a RESULT (the sweep is a survey, not a gate), so one broken
@@ -100,10 +162,11 @@ def sweep_chart(sm_path: str) -> dict:
             out['error'] = 'compile returned None'
             return out
         wait_for_upgrade(compiled)
+        times = sample_times(compiled)
         evaluator, id_maps, report = dd.build_static_doc(compiled)
         order = id_maps['element_order']
         rep = dd.element_parity_report(evaluator, order, _natural_lookup(),
-                                       sample_times(compiled))
+                                       times)
         out.update(
             ok=True,
             items=len(order),
@@ -114,6 +177,8 @@ def sweep_chart(sm_path: str) -> dict:
             all_ok=bool(rep['all_ok']),
             compared=sum(r['n_compared'] for r in rep['times']),
             unsized=sum(r['n_unsized'] for r in rep['times']),
+            uncarried=_uncarried_link_props(compiled),
+            **_field_measure(compiled, times),
         )
     except Exception as exc:  # noqa: BLE001 - a survey records failures
         out['error'] = f'{type(exc).__name__}: {exc}'
@@ -138,6 +203,16 @@ def find_charts(root: str) -> list:
     return charts
 
 
+def _print_over(results, key: str, label: str, bar: float = 0.01) -> None:
+    """The charts whose `key` error clears `bar`, worst first."""
+    over = [r for r in results if r[key] > bar]
+    if not over:
+        return
+    print(f'\n{label} placement over {bar}px:')
+    for r in sorted(over, key=lambda r: -r[key]):
+        print(f'  {r[key]:>10}px  {Path(r["chart"]).parent.name}')
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument('--root', default='/mnt/Yucky/Rhythm Games/Players/'
@@ -152,7 +227,8 @@ def main() -> int:
 
     results = []
     skips = Counter()
-    worst = 0.0
+    uncarried = Counter()
+    worst = worst_field = 0.0
     for index, chart in enumerate(charts, 1):
         name = Path(chart).parent.name
         print(f'[{index}/{len(charts)}] {name} ...', flush=True)
@@ -160,26 +236,41 @@ def main() -> int:
         results.append(result)
         if result['ok']:
             skips.update(result['skips'])
+            uncarried.update(result['uncarried'])
             worst = max(worst, result['max_corner_err'])
+            worst_field = max(worst_field, result['field_err'])
             print(f'    {result["seconds"]}s  items={result["items"]} '
                   f'compared={result["compared"]} '
                   f'err={result["max_corner_err"]}px '
                   f'skips={result["skips"]}', flush=True)
+            print(f'      fields: {result["instances"]} instances '
+                  f'compared={result["field_compared"]} '
+                  f'3d={result["field_3d"]} '
+                  f'missing={result["field_missing"]} '
+                  f'extra={result["field_extra"]} '
+                  f'err={result["field_err"]}px', flush=True)
         else:
             print(f'    {result["seconds"]}s  FAILED {result["error"]}',
                   flush=True)
 
     ok = [r for r in results if r['ok']]
-    print(f'\n=== {len(ok)}/{len(results)} compiled, '
-          f'worst corner error {worst}px ===')
+    print(f'\n=== {len(ok)}/{len(results)} compiled, worst corner error: '
+          f'elements {worst}px, fields {worst_field}px ===')
     print('skipped element kinds across the sweep:')
     for kind, count in skips.most_common():
         print(f'  {kind:>16}  {count}')
-    over = [r for r in ok if r['max_corner_err'] > 0.01]
-    if over:
-        print('\ncharts over 0.01px:')
-        for r in sorted(over, key=lambda r: -r['max_corner_err']):
-            print(f'  {r["max_corner_err"]:>10}px  {Path(r["chart"]).parent.name}')
+    print('field-link props the doc does NOT carry, by links poking them:')
+    for prop, count in uncarried.most_common():
+        print(f'  {prop:>16}  {count}')
+    _print_over(ok, 'max_corner_err', 'element')
+    _print_over(ok, 'field_err', 'field')
+    dropped = [r for r in ok if r['field_missing'] or r['field_extra']]
+    if dropped:
+        print('\ncharts where the two sides draw different instances:')
+        for r in dropped:
+            print(f'  missing={r["field_missing"]:>4} '
+                  f'extra={r["field_extra"]:>4}  '
+                  f'{Path(r["chart"]).parent.name}')
 
     if args.json:
         Path(args.json).write_text(json.dumps(results, indent=1))
