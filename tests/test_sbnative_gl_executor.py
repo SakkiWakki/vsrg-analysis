@@ -134,6 +134,50 @@ def test_snapshot_shows_pre_curtain_content_not_black(gl):
     assert _rgb(screen, 2, 2) == pytest.approx((40, 120, 200), abs=2)
 
 
+def test_edge_fade_ramps_alpha_from_the_faded_edge(gl):
+    # SM SetFade* (Sprite.cpp:560): alpha ramps 0 AT the faded edge up to 1
+    # that fraction inward, holding 1 beyond. Drawn over an opaque red
+    # backdrop, a top fade must leave the top row nearly backdrop and the
+    # bottom row fully the sprite.
+    b = sn.DocBuilder(8.0, 8.0)
+    b.item(0, sn.SRC_FILL, 0, sx_rest=8.0, sy_rest=8.0)     # red backdrop
+    b.item(0, sn.SRC_IMAGE, 0, sx_rest=8.0, sy_rest=8.0)    # the faded sprite
+    b.item_fade(0, t_rest=0.5)                              # top half ramps
+    ev = b.finish()
+
+    images = {0: _solid(1, 1, QColor(0, 0, 255, 255))}
+    ex = GLExecutor(images, [(8.0, 8.0)])
+    u, f = _frames(ev, 0.0)
+    f = f.copy()
+    fill = next(i for i in range(u.shape[0])
+                if u[i, 0] == sn.OP_BLIT and u[i, 1] == sn.SRC_FILL)
+    f[fill, 10:13] = (1.0, 0.0, 0.0)
+
+    screen = ex.execute(u, f)
+    assert not ex.broken
+    top = _rgb(screen, 4, 0)
+    bottom = _rgb(screen, 4, 7)
+    assert bottom[2] > 200 and bottom[0] < 55, f'unfaded edge should be the sprite: {bottom}'
+    assert top[0] > top[2], f'faded edge should be mostly backdrop: {top}'
+    # And it is a RAMP, not a step: halfway into the fade band sits between.
+    mid = _rgb(screen, 4, 2)
+    assert top[2] < mid[2] < bottom[2], f'not monotonic: {top} {mid} {bottom}'
+
+
+def test_an_unfaded_blit_takes_the_default_program(gl):
+    # The fade program exists so the common path pays nothing; a blit with
+    # every fade lane at rest must not route through it.
+    b = sn.DocBuilder(4.0, 4.0)
+    b.item(0, sn.SRC_IMAGE, 0, sx_rest=4.0, sy_rest=4.0)
+    ev = b.finish()
+    ex = GLExecutor({0: _solid(1, 1, QColor(0, 0, 255, 255))}, [(4.0, 4.0)])
+    u, f = _frames(ev, 0.0)
+    ex.execute(u, f)
+    assert not ex.broken
+    assert ex._fade_or_default(tuple(f[1, _gl._F_FADE:_gl._F_FADE + 4])) \
+        is ex._programs[0]
+
+
 def _upload_texture(image):
     """Upload a QImage to a plain GL texture via the Qt GL functions and
     return (id, w, h). Mirrors a renderer capture FBO's ``texture()`` for the

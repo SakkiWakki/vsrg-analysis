@@ -329,6 +329,32 @@ impl DocBuilder {
         item.size = [chan(size_x_id, size_x_rest), chan(size_y_id, size_y_rest)];
     }
 
+    /// SM SetFadeLeft/Right/Top/Bottom on the item most recently pushed onto
+    /// `target`: each a fraction of the drawn box over which alpha ramps from
+    /// 0 at that edge up to 1 inward. All rest at 0 (a hard edge), and the
+    /// ramps multiply where they overlap.
+    #[pyo3(signature = (target, l_id=-1, l_rest=0.0, r_id=-1, r_rest=0.0,
+                        t_id=-1, t_rest=0.0, b_id=-1, b_rest=0.0))]
+    fn item_fade(
+        &mut self,
+        target: u32,
+        l_id: i64,
+        l_rest: f32,
+        r_id: i64,
+        r_rest: f32,
+        t_id: i64,
+        t_rest: f32,
+        b_id: i64,
+        b_rest: f32,
+    ) {
+        self.last_item(target).fade = [
+            chan(l_id, l_rest),
+            chan(r_id, r_rest),
+            chan(t_id, t_rest),
+            chan(b_id, b_rest),
+        ];
+    }
+
     /// ScaleToCover / ScaleToFitInside on the item most recently pushed onto
     /// `target`: the uniform zoom that fits the source's natural box to a
     /// recorded rect. `mode` < 0.5 is off, 1.0 is cover, else fit-inside.

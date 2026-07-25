@@ -957,16 +957,26 @@ def test_a_corner_gradient_is_counted_not_silently_dropped(doc_elements,
     assert report['element_skips'].get('corner_gradient') == 1
 
 
-def test_an_edge_fade_is_counted_not_silently_dropped(doc_elements, tmp_path):
-    # SetFade* is used 21 times across the two reference charts, so unlike a
-    # corner gradient this one has to be BUILT - the counter exists so the gap
-    # is visible until it is.
+def test_edge_fades_reach_the_record_only_when_poked(doc_elements, tmp_path):
+    # SetFade* is used 21 times across the two reference charts. A non-resting
+    # fade routes the blit through a second GL program, so an element that
+    # never fades must leave the lanes at 0 rather than pay for a hard edge.
     asset = tmp_path / 'fade.png'
     asset.write_bytes(b'')
-    el = _sprite(0, str(asset))
-    el.timelines['fade_top'] = EventTimeline(
+    faded = _sprite(0, str(asset))
+    faded.timelines['fade_top'] = EventTimeline(
         [Keyframe(0.0, (0.25,), 0.0, _EASE_LINEAR)], rest=(0.0,))
-    _evaluator, _id_maps, report = dd.build_static_doc(
-        _compiled([], tree=[el]))
+    plain = _sprite(0, str(asset))
 
-    assert report['element_skips'].get('edge_fade') == 1
+    evaluator, _id_maps, report = dd.build_static_doc(
+        _compiled([], tree=[faded]))
+    assert 'edge_fade' not in report['element_skips'], 'fades are implemented'
+    u, f = _blit_lanes(evaluator, 1.0)
+    row = next(i for i in range(len(u)) if u[i, 0] == sn.OP_BLIT)
+    # lanes are l, r, t, b - only the top edge fades.
+    assert tuple(f[row, 24:28]) == (0.0, 0.0, 0.25, 0.0)
+
+    evaluator, _id_maps, _r = dd.build_static_doc(_compiled([], tree=[plain]))
+    u, f = _blit_lanes(evaluator, 1.0)
+    row = next(i for i in range(len(u)) if u[i, 0] == sn.OP_BLIT)
+    assert tuple(f[row, 24:28]) == (0.0, 0.0, 0.0, 0.0)

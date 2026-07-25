@@ -236,6 +236,11 @@ pub struct Item {
     /// spans rather than four edges. Takes precedence over `size`, matching
     /// `_draw_size`, which tests fit before the absolute override.
     pub fit: [ChannelRef; 3],
+    /// SM SetFadeLeft/Right/Top/Bottom as fractions of the drawn box, sampled
+    /// each frame: alpha ramps 0 at the edge up to 1 that far inward
+    /// (Sprite.cpp:560). Rests at 0 - a hard edge. The four ramps MULTIPLY
+    /// where they overlap, matching the painter's DestinationIn mask.
+    pub fade: [ChannelRef; 4],
     pub opacity: ChannelRef,
     pub tint: [ChannelRef; 3],
     /// Additive-blend gate, sampled every frame: >= 0.5 draws Additive,
@@ -272,6 +277,7 @@ impl Item {
             origin: [0.0, 0.0],
             size: [ChannelRef::constant(-1.0); 2],
             fit: [ChannelRef::constant(0.0); 3],
+            fade: [ChannelRef::constant(0.0); 4],
             opacity: ChannelRef::constant(1.0),
             tint: [ChannelRef::constant(1.0); 3],
             blend_add: ChannelRef::constant(0.0),

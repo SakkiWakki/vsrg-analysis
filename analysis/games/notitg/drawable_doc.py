@@ -1285,6 +1285,26 @@ class _Builder:
             kwargs[f'size_{axis}_rest'] = rest
         self._builder.item_box(_SCREEN_ID, **kwargs)
         self._emit_element_fit(element)
+        self._emit_element_fade(element)
+
+    def _emit_element_fade(self, element) -> None:
+        """Attach the element's SetFade* edge ramps to the item just pushed.
+
+        Emitted only when the element actually fades: the ramps rest at 0 (a
+        hard edge), and a non-resting fade lane routes the blit through a
+        second GL program, so a needless one would cost every element two
+        extra uniform sets a hard-edged draw does not need."""
+        if not _is_poked(element, _FADE_PROPS, _FADE_OFF):
+            return
+        kwargs = {}
+        for param, prop in zip(('l', 'r', 't', 'b'), _FADE_PROPS):
+            timeline = element.timelines.get(prop)
+            if timeline is None:
+                continue
+            chan_id, rest = self._channel(timeline)
+            kwargs[f'{param}_id'] = chan_id
+            kwargs[f'{param}_rest'] = rest
+        self._builder.item_fade(_SCREEN_ID, **kwargs)
 
     def _emit_element_fit(self, element) -> None:
         """Attach ScaleToCover / ScaleToFitInside to the item just pushed.
@@ -1320,8 +1340,6 @@ class _Builder:
         rather than obviously missing."""
         if _is_poked(element, _CORNER_COLOR_PROPS, _CORNER_UNSET):
             self._count_skip('corner_gradient')
-        if _is_poked(element, _FADE_PROPS, _FADE_OFF):
-            self._count_skip('edge_fade')
         color = element.timelines.get('color')
         if color is None:
             return

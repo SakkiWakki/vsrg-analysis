@@ -13,14 +13,14 @@ pops the target stack. ``execute`` returns the screen drawable's FBO read
 back as a ``QImage`` (``toImage``) for tests.
 
 Record layout (frozen; mirrors native/src/evaluate.rs, U_STRIDE=10 /
-F_STRIDE=24) - identical to RasterExecutor:
+F_STRIDE=28) - identical to RasterExecutor:
 
   U lanes: [kind, a, b, c, blend, shader+1, clip+1, screen_space,
             uf_offset, uf_count]
   F lanes: mat3 [0..9], opacity [9], tint rgb [10..13],
            crop l,t,r,b [13..17], origin x,y [17..19],
            size w,h [19..21] (< 0 = natural),
-           fit mode,w,h [21..24]
+           fit mode,w,h [21..24], fade l,r,t,b [24..28]
 
 The mat3 is the RECORD's column-vector convention (p' = M @ p, translation
 in lanes 2/5), source logical -> target logical; homographies welcome (the
@@ -105,6 +105,7 @@ _F_CROP = 13  # ..17 (l, t, r, b fractions of the SOURCE logical size)
 _F_ORIGIN = 17  # ..19 (x, y fractions of the item's own drawn size)
 _F_SIZE = 19  # ..21 (absolute w, h overriding the natural box; < 0 = natural)
 _F_FIT = 21  # ..24 (ScaleToCover/FitInside: mode, rect w, rect h)
+_F_FADE = 24  # ..28 (SetFade l, r, t, b as fractions of the drawn box)
 
 # ScaleToCover takes the LARGER axis ratio (fills the rect); anything else
 # non-zero fits inside, taking the SMALLER (letterboxes).
@@ -113,7 +114,7 @@ _FIT_COVER = 1.0
 # The record strides this executor reads, so a hand-built record can bind to
 # them instead of restating a number that drifts when a lane is added.
 _U_STRIDE_LANES = 10
-_F_STRIDE_LANES = 24
+_F_STRIDE_LANES = 28
 
 # Op / source / clear codes (kept in sync with storyboard_native; the
 # executor runs without importing it at module load so tests importorskip
@@ -154,6 +155,48 @@ out vec4 fragColor;
 void main(void) {
     vec4 c = texture(u_tex, v_uv);
     fragColor = vec4(c.rgb * u_tint, c.a) * u_opacity;
+}
+"""
+
+# The fade variant needs the position WITHIN THE DRAWN BOX, which v_uv
+# cannot supply: v_uv may address a sheet cell or an overscanned capture's
+# sub-rect, while SetFade* ramps over the box the item actually draws.
+# u_quad carries that box in the same source-logical units as a_pos.
+_FADE_VERTEX_SRC = """#version 150
+in vec2 a_pos;
+in vec2 a_uv;
+uniform mat3 u_mat;
+uniform vec4 u_quad;
+out vec2 v_uv;
+out vec2 v_local;
+void main(void) {
+    vec3 p = u_mat * vec3(a_pos, 1.0);
+    v_uv = a_uv;
+    vec2 span = max(u_quad.zw - u_quad.xy, vec2(1e-6));
+    v_local = (a_pos - u_quad.xy) / span;
+    gl_Position = vec4(p.xy, 0.0, p.z);
+}
+"""
+
+# SM SetFade* (Sprite.cpp:560): alpha ramps 0 at the edge up to 1 that far
+# inward, holding 1 beyond. Overlapping edges MULTIPLY, matching the painter
+# mask's DestinationIn composition rather than taking a min.
+_FADE_FRAG_SRC = """#version 150
+uniform sampler2D u_tex;
+uniform float u_opacity;
+uniform vec3 u_tint;
+uniform vec4 u_fade;
+in vec2 v_uv;
+in vec2 v_local;
+out vec4 fragColor;
+float ramp(float d, float f) {
+    return f > 0.0 ? clamp(d / f, 0.0, 1.0) : 1.0;
+}
+void main(void) {
+    vec4 c = texture(u_tex, v_uv);
+    float a = ramp(v_local.x, u_fade.x) * ramp(1.0 - v_local.x, u_fade.y)
+            * ramp(v_local.y, u_fade.z) * ramp(1.0 - v_local.y, u_fade.w);
+    fragColor = vec4(c.rgb * u_tint, c.a) * (u_opacity * a);
 }
 """
 
@@ -307,11 +350,11 @@ def _set_sample_params(f, texture) -> None:
     f.glBindTexture(GL_TEXTURE_2D, 0)
 
 
-def _build_program(frag_src, uniforms):
+def _build_program(frag_src, uniforms, vert_src=None):
     program = QOpenGLShaderProgram()
     built = (program.addShaderFromSourceCode(
                  QOpenGLShader.ShaderTypeBit.Vertex,
-                 _adapt_dialect(_VERTEX_SRC))
+                 _adapt_dialect(vert_src or _VERTEX_SRC))
              and program.addShaderFromSourceCode(
                  QOpenGLShader.ShaderTypeBit.Fragment,
                  _adapt_dialect(frag_src)))
@@ -400,7 +443,7 @@ class GLExecutor:
 
         # Lazily built GL objects (need a current context, which the ctor
         # may not have; built on first execute()).
-        self._programs = None            # (tex_entry, fill_entry)
+        self._programs = None            # (tex, fill, fade) entries
         self._targets: dict[int, QOpenGLFramebufferObject] = {}
         self._image_textures: dict[int, tuple] = {}  # image id -> (tex, w, h)
         # EXTERNAL bound textures: DrawableId -> (texture id, pixel w, h),
@@ -658,10 +701,19 @@ class GLExecutor:
         if self._programs is None:
             tex = _build_program(_TEX_FRAG_SRC, ('u_mat', 'u_tex', 'u_opacity', 'u_tint'))
             fill = _build_program(_FILL_FRAG_SRC, ('u_mat', 'u_color'))
+            # A separate program rather than fade uniforms on the default one:
+            # almost no blit is faded, and the common path must not pay two
+            # extra uniform sets per op (the compose loop is the frame budget).
+            fade = _build_program(
+                _FADE_FRAG_SRC,
+                ('u_mat', 'u_tex', 'u_opacity', 'u_tint', 'u_fade', 'u_quad'),
+                vert_src=_FADE_VERTEX_SRC)
             if tex is None or fill is None:
                 self._mark_broken('quad program build failed')
                 return False
-            self._programs = (tex, fill)
+            # A fade build failure degrades to the unfaded program (hard
+            # edges), never to a black or skipped draw.
+            self._programs = (tex, fill, fade)
         if self._vao is None:
             self._build_quad(gf)
         return True
@@ -1037,14 +1089,19 @@ class GLExecutor:
         u0, u1 = _inset_half_texel(u0, u1, sw)
         v0, v1 = _inset_half_texel(v0, v1, sh)
         self._textured_quad(gf, mat3, tw, th, tint, opacity, texture, sw, sh,
-                            shaded, (x0, y0, x1, y1), (u0, v0, u1, v1))
+                            shaded, (x0, y0, x1, y1), (u0, v0, u1, v1),
+                            fade=tuple(frec[_F_FADE:_F_FADE + 4]))
 
     def _textured_quad(self, gf, mat3, tw, th, tint, opacity, texture,
-                       sw, sh, shaded, quad, uv) -> None:
-        program, locs = shaded if shaded is not None else self._programs[0]
+                       sw, sh, shaded, quad, uv, fade=None) -> None:
+        entry = shaded if shaded is not None else self._fade_or_default(fade)
+        program, locs = entry
         if program is None:
             return
         program.bind()
+        if 'u_fade' in locs:
+            gf.glUniform4f(locs['u_fade'], *(float(v) for v in fade))
+            gf.glUniform4f(locs['u_quad'], *(float(v) for v in quad))
         gf.glActiveTexture(GL_TEXTURE0)
         gf.glBindTexture(GL_TEXTURE_2D, texture)
         program.setUniformValue(locs['u_tex'], 0)
@@ -1062,6 +1119,15 @@ class GLExecutor:
         self._draw_quad(gf, x0, y0, x1, y1, uv=uv)
         gf.glBindTexture(GL_TEXTURE_2D, 0)
         program.release()
+
+    def _fade_or_default(self, fade):
+        """The fade program when this blit actually fades, else the default
+        textured one. A per-item frag shader wins over both - it owns the
+        whole fragment, so a chart that fades a shaded sprite keeps the
+        shader and loses the ramp (unexercised by either reference chart)."""
+        faded = fade is not None and max(fade) > 0.0
+        return self._programs[2] if faded and self._programs[2] is not None \
+            else self._programs[0]
 
     def _draw_quad(self, gf, x0, y0, x1, y1, uv) -> None:
         """Upload and draw one quad: positions in source logical coords,
