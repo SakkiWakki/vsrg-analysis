@@ -31,14 +31,30 @@ os.environ.setdefault('VSRG_DRAWABLE_ELEMENTS', '1')
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-# DELIBERATELY off round seconds. Channel breakpoint times are f32, so a
-# segment starting at 60.00000000000378 rounds to exactly 60.0 and wins the
-# lookup at t=60.0 that the f64 timeline (60.0000...378 <= 60.0 is False)
-# does not. The disagreement window is ~4e-12s wide - unreachable from an
-# audio clock, but a round sample time lands in it every time, and it made a
-# clean chart read as 16px off.
-SAMPLE_TIMES = (15.037, 30.037, 60.037, 90.037,
-                120.037, 180.037, 240.037, 300.037)
+# Sample times as FRACTIONS of the chart's own horizon, not fixed seconds.
+# Past the horizon nothing is recorded: the exported channel holds its last
+# value while `SegCurve.sample` clamps to the frontier or serves a preview,
+# so the two legitimately disagree in territory neither renders. Fixed
+# seconds sampled a 117s chart at 300s and reported it 8px off.
+#
+# The offsets are DELIBERATELY not round fractions. Channel breakpoint times
+# are f32, so a segment starting at 60.00000000000378 rounds to exactly 60.0
+# and wins the lookup at t=60.0 that the f64 timeline does not. That window is
+# ~4e-12s wide - unreachable from an audio clock, but a round sample time
+# lands in it every time, and it made a clean chart read as 16px off.
+SAMPLE_FRACTIONS = (0.07, 0.13, 0.21, 0.34, 0.47, 0.58, 0.71, 0.83, 0.94)
+
+
+def sample_times(compiled) -> list:
+    """Times to compare at, spread across the chart's recorded span."""
+    from analysis.games.notitg.drawable_doc import _horizon
+
+    horizon = _horizon(compiled)
+    live = compiled.get('_live_sim')
+    frontier = getattr(live, 'frontier', None)
+    if isinstance(frontier, (int, float)) and frontier > 0.0:
+        horizon = min(horizon, float(frontier))
+    return [round(horizon * f, 3) + 0.037 for f in SAMPLE_FRACTIONS]
 
 
 def _natural_lookup():
@@ -87,7 +103,7 @@ def sweep_chart(sm_path: str) -> dict:
         evaluator, id_maps, report = dd.build_static_doc(compiled)
         order = id_maps['element_order']
         rep = dd.element_parity_report(evaluator, order, _natural_lookup(),
-                                       SAMPLE_TIMES)
+                                       sample_times(compiled))
         out.update(
             ok=True,
             items=len(order),
