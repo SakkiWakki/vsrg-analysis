@@ -446,6 +446,76 @@ def test_static_doc_element_image_appears_in_composite(gl, monkeypatch, tmp_path
             and inside.blue() < 80)
 
 
+def _write_half_split_png(tmp_path, name, left, right):
+    """A 2x1 sheet: the left cell solid `left`, the right cell solid `right`,
+    so a composite's colour says which CELL was drawn."""
+    path = tmp_path / name
+    img = QImage(32, 16, QImage.Format.Format_ARGB32)
+    img.fill(left)
+    for x in range(16, 32):
+        for y in range(16):
+            img.setPixel(x, y, right)
+    assert img.save(str(path), 'PNG')
+    return str(path)
+
+
+# The sheet element occupies the screen's top-left QUARTER, so the rest of the
+# screen must stay empty. A full-screen element cannot catch the bug: the
+# expansion happens to land the right cell on the visible area and the spill
+# falls outside the target entirely.
+_SHEET_BOX_FRAC = 0.5
+
+
+def _sheet_doc(image_path, frame):
+    """A doc drawing ONE cell of a 2x1 sheet into a box covering the screen's
+    top-left quarter, with ``id_maps['image_grids']`` declaring the grid."""
+
+    class Doc:
+        @staticmethod
+        def prepare_static_doc(compiled, screen_w=_SCREEN_W, screen_h=_SCREEN_H):
+            ops = [('item', (0, sn.SRC_IMAGE, 0),
+                    {'sx_rest': float(screen_w) * _SHEET_BOX_FRAC / 16.0,
+                     'sy_rest': float(screen_h) * _SHEET_BOX_FRAC / 16.0,
+                     'frame_rest': float(frame)})]
+            id_maps = {'screen': 0, 'slots': {}, 'fields': {},
+                       'images': {0: image_path}, 'image_grids': {0: (2, 1)}}
+            return ops, id_maps, _report(images=1, elements_below=1)
+
+    return Doc()
+
+
+@pytest.mark.parametrize('frame,expect_red', [(0, True), (1, False)])
+def test_sheet_cell_draws_only_that_cell_and_does_not_bleed(
+        gl, monkeypatch, tmp_path, frame, expect_red):
+    # A sheet-backed image must draw ONE CELL over its box AND NOTHING BEYOND
+    # IT. The overscan branch in _draw_texture expands the quad to bring a
+    # bound capture's margins back on screen; a cell sub-rect used to reach it
+    # too, which drew the WHOLE sheet at grid size - the right cell landed in
+    # the box and the remaining cells spilled outside it ("the entire sprite
+    # sheet along with the specific item"). Cells and capture margins mean
+    # opposite things; only the bound rect earns that branch.
+    sheet = _write_half_split_png(tmp_path, 'sheet 2x1.png',
+                                  QColor(220, 0, 0, 255).rgba(),
+                                  QColor(0, 0, 220, 255).rgba())
+    player, pipe = _build_pipeline(monkeypatch, _sheet_doc(sheet, frame))
+    ctx = _Ctx(t_now=0.0, player=player)
+    drew, target = _spin_present(pipe, ctx)
+    assert drew is True
+    x, y, w, h = CHART_RECT
+    box_w, box_h = int(w * _SHEET_BOX_FRAC), int(h * _SHEET_BOX_FRAC)
+
+    inside = target.pixelColor(x + box_w // 2, y + box_h // 2)
+    if expect_red:
+        assert inside.red() > 150 and inside.blue() < 90, f'cell: {inside}'
+    else:
+        assert inside.blue() > 150 and inside.red() < 90, f'cell: {inside}'
+
+    # Just RIGHT of the box, still inside the chart rect: the neighbouring
+    # cell used to bleed here.
+    beyond = target.pixelColor(x + box_w + (w - box_w) // 2, y + box_h // 2)
+    assert beyond.alpha() < 40, f'sheet bled past its box: {beyond}'
+
+
 def test_unreadable_element_image_skips_without_crashing(gl, monkeypatch):
     # An unreadable image path must NOT crash the frame: the lazy table logs
     # once, resolves to None, and the executor draws nothing for that id - the
@@ -563,6 +633,45 @@ def test_topology_signature_tracks_count_and_last_name():
     assert pl._topology_signature(compiled) == (3, 'c')
     # An empty / absent provider is None (treated as unchanged, no rebuild).
     assert pl._topology_signature({'field_instances': None}) is None
+
+
+def test_every_note_sprite_registers_under_the_key_the_emitter_asks_for(_qapp):
+    # The registration keys and the emitter's lookup keys must intersect for
+    # EVERY sprite kind. They did not: the pipeline enumerated a fixed
+    # column x state grid, but a mine keys on nothing (registered
+    # 'mine_0_normal', looked up as 'mine'), a lift/fake keys on col only, and
+    # an ln_body additionally on is_roll - so cache.get raised
+    # KeyError('is_roll'), _sprite_image swallowed it, and mines, lifts, fakes
+    # and every LN body silently never drew.
+    from types import SimpleNamespace
+
+    from analysis.player.render.layers.note_sprites import default_note_sprites
+    from analysis.player.render.layers.sprite_cache import NoteSpriteCache
+    from analysis.player.render.storyboard import note_feed as nf
+
+    cache = NoteSpriteCache()
+    cache.bind(default_note_sprites())
+    cache.check_geometry(64, 14)
+    ctx = SimpleNamespace(
+        player=SimpleNamespace(skin='bar',
+                               palette={c: (80, 190, 240) for c in range(4)}),
+        lane_w=64, note_h=14)
+
+    registered = {}
+    for key, sprite in pl.DrawablePipeline._NOTE_SPRITES:
+        for name, kwargs in pl._sprite_variants(
+                cache, key, sprite, 4, pl.DrawablePipeline._SPRITE_STATES):
+            image = pl._sprite_image(cache, sprite, ctx, kwargs)
+            assert image is not None, f'{sprite} {kwargs} failed to rasterize'
+            registered[name] = (len(registered), 10.0, 10.0)
+
+    # Exactly the lookups note_feed performs for each kind.
+    for kind, col, state in (('tap', 0, 'normal'), ('ln_head', 1, 'normal'),
+                             ('ln_tail', 2, 'roll'), ('ln_body', 3, 'normal'),
+                             ('mine', 0, None), ('lift', 1, None),
+                             ('fake', 2, None)):
+        assert nf._lookup_sprite(registered, kind, col, state) is not None, (
+            f'{kind} is registered but the emitter cannot resolve it')
 
 
 def test_sprite_generation_notices_a_skin_toggle():

@@ -615,10 +615,10 @@ class DrawablePipeline:
         slot_ids = sorted(int(s) for s in slots.values())
         return slot_ids, int(count), u_soa.tobytes(), f_soa.tobytes()
 
-    # The note sprites the feed resolves, as (feed key, sprite-cache name)
-    # with the per-(col, state) variants the cache keys on. The receptor is
-    # not a cache sprite - the field layer strokes a plain notch - so it
-    # registers as a solid source the item's mat3 shapes into the lane bar.
+    # The note sprites the feed resolves, as (feed key, sprite-cache name).
+    # The receptor is not a cache sprite - the field layer strokes a plain
+    # notch - so it registers as a solid source the item's mat3 shapes into
+    # the lane bar.
     _NOTE_SPRITES = (
         ('tap', 'tap_head'), ('ln_head', 'ln_head'), ('ln_tail', 'ln_tail'),
         ('ln_body', 'ln_body'), ('mine', 'mine'), ('lift', 'lift'),
@@ -681,11 +681,11 @@ class DrawablePipeline:
 
         keycount = int(getattr(ctx, 'keycount', 0) or 0)
         for key, sprite in self._NOTE_SPRITES:
-            for col in range(keycount):
-                for state in self._SPRITE_STATES:
-                    pixmap = _sprite_image(cache, sprite, ctx, col, state)
-                    if pixmap is not None:
-                        register(f'{key}_{col}_{state}', pixmap)
+            for name, kwargs in _sprite_variants(cache, key, sprite, keycount,
+                                                 self._SPRITE_STATES):
+                pixmap = _sprite_image(cache, sprite, ctx, kwargs)
+                if pixmap is not None:
+                    register(name, pixmap)
         self._note_images = image_map
         self._note_generation = generation
         return image_map
@@ -766,14 +766,55 @@ def _sprite_generation(ctx):
     return (getattr(cache, 'generation', 0), getattr(ctx, 'keycount', None))
 
 
-def _sprite_image(cache, name, ctx, col, state):
-    """One note sprite as a QImage, or None when the cache does not carry it
-    in that (col, state) combination (not every sprite has every state).
+def _sprite_variants(cache, key, sprite, keycount, states):
+    """The `(image_map name, cache kwargs)` pairs to register for one sprite.
+
+    Each sprite declares which key fields it varies on (`SpriteSpec.key_fields`)
+    and they genuinely differ: a mine is one glyph for the whole field, a lift
+    varies by column, a head varies by column AND judgment state, and an LN body
+    additionally by roll-ness. Enumerating a fixed column x state grid for all of
+    them registers every sprite under a name the emitter never looks up (a mine
+    became `mine_0_normal` while `note_feed._lookup_sprite` asks for `mine`) and
+    raises `KeyError('is_roll')` on the body - so mines, lifts, fakes and every
+    LN body silently never drew.
+
+    `is_roll` is derived rather than enumerated: the emitter's `_tail_state`
+    already encodes roll-ness as the 'roll' state, so the two never disagree."""
+    fields = _sprite_key_fields(cache, sprite)
+    cols = range(keycount) if 'col' in fields else (None,)
+    for col in cols:
+        for state in (states if 'state' in fields else (None,)):
+            kwargs = {}
+            if col is not None:
+                kwargs['col'] = col
+            if state is not None:
+                kwargs['state'] = state
+            if 'is_roll' in fields:
+                kwargs['is_roll'] = state == 'roll'
+            name = key
+            if col is not None:
+                name += f'_{col}'
+            if state is not None:
+                name += f'_{state}'
+            yield name, kwargs
+
+
+def _sprite_key_fields(cache, sprite) -> tuple:
+    """The key fields `sprite` varies on, or the head-like default when the
+    cache does not expose its specs (a stubbed cache in a test)."""
+    specs = getattr(cache, '_specs', None)
+    spec = specs.get(sprite) if isinstance(specs, dict) else None
+    return tuple(getattr(spec, 'key_fields', ('col', 'state')))
+
+
+def _sprite_image(cache, name, ctx, kwargs):
+    """One note sprite as a QImage, or None when the cache cannot produce it
+    (not every sprite has every state).
 
     The cache rasterises QPixmaps for the raster path; the GL executor uploads
     QImages, so this converts at the boundary."""
     try:
-        pixmap = cache.get(name, ctx, col=col, state=state)
+        pixmap = cache.get(name, ctx, **kwargs)
     except Exception:
         return None
     if pixmap is None or pixmap.isNull():

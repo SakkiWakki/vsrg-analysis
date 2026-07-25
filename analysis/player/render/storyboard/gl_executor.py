@@ -926,12 +926,20 @@ class GLExecutor:
         `cell` is an `(index, cols, rows)` sheet selection: the quad samples
         only that cell's sub-rect, composed under any bound sub-rect and the
         item's crops.
+
+        The two kinds of sub-rect mean OPPOSITE things and must not be
+        conflated. A BOUND one (`uploaded[3]`, set by `set_drawable_texture`
+        for a live capture) says "your logical box is this region of a larger
+        texture", so the quad expands to bring the surrounding margins back.
+        A CELL one says "sample only this region" - expanding for it would
+        draw the whole sheet at grid size. Only the bound rect earns the
+        overscan branch, so it is tracked separately from the composed one.
         """
         if uploaded is None or logical is None:
             return
         texture, sw, sh = uploaded[0], uploaded[1], uploaded[2]
-        sub = uploaded[3] if len(uploaded) > 3 else None
-        sub = _compose_cell(sub, cell)
+        bound_sub = uploaded[3] if len(uploaded) > 3 else None
+        sub = _compose_cell(bound_sub, cell)
         lw, lh = logical
         if lw <= 0.0 or lh <= 0.0 or sw <= 0 or sh <= 0:
             return
@@ -948,7 +956,7 @@ class GLExecutor:
         vis_fh = max(0.0, 1.0 - crop_t - crop_b)
         if vis_fw <= 0.0 or vis_fh <= 0.0:
             return
-        if sub is not None and crop_l + crop_t + crop_r + crop_b <= 0.0:
+        if bound_sub is not None and crop_l + crop_t + crop_r + crop_b <= 0.0:
             # OVERSCAN PRESERVATION: an uncropped bound capture draws its
             # FULL texture, quad expanded so the sub-rect still lands on the
             # logical box - the margins carry content that sat outside the
@@ -959,7 +967,7 @@ class GLExecutor:
             # the composite. A cropped blit keeps the exact sub-rect path
             # below: SM crops hide bands of the DESIGN-BOX quad, and the
             # engine never saw margins.
-            x0, y0, x1, y1 = _expanded_extent(sub, lw, lh)
+            x0, y0, x1, y1 = _expanded_extent(bound_sub, lw, lh)
             u0, u1 = _inset_half_texel(0.0, 1.0, sw)
             fv0, fv1 = 0.0, 1.0
             v0, v1 = (1.0 - fv0, 1.0 - fv1) if flip_v else (fv0, fv1)
