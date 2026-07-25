@@ -227,6 +227,7 @@ class DrawablePipeline:
         self._prepare_n = 0
         # One-shot: a scope the doc declares but the renderer never feeds.
         self._unfed_logged = False
+        self._live_prepare_n = 0
         self._assembly = None
         self._signature = None
         self._res_scale = None
@@ -415,7 +416,8 @@ class DrawablePipeline:
                                "settle before the first prepare (legacy "
                                "path draws until then)")
             return False
-        self._start_prepare('first build')
+        self._start_prepare('first build' if self._prepare_n == 0
+                             else 'the previous doc was superseded')
         return False
 
     def _signature_settled(self) -> bool:
@@ -482,7 +484,7 @@ class DrawablePipeline:
             try:
                 ops, id_maps, _report = self._doc.prepare_static_doc(
                     self._compiled, screen_w=_SCREEN_W, screen_h=_SCREEN_H)
-                self._prepared = (ops, id_maps, signature)
+                self._prepared = (ops, id_maps, signature, run)
                 logger.warning("DrawablePipeline: prepare #%d finished "
                                "(%d ops); assembling over the next frames",
                                run, len(ops))
@@ -515,7 +517,10 @@ class DrawablePipeline:
     _REPLAY_BUDGET_S = 0.006
 
     def _start_assembly(self) -> None:
-        ops, id_maps, signature = self._prepared
+        ops, id_maps, signature, run = self._prepared
+        # Which prepare this doc came from. A later prepare is usually
+        # already running by now, so `_prepare_n` names the wrong one.
+        self._live_prepare_n = run
         self._prepared = None
         self._prepare_thread = None
         import storyboard_native as sn
@@ -583,7 +588,7 @@ class DrawablePipeline:
         # one is adopted, and the two lines interleave.
         logger.warning(
             "DrawablePipeline: prepare #%d now LIVE (drawables=%d, "
-            "per-player fields=%s, note feeds=%s)", self._prepare_n,
+            "per-player fields=%s, note feeds=%s)", self._live_prepare_n,
             evaluator.drawable_count(),
             id_maps.get('fields') or 'none', id_maps.get('note_feeds'))
         # Field drawables are SLICES of the one screen surface: transparent
