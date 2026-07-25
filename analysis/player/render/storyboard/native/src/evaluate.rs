@@ -451,15 +451,27 @@ fn emit_commands(
                 emit_item(doc, item, t, events, cache, schedule);
                 i += 1;
             }
-            Cmd::Feed { slot } => {
+            Cmd::Feed {
+                slot,
+                links,
+                flip_base_y,
+                visible,
+            } => {
                 // Inline: the slot's fed items draw HERE, as ordinary items of
                 // the enclosing drawable, so nothing bounds them but the real
                 // render target.
-                if let Some(feed) = feeds.iter().find(|f| f.drawable == *slot) {
-                    for item in feed.items {
-                        emit_item(doc, item, t, events, cache, schedule);
-                    }
-                }
+                emit_feed(
+                    doc,
+                    *slot,
+                    links,
+                    *flip_base_y,
+                    *visible,
+                    t,
+                    feeds,
+                    events,
+                    cache,
+                    schedule,
+                );
                 i += 1;
             }
             Cmd::Snapshot { into } => {
@@ -489,13 +501,23 @@ fn emit_commands(
                         // A z-sorted span holds only drawing items; a feed
                         // slot inside one has no single z to sort by, so it
                         // draws in place (its own items keep their order).
-                        Cmd::Feed { slot } => {
-                            if let Some(feed) = feeds.iter().find(|f| f.drawable == *slot) {
-                                for item in feed.items {
-                                    emit_item(doc, item, t, events, cache, schedule);
-                                }
-                            }
-                        }
+                        Cmd::Feed {
+                            slot,
+                            links,
+                            flip_base_y,
+                            visible,
+                        } => emit_feed(
+                            doc,
+                            *slot,
+                            links,
+                            *flip_base_y,
+                            *visible,
+                            t,
+                            feeds,
+                            events,
+                            cache,
+                            schedule,
+                        ),
                         // Nested spans are rejected at DocBuilder::finish;
                         // an inner span never reaches this fold. A doc built
                         // outside the validated builder degrades to a no-op.
@@ -596,6 +618,57 @@ fn sample_link(
     }
 }
 
+/// Emit one Feed command: the slot's fed items, gated by the feed's
+/// `visible` channel. A non-empty consumer link chain (a proxy/player
+/// field) composes over every item - its H over each mat3, its alpha over
+/// each opacity - so the consumer RE-RENDERS the same unclipped items
+/// instead of blitting a capture-boxed texture (the copy-render rule).
+#[allow(clippy::too_many_arguments)]
+fn emit_feed(
+    doc: &DrawableDoc,
+    slot: u32,
+    links: &[crate::doc::LinkRef],
+    flip_base_y: bool,
+    visible: ChannelRef,
+    t: f32,
+    feeds: &[Feed],
+    events: &[Event],
+    cache: &mut ReactionCache,
+    schedule: &mut DrawSchedule,
+) {
+    let ch = &doc.channels;
+    if ch.sample(visible, t) < 0.5 {
+        return;
+    }
+    let Some(feed) = feeds.iter().find(|f| f.drawable == slot) else {
+        return;
+    };
+    if links.is_empty() {
+        for item in feed.items {
+            emit_item(doc, item, t, events, cache, schedule);
+        }
+        return;
+    }
+
+    let states: Vec<crate::transform::TransformState> =
+        links.iter().map(|l| sample_link(ch, l, t)).collect();
+    let Some((h, alpha, _crop)) = crate::transform::compose_links(&states, flip_base_y) else {
+        return; // hidden / degenerate / faint chain drops the whole feed
+    };
+    // compose_links returns row-vector H; fed mats and the record are
+    // column-vector, so transpose once before composing over each item.
+    // The chain's crop is not applied: per-item crop fractions are of the
+    // item's own box, not the chain's content box.
+    let chain = [
+        h[0], h[3], h[6], //
+        h[1], h[4], h[7], //
+        h[2], h[5], h[8],
+    ];
+    for item in feed.items {
+        emit_item_folded(doc, item, t, events, cache, schedule, Some((&chain, alpha)));
+    }
+}
+
 fn emit_item(
     doc: &DrawableDoc,
     item: &Item,
@@ -603,6 +676,22 @@ fn emit_item(
     events: &[Event],
     cache: &mut ReactionCache,
     schedule: &mut DrawSchedule,
+) {
+    emit_item_folded(doc, item, t, events, cache, schedule, None)
+}
+
+/// `emit_item` with an optional pre-composed consumer transform: `pre` is
+/// a (column-vector chain H, chain alpha) applied over the item's own
+/// placement - the linked-Feed path (see `emit_feed`).
+#[allow(clippy::too_many_arguments)]
+fn emit_item_folded(
+    doc: &DrawableDoc,
+    item: &Item,
+    t: f32,
+    events: &[Event],
+    cache: &mut ReactionCache,
+    schedule: &mut DrawSchedule,
+    pre: Option<(&[f32; 9], f32)>,
 ) {
     let ch: &ChannelTable = &doc.channels;
     if ch.sample(item.visible, t) < 0.5 {
@@ -612,10 +701,14 @@ fn emit_item(
     // The item's placement: the full leaf-link chain when present (its H,
     // alpha, and crop win), else the first-cut TRS. Both land in the BLIT
     // record's column-vector mat3 convention.
-    let (mut mat, alpha_mul, link_crop) = match item_transform(doc, item, t) {
+    let (mut mat, mut alpha_mul, link_crop) = match item_transform(doc, item, t) {
         Some(triple) => triple,
         None => return, // hidden / degenerate / faint link chain
     };
+    if let Some((chain, chain_alpha)) = pre {
+        mat = crate::transform::mul3(chain, &mat);
+        alpha_mul *= chain_alpha;
+    }
 
     // Event-driven property splices: a reaction whose event has arrived
     // by `t` overrides its base draw property with its lowered fragment.
@@ -973,7 +1066,12 @@ mod tests {
         doc.drawables[0]
             .commands
             .push(Cmd::Item(Item::of(Source::Fill)));
-        doc.drawables[0].commands.push(Cmd::Feed { slot });
+        doc.drawables[0].commands.push(Cmd::Feed {
+            slot,
+            links: Vec::new(),
+            flip_base_y: false,
+            visible: ChannelRef::constant(1.0),
+        });
         doc.drawables[0]
             .commands
             .push(Cmd::Item(Item::of(Source::Image {
@@ -1001,6 +1099,84 @@ mod tests {
             .map(|i| schedule.u[i * U_STRIDE + 1])
             .collect();
         assert_eq!(begins, vec![SCREEN], "a feed slot is never a render target");
+    }
+
+    #[test]
+    fn linked_feed_composes_the_chain_over_each_fed_item() {
+        // A Feed carrying a consumer link chain re-renders the fed items
+        // under it: each item's record mat equals the chain's H composed
+        // over its fed mat, and the chain alpha multiplies its opacity.
+        // With an IDENTITY fed mat, the record must match what the same
+        // chain produces on an ordinary linked item.
+        let mut linked = DrawableDoc::with_screen([640.0, 480.0]);
+        let mut item = Item::of(Source::Fill);
+        item.links.push(default_link());
+        linked.drawables[0].commands.push(Cmd::Item(item));
+        let expected = blit_mat(&evaluate(&linked, 0.0, &[]));
+
+        let mut doc = DrawableDoc::with_screen([640.0, 480.0]);
+        let slot = doc.add_drawable([0.0, 0.0], false, true);
+        doc.drawables[slot as usize].inline = true;
+        let mut faded = default_link();
+        faded.alpha = ChannelRef::constant(0.5);
+        doc.drawables[0].commands.push(Cmd::Feed {
+            slot,
+            links: vec![faded],
+            flip_base_y: false,
+            visible: ChannelRef::constant(1.0),
+        });
+        let mut fed = Item::of(Source::Fill);
+        fed.fed_mat = Some([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+        fed.opacity = ChannelRef::constant(0.6);
+        let items = vec![fed];
+        let feeds = [Feed {
+            drawable: slot,
+            items: &items,
+        }];
+        let schedule = evaluate(&doc, 0.0, &feeds);
+
+        let m = blit_mat(&schedule);
+        for lane in 0..9 {
+            assert!(
+                (m[lane] - expected[lane]).abs() < 1e-4,
+                "lane {lane}: {} vs {}",
+                m[lane],
+                expected[lane]
+            );
+        }
+        let op = (0..schedule.len())
+            .find(|i| schedule.u[i * U_STRIDE] == OP_BLIT)
+            .unwrap();
+        assert!((schedule.f[op * F_STRIDE + 9] - 0.3).abs() < 1e-4);
+    }
+
+    #[test]
+    fn feed_visibility_gate_and_hidden_chain_drop_all_items() {
+        // visible < 0.5 emits nothing; so does a chain whose link is hidden.
+        for hide_via_chain in [false, true] {
+            let mut doc = DrawableDoc::with_screen([640.0, 480.0]);
+            let slot = doc.add_drawable([0.0, 0.0], false, true);
+            doc.drawables[slot as usize].inline = true;
+            let mut hidden = default_link();
+            if hide_via_chain {
+                hidden.hidden = ChannelRef::constant(1.0);
+            }
+            doc.drawables[0].commands.push(Cmd::Feed {
+                slot,
+                links: vec![hidden],
+                flip_base_y: false,
+                visible: ChannelRef::constant(if hide_via_chain { 1.0 } else { 0.0 }),
+            });
+            let mut fed = Item::of(Source::Fill);
+            fed.fed_mat = Some([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+            let items = vec![fed];
+            let feeds = [Feed {
+                drawable: slot,
+                items: &items,
+            }];
+            let schedule = evaluate(&doc, 0.0, &feeds);
+            assert_eq!(op_kinds(&schedule), vec![OP_BEGIN, OP_END]);
+        }
     }
 
     #[test]

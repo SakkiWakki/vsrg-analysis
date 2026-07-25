@@ -103,7 +103,7 @@ impl Default for TransformState {
 
 // --- 3x3 row-vector primitives (transform3d.py, reduced to the plane) --
 
-fn mul3(a: &Mat3, b: &Mat3) -> Mat3 {
+pub(crate) fn mul3(a: &Mat3, b: &Mat3) -> Mat3 {
     let mut m = [0.0f32; 9];
     for row in 0..3 {
         for col in 0..3 {

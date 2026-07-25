@@ -215,6 +215,7 @@ class DrawablePipeline:
         self._topology_final = False
         self._note_images = None
         self._note_feed_failed = False
+        self._wait_logged = False
         # Async build stages (see _ensure_built).
         self._prepare_thread = None
         self._prepared = None
@@ -377,6 +378,11 @@ class DrawablePipeline:
         # and worker reads are safe - so no prepare starts until the
         # topology signature has stopped changing.
         if not self._signature_settled():
+            if not self._wait_logged:
+                self._wait_logged = True
+                logger.warning("DrawablePipeline: waiting for the sweep to "
+                               "settle before the first prepare (legacy "
+                               "path draws until then)")
             return False
         self._start_prepare()
         return False
@@ -433,11 +439,16 @@ class DrawablePipeline:
         import threading
         signature = _topology_signature(self._compiled)
 
+        logger.warning("DrawablePipeline: prepare started")
+
         def worker():
             try:
                 ops, id_maps, _report = self._doc.prepare_static_doc(
                     self._compiled, screen_w=_SCREEN_W, screen_h=_SCREEN_H)
                 self._prepared = (ops, id_maps, signature)
+                logger.warning("DrawablePipeline: prepare finished "
+                               "(%d ops); assembling over the next frames",
+                               len(ops))
             except Exception as exc:  # noqa: BLE001 - surfaced via disable
                 logger.warning("DrawablePipeline: prepare failed",
                                exc_info=True)
@@ -446,6 +457,20 @@ class DrawablePipeline:
         self._prepare_thread = threading.Thread(
             target=worker, daemon=True, name='drawable-doc-prepare')
         self._prepare_thread.start()
+
+        def heartbeat(thread=self._prepare_thread):
+            import time as _time
+            t0 = _time.monotonic()
+            while thread.is_alive():
+                _time.sleep(10.0)
+                if thread.is_alive():
+                    logger.warning(
+                        "DrawablePipeline: prepare still running (%.0fs; "
+                        "~25s standalone on gat, longer under a live "
+                        "render loop)", _time.monotonic() - t0)
+
+        threading.Thread(target=heartbeat, daemon=True,
+                         name='drawable-doc-prepare-heartbeat').start()
 
     # Replay budget per frame: the full replay is ~1.3s of FFI on gat 1
     # (7k ops); this bound keeps each frame's share invisible.
@@ -506,6 +531,10 @@ class DrawablePipeline:
             image_grids=(id_maps.get('image_grids')
                          if isinstance(id_maps, dict) else None))
         self._executor.set_clear(SCREEN_ID, CLEAR_TRANSPARENT)
+        logger.warning(
+            "DrawablePipeline: static doc LIVE (drawables=%d, fields=%s, "
+            "note_feeds=%s)", evaluator.drawable_count(),
+            id_maps.get('fields'), id_maps.get('note_feeds'))
         # Field drawables are SLICES of the one screen surface: transparent
         # overlays, never opaque slabs (the black-chart-region fix). AFT slots
         # are NOT included: they are minted persistent (ClearMode::Retain) and
@@ -552,14 +581,22 @@ class DrawablePipeline:
             self._start_prepare()
 
     def _note_feed(self, ctx):
-        """This frame's note items for the inline notes slot, as
-        `(slot_id, count, u_bytes, f_bytes)`, or None when the doc has no
-        slot (the captured-notefield path) or nothing is visible.
+        """This frame's note items for the inline note slots, as
+        `(slot_ids, count, u_bytes, f_bytes)`, or None when the doc has no
+        slots (the captured-notefield path) or nothing is visible.
+
+        Every slot receives the same items (one emission, shared by the
+        base field and each proxy/player consumer - the consumer's Feed
+        composes its own chain over them natively).
 
         Reuses the render context the caller already built - the emitter is a
         pure read of the prepass, so no second pass over the notes."""
-        slot = (self._id_maps or {}).get('notes_slot')
-        if slot is None:
+        id_maps = self._id_maps or {}
+        slots = id_maps.get('note_feeds')
+        if not slots:
+            slot = id_maps.get('notes_slot')
+            slots = {'field': slot} if slot is not None else {}
+        if not slots:
             return None
         image_map = self._ensure_note_images(ctx)
         if image_map is None:
@@ -569,7 +606,8 @@ class DrawablePipeline:
             ctx, image_map)
         if not count:
             return None
-        return int(slot), int(count), u_soa.tobytes(), f_soa.tobytes()
+        slot_ids = sorted(int(s) for s in slots.values())
+        return slot_ids, int(count), u_soa.tobytes(), f_soa.tobytes()
 
     # The note sprites the feed resolves, as (feed key, sprite-cache name)
     # with the per-(col, state) variants the cache keys on. The receptor is
@@ -639,9 +677,10 @@ class DrawablePipeline:
             fed = None
         if fed is None:
             return self._schedule(t)
-        slot, count, u_bytes, f_bytes = fed
+        slots, count, u_bytes, f_bytes = fed
         u_raw, f_raw, _uf_raw, n = self._evaluator.frame_with_feeds(
-            float(t), [slot], [count], u_bytes, f_bytes)
+            float(t), slots, [count] * len(slots),
+            u_bytes * len(slots), f_bytes * len(slots))
         u = np.frombuffer(u_raw, dtype=np.uint32).reshape(
             n, self._evaluator.u_stride)
         f = np.frombuffer(f_raw, dtype=np.float32).reshape(

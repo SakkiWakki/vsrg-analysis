@@ -250,7 +250,7 @@ def test_aft_flip_swaps_leaf_crop():
     assert rep['all_ok'], dd.format_parity_report(rep)
 
 
-def test_dual_player_fields_get_distinct_drawables():
+def test_dual_player_fields_get_distinct_drawables(captured_notefield):
     # Two player instances + a proxy of player 2: the dual path draws no base
     # original, and player 2's field routes to its own 'field2' drawable.
     p1 = fc.player_instance(1, {'x': _instant(160.0), 'y': _instant(240.0)})
@@ -263,6 +263,22 @@ def test_dual_player_fields_get_distinct_drawables():
     rep = dd.parity_report(evaluator, id_maps, _effect(compiled),
                            [0.0, 1.0, 5.0])
     assert rep['all_ok'], dd.format_parity_report(rep)
+
+
+def test_inline_notes_players_feed_and_per_player_scopes_blit():
+    # The default (inline-notes) path: a 'field'-scope consumer RE-RENDERS
+    # the shared fed note items under its own chain (no capture-boxed
+    # drawable to clip at), while a per-player 'field{N}' scope keeps the
+    # capture blit - the feed carries player 1's items only.
+    p1 = fc.player_instance(1, {'x': _instant(160.0), 'y': _instant(240.0)})
+    p2 = fc.player_instance(2, {'x': _instant(480.0), 'y': _instant(240.0)})
+    pr2 = fc.instance('pr2', 'proxy', 2, [_link(x=300.0, y=240.0)])
+    spec = PlayerFieldsSpec({2: object()})
+    compiled = _compiled([p1, p2, pr2], player_fields=spec)
+    _evaluator, id_maps, _report = dd.build_static_doc(compiled)
+    assert set(id_maps['fields']) == {'field2'}
+    assert set(id_maps['note_feeds']) == {'field'}
+    assert id_maps['notes_slot'] == id_maps['note_feeds']['field']
 
 
 # --------------------------------------------------------------------------
@@ -288,7 +304,7 @@ def _sprite(z, path, **kw):
     return _element('sprite', z, asset=path, **kw)
 
 
-def test_below_and_above_bands_split_around_the_field_stream():
+def test_below_and_above_bands_split_around_the_field_stream(captured_notefield):
     # A background sprite (z<0) and a foreground sprite (z>=0) around one proxy:
     # the below sprite draws first, the field instance next, the above last.
     below = _sprite(_BACKGROUND_Z, '/tmp/bg.png',

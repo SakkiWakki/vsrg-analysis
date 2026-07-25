@@ -439,9 +439,11 @@ class _Builder:
         # so the executor allocates each drawable at its REAL size instead
         # of assuming everything is screen-shaped.
         self._drawable_sizes: dict[int, tuple] = {0: self._screen}
-        # The inline notes feed slot (see notes_inline); None when the
-        # base field blits a captured notefield instead.
-        self._notes_slot = None
+        # Inline note-feed slots by field scope (see notes_inline); empty
+        # when fields blit captured notefields instead. One slot per scope,
+        # shared by every consumer of that scope's notes - each Feed command
+        # composes its own link chain over the same fed items.
+        self._notes_slots: dict[str, int] = {}
         # Per-band emitted counts + per-kind skip counts, surfaced in the report.
         self._elem_below = 0
         self._elem_above = 0
@@ -482,6 +484,17 @@ class _Builder:
             drawable = self._new_drawable(persistent=True)
             self._slot_ids[name] = drawable
         return drawable
+
+    def _notes_slot_for(self, scope: str) -> int:
+        slot = self._notes_slots.get(scope)
+        if slot is None:
+            slot = self._builder.feed_slot()
+            # The exported size table is positional by drawable id, so the
+            # slot needs an entry even though it never becomes a render
+            # target (inline: its items draw into the enclosing drawable).
+            self._drawable_sizes[slot] = (0.0, 0.0)
+            self._notes_slots[scope] = slot
+        return slot
 
     # -- channel export ---------------------------------------------------
 
@@ -590,7 +603,8 @@ class _Builder:
                    'image_grids': dict(self._image_grids),
                    'drawable_sizes': [self._drawable_sizes[i]
                                       for i in sorted(self._drawable_sizes)],
-                   'notes_slot': self._notes_slot}
+                   'notes_slot': self._notes_slots.get('field'),
+                   'note_feeds': dict(self._notes_slots)}
         return evaluator, id_maps
 
     def _banded_elements(self):
@@ -619,18 +633,19 @@ class _Builder:
         spec = self._compiled.get('player_fields')
         if spec is not None and getattr(spec, 'note_mods', None):
             return
+        visible_id, visible_rest = self._visible_from_hidden(
+            self._compiled.get('base_field_hidden'))
         if notes_inline():
             # NOTES AS ITEMS: the base field's receptors and notes draw as
             # ordinary screen items, each placed by its own mat3, instead of
             # blitting one captured notefield. Nothing but the real render
             # target bounds them, so a mod that pushes a note outside the
             # playfield no longer clips it at a capture box.
-            self._notes_slot = self._builder.feed_slot()
-            self._builder.feed_inline(_SCREEN_ID, self._notes_slot)
+            self._builder.feed_inline(_SCREEN_ID, self._notes_slot_for('field'),
+                                      visible_id=visible_id,
+                                      visible_rest=visible_rest)
             return
         field = self._field_drawable('field')
-        visible_id, visible_rest = self._visible_from_hidden(
-            self._compiled.get('base_field_hidden'))
         self._builder.item(_SCREEN_ID, self._sn.SRC_DRAWABLE, field,
                            visible_id=visible_id, visible_rest=visible_rest)
 
@@ -697,6 +712,18 @@ class _Builder:
                 self._emit_blit(sn.SRC_DRAWABLE, slot, inst, additive=additive)
             case 'player' | 'proxy':
                 scope = self._field_scope(inst)
+                if notes_inline() and scope == 'field':
+                    # RE-RENDER, don't blit (the copy-render rule): the
+                    # consumer's chain composes over the shared fed note
+                    # items, so a mod-displaced note survives where a
+                    # capture-boxed texture would have clipped it. A
+                    # per-player 'field{N}' scope keeps the capture blit -
+                    # its content differs per player and the feed carries
+                    # player 1's items only.
+                    self._builder.feed_inline(
+                        _SCREEN_ID, self._notes_slot_for(scope))
+                    self._emit_links(_SCREEN_ID, inst)
+                    return
                 drawable = self._field_drawable(scope)
                 self._emit_blit(sn.SRC_DRAWABLE, drawable, inst)
             case _:
@@ -978,6 +1005,14 @@ class _RecordingBuilder:
         self.ops.append(('drawable', args, kwargs))
         self._drawables += 1
         return self._drawables - 1
+
+    def feed_slot(self) -> int:
+        self.ops.append(('feed_slot', (), {}))
+        self._drawables += 1
+        return self._drawables - 1
+
+    def feed_inline(self, *args, **kwargs) -> None:
+        self.ops.append(('feed_inline', args, kwargs))
 
     def item(self, *args, **kwargs) -> None:
         self.ops.append(('item', args, kwargs))

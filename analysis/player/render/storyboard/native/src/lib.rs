@@ -197,11 +197,21 @@ impl DocBuilder {
     }
 
     /// Draw `slot`'s fed items at this point in `target`'s command stream.
-    fn feed_inline(&mut self, target: u32, slot: u32) {
+    /// `visible_id`/`visible_rest` gate the whole feed (an item `visible`
+    /// channel: < 0.5 emits nothing). Follow with `item_link` calls to
+    /// attach a consumer transform chain - the chain's H then composes
+    /// over each fed item's mat3 (a proxy/player field re-render).
+    #[pyo3(signature = (target, slot, visible_id=-1, visible_rest=1.0))]
+    fn feed_inline(&mut self, target: u32, slot: u32, visible_id: i64, visible_rest: f32) {
         let doc = self.doc.as_mut().expect("builder already finished");
         doc.drawables[target as usize]
             .commands
-            .push(crate::doc::Cmd::Feed { slot });
+            .push(crate::doc::Cmd::Feed {
+                slot,
+                links: Vec::new(),
+                flip_base_y: false,
+                visible: chan(visible_id, visible_rest),
+            });
     }
 
     /// Register a shader; returns its id. `uniform_names` orders the
@@ -433,9 +443,9 @@ impl DocBuilder {
             rotation_order: crate::camera::RotOrder::from_str(rotation_order)
                 .unwrap_or(crate::camera::RotOrder::Xyz),
         };
-        let item = self.last_item(target);
-        item.links.push(link);
-        item.flip_base_y = flip_base_y;
+        let (links, flip) = self.last_links(target);
+        links.push(link);
+        *flip = flip_base_y;
     }
 
     /// Attach a channel-backed camera projection to the item most recently
@@ -625,6 +635,18 @@ impl DocBuilder {
         match commands.last_mut() {
             Some(Cmd::Item(item)) => item,
             _ => panic!("last command on target {target} is not an Item"),
+        }
+    }
+
+    /// The link chain + flip slot of the tail command - an Item or a Feed
+    /// (`item_link` attaches to either). Panics if the tail is neither.
+    fn last_links(&mut self, target: u32) -> (&mut Vec<LinkRef>, &mut bool) {
+        let commands =
+            &mut self.doc.as_mut().expect("builder already finished").drawables[target as usize].commands;
+        match commands.last_mut() {
+            Some(Cmd::Item(item)) => (&mut item.links, &mut item.flip_base_y),
+            Some(Cmd::Feed { links, flip_base_y, .. }) => (links, flip_base_y),
+            _ => panic!("last command on target {target} takes no links"),
         }
     }
 }

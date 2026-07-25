@@ -280,7 +280,20 @@ pub enum Cmd {
     /// which is precisely what cuts mod-displaced notes off; drawn inline,
     /// each item is placed by its own mat3 and only the real render target
     /// bounds it.
-    Feed { slot: u32 },
+    ///
+    /// A non-empty `links` chain is a CONSUMER transform (a proxy/player
+    /// field re-render): the chain's H composes over each fed item's mat3
+    /// and its alpha multiplies each item's opacity, so the consumer shows
+    /// the same unclipped items instead of a capture-boxed texture. The
+    /// chain's crop does not apply - per-item crop fractions are of the
+    /// item's own box, not the chain's content box (documented limitation).
+    /// `visible` gates the whole feed (< 0.5 emits nothing).
+    Feed {
+        slot: u32,
+        links: Vec<LinkRef>,
+        flip_base_y: bool,
+        visible: ChannelRef,
+    },
 }
 
 pub struct Drawable {
