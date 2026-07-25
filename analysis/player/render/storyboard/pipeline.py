@@ -221,6 +221,10 @@ class DrawablePipeline:
         self._prepare_thread = None
         self._prepared = None
         self._prepare_error = None
+        # Numbers the prepares in the log: a run does several, and without a
+        # number the interleaved start/heartbeat/finish lines could not be
+        # matched up to each other.
+        self._prepare_n = 0
         self._assembly = None
         self._signature = None
         self._res_scale = None
@@ -386,7 +390,7 @@ class DrawablePipeline:
                                "settle before the first prepare (legacy "
                                "path draws until then)")
             return False
-        self._start_prepare()
+        self._start_prepare('first build')
         return False
 
     def _signature_settled(self) -> bool:
@@ -435,24 +439,30 @@ class DrawablePipeline:
         self._signature_cache = _topology_signature(self._compiled)
         return self._signature_cache
 
-    def _start_prepare(self) -> None:
+    def _start_prepare(self, why: str) -> None:
         """Kick the worker-side prepare. The signature is taken BEFORE the
-        prepare so growth during it registers as stale later."""
+        prepare so growth during it registers as stale later.
+
+        `why` names the reason, because a run logs several of these and
+        nothing said which was the first build and which was a rebuild the
+        chart's own topology growth forced."""
         import threading
         signature = _topology_signature(self._compiled)
+        self._prepare_n += 1
+        run = self._prepare_n
 
-        logger.warning("DrawablePipeline: prepare started")
+        logger.warning("DrawablePipeline: prepare #%d started (%s)", run, why)
 
         def worker():
             try:
                 ops, id_maps, _report = self._doc.prepare_static_doc(
                     self._compiled, screen_w=_SCREEN_W, screen_h=_SCREEN_H)
                 self._prepared = (ops, id_maps, signature)
-                logger.warning("DrawablePipeline: prepare finished "
+                logger.warning("DrawablePipeline: prepare #%d finished "
                                "(%d ops); assembling over the next frames",
-                               len(ops))
+                               run, len(ops))
             except Exception as exc:  # noqa: BLE001 - surfaced via disable
-                logger.warning("DrawablePipeline: prepare failed",
+                logger.warning("DrawablePipeline: prepare #%d failed", run,
                                exc_info=True)
                 self._prepare_error = f'static-doc prepare failed ({exc})'
 
@@ -467,9 +477,10 @@ class DrawablePipeline:
                 _time.sleep(10.0)
                 if thread.is_alive():
                     logger.warning(
-                        "DrawablePipeline: prepare still running (%.0fs; "
-                        "~25s standalone on gat, longer under a live "
-                        "render loop)", _time.monotonic() - t0)
+                        "DrawablePipeline: prepare #%d still running (%.0fs; "
+                        "it runs on a worker thread, so the chart keeps "
+                        "drawing through the previous doc)",
+                        run, _time.monotonic() - t0)
 
         threading.Thread(target=heartbeat, daemon=True,
                          name='drawable-doc-prepare-heartbeat').start()
@@ -542,10 +553,14 @@ class DrawablePipeline:
         # through the default textured program.
         self._executor.set_shaders(
             (id_maps.get('shaders') or []) if isinstance(id_maps, dict) else [])
+        # Says which prepare's doc went live: assembly is spread over frames,
+        # so a later prepare is usually already RUNNING by the time an earlier
+        # one is adopted, and the two lines interleave.
         logger.warning(
-            "DrawablePipeline: static doc LIVE (drawables=%d, fields=%s, "
-            "note_feeds=%s)", evaluator.drawable_count(),
-            id_maps.get('fields'), id_maps.get('note_feeds'))
+            "DrawablePipeline: prepare #%d now LIVE (drawables=%d, "
+            "per-player fields=%s, note feeds=%s)", self._prepare_n,
+            evaluator.drawable_count(),
+            id_maps.get('fields') or 'none', id_maps.get('note_feeds'))
         # Field drawables are SLICES of the one screen surface: transparent
         # overlays, never opaque slabs (the black-chart-region fix). AFT slots
         # are NOT included: they are minted persistent (ClearMode::Retain) and
@@ -589,7 +604,7 @@ class DrawablePipeline:
         if signature is None or signature == self._signature:
             return
         if self._settled(signature):
-            self._start_prepare()
+            self._start_prepare('the chart bound more proxies/AFTs')
 
     def _note_feed(self, ctx):
         """This frame's note items for the inline note slots, as
