@@ -889,8 +889,12 @@ class _LazyImages:
     Only ``.get`` is used by the executor; the other read paths are provided
     for API symmetry with a plain dict."""
 
-    def __init__(self, paths: dict[int, str]) -> None:
+    def __init__(self, paths: dict[int, str], texts: dict | None = None) -> None:
         self._paths = dict(paths)
+        # image id -> (string, pixel size) for `text` elements. The doc
+        # compiler cannot lay these out - it runs on a worker thread and stays
+        # Qt-free - so it records the spec and the raster happens here.
+        self._texts = dict(texts or {})
         self._cache: dict[int, object] = {}
         self._logged: set[int] = set()
 
@@ -922,7 +926,10 @@ class _LazyImages:
         import threading
 
         def worker():
-            for image_id in list(self._paths):
+            # Text ids too: laying out and rasterising a caption is the same
+            # kind of first-draw hitch a disk decode is, and QPainter onto a
+            # QImage is no more GUI-bound than QImage decoding.
+            for image_id in [*self._paths, *self._texts]:
                 if image_id not in self._cache:
                     self._cache[image_id] = self._load(image_id)
 
@@ -945,6 +952,9 @@ class _LazyImages:
 
         from PySide6.QtGui import QColor, QImage
 
+        spec = self._texts.get(image_id)
+        if spec is not None:
+            return self._render_text(*spec)
         path = self._paths.get(image_id)
         if not path:
             return None
@@ -962,6 +972,31 @@ class _LazyImages:
             return None
         return image
 
+    def _render_text(self, text: str, font_px: float):
+        """A `text` element's glyphs as a WHITE-on-transparent QImage sized
+        exactly `(bounding width, metrics height)` with the baseline at
+        `ascent` - the box legacy's `_element_size` reports and draws into.
+
+        White, not the element's colour: the item's tint multiplies it, which
+        is what legacy's `painter.setPen(color)` does, and it lets one raster
+        serve a caption that recolours over time."""
+        from PySide6.QtCore import QPointF, Qt
+        from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QPainter
+
+        font = QFont()
+        font.setPixelSize(max(1, int(font_px or 32)))
+        metrics = QFontMetricsF(font)
+        width = max(1, int(round(metrics.boundingRect(text).width())))
+        height = max(1, int(round(metrics.height())))
+        image = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(image)
+        painter.setFont(font)
+        painter.setPen(QColor(255, 255, 255, 255))
+        painter.drawText(QPointF(0.0, metrics.ascent()), text)
+        painter.end()
+        return image
+
     def _log_missing(self, image_id, path) -> None:
         if image_id in self._logged:
             return
@@ -973,10 +1008,15 @@ class _LazyImages:
 
 def _lazy_images(id_maps):
     """A lazy image table from the static doc's ``id_maps['images']``
-    ({image_id -> absolute path}). Absent -> an empty table (a doc that
-    references no image sources composes fine)."""
-    paths = id_maps.get('images') if isinstance(id_maps, dict) else None
-    return _LazyImages(paths if isinstance(paths, dict) else {})
+    ({image_id -> absolute path}) plus ``id_maps['text_images']``
+    ({image_id -> (string, pixel size)}), which this table rasterises itself.
+    Absent -> an empty table (a doc that references no image sources composes
+    fine)."""
+    maps = id_maps if isinstance(id_maps, dict) else {}
+    paths = maps.get('images')
+    texts = maps.get('text_images')
+    return _LazyImages(paths if isinstance(paths, dict) else {},
+                       texts if isinstance(texts, dict) else {})
 
 
 def _drawable_sizes_of(id_maps, evaluator) -> list:

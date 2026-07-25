@@ -792,6 +792,9 @@ class _Builder:
         # stream against this rather than re-deriving which elements glow
         # (a glowing element emits a SECOND image blit for its glow pass).
         self._element_order: list[tuple] = []
+        # `text` elements whose glyphs the consumer rasterises: image id ->
+        # (text, pixel size). See `_text_image_id`.
+        self._text_images: dict[int, tuple] = {}
         # Per-item fragment programs: one id per distinct (frag, vert, names),
         # with the descs exported positionally for GLExecutor.set_shaders.
         self._shader_ids: dict[tuple, int] = {}
@@ -1085,6 +1088,7 @@ class _Builder:
                    'notes_slot': self._notes_slots.get('field'),
                    'note_feeds': dict(self._notes_slots),
                    'shaders': list(self._shader_descs),
+                   'text_images': dict(self._text_images),
                    'element_order': list(self._element_order)}
         return evaluator, id_maps
 
@@ -1280,6 +1284,14 @@ class _Builder:
             return True
         if element.kind == 'bitmaptext':
             return self._emit_bitmaptext(element, ancestors)
+        if element.kind == 'text':
+            image_id = self._text_image_id(element)
+            if image_id is None:
+                self._count_skip('text')
+                return False
+            self._sn_element_item(self._sn.SRC_IMAGE, image_id, element,
+                                  ancestors)
+            return True
         if element.kind not in _IMAGE_KINDS:
             self._count_skip(element.kind)
             return False
@@ -1371,6 +1383,28 @@ class _Builder:
                                 b_id=b_id, b_rest=b_rest)
         if ancestors:
             self._emit_element_links(element, ancestors)
+
+    def _text_image_id(self, element):
+        """An image id for a `text` element's rendered glyphs, or None when it
+        carries no text.
+
+        The raster is DEFERRED to the consumer rather than done here: laying
+        out a system font needs Qt, and this compiler runs on a worker thread
+        and stays Qt-free so it can. The doc records the spec; the image table
+        renders it white-on-transparent on first use and the element's own
+        tint colours it, which is what legacy's `setPen(color)` does.
+
+        Keyed by (text, size) so a chart repeating a caption uploads once."""
+        if not element.text:
+            return None
+        key = ('text', element.text, float(element.font_px or 0.0))
+        image_id = self._image_ids.get(key)
+        if image_id is None:
+            image_id = len(self._image_ids)
+            self._image_ids[key] = image_id
+            self._text_images[image_id] = (element.text,
+                                           float(element.font_px or 0.0))
+        return image_id
 
     def _emit_bitmaptext(self, element, ancestors=()) -> bool:
         """Emit one item per character: an SM bitmap font is a GRID atlas, so a

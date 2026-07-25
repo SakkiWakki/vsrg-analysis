@@ -390,8 +390,8 @@ def test_within_band_sorted_by_z_then_index_then_start(doc_elements):
 
 
 def test_unsupported_kinds_skipped_with_per_kind_counts(doc_elements):
-    # Text / video / an asset-less sprite are skipped, each tallied by kind.
-    # Rects DO draw (as tinted fills), so they emit rather than tally.
+    # Video and an asset-less sprite are skipped, each tallied by kind. Rects
+    # draw as tinted fills and text draws as a deferred raster, so both emit.
     tree = [
         _sprite(_BACKGROUND_Z, '/tmp/real.png', keyframes={'x': _instant(1.0)}),
         _element('rect', _BACKGROUND_Z),
@@ -403,8 +403,8 @@ def test_unsupported_kinds_skipped_with_per_kind_counts(doc_elements):
     compiled = _compiled([], tree=tree)
     evaluator, id_maps, report = dd.build_static_doc(compiled)
 
-    assert report['elements_below'] == 3 and report['elements_above'] == 0
-    assert report['element_skips'] == {'text': 1, 'video': 1, 'no_asset': 1}
+    assert report['elements_below'] == 3 and report['elements_above'] == 1
+    assert report['element_skips'] == {'video': 1, 'no_asset': 1}
     assert report['images'] == 1
 
 
@@ -1261,3 +1261,32 @@ def test_a_full_run_crop_removes_every_glyph(doc_elements, tmp_path):
     blits = [i for i in range(len(u)) if u[i, 0] == sn.OP_BLIT]
     assert all(round(float(f[i, 15]), 3) == 1.0 for i in blits), (
         'cropright(1) must leave nothing visible')
+
+
+def test_text_elements_defer_their_raster_to_the_image_table(doc_elements):
+    # Laying out a system font needs Qt, and this compiler runs on a worker
+    # thread and stays Qt-free - so the doc records the spec and the consumer
+    # rasterises it.
+    el = _element('text', 0, text='hello', font_px=24.0)
+    evaluator, id_maps, report = dd.build_static_doc(_compiled([], tree=[el]))
+
+    assert 'text' not in report['element_skips'], 'text draws now'
+    assert id_maps['text_images'] == {0: ('hello', 24.0)}
+    u, _f = _blit_lanes(evaluator, 1.0)
+    blits = [i for i in range(len(u)) if u[i, 0] == sn.OP_BLIT]
+    assert len(blits) == 1
+    assert int(u[blits[0], 1]) == sn.SRC_IMAGE and int(u[blits[0], 2]) == 0
+
+
+def test_the_same_caption_at_the_same_size_uploads_once(doc_elements):
+    tree = [_element('text', 0, text='same', font_px=20.0),
+            _element('text', 1, text='same', font_px=20.0),
+            _element('text', 2, text='same', font_px=40.0)]
+    _evaluator, id_maps, _report = dd.build_static_doc(_compiled([], tree=tree))
+    assert len(id_maps['text_images']) == 2, 'keyed by (text, size)'
+
+
+def test_an_empty_text_element_is_skipped_not_drawn(doc_elements):
+    _evaluator, _id_maps, report = dd.build_static_doc(
+        _compiled([], tree=[_element('text', 0, text='')]))
+    assert report['element_skips'].get('text') == 1
