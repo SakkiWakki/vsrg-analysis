@@ -1681,10 +1681,18 @@ class _Builder:
 
         The item's own lanes stay as emitted - `compose_links` REPLACES the TRS
         mat3 when links are present, so the leaf's transform must ride the
-        chain's final link rather than the item lanes alone."""
-        for link_element in (*ancestors, element):
+        chain's final link rather than the item lanes alone. Alpha and hidden
+        are the exception: the item already carries the leaf's, so its link
+        must not carry them again (`_element_link_kwargs`).
+
+        The bitmaptext path does NOT take this branch, and must not: its item
+        carries no opacity lane at all, so the leaf's alpha rides its chain
+        exactly once there."""
+        chain = (*ancestors, element)
+        for index, link_element in enumerate(chain):
             self._builder.item_link(
-                _SCREEN_ID, **self._element_link_kwargs(link_element))
+                _SCREEN_ID, **self._element_link_kwargs(
+                    link_element, leaf=index == len(chain) - 1))
         fov = self._chain_fov(ancestors, element)
         if fov is not None:
             fov_id, fov_rest = fov
@@ -1717,14 +1725,25 @@ class _Builder:
             return chan_id, float(rest)
         return None
 
-    def _element_link_kwargs(self, element) -> dict:
+    def _element_link_kwargs(self, element, leaf: bool = False) -> dict:
         """The `item_link` kwargs for one element in a chain: an (id, rest)
         channel per transform prop it carries, plus its Euler rotation order.
 
         Absent props fall through to the binding's engine-identity defaults, so
-        a group that only sets `x`/`y` composes as a pure translation."""
+        a group that only sets `x`/`y` composes as a pure translation.
+
+        The LEAF link drops `alpha` and `hidden`. The leaf is BOTH the item and
+        the chain's last link, and the item already carries its own alpha on
+        the opacity lane and its own hidden bit on the visible gate - so
+        leaving them on the link multiplied the leaf's alpha in twice. An
+        element at diffusealpha 0.5 under opaque parents composited at 0.25,
+        and a full-screen rect at 0.05 came out at 0.0025: invisible where the
+        engine draws a veil. Placement was exact throughout, which is why this
+        outlived the quad harness."""
         kwargs: dict[str, object] = {}
         for param, prop in _ELEMENT_LINK_PROPS:
+            if leaf and prop in ('alpha', 'hidden'):
+                continue
             timeline = element.timelines.get(prop)
             if timeline is None:
                 continue
@@ -2309,6 +2328,57 @@ def _record_quad(frec, natural):
     return corners
 
 
+# An f32 opacity lane folded down a chain of multiplies; anything under this
+# is rounding, anything over is a compositing difference.
+_ALPHA_ATOL = 1e-4
+
+
+def _legacy_element_alpha(element, ancestors, t) -> float:
+    """The alpha the legacy painter composites `element` at.
+
+    A group's alpha multiplies into every child (`render._paint_element`'s
+    `inherited_alpha`), so this is the product down the whole chain."""
+    alpha = 1.0
+    for link in (*ancestors, element):
+        alpha *= link.sample('alpha', t)[0]
+    return min(1.0, alpha)
+
+
+def _legacy_element_drawn(element, ancestors, t, role: str = 'content') -> bool:
+    """Whether the legacy painter draws `element`'s `role` pass at `t`.
+
+    `render._paint_element`'s own gate: SM's `hidden` bit hard-gates a draw
+    independently of alpha, and an ancestor at alpha 0 culls a whole subtree
+    the leaf knows nothing about.
+
+    Plus the LIFETIME window the walker applies before the painter is ever
+    called (`render._paint_children`: a child outside `[t_start, t_end)` is
+    skipped while its siblings draw).
+
+    "Draws" means PUTS PIXELS ON SCREEN, which is why a degenerate chain
+    counts as not drawing. The two paths dispose of one differently and
+    agree on the result: `compose_links` culls a zero-determinant chain
+    outright, while the painter draws a zero-area quad. gat parks an
+    ancestor at `zoomy(0)` for minutes at a time, and reading legacy's
+    "draws" as literal reported every element under it as MISSING."""
+    from analysis.player.render.storyboard.render import _MIN_VISIBLE_ALPHA
+
+    chain = (*ancestors, element)
+    if any(not (link.t_start <= t < link.t_end) for link in chain):
+        return False
+    if any(link.sample('hidden', t)[0] >= 0.5 for link in chain):
+        return False
+    for prop in ('scale_x', 'scale_y'):
+        if any(link.sample(prop, t)[0] == 0.0 for link in chain):
+            return False
+    if role == 'glow':
+        # The GLOW pass has its own gate: `_paint_glow` returns on a glow
+        # alpha at rest, whatever the element's diffuse alpha is doing.
+        from analysis.player.render.storyboard.render import _GLOW_MIN_ALPHA
+        return element.sample('glow', t)[3] > _GLOW_MIN_ALPHA
+    return _legacy_element_alpha(element, ancestors, t) >= _MIN_VISIBLE_ALPHA
+
+
 def element_parity_report(evaluator, element_order, natural_of, sample_times,
                           atol: float = 1e-3) -> dict:
     """Compare the doc's element blits against the legacy painter at each of
@@ -2334,7 +2404,7 @@ def element_parity_report(evaluator, element_order, natural_of, sample_times,
         drawn = {tag: (kind, frec) for kind, _sid, tag, frec
                  in _blit_records(evaluator, t)
                  if 0 < tag < _INSTANCE_TAG_BASE}
-        diffs = []
+        diffs, missing, extra = [], [], []
         worst = 0.0
         n_compared = 0
         n_unsized = 0
@@ -2343,11 +2413,29 @@ def element_parity_report(evaluator, element_order, natural_of, sample_times,
         for index, entry in enumerate(element_order):
             element, role, ancestors = entry
             record = drawn.get(index + 1)
-            # Absent means the evaluator CULLED it - outside its time window,
-            # hidden, or fully transparent. That is a legitimate per-frame
-            # outcome, not a mismatch, so only drawn items are compared.
+            # WHETHER each side draws it at all, before where. A placement
+            # comparison over drawn items alone cannot see a element the doc
+            # draws and legacy culls - and a full-screen black rect the doc
+            # draws one frame too long blacks out the whole composite while
+            # every measured element still reports 0.000px.
+            wanted = _legacy_element_drawn(element, ancestors, t, role)
             if record is None:
+                if wanted:
+                    missing.append((index, element.kind, role))
                 continue
+            if not wanted:
+                extra.append((index, element.kind, role))
+                continue
+            if role == 'content':
+                # OPACITY, not just placement. The doc applied the leaf's own
+                # alpha twice - once on the item lane, once on its own chain
+                # link - so every grouped element composited at the square of
+                # its alpha while landing at exactly the right pixel.
+                want_alpha = _legacy_element_alpha(element, ancestors, t)
+                got_alpha = float(record[1][_rec.F_OPACITY])
+                if abs(want_alpha - got_alpha) > _ALPHA_ATOL:
+                    diffs.append((index, 'opacity',
+                                  round(got_alpha - want_alpha, 4)))
             if role != 'content':
                 # A glow pass draws the content's own quad, so its placement is
                 # already covered. A GLYPH is not: bitmaptext is centred
@@ -2390,7 +2478,8 @@ def element_parity_report(evaluator, element_order, natural_of, sample_times,
             n_compared += 1
             if err > atol:
                 diffs.append((index, 'corner', round(float(err), 3)))
-        times.append({'t': float(t), 'ok': not diffs, 'diffs': diffs,
+        times.append({'t': float(t), 'ok': not (diffs or missing or extra),
+                      'diffs': diffs, 'missing': missing, 'extra': extra,
                       'n_blit': len(drawn), 'n_compared': n_compared,
                       'n_unsized': n_unsized, 'n_projected': n_projected,
                       'n_unverified': n_unverified, 'max_corner_err': worst})
@@ -2398,6 +2487,8 @@ def element_parity_report(evaluator, element_order, natural_of, sample_times,
         'times': times,
         'all_ok': all(r['ok'] for r in times),
         'max_corner_err': max((r['max_corner_err'] for r in times), default=0.0),
+        'n_missing': sum(len(r['missing']) for r in times),
+        'n_extra': sum(len(r['extra']) for r in times),
         'n_fail': sum(0 if r['ok'] else 1 for r in times),
     }
 
@@ -2573,6 +2664,10 @@ def field_parity_report(evaluator, compiled, instance_order, sample_times,
                 n_projected += 1
                 continue
             _kind, _sid, frec = record
+            got_alpha = float(frec[_rec.F_OPACITY])
+            if abs(expected[1] - got_alpha) > _ALPHA_ATOL:
+                diffs.append((index, name,
+                              round(got_alpha - expected[1], 4)))
             # Every field-instance blit sizes from the design box: a field
             # capture and an AFT slot are whole-screen drawables, and a
             # curtain fill takes its target's box (`_draw_fill`) because it
@@ -2651,10 +2746,15 @@ def format_element_parity_report(report) -> str:
     lines = [
         f"element parity: {'OK' if report['all_ok'] else 'FAIL'} "
         f"({report['n_fail']}/{len(report['times'])} times failing) "
+        f"missing={report['n_missing']} extra={report['n_extra']} "
         f"max_corner_err={report['max_corner_err']:.3f}px"
     ]
     for r in report['times']:
-        detail = '' if r['ok'] else f"  diffs={[d[:2] for d in r['diffs'][:4]]}"
+        detail = f"  diffs={[d[:2] for d in r['diffs'][:4]]}" if r['diffs'] else ''
+        if r['missing']:
+            detail += f"  MISSING={r['missing'][:4]}"
+        if r['extra']:
+            detail += f"  EXTRA={r['extra'][:4]}"
         unsized = f" unsized={r['n_unsized']}" if r['n_unsized'] else ''
         unsized += f" 3d={r['n_projected']}" if r['n_projected'] else ''
         unsized += f" glyphs={r['n_unverified']}" if r['n_unverified'] else ''

@@ -1013,6 +1013,66 @@ def test_element_parity_harness_agrees_with_the_legacy_painter(doc_elements,
     assert rep['max_corner_err'] < 1e-3
 
 
+def test_a_grouped_element_composites_at_its_alpha_not_its_square(
+        doc_elements, tmp_path):
+    # The leaf is BOTH the item and its chain's last link. Carrying alpha on
+    # both multiplied it in twice, so an element at diffusealpha 0.5 under an
+    # opaque group composited at 0.25 - and a veil at 0.05 came out at 0.0025,
+    # invisible. Placement was exact throughout, which is why the quad harness
+    # never saw it.
+    leaf = _parity_element(tmp_path, 'l', alpha=0.5)
+    group = _element('group', 0, children=[leaf],
+                     keyframes={'alpha': _instant(1.0)})
+    evaluator, id_maps, _report = dd.build_static_doc(
+        _compiled([], tree=[group]))
+
+    order = id_maps['element_order']
+    index = next(i for i, (el, role, _a) in enumerate(order)
+                 if el is leaf and role == 'content')
+    drawn = {tag: f for _k, _s, tag, f in dd._blit_records(evaluator, 0.0)}
+    assert drawn[index + 1][dd._rec.F_OPACITY] == pytest.approx(0.5)
+
+
+def test_the_element_harness_compares_opacity_not_only_placement(
+        doc_elements, tmp_path):
+    # The harness is only worth having if it FAILS on the difference it exists
+    # to catch, and a compositing difference moves no corner at all.
+    el = _parity_element(tmp_path, 'a', x=100.0, y=100.0, alpha=0.5)
+    evaluator, id_maps, _report = dd.build_static_doc(
+        _compiled([], tree=[el]))
+
+    rep = dd.element_parity_report(evaluator, id_maps['element_order'],
+                                   lambda _el: (64.0, 32.0), (0.0, 1.0))
+    assert rep['all_ok'], dd.format_element_parity_report(rep)
+
+    el.timelines['alpha'] = EventTimeline(
+        [Keyframe(0.0, (0.25,), 0.0, _EASE_LINEAR)], rest=(0.25,))
+    rep = dd.element_parity_report(evaluator, id_maps['element_order'],
+                                   lambda _el: (64.0, 32.0), (0.0, 1.0))
+    assert not rep['all_ok']
+    assert any(d[1] == 'opacity' for r in rep['times'] for d in r['diffs'])
+
+
+def test_the_element_harness_reports_an_element_legacy_culls(doc_elements,
+                                                             tmp_path):
+    # An element the doc draws and legacy does not is invisible to a
+    # placement comparison over drawn items - and a full-screen rect drawn a
+    # frame too long blacks out the whole composite while every measured
+    # element still reports 0.000px.
+    el = _parity_element(tmp_path, 'a', x=100.0, y=100.0)
+    evaluator, id_maps, _report = dd.build_static_doc(
+        _compiled([], tree=[el]))
+    natural = lambda _el: (64.0, 32.0)  # noqa: E731
+    assert dd.element_parity_report(
+        evaluator, id_maps['element_order'], natural, (0.0,))['all_ok']
+
+    el.timelines['hidden'] = EventTimeline(
+        [Keyframe(0.0, (1.0,), 0.0, _EASE_LINEAR)], rest=(1.0,))
+    rep = dd.element_parity_report(evaluator, id_maps['element_order'],
+                                   natural, (0.0,))
+    assert rep['n_extra'] == 1, dd.format_element_parity_report(rep)
+
+
 def test_element_parity_harness_catches_a_dropped_origin(doc_elements,
                                                          tmp_path):
     # The harness is only worth having if it FAILS on the bug it exists to
