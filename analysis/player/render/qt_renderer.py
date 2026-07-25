@@ -139,6 +139,17 @@ def _finite_bounds(*arrays):
     return (lo, hi) if lo <= hi else None
 
 
+def _drawable_pipeline_enabled() -> bool:
+    """Whether the chart region composites through the Drawable pipeline.
+
+    ON by default: it is the unified draw path. `VSRG_DRAWABLE_PIPELINE=0`
+    reverts to the legacy capture+blit machinery for differential testing.
+    The pipeline still self-disables (falling back to that same path) on a
+    non-GL painter or any error, so this only chooses which is TRIED."""
+    return os.environ.get('VSRG_DRAWABLE_PIPELINE', '1').lower() not in (
+        '0', 'false', 'no')
+
+
 def _overscan_steps(need: int, base: int, window: int) -> int:
     """The margin covering `need` px, rounded up to whole `base`-sized
     steps so the pooled capture target (raster pixmap / GL FBO, both
@@ -949,7 +960,7 @@ class QtPlayerRenderer:
         The backdrop pixmap, when present, was captured in place of the
         direct background/below-draws, so it is blitted here as the base
         backdrop exactly once."""
-        if os.environ.get('VSRG_DRAWABLE_PIPELINE') == '1':
+        if _drawable_pipeline_enabled():
             from analysis.player.render.storyboard.pipeline import pipeline_for
             _pipeline = pipeline_for(ctx.player)
             # Hand this frame's live GL capture handles (the transparent

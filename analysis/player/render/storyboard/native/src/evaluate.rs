@@ -410,6 +410,11 @@ fn emit_drawable(
     schedule: &mut DrawSchedule,
 ) {
     let drawable = &doc.drawables[id as usize];
+    if drawable.inline {
+        // A feed SLOT is never a target of its own; `Cmd::Feed` draws its
+        // items into the enclosing drawable at their tree position.
+        return;
+    }
     let feed_items = feeds
         .iter()
         .find(|f| f.drawable == id)
@@ -425,7 +430,7 @@ fn emit_drawable(
             emit_item(doc, item, t, events, cache, schedule);
         }
     } else {
-        emit_commands(doc, &drawable.commands, t, events, cache, schedule);
+        emit_commands(doc, &drawable.commands, t, events, cache, schedule, feeds);
     }
     schedule.op(OP_END, id, 0);
 }
@@ -437,12 +442,24 @@ fn emit_commands(
     events: &[Event],
     cache: &mut ReactionCache,
     schedule: &mut DrawSchedule,
+    feeds: &[Feed],
 ) {
     let mut i = 0usize;
     while i < commands.len() {
         match &commands[i] {
             Cmd::Item(item) => {
                 emit_item(doc, item, t, events, cache, schedule);
+                i += 1;
+            }
+            Cmd::Feed { slot } => {
+                // Inline: the slot's fed items draw HERE, as ordinary items of
+                // the enclosing drawable, so nothing bounds them but the real
+                // render target.
+                if let Some(feed) = feeds.iter().find(|f| f.drawable == *slot) {
+                    for item in feed.items {
+                        emit_item(doc, item, t, events, cache, schedule);
+                    }
+                }
                 i += 1;
             }
             Cmd::Snapshot { into } => {
@@ -469,6 +486,16 @@ fn emit_commands(
                     match &commands[j] {
                         Cmd::Item(item) => emit_item(doc, item, t, events, cache, schedule),
                         Cmd::Snapshot { into } => schedule.op(OP_COPY, *into, 0),
+                        // A z-sorted span holds only drawing items; a feed
+                        // slot inside one has no single z to sort by, so it
+                        // draws in place (its own items keep their order).
+                        Cmd::Feed { slot } => {
+                            if let Some(feed) = feeds.iter().find(|f| f.drawable == *slot) {
+                                for item in feed.items {
+                                    emit_item(doc, item, t, events, cache, schedule);
+                                }
+                            }
+                        }
                         // Nested spans are rejected at DocBuilder::finish;
                         // an inner span never reaches this fold. A doc built
                         // outside the validated builder degrades to a no-op.
@@ -560,6 +587,12 @@ fn sample_link(
         ],
         natural_w: ch.sample(link.natural_w, t),
         natural_h: ch.sample(link.natural_h, t),
+        rotation_x: ch.sample(link.rotation_x, t),
+        rotation_y: ch.sample(link.rotation_y, t),
+        z: ch.sample(link.z, t),
+        scale_z: ch.sample(link.scale_z, t),
+        base_scale_z: ch.sample(link.base_scale_z, t),
+        rotation_order: link.rotation_order,
     }
 }
 
@@ -929,6 +962,48 @@ mod tests {
     }
 
     #[test]
+    fn inline_feed_draws_into_the_enclosing_drawable() {
+        // A feed SLOT is not a target: its items draw as ordinary items of
+        // the enclosing drawable, between that drawable's own commands, so
+        // nothing but the real render target bounds them. Rendering them
+        // into a box of their own is what clips mod-displaced notes away.
+        let mut doc = DrawableDoc::with_screen([640.0, 480.0]);
+        let slot = doc.add_drawable([0.0, 0.0], false, true);
+        doc.drawables[slot as usize].inline = true;
+        doc.drawables[0]
+            .commands
+            .push(Cmd::Item(Item::of(Source::Fill)));
+        doc.drawables[0].commands.push(Cmd::Feed { slot });
+        doc.drawables[0]
+            .commands
+            .push(Cmd::Item(Item::of(Source::Image {
+                image: 9,
+                frame: ChannelRef::constant(0.0),
+            })));
+        let fed = vec![Item::of(Source::Image {
+            image: 3,
+            frame: ChannelRef::constant(0.0),
+        })];
+        let borrowed = [Feed {
+            drawable: slot,
+            items: &fed,
+        }];
+        let schedule = evaluate(&doc, 0.0, &borrowed);
+
+        // The fed item lands BETWEEN the screen's own items, in tree order,
+        // and the slot never opens a target of its own.
+        assert_eq!(
+            blit_sources(&schedule),
+            vec![(SRC_FILL, 0), (SRC_IMAGE, 3), (SRC_IMAGE, 9)]
+        );
+        let begins: Vec<u32> = (0..schedule.len())
+            .filter(|i| schedule.u[i * U_STRIDE] == OP_BEGIN)
+            .map(|i| schedule.u[i * U_STRIDE + 1])
+            .collect();
+        assert_eq!(begins, vec![SCREEN], "a feed slot is never a render target");
+    }
+
+    #[test]
     fn dynamic_feed_supplies_items() {
         let mut doc = DrawableDoc::with_screen([640.0, 480.0]);
         let notes = doc.add_drawable([640.0, 480.0], false, true);
@@ -986,6 +1061,12 @@ mod tests {
             crop: [c(s.crop[0]), c(s.crop[1]), c(s.crop[2]), c(s.crop[3])],
             natural_w: c(s.natural_w),
             natural_h: c(s.natural_h),
+            rotation_x: c(s.rotation_x),
+            rotation_y: c(s.rotation_y),
+            z: c(s.z),
+            scale_z: c(s.scale_z),
+            base_scale_z: c(s.base_scale_z),
+            rotation_order: s.rotation_order,
         }
     }
 

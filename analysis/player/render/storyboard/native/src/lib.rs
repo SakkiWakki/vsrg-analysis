@@ -160,11 +160,48 @@ impl DocBuilder {
         }
     }
 
-    fn drawable(&mut self, w: f32, h: f32, persistent: bool, dynamic: bool) -> u32 {
-        self.doc
-            .as_mut()
-            .expect("builder already finished")
-            .add_drawable([w, h], persistent, dynamic)
+    #[pyo3(signature = (w, h, persistent, dynamic, clear=None))]
+    fn drawable(
+        &mut self,
+        w: f32,
+        h: f32,
+        persistent: bool,
+        dynamic: bool,
+        clear: Option<&str>,
+    ) -> u32 {
+        let doc = self.doc.as_mut().expect("builder already finished");
+        let id = doc.add_drawable([w, h], persistent, dynamic);
+        // Explicit backing override ('transparent' | 'opaque' | 'retain');
+        // None keeps the derived default (persistent -> Retain, else
+        // TransparentBlack - a plain drawable owns no backing).
+        if let Some(mode) = clear.and_then(|s| match s {
+            "transparent" => Some(crate::doc::ClearMode::TransparentBlack),
+            "opaque" => Some(crate::doc::ClearMode::OpaqueBlack),
+            "retain" => Some(crate::doc::ClearMode::Retain),
+            _ => None,
+        }) {
+            doc.set_drawable_clear(id, mode);
+        }
+        id
+    }
+
+    /// Mint a FEED SLOT: a drawable that is never a render target of its
+    /// own. Its per-frame items draw inline wherever `feed_inline` places
+    /// it, so they are bounded only by the real target - the whole point
+    /// for notes, which mods push outside any fixed box.
+    fn feed_slot(&mut self) -> u32 {
+        let doc = self.doc.as_mut().expect("builder already finished");
+        let id = doc.add_drawable([0.0, 0.0], false, true);
+        doc.drawables[id as usize].inline = true;
+        id
+    }
+
+    /// Draw `slot`'s fed items at this point in `target`'s command stream.
+    fn feed_inline(&mut self, target: u32, slot: u32) {
+        let doc = self.doc.as_mut().expect("builder already finished");
+        doc.drawables[target as usize]
+            .commands
+            .push(crate::doc::Cmd::Feed { slot });
     }
 
     /// Register a shader; returns its id. `uniform_names` orders the
@@ -303,7 +340,13 @@ impl DocBuilder {
                         crop_r_id=-1, crop_r_rest=0.0, crop_b_id=-1, crop_b_rest=0.0,
                         natural_w_id=-1, natural_w_rest=640.0,
                         natural_h_id=-1, natural_h_rest=480.0,
-                        flip_base_y=false))]
+                        flip_base_y=false,
+                        rotation_x_id=-1, rotation_x_rest=0.0,
+                        rotation_y_id=-1, rotation_y_rest=0.0,
+                        z_id=-1, z_rest=0.0,
+                        scale_z_id=-1, scale_z_rest=1.0,
+                        base_scale_z_id=-1, base_scale_z_rest=1.0,
+                        rotation_order="xyz"))]
     fn item_link(
         &mut self,
         target: u32,
@@ -346,6 +389,17 @@ impl DocBuilder {
         natural_h_id: i64,
         natural_h_rest: f32,
         flip_base_y: bool,
+        rotation_x_id: i64,
+        rotation_x_rest: f32,
+        rotation_y_id: i64,
+        rotation_y_rest: f32,
+        z_id: i64,
+        z_rest: f32,
+        scale_z_id: i64,
+        scale_z_rest: f32,
+        base_scale_z_id: i64,
+        base_scale_z_rest: f32,
+        rotation_order: &str,
     ) {
         let link = LinkRef {
             x: chan(x_id, x_rest),
@@ -369,6 +423,15 @@ impl DocBuilder {
             ],
             natural_w: chan(natural_w_id, natural_w_rest),
             natural_h: chan(natural_h_id, natural_h_rest),
+            rotation_x: chan(rotation_x_id, rotation_x_rest),
+            rotation_y: chan(rotation_y_id, rotation_y_rest),
+            z: chan(z_id, z_rest),
+            scale_z: chan(scale_z_id, scale_z_rest),
+            base_scale_z: chan(base_scale_z_id, base_scale_z_rest),
+            // An unrecognized token falls back to the stock RageMatrix order
+            // rather than failing the build (parity with the Python reader).
+            rotation_order: crate::camera::RotOrder::from_str(rotation_order)
+                .unwrap_or(crate::camera::RotOrder::Xyz),
         };
         let item = self.last_item(target);
         item.links.push(link);

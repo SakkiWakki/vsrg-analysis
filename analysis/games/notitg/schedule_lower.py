@@ -46,6 +46,14 @@ from analysis.player.render.segment_timeline import SegmentTimeline
 _STOP_VERBS = frozenset({'stoptweening', 'finishtweening'})
 _MOD_VERBS = frozenset({'ApplyModifiers', 'mod'})
 _EXTRA_SETTERS = {'diffusealpha': 'alpha', 'hidden': 'hidden'}
+
+# Verbs writing an IMMEDIATE engine field rather than a TweenState member
+# (Actor.h:311 SetHidden bypasses the tween queue, exactly as the sim's
+# `_visibility` -> `_set_immediate` does). They must never fold into a
+# pending tweening Seg: `hidden` is a BIT, and ramping it makes the lane
+# read fractional (0.878), which every `hidden >= 0.5` consumer then reads
+# as hidden - silently culling the actor for the whole ramp.
+_IMMEDIATE_SETTERS = frozenset({'hidden', 'visible'})
 _COLOR_LANES = ('color:0', 'color:1', 'color:2')
 _MAX_COMMAND_DEPTH = 8
 
@@ -869,7 +877,10 @@ def _apply_setter(verb, values, handler, target) -> bool:
 
     segs = handler.segs(target)
     tail = segs[-1] if segs else None
-    if tail is not None and tail.dur > 0.0 and tail.effect is None:
+    mergeable = (verb not in _IMMEDIATE_SETTERS
+                 and tail is not None and tail.dur > 0.0
+                 and tail.effect is None)
+    if mergeable:
         segs[-1] = Seg(tail.dur, tail.ease, {**tail.targets, **targets})
     else:
         segs.append(Seg(0.0, targets=targets))

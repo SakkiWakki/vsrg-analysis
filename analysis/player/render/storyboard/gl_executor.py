@@ -169,6 +169,53 @@ def _inset_half_texel(a: float, b: float, texels: int) -> tuple[float, float]:
     return (lo, hi) if a <= b else (hi, lo)
 
 
+def _crop_unit_quad(frec):
+    """The unit source quad (0,0)-(1,1) inset by a record's crop fractions -
+    `capture.crop_region` on a unit region. None/rest crop = the full quad."""
+    if frec is None:
+        return 0.0, 0.0, 1.0, 1.0
+    left = _clamp01(float(frec[_F_CROP]))
+    top = _clamp01(float(frec[_F_CROP + 1]))
+    right = _clamp01(float(frec[_F_CROP + 2]))
+    bottom = _clamp01(float(frec[_F_CROP + 3]))
+    return left, top, 1.0 - right, 1.0 - bottom
+
+
+def _expanded_extent(sub, lw, lh):
+    """The logical-space rect the FULL texture spans, given that its `sub`
+    rect (`(u0, v0, u1, v1)` fractions, top-down) maps onto the logical box
+    `[0, lw] x [0, lh]`. Inverts the sub-rect mapping so an overscan-padded
+    capture's margins extend past the box instead of being cut at it."""
+    bu0, bv0, bu1, bv1 = sub
+    span_u = max(bu1 - bu0, 1e-6)
+    span_v = max(bv1 - bv0, 1e-6)
+    x0 = -bu0 / span_u * lw
+    y0 = -bv0 / span_v * lh
+    return x0, y0, x0 + lw / span_u, y0 + lh / span_v
+
+
+def _compose_cell(sub, cell):
+    """Narrow a `(u0, v0, u1, v1)` sub-rect (None = the whole texture) to one
+    sprite-sheet cell, in the source's own top-down fraction space.
+
+    `cell` is `(index, cols, rows)`; the index walks the sheet row-major and
+    wraps, matching ``sprite_sheet.frame_at_time``. None (or a 1x1 grid)
+    leaves the sub-rect untouched, so a plain sprite still samples fully."""
+    if cell is None:
+        return sub
+    index, cols, rows = cell
+    if cols <= 1 and rows <= 1:
+        return sub
+    count = cols * rows
+    index = int(index) % count if count > 0 else 0
+    col, row = index % cols, index // cols
+    bx0, by0, bx1, by1 = sub if sub is not None else (0.0, 0.0, 1.0, 1.0)
+    span_u, span_v = (bx1 - bx0) / cols, (by1 - by0) / rows
+    u0 = bx0 + col * span_u
+    v0 = by0 + row * span_v
+    return u0, v0, u0 + span_u, v0 + span_v
+
+
 def _mat_source_to_ndc(mat3: np.ndarray, w: int, h: int) -> QMatrix3x3:
     """Compose the record's column-vector mat3 (source logical -> target
     logical) with target-logical -> NDC (y-down, top-left at (-1, +1); 1
@@ -284,11 +331,19 @@ class GLExecutor:
         clips: list[tuple] | None = None,
         lines: dict[int, np.ndarray] | None = None,
         image_grids: dict[int, tuple] | None = None,
+        image_natural: dict[int, tuple] | None = None,
     ) -> None:
         self._images = images
         self._sizes = drawable_sizes
         self._clips = list(clips or [])
         self._lines: dict[int, np.ndarray] = dict(lines or {})
+        # ImageId -> (cols, rows) for sheet-backed images; the blit's frame
+        # lane indexes the cell (see _cell_uv). Absent = a plain 1x1 sprite.
+        self._image_grids: dict[int, tuple] = dict(image_grids or {})
+        # ImageId -> declared logical box, overriding the texture's pixel
+        # size. A fed note registers (1, 1) because its mat3 already carries
+        # the on-screen size over a unit source box.
+        self._image_natural: dict[int, tuple] = dict(image_natural or {})
         self.shader_uniforms: dict[int, list[float]] = {}
         # Per-drawable retain-decay factors (DrawableId -> alpha kept per
         # frame); see set_decay. A Retain BEGIN fades surviving content by
@@ -344,6 +399,13 @@ class GLExecutor:
         The pipeline sets the screen root TransparentBlack so the composite
         presents over the painted backdrop instead of covering it black."""
         self._clear_override[int(drawable_id)] = int(mode)
+
+    def clear_mode_of(self, drawable_id: int, recorded: int) -> int:
+        """The clear mode a BEGIN of `drawable_id` will actually apply: the
+        pipeline's override when one is set, else the record's own
+        `recorded` value. Lets a caller report the EFFECTIVE clear rather
+        than the one baked into the doc."""
+        return self._clear_override.get(int(drawable_id), int(recorded))
 
     def set_decay(self, drawable_id: int, factor_per_frame: float) -> None:
         """Set a Retain drawable's per-frame decay factor, keyed by
@@ -733,16 +795,32 @@ class GLExecutor:
             gf.glBlendFunc(GL_ONE, GL_ONE)
         match src_kind:
             case n if n == _SRC_FILL:
-                self._draw_fill(gf, mat3, tw, th, tint, opacity)
+                self._draw_fill(gf, mat3, tw, th, tint, opacity, frec)
             case n if n == _SRC_IMAGE:
                 # An image's logical box is its natural (pixel) size; the
                 # item transform scales it (source-logical == pixels).
-                uploaded = self._image_texture(gf, int(urec[_U_B]))
+                image_id = int(urec[_U_B])
+                uploaded = self._image_texture(gf, image_id)
                 if uploaded is not None and len(uploaded) == 3:
                     uploaded = (*uploaded, None)
-                logical = None if uploaded is None else (uploaded[1], uploaded[2])
+                # A sheet's logical box is ONE CELL, not the whole sheet: the
+                # item transform scales the cell it draws (lane 3 = the frame).
+                cols, rows = self._image_grids.get(image_id, (1, 1))
+                cell = (int(urec[_U_C]), int(cols), int(rows))
+                # An image's logical box is its pixel size UNLESS the caller
+                # declared one. A fed note carries its on-screen size in the
+                # mat3 over a UNIT source box, so its image registers natural
+                # (1, 1) and the sprite's pixel dimensions never scale it.
+                natural = self._image_natural.get(image_id)
+                if natural is not None:
+                    logical = (None if uploaded is None else natural)
+                else:
+                    logical = (None if uploaded is None
+                               else (uploaded[1] / cols, uploaded[2] / rows))
+                # Uploaded QImages are top-down already - no FBO v-flip.
                 self._draw_texture(gf, mat3, tw, th, frec, tint, opacity,
-                                   uploaded, logical, shaded)
+                                   uploaded, logical, shaded,
+                                   flip_v=False, cell=cell)
             case n if n == _SRC_DRAWABLE:
                 # SOURCE NORMALIZATION (drawable-ir.md rule 5): the source
                 # drawable's content covers its LOGICAL box regardless of its
@@ -804,9 +882,19 @@ class GLExecutor:
             return None
         return fbo.texture(), fbo.width(), fbo.height(), None
 
-    def _draw_fill(self, gf, mat3, tw, th, tint, opacity) -> None:
+    def _draw_fill(self, gf, mat3, tw, th, tint, opacity, frec=None) -> None:
+        """One solid-colour quad (an AFT-rig curtain), inset by the item's crop.
+
+        A curtain's region IS the quad's full extent, so SM's crop fractions
+        apply to it directly - the same rule `capture.crop_region` applies on
+        the reference backend (`fill(rgb, opacity, crop)`). Without this a
+        croptop/cropbottom'd curtain paints its FULL extent, covering content
+        the engine leaves showing."""
         entry = self._programs[1]
         if entry is None:
+            return
+        x0, y0, x1, y1 = _crop_unit_quad(frec)
+        if x1 <= x0 or y1 <= y0:
             return
         program, locs = entry
         program.bind()
@@ -816,16 +904,29 @@ class GLExecutor:
         gf.glUniform4f(locs['u_color'], r * a, g * a, b * a, a)
         program.setUniformValue(locs['u_mat'], _mat_source_to_ndc(mat3, tw, th))
         # A unit quad in source space (0,0)-(1,1), matching the raster
-        # backend's fillRect(0,0,1,1).
-        self._draw_quad(gf, 0.0, 0.0, 1.0, 1.0, uv=None)
+        # backend's fillRect(0,0,1,1), inset by the crop fractions.
+        self._draw_quad(gf, x0, y0, x1, y1, uv=None)
         program.release()
 
     def _draw_texture(self, gf, mat3, tw, th, frec, tint, opacity, uploaded,
-                      logical, shaded=None) -> None:
+                      logical, shaded=None, flip_v=True, cell=None) -> None:
+        """Blit one textured quad.
+
+        `flip_v` selects the source's row convention. An FBO or a bound
+        renderer capture is painted y-down by Qt, so sampling it needs the
+        `v = 1 - fraction` flip; an UPLOADED QImage already carries top-down
+        rows (_upload_image hands glTexImage2D the scanlines in order), so
+        flipping one draws it upside down.
+
+        `cell` is an `(index, cols, rows)` sheet selection: the quad samples
+        only that cell's sub-rect, composed under any bound sub-rect and the
+        item's crops.
+        """
         if uploaded is None or logical is None:
             return
         texture, sw, sh = uploaded[0], uploaded[1], uploaded[2]
         sub = uploaded[3] if len(uploaded) > 3 else None
+        sub = _compose_cell(sub, cell)
         lw, lh = logical
         if lw <= 0.0 or lh <= 0.0 or sw <= 0 or sh <= 0:
             return
@@ -842,6 +943,26 @@ class GLExecutor:
         vis_fh = max(0.0, 1.0 - crop_t - crop_b)
         if vis_fw <= 0.0 or vis_fh <= 0.0:
             return
+        if sub is not None and crop_l + crop_t + crop_r + crop_b <= 0.0:
+            # OVERSCAN PRESERVATION: an uncropped bound capture draws its
+            # FULL texture, quad expanded so the sub-rect still lands on the
+            # logical box - the margins carry content that sat outside the
+            # design box at capture time, which a transformed copy can bring
+            # back on screen (receptors past the edge). The old path sampled
+            # the whole window capture and clipped in DEST space; here the
+            # target FBO's own edge is that clip, so nothing lands outside
+            # the composite. A cropped blit keeps the exact sub-rect path
+            # below: SM crops hide bands of the DESIGN-BOX quad, and the
+            # engine never saw margins.
+            x0, y0, x1, y1 = _expanded_extent(sub, lw, lh)
+            u0, u1 = _inset_half_texel(0.0, 1.0, sw)
+            fv0, fv1 = 0.0, 1.0
+            v0, v1 = (1.0 - fv0, 1.0 - fv1) if flip_v else (fv0, fv1)
+            v0, v1 = _inset_half_texel(v0, v1, sh)
+            self._textured_quad(gf, mat3, tw, th, tint, opacity, texture,
+                                sw, sh, shaded, (x0, y0, x1, y1),
+                                (u0, v0, u1, v1))
+            return
         x0, y0 = crop_l * lw, crop_t * lh
         x1, y1 = x0 + vis_fw * lw, y0 + vis_fh * lh
         # Sample fractions compose into the bound sub-rect (an overscanned
@@ -851,13 +972,18 @@ class GLExecutor:
         span_u, span_v = bx1 - bx0, by1 - by0
         u0 = bx0 + crop_l * span_u
         u1 = bx0 + (crop_l + vis_fw) * span_u
-        v0 = 1.0 - (by0 + crop_t * span_v)
-        v1 = 1.0 - (by0 + (crop_t + vis_fh) * span_v)
+        fv0 = by0 + crop_t * span_v
+        fv1 = by0 + (crop_t + vis_fh) * span_v
+        v0, v1 = (1.0 - fv0, 1.0 - fv1) if flip_v else (fv0, fv1)
         # Half-texel inset (A5): keep GL_LINEAR at a sub-rect edge from
         # bleeding the adjacent margin/sidebar texel of the backing texture.
         u0, u1 = _inset_half_texel(u0, u1, sw)
         v0, v1 = _inset_half_texel(v0, v1, sh)
+        self._textured_quad(gf, mat3, tw, th, tint, opacity, texture, sw, sh,
+                            shaded, (x0, y0, x1, y1), (u0, v0, u1, v1))
 
+    def _textured_quad(self, gf, mat3, tw, th, tint, opacity, texture,
+                       sw, sh, shaded, quad, uv) -> None:
         program, locs = shaded if shaded is not None else self._programs[0]
         if program is None:
             return
@@ -875,7 +1001,8 @@ class GLExecutor:
         if 'u_resolution' in locs:
             gf.glUniform2f(locs['u_resolution'], float(sw), float(sh))
         program.setUniformValue(locs['u_mat'], _mat_source_to_ndc(mat3, tw, th))
-        self._draw_quad(gf, x0, y0, x1, y1, uv=(u0, v0, u1, v1))
+        x0, y0, x1, y1 = quad
+        self._draw_quad(gf, x0, y0, x1, y1, uv=uv)
         gf.glBindTexture(GL_TEXTURE_2D, 0)
         program.release()
 

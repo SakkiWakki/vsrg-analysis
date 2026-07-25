@@ -159,6 +159,16 @@ pub struct LinkRef {
     pub crop: [ChannelRef; 4], // l, t, r, b
     pub natural_w: ChannelRef,
     pub natural_h: ChannelRef,
+    /// Out-of-plane terms. All rest at engine identity, so a link that
+    /// never sets them composes through the exact 2D path.
+    pub rotation_x: ChannelRef,
+    pub rotation_y: ChannelRef,
+    pub z: ChannelRef,
+    pub scale_z: ChannelRef,
+    pub base_scale_z: ChannelRef,
+    /// Euler order for `rotation_x/y/rot`; constant per link (a token, not
+    /// an animatable scalar), so it rides the LinkRef directly.
+    pub rotation_order: crate::camera::RotOrder,
 }
 
 /// A channel-backed camera projection attached to an item (Item.projection
@@ -261,6 +271,16 @@ pub enum Cmd {
     /// The next `len` commands re-sort stably by their sampled `z`
     /// before drawing (SetDrawByZPosition).
     SortSpan { len: u32 },
+    /// Emit `slot`'s fed items INLINE, at this tree position, into the
+    /// enclosing drawable - no target of its own.
+    ///
+    /// This is how per-frame content (notes, receptors) draws as ordinary
+    /// items on the screen rather than into an intermediate box. Rendering
+    /// them into their own drawable would clip everything past that box,
+    /// which is precisely what cuts mod-displaced notes off; drawn inline,
+    /// each item is placed by its own mat3 and only the real render target
+    /// bounds it.
+    Feed { slot: u32 },
 }
 
 pub struct Drawable {
@@ -275,6 +295,10 @@ pub struct Drawable {
     /// Dynamic: commands arrive per frame via feeds (notes,
     /// travelpaths); the static list above stays empty.
     pub dynamic: bool,
+    /// Inline: this drawable is a FEED SLOT, never a render target. It is
+    /// skipped by the per-drawable walk; a `Cmd::Feed` emits its items into
+    /// whichever drawable holds that command (see Cmd::Feed).
+    pub inline: bool,
 }
 
 #[derive(Default)]
@@ -298,6 +322,7 @@ impl DrawableDoc {
             clear: ClearMode::OpaqueBlack,
             commands: Vec::new(),
             dynamic: false,
+            inline: false,
         });
         doc
     }
@@ -349,6 +374,12 @@ impl DrawableDoc {
         Ok(())
     }
 
+    /// Mint a drawable. A plain drawable is a sprite/actor surface: it is
+    /// only as big as its content and composites transparent - it must never
+    /// contribute an opaque region it does not own. Persistent drawables
+    /// (engine AFT capture semantics) retain content across frames. A
+    /// producer whose surface genuinely owns a backing (an AFT rig that
+    /// blacks out) opts in via `set_drawable_clear`.
     pub fn add_drawable(&mut self, size: [f32; 2], persistent: bool, dynamic: bool) -> u32 {
         let id = self.drawables.len() as u32;
         self.drawables.push(Drawable {
@@ -357,12 +388,19 @@ impl DrawableDoc {
             clear: if persistent {
                 ClearMode::Retain
             } else {
-                ClearMode::OpaqueBlack
+                ClearMode::TransparentBlack
             },
             commands: Vec::new(),
             dynamic,
+            inline: false,
         });
         id
+    }
+
+    pub fn set_drawable_clear(&mut self, id: u32, clear: ClearMode) {
+        if let Some(d) = self.drawables.get_mut(id as usize) {
+            d.clear = clear;
+        }
     }
 }
 

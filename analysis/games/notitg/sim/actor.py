@@ -95,6 +95,14 @@ _TWEEN_OVERFLOW = 50
 # fires on queue DEPTH, not on drain length).
 _MAX_DRAIN_STEPS = 10000
 
+# Properties holding a DISCRETE value - a bit or an index, never a point on a
+# continuous curve. Their lanes must not corridor-collapse (see
+# SegmentTimeline's `step`): approximating a run of these with a linear ramp
+# invents values that were never written, and a fractional `hidden` reads as
+# hidden to every `>= 0.5` consumer. All are written via `_set_immediate`,
+# mirroring the engine fields that bypass SM's TweenState.
+_STEP_PROPS = frozenset({'hidden', 'awake', 'blend_add', 'frame'})
+
 _DEFAULT_EFFECT_CLOCK = 'bgm'
 
 # Per-corner diffuse (SetDiffuseUpperLeft etc., openitg Actor.h:190-197).
@@ -1470,7 +1478,7 @@ class SimActor:
         rest = _rest(prop)
         if isinstance(rest, tuple):
             rest = rest[i] if i < len(rest) else 0.0
-        lane = SegmentTimeline(rest=float(rest))
+        lane = SegmentTimeline(rest=float(rest), step=prop in _STEP_PROPS)
         # Frontier gating belongs to the reader (it clamps queries to
         # the recording sim's clock); the lane itself is writer-truth.
         lane.frontier = float('inf')

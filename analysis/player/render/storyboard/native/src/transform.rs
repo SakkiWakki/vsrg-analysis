@@ -61,6 +61,15 @@ pub struct TransformState {
     pub crop: [f32; 4],
     pub natural_w: f32,
     pub natural_h: f32,
+    /// Out-of-plane rotation (degrees) and the depth translate/scale. All
+    /// rest at engine identity, so a 2D link composes exactly as before.
+    pub rotation_x: f32,
+    pub rotation_y: f32,
+    pub z: f32,
+    pub scale_z: f32,
+    pub base_scale_z: f32,
+    /// The Euler order `rotation_x/y/rot` multiply in (SetRotationOrder).
+    pub rotation_order: crate::camera::RotOrder,
 }
 
 impl Default for TransformState {
@@ -82,6 +91,12 @@ impl Default for TransformState {
             crop: [0.0; 4],
             natural_w: DESIGN_W,
             natural_h: DESIGN_H,
+            rotation_x: 0.0,
+            rotation_y: 0.0,
+            z: 0.0,
+            scale_z: 1.0,
+            base_scale_z: 1.0,
+            rotation_order: crate::camera::RotOrder::Xyz,
         }
     }
 }
@@ -130,6 +145,94 @@ fn skew_y3(amount: f32) -> Mat3 {
 fn det3(m: &Mat3) -> f32 {
     m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6])
         + m[2] * (m[3] * m[7] - m[4] * m[6])
+}
+
+/// True when the link leaves every out-of-plane term at rest, so its map
+/// is a plane-preserving 2D affine and the Mat3 path is exact.
+fn is_planar(link: &TransformState) -> bool {
+    link.rotation_x == 0.0
+        && link.rotation_y == 0.0
+        && link.z == 0.0
+        && link.scale_z == 1.0
+        && link.base_scale_z == 1.0
+}
+
+/// One link's local matrix in 3D - `field_compose._local`'s general branch.
+/// Delegates the engine-ordered rotate/scale/translate/skew build to
+/// `camera::local_matrix` (the shared port) rather than repeating it; the
+/// anchor offset rides innermost, exactly as in the 2D path.
+fn local4(link: &TransformState, flip: bool, leaf: bool) -> crate::camera::Mat4 {
+    let (adx, ady) = anchor(link, flip, leaf);
+    let mut base_sy = link.base_scale_y;
+    if flip {
+        base_sy = -base_sy;
+    }
+    let m = crate::camera::local_matrix(
+        [link.x, link.y, link.z],
+        [link.rotation_x, link.rotation_y, link.rot],
+        [
+            link.zoom_x * link.base_scale_x,
+            link.zoom_y * base_sy,
+            link.scale_z * link.base_scale_z,
+        ],
+        [link.skew_x, link.skew_y],
+        link.rotation_order,
+    );
+    if adx == 0.0 && ady == 0.0 {
+        return m;
+    }
+    crate::camera::mat_mul(&mat4_translate(adx, ady), &m)
+}
+
+fn mat4_translate(x: f32, y: f32) -> crate::camera::Mat4 {
+    let mut m = [0.0f32; 16];
+    m[0] = 1.0;
+    m[5] = 1.0;
+    m[10] = 1.0;
+    m[15] = 1.0;
+    m[12] = x;
+    m[13] = y;
+    m
+}
+
+/// The leaf's halign/valign anchor offset (0 for a non-leaf link).
+fn anchor(link: &TransformState, flip: bool, leaf: bool) -> (f32, f32) {
+    if !leaf {
+        return (0.0, 0.0);
+    }
+    // The anchor offsets the quad by its OWN size, so it scales with the
+    // leaf's natural box - not a global design constant. A leaf that leaves
+    // natural_w/h at the 640x480 default composes exactly as before.
+    let adx = (0.5 - link.halign) * link.natural_w;
+    let mut ady = (0.5 - link.valign) * link.natural_h;
+    if flip {
+        ady = -ady;
+    }
+    (adx, ady)
+}
+
+/// Embed a planar Mat3 (row-vector) in a Mat4, and project a Mat4 back to
+/// the z=0 plane's Mat3. The pair is lossless for planar maps, letting a
+/// chain mix 2D and 3D links without forcing every link through Mat4.
+fn mat3_to_mat4(m: &Mat3) -> crate::camera::Mat4 {
+    let mut o = [0.0f32; 16];
+    o[10] = 1.0;
+    for (row, src) in [0usize, 1, 3].iter().enumerate() {
+        for (col, dst) in [0usize, 1, 3].iter().enumerate() {
+            o[src * 4 + dst] = m[row * 3 + col];
+        }
+    }
+    o
+}
+
+fn mat4_to_mat3(m: &crate::camera::Mat4) -> Mat3 {
+    let mut o = [0.0f32; 9];
+    for (row, src) in [0usize, 1, 3].iter().enumerate() {
+        for (col, dst) in [0usize, 1, 3].iter().enumerate() {
+            o[row * 3 + col] = m[src * 4 + dst];
+        }
+    }
+    o
 }
 
 /// One link's local matrix - the 2D reduction of field_compose._local.
@@ -189,18 +292,31 @@ pub fn compose_links(links: &[TransformState], flip_base_y: bool) -> Option<(Mat
     }
     let leaf = links.len() - 1;
     let mut alpha = 1.0f32;
+    // The chain stays on the exact Mat3 path until a link uses an
+    // out-of-plane term; from there it composes in Mat4 (a planar link
+    // embeds losslessly, so a mixed chain is still engine-faithful).
     let mut world: Option<Mat3> = None;
+    let mut world4: Option<crate::camera::Mat4> = None;
     for (i, link) in links.iter().enumerate() {
         if link.hidden >= 0.5 {
             return None;
         }
         alpha *= link.alpha;
         let flip = flip_base_y && i == leaf;
-        let local = local(link, flip, i == leaf);
-        // world = compose(world, local) = local @ world.
-        world = Some(match world {
+        if world4.is_none() && is_planar(link) {
+            let local = local(link, flip, i == leaf);
+            // world = compose(world, local) = local @ world.
+            world = Some(match world {
+                None => local,
+                Some(w) => mul3(&local, &w),
+            });
+            continue;
+        }
+        let local = local4(link, flip, i == leaf);
+        let parent = world4.or_else(|| world.as_ref().map(mat3_to_mat4));
+        world4 = Some(match parent {
             None => local,
-            Some(w) => mul3(&local, &w),
+            Some(w) => crate::camera::compose(&w, &local),
         });
     }
     if alpha < MIN_ALPHA {
@@ -209,9 +325,20 @@ pub fn compose_links(links: &[TransformState], flip_base_y: bool) -> Option<(Mat
 
     // _TO_CONTENT = translate(-320, -240) applied on the content side.
     // Under the centered design projection the z=0 plane maps 1:1, so
-    // the normalized homography IS this affine 3x3.
-    let world = world.expect("non-empty links");
-    let to_content = translate3(-(DESIGN_W / 2.0), -(DESIGN_H / 2.0));
+    // the normalized homography IS this affine 3x3. A chain carrying
+    // out-of-plane terms folds through its camera at the item level
+    // (evaluate.rs::fold_projection), so the z=0 block is the right
+    // hand-off here too.
+    let world = match world4 {
+        Some(w4) => mat4_to_mat3(&w4),
+        None => world.expect("non-empty links"),
+    };
+    // Content is centred about its OWN box, so the offset is the leaf's
+    // natural size - a drawable sized to what it draws still composes
+    // correctly. The 640x480 default keeps every design-sized leaf identical.
+    let leaf_link = &links[leaf];
+    let to_content = translate3(-(leaf_link.natural_w / 2.0),
+                                -(leaf_link.natural_h / 2.0));
     let h = mul3(&to_content, &world);
     if det3(&h).abs() < MIN_DET {
         return None;
@@ -308,6 +435,10 @@ mod tests {
             crop: [g(13), g(14), g(15), g(16)],
             natural_w: DESIGN_W,
             natural_h: DESIGN_H,
+            // The fixture is the 2D corpus (LINK_FIELDS), so the
+            // out-of-plane terms stay at rest and it keeps pinning the
+            // exact planar path.
+            ..TransformState::default()
         }
     }
 
@@ -461,6 +592,108 @@ mod tests {
         let px = vx * h[0] + vy * h[3] + h[6];
         let py = vx * h[1] + vy * h[4] + h[7];
         assert!(px.abs() < 1e-4 && py.abs() < 1e-4, "{px} {py}");
+    }
+
+    #[test]
+    fn content_centres_about_its_own_natural_box() {
+        // A drawable sized to what it DRAWS (not the design screen) must still
+        // compose correctly: its content centre maps to the same place a
+        // design-sized leaf's does. Here a 200x100 leaf centres at (100, 50).
+        let leaf = TransformState {
+            natural_w: 200.0,
+            natural_h: 100.0,
+            ..Default::default()
+        };
+        let (h, _, _) = compose_links(&[leaf], false).unwrap();
+        let (vx, vy) = (100.0f32, 50.0f32);
+        let px = vx * h[0] + vy * h[3] + h[6];
+        let py = vx * h[1] + vy * h[4] + h[7];
+        assert!(px.abs() < 1e-4 && py.abs() < 1e-4, "{px} {py}");
+    }
+
+    #[test]
+    fn anchor_offsets_by_the_leafs_own_size() {
+        // halign rides the leaf's natural width, so a 200-wide leaf anchored
+        // left shifts by 100 (half its own box), not half the design screen.
+        let leaf = TransformState {
+            natural_w: 200.0,
+            natural_h: 100.0,
+            halign: 0.0,
+            ..Default::default()
+        };
+        let (adx, ady) = anchor(&leaf, false, true);
+        assert!((adx - 100.0).abs() < 1e-4, "{adx}");
+        assert!(ady.abs() < 1e-4, "{ady}");
+    }
+
+    #[test]
+    fn out_of_plane_terms_at_rest_take_the_exact_planar_path() {
+        // The 3D extension must not perturb a 2D chain: an explicitly
+        // rest-filled out-of-plane link folds bit-identically to the
+        // planar composition (gat's field instances all live here).
+        let planar = TransformState {
+            x: 40.0,
+            y: -25.0,
+            zoom_x: 1.5,
+            rot: 30.0,
+            skew_x: 0.2,
+            ..Default::default()
+        };
+        let parent = TransformState {
+            x: 12.0,
+            rot: -10.0,
+            ..Default::default()
+        };
+        assert!(is_planar(&planar) && is_planar(&parent));
+        let (h, _, _) = compose_links(&[parent, planar], false).unwrap();
+        let expect = mul3(
+            &translate3(-(DESIGN_W / 2.0), -(DESIGN_H / 2.0)),
+            &mul3(&local(&planar, false, true), &local(&parent, false, false)),
+        );
+        assert_eq!(h, expect);
+    }
+
+    #[test]
+    fn rotation_x_foreshortens_the_vertical_axis() {
+        // gat 1's `gat_bg:rotationx(60)`: tipping about x shrinks the
+        // projected y extent by cos(60) = 0.5 while x is untouched. The
+        // z=0 block is what compose_links hands back (the camera folds in
+        // at the item level), so this pins the rotation reaching the mat.
+        let tipped = TransformState {
+            rotation_x: 60.0,
+            ..Default::default()
+        };
+        assert!(!is_planar(&tipped));
+        let (h, _, _) = compose_links(&[tipped], false).unwrap();
+        // A content point one unit "down" from centre: (320, 241).
+        let (vx, vy) = (320.0f32, 241.0f32);
+        let px = vx * h[0] + vy * h[3] + h[6];
+        let py = vx * h[1] + vy * h[4] + h[7];
+        assert!(px.abs() < 1e-4, "x untouched by an x-axis tip: {px}");
+        let cos60 = (60.0f32).to_radians().cos();
+        assert!((py - cos60).abs() < 1e-4, "y foreshortened: {py} vs {cos60}");
+    }
+
+    #[test]
+    fn a_planar_parent_composes_onto_a_tipped_child() {
+        // Mixed chains are the gat background shape (a positioned frame
+        // over a rotationx'd one): the planar prefix must survive the
+        // promotion to Mat4 rather than being dropped.
+        let parent = TransformState {
+            x: 15.0,
+            y: 7.0,
+            ..Default::default()
+        };
+        let child = TransformState {
+            rotation_x: 60.0,
+            ..Default::default()
+        };
+        let (h, _, _) = compose_links(&[parent, child], false).unwrap();
+        let (vx, vy) = (320.0f32, 240.0f32);
+        let px = vx * h[0] + vy * h[3] + h[6];
+        let py = vx * h[1] + vy * h[4] + h[7];
+        assert!((px - 15.0).abs() < 1e-4, "parent x carried: {px}");
+        assert!((py - 7.0).abs() < 1e-4, "parent y carried: {py}");
     }
 
     #[test]

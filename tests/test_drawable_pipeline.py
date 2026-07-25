@@ -193,7 +193,7 @@ class _WrapEvaluator:
         return getattr(self._inner, name)
 
 
-def _fake_doc():
+def _fake_doc_with_ops(ops):
     """A fake static-doc compiler for the ASYNC contract:
     ``prepare_static_doc`` returns (ops, id_maps, report); the pipeline
     replays the ops onto a real DocBuilder on the render thread."""
@@ -202,9 +202,13 @@ def _fake_doc():
         @staticmethod
         def prepare_static_doc(compiled, screen_w=_SCREEN_W, screen_h=_SCREEN_H):
             id_maps = {'screen': 0, 'slots': {}, 'fields': {}, 'images': {}}
-            return _fill_doc_ops(), id_maps, _report(fills=1, instances=1)
+            return ops, id_maps, _report(fills=1, instances=1)
 
     return Doc()
+
+
+def _fake_doc():
+    return _fake_doc_with_ops(_fill_doc_ops())
 
 
 def _install_doc(monkeypatch, doc):
@@ -235,6 +239,27 @@ def test_delegate_composes_and_blits_into_chart_rect(gl, monkeypatch):
     assert (inside.alpha() > 200 and inside.red() > 200
             and inside.green() > 200 and inside.blue() > 200)
     assert outside.alpha() == 0
+
+
+def test_fill_curtain_quad_insets_by_its_crop():
+    """A curtain fill insets by its crop fractions - `capture.crop_region` on a
+    unit region, the rule both reference backends apply in `fill(rgb, opacity,
+    crop)` (db7546f). Without it a croptop'd curtain paints its FULL extent,
+    covering content the engine leaves showing."""
+    from analysis.player.render.capture import crop_region
+    from analysis.player.render.storyboard.gl_executor import (
+        _F_CROP, _crop_unit_quad)
+    from PySide6.QtCore import QRectF
+
+    frec = np.zeros(20, dtype=np.float32)
+    frec[_F_CROP:_F_CROP + 4] = (0.25, 0.5, 0.125, 0.0)  # l, t, r, b
+    quad = _crop_unit_quad(frec)
+
+    # The same inset the reference backends compute on a unit region.
+    rect = crop_region(QRectF(0.0, 0.0, 1.0, 1.0), (0.25, 0.5, 0.125, 0.0))
+    assert quad == pytest.approx(
+        (rect.left(), rect.top(), rect.right(), rect.bottom()))
+    assert _crop_unit_quad(np.zeros(20, dtype=np.float32)) == (0.0, 0.0, 1.0, 1.0)
 
 
 def test_delegate_leaves_chart_rect_bounds(gl, monkeypatch):
@@ -509,11 +534,15 @@ def test_topology_growth_triggers_a_rebuild(gl, monkeypatch):
     # rebuild fires once the signature has been stable for the settle
     # window - simulated by rewinding the settle clock.
     provider.grow('c')
+    pipe._signature_polled = -1e9  # let the throttled poll see the growth
     _drew, _t = _GLTarget(CHART_RECT).present(pipe, ctx)
     assert builds[0] == 1        # churn frame: tracked, not rebuilt
-    pipe._settle_since = -1e9    # the growth settled long ago
     import time as _time
     for _ in range(200):         # async re-prepare + replay + adopt
+        # Both clocks read as long-elapsed: the signature poll is throttled
+        # (see _poll_signature) and the settle window gates the rebuild.
+        pipe._signature_polled = -1e9
+        pipe._settle_since = -1e9
         _drew, _t = _GLTarget(CHART_RECT).present(pipe, ctx)
         if builds[0] == 2 and pipe._assembly is None \
                 and pipe._prepared is None:
@@ -541,6 +570,9 @@ def test_topology_signature_tracks_count_and_last_name():
 # --------------------------------------------------------------------------
 
 def test_end_to_end_through_the_real_static_doc(gl, monkeypatch):
+    # Pins the captured-notefield base field: this asserts the static
+    # doc's blit stream, and inline notes carry no base-field blit.
+    monkeypatch.setenv('VSRG_DRAWABLE_NOTES', '0')
     # Integration with the ACTUAL drawable_doc.build_static_doc (not a fake): a
     # synthetic single-proxy chart builds a real static doc and the pipeline
     # samples + presents it without error.

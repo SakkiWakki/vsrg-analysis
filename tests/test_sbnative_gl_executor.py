@@ -436,3 +436,77 @@ def test_broken_shader_degrades_to_unshaded_not_black(gl):
     screen = ex.execute(u, f, uf)
     assert not ex.broken
     assert _rgb(screen, 2, 2) == pytest.approx((255, 255, 255), abs=4)
+
+
+def test_overscan_margin_content_survives_a_shifted_copy(gl):
+    """A field capture is WINDOW-sized plus overscan MARGINS holding content
+    the mods pushed outside the playfield; the uv sub-rect names the chart-rect
+    region that maps onto the drawable's logical box.
+
+    A copy that shifts the field must be able to bring that margin content on
+    screen - the engine re-renders a proxy, so content outside the playfield is
+    exactly what a shifted copy reveals. Sampling only the sub-rect discards it
+    and the copy shows a hard-edged crop at the playfield boundary.
+    """
+    b = sn.DocBuilder(640.0, 480.0)
+    field = b.drawable(640.0, 480.0, False, False)
+    # A copy shifted LEFT by half the box: content living in the capture's
+    # RIGHT margin lands inside the screen.
+    b.item(0, sn.SRC_DRAWABLE, field, x_rest=-320.0, sx_rest=1.0, sy_rest=1.0)
+    ev = b.finish()
+
+    # Capture: 1280x480. The chart rect is its LEFT half (uv 0..0.5); the right
+    # half is overscan margin. Playfield content green, margin content red.
+    content = QImage(1280, 480, QImage.Format.Format_ARGB32_Premultiplied)
+    content.fill(QColor(0, 0, 0, 255))
+    from PySide6.QtGui import QPainter
+    p = QPainter(content)
+    p.fillRect(0, 0, 640, 480, QColor(0, 200, 0, 255))      # playfield
+    p.fillRect(640, 0, 640, 480, QColor(200, 0, 0, 255))    # margin
+    p.end()
+    tex, tw, thh = _upload_texture(content)
+
+    ex = GLExecutor({}, [(640.0, 480.0), (640.0, 480.0)])
+    ex.set_drawable_texture(field, tex, tw, thh, (0.0, 0.0, 0.5, 1.0))
+    screen = ex.execute(*_frames(ev, 0.0))
+
+    assert not ex.broken
+    # Shifted left by 320: the playfield's right half occupies screen x<320,
+    # and the MARGIN content should occupy x>320.
+    assert _rgb(screen, 160, 240) == (0, 200, 0), 'playfield content shifted in'
+    assert _rgb(screen, 480, 240) == (200, 0, 0), (
+        'margin content must survive the copy - a sub-rect-only sample '
+        'crops everything outside the playfield')
+
+
+def test_content_overflowing_a_drawable_is_clipped_at_its_box(gl):
+    """A drawable that is a BEGIN target renders into an FBO of its LOGICAL
+    size, so content drawn past that box is destroyed - not merely hidden.
+
+    Here a sub-drawable's image is twice its box and offset, so half of it
+    falls outside. Blitting the sub-drawable at 1:1 then shows the clipped
+    result: the overflow is gone even though the destination had room for it.
+    This is why a drawable must be sized to the content it holds.
+    """
+    b = sn.DocBuilder(64.0, 64.0)
+    sub = b.drawable(32.0, 32.0, False, False)
+    # A 1x1 white source scaled to 64x64 inside a 32x32 drawable: the right
+    # and bottom halves overflow the box.
+    b.item(sub, sn.SRC_IMAGE, 0, sx_rest=64.0, sy_rest=64.0)
+    # Draw the sub-drawable into the screen at its natural 32x32 logical box,
+    # then again shifted so any surviving overflow would be visible.
+    b.item(0, sn.SRC_DRAWABLE, sub, sx_rest=1.0, sy_rest=1.0)
+    ev = b.finish()
+
+    images = {0: _solid(1, 1, QColor(255, 255, 255, 255))}
+    ex = GLExecutor(images, [(64.0, 64.0), (32.0, 32.0)])
+    screen = ex.execute(*_frames(ev, 0.0))
+
+    assert not ex.broken
+    # Inside the sub-drawable's box: painted.
+    assert _rgb(screen, 16, 16) == (255, 255, 255)
+    # Past its box, still inside the SCREEN: the overflow was clipped away by
+    # the sub-drawable's own FBO, so nothing survives to composite here.
+    assert _rgb(screen, 48, 48) == (0, 0, 0), (
+        'content overflowing a drawable is destroyed at its box - the '
+        'drawable must be sized to what it draws')

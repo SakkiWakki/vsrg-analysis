@@ -157,7 +157,20 @@ def _synthetic_scene():
 _SAMPLE_TIMES = (0.0, 0.5, 1.0, 2.0, 4.0, 6.0)
 
 
-def test_synthetic_parity_exact_over_sample_times():
+
+@pytest.fixture
+def captured_notefield(monkeypatch):
+    """Pin the base field to the CAPTURED-notefield representation.
+
+    Field-instance parity is defined against `NotitgFieldInstances.at`, whose
+    model is one blit of the captured notefield. The default path draws the
+    base field's notes as inline items instead (drawable_doc.notes_inline), so
+    it legitimately has no such blit - these tests pin the representation the
+    parity contract is written against."""
+    monkeypatch.setenv('VSRG_DRAWABLE_NOTES', '0')
+
+
+def test_synthetic_parity_exact_over_sample_times(captured_notefield):
     compiled = _compiled(_synthetic_scene())
     evaluator, id_maps, report = dd.build_static_doc(compiled)
 
@@ -189,7 +202,7 @@ def test_capture_emits_snapshot_not_a_blit():
     assert (sn.SRC_DRAWABLE, slot_id) in blit_srcs
 
 
-def test_z_group_run_wrapped_in_sort_span():
+def test_z_group_run_wrapped_in_sort_span(captured_notefield):
     # Two proxies in one z_group whose z ordering crosses over time; the
     # SortSpan must reorder their blits to match the effect's stable z sort.
     a = _proxy('a', x=100.0, y=240.0)
@@ -210,7 +223,7 @@ def test_z_group_run_wrapped_in_sort_span():
     assert rep['all_ok'], dd.format_parity_report(rep)
 
 
-def test_base_hidden_gate_drops_the_base_field():
+def test_base_hidden_gate_drops_the_base_field(captured_notefield):
     # base_field_hidden rises then falls; the base-field blit must appear only
     # while the chart shows the real field (the inverted visible gate).
     hidden = EventTimeline([Keyframe(2.0, (1.0,), 0.0, _EASE_LINEAR),
@@ -299,7 +312,7 @@ def test_below_and_above_bands_split_around_the_field_stream():
     assert sn.SRC_DRAWABLE in kinds[1:-1]
 
 
-def test_field_instance_subsequence_unchanged_by_elements():
+def test_field_instance_subsequence_unchanged_by_elements(captured_notefield):
     # The field-instance parity must hold IDENTICALLY whether or not storyboard
     # elements are present: the harness compares the field-instance subsequence.
     scene = _synthetic_scene()
@@ -367,19 +380,29 @@ def test_unsupported_kinds_skipped_with_per_kind_counts():
     assert report['images'] == 1
 
 
-def test_group_is_flattened_to_its_image_children():
-    # A group draws nothing itself; its sprite children band by their OWN z and
-    # the group is tallied as a skip.
+def test_group_children_band_by_the_top_level_z():
+    # A group draws nothing itself (tallied as a skip); its sprite children
+    # emit as items but band by the TOP-LEVEL element's z - the legacy
+    # StoryboardEffect bands top-level elements only, and the compiler puts a
+    # hoisted subtree's band z on its root (modfile._with_z), so reading the
+    # leaf's own z would strand a background hoist above the field.
     child_a = _sprite(-100, '/tmp/ga.png', keyframes={'x': _instant(5.0)})
     child_b = _sprite(30, '/tmp/gb.png', keyframes={'x': _instant(6.0)})
     group = _element('group', 0, children=[child_a, child_b])
     compiled = _compiled([], tree=[group])
     evaluator, id_maps, report = dd.build_static_doc(compiled)
 
-    assert report['elements_below'] == 1  # child_a (z=-100)
-    assert report['elements_above'] == 1  # child_b (z=30)
+    assert report['elements_below'] == 0  # group z=0 bands both above
+    assert report['elements_above'] == 2
     assert report['element_skips'].get('group') == 1
     assert set(id_maps['images'].values()) == {'/tmp/ga.png', '/tmp/gb.png'}
+
+    hoisted = _element('group', _BACKGROUND_Z,
+                       children=[_sprite(0, '/tmp/bg.png',
+                                         keyframes={'x': _instant(1.0)})])
+    compiled = _compiled([], tree=[hoisted])
+    _evaluator, _id_maps, report = dd.build_static_doc(compiled)
+    assert report['elements_below'] == 1  # the background hoist
 
 
 def test_sheet_sprite_gets_a_frame_channel():

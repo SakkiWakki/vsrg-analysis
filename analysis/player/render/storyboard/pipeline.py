@@ -72,6 +72,8 @@ reports itself unavailable and the renderer uses the normal path.
 from __future__ import annotations
 
 import logging
+import os
+import sys
 
 import numpy as np
 
@@ -177,6 +179,21 @@ def _topology_signature(compiled):
     return (len(instances), last)
 
 
+def _sweep_in_progress(compiled):
+    """True/False when the chart has a lazy sweep still short of the chart
+    end, or None when it has no live sim at all (nothing to wait for).
+
+    Reads the published frontier, which the sweep advances monotonically -
+    a passive read, never a seek."""
+    live = compiled.get('_live_sim') if compiled else None
+    if live is None:
+        return None
+    try:
+        return float(live.frontier) < float(live._end_seconds)
+    except Exception:
+        return None
+
+
 class DrawablePipeline:
     """Owns the lazy Seam-A build (the static tree-order doc) and the
     per-frame Seam-B -> GL present for one player. Self-disables permanently
@@ -193,6 +210,11 @@ class DrawablePipeline:
         # The rebuild settle gate's tracking (see _rebuild_if_stale).
         self._settle_sig = None
         self._settle_since = 0.0
+        self._signature_cache = None
+        self._signature_polled = 0.0
+        self._topology_final = False
+        self._note_images = None
+        self._note_feed_failed = False
         # Async build stages (see _ensure_built).
         self._prepare_thread = None
         self._prepared = None
@@ -237,7 +259,7 @@ class DrawablePipeline:
         self._apply_resolution(ctx, painter)
         self._ingest_field_captures(field_captures, overscan,
                                     ctx.chart_rect)
-        u, f = self._schedule(float(ctx.t_now))
+        u, f = self._schedule_with_feeds(float(ctx.t_now), ctx)
         if u is None:
             return False
         # GL-ONLY present: composite onto the painter's GL target directly,
@@ -360,16 +382,50 @@ class DrawablePipeline:
         return False
 
     def _signature_settled(self) -> bool:
-        """True once the provider's topology signature has been unchanged
-        for the settle window (the sweep's churn ended)."""
+        """True once it is safe and worthwhile to build the static doc.
+
+        The real gate is SWEEP COMPLETION. A prepare dense-samples the lazy
+        curves in a tight Python loop, which starves the sweep thread of the
+        GIL - the sweep's progress stalls mid-chart - and the topology it
+        would capture is incomplete until the sweep ends anyway, so a
+        mid-sweep build is both harmful and wasted. Waiting for the frontier
+        yields exactly one build, on complete data.
+
+        Producers with no live sweep (any non-lazy chart) expose no sim; those
+        fall back to the topology settle window."""
+        sweeping = _sweep_in_progress(self._compiled)
+        if sweeping is not None:
+            return not sweeping
+        return self._settled(self._poll_signature())
+
+    def _settled(self, signature) -> bool:
+        """Track `signature` against the settle window: any change restarts the
+        clock, and only an unchanged signature that has aged past
+        `_REBUILD_SETTLE_S` reports settled."""
         import time as _time
-        signature = _topology_signature(self._compiled)
         now = _time.monotonic()
         if signature != self._settle_sig:
             self._settle_sig = signature
             self._settle_since = now
             return False
         return now - self._settle_since >= self._REBUILD_SETTLE_S
+
+    def _poll_signature(self):
+        """The provider's topology signature, refreshed at most every
+        `_SIGNATURE_POLL_S`.
+
+        Asking the provider is NOT free: the lazy NotITG provider runs a
+        wall-budgeted slice of the sim sweep on the render thread and may
+        rebuild its instance list, so polling it per frame doubles that work
+        (the effect already calls it once itself). Settling is measured in
+        seconds, so a few polls per second detects it just as fast."""
+        import time as _time
+        now = _time.monotonic()
+        if now - self._signature_polled < self._SIGNATURE_POLL_S:
+            return self._signature_cache
+        self._signature_polled = now
+        self._signature_cache = _topology_signature(self._compiled)
+        return self._signature_cache
 
     def _start_prepare(self) -> None:
         """Kick the worker-side prepare. The signature is taken BEFORE the
@@ -438,14 +494,23 @@ class DrawablePipeline:
         self._evaluator = evaluator
         self._id_maps = id_maps
         self._signature = signature
+        # A doc assembled from a finished sweep is built on final topology:
+        # nothing can grow behind it, so staleness polling can stop.
+        self._topology_final = _sweep_in_progress(self._compiled) is False
+        self._note_images = None
+        images = _lazy_images(id_maps)
+        images.warm()
         self._executor = GLExecutor(
-            _lazy_images(id_maps),
+            images,
             _drawable_sizes_of(id_maps, evaluator),
             image_grids=(id_maps.get('image_grids')
                          if isinstance(id_maps, dict) else None))
         self._executor.set_clear(SCREEN_ID, CLEAR_TRANSPARENT)
         # Field drawables are SLICES of the one screen surface: transparent
-        # overlays, never opaque slabs (the black-chart-region fix).
+        # overlays, never opaque slabs (the black-chart-region fix). AFT slots
+        # are NOT included: they are minted persistent (ClearMode::Retain) and
+        # must keep their captured content across frames - clearing them would
+        # destroy the engine capture/decay semantics.
         for field_id in (id_maps.get('fields') or {}).values():
             self._executor.set_clear(field_id, CLEAR_TRANSPARENT)
         self._res_scale = None
@@ -455,28 +520,139 @@ class DrawablePipeline:
     # with the async prepare + budgeted replay, no rebuild ever blocks.
     _REBUILD_SETTLE_S = 2.0
 
+    # How often the topology signature may be re-read (see _poll_signature).
+    # Well under the settle window, so settling is still detected promptly.
+    _SIGNATURE_POLL_S = 0.25
+
     def _rebuild_if_stale(self, painter) -> None:
         """Start a background re-prepare once the provider's topology
         signature has changed AND settled. The current doc keeps drawing
         until the replacement is assembled and adopted."""
-        import time as _time
         if self._evaluator is None:
             return
         if self._prepare_thread is not None and self._prepare_thread.is_alive():
             return
         if self._assembly is not None or self._prepared is not None:
             return
-        signature = _topology_signature(self._compiled)
+        if self._topology_final:
+            # The live doc was built from post-sweep data, so the topology
+            # cannot change again and there is nothing to detect. Asking is
+            # not free (see _poll_signature), and at ~200ms per call on a
+            # full topology it is the periodic frame-rate collapse - so once
+            # the answer is knowably fixed, stop asking.
+            return
+        if _sweep_in_progress(self._compiled):
+            # Same reason the first build waits: a rebuild mid-sweep starves
+            # the sweep and captures topology that is still growing.
+            return
+        signature = self._poll_signature()
         if signature is None or signature == self._signature:
             return
-        now = _time.monotonic()
-        if signature != self._settle_sig:
-            self._settle_sig = signature
-            self._settle_since = now
-            return
-        if now - self._settle_since < self._REBUILD_SETTLE_S:
-            return
-        self._start_prepare()
+        if self._settled(signature):
+            self._start_prepare()
+
+    def _note_feed(self, ctx):
+        """This frame's note items for the inline notes slot, as
+        `(slot_id, count, u_bytes, f_bytes)`, or None when the doc has no
+        slot (the captured-notefield path) or nothing is visible.
+
+        Reuses the render context the caller already built - the emitter is a
+        pure read of the prepass, so no second pass over the notes."""
+        slot = (self._id_maps or {}).get('notes_slot')
+        if slot is None:
+            return None
+        image_map = self._ensure_note_images(ctx)
+        if image_map is None:
+            return None
+        from analysis.player.render.storyboard import note_feed
+        u_soa, f_soa, count, _report = note_feed.feed_from_context(
+            ctx, image_map)
+        if not count:
+            return None
+        return int(slot), int(count), u_soa.tobytes(), f_soa.tobytes()
+
+    # The note sprites the feed resolves, as (feed key, sprite-cache name)
+    # with the per-(col, state) variants the cache keys on. The receptor is
+    # not a cache sprite - the field layer strokes a plain notch - so it
+    # registers as a solid source the item's mat3 shapes into the lane bar.
+    _NOTE_SPRITES = (
+        ('tap', 'tap_head'), ('ln_head', 'ln_head'), ('ln_tail', 'ln_tail'),
+        ('ln_body', 'ln_body'), ('mine', 'mine'), ('lift', 'lift'),
+        ('fake', 'fake'),
+    )
+    _SPRITE_STATES = ('normal', 'tick', 'miss_tap', 'miss_ln', 'roll',
+                      'released')
+
+    def _ensure_note_images(self, ctx):
+        """`{key: image_id}` for the note feed, registering each sprite into
+        the executor's image table once.
+
+        Every feed image declares natural size (1, 1): a fed item's mat3
+        already carries its on-screen rect over a unit source box, so the
+        sprite's own pixel dimensions must not scale it. Sprites are
+        rasterised per (column, state) exactly as the raster cache keys them,
+        so the feed resolves the same noteskin variant.
+
+        Returns None when the sprite cache is unavailable - the caller then
+        skips the feed rather than drawing wrong art."""
+        if self._note_images is not None:
+            return self._note_images
+        images = getattr(self._executor, '_images', None)
+        cache = getattr(ctx, 'sprite_cache', None)
+        put = getattr(images, 'put', None)
+        if put is None or cache is None:
+            return None
+        from PySide6.QtGui import QColor, QImage
+
+        next_id = 1 + max((self._id_maps.get('images') or {}), default=-1)
+        image_map = {}
+
+        def register(key, image):
+            nonlocal next_id
+            put(next_id, image)
+            self._executor._image_natural[next_id] = (1.0, 1.0)
+            image_map[key] = next_id
+            next_id += 1
+
+        solid = QImage(1, 1, QImage.Format.Format_ARGB32_Premultiplied)
+        solid.fill(QColor(255, 255, 255, 255))
+        register('receptor', solid)
+
+        keycount = int(getattr(ctx, 'keycount', 0) or 0)
+        for key, sprite in self._NOTE_SPRITES:
+            for col in range(keycount):
+                for state in self._SPRITE_STATES:
+                    pixmap = _sprite_image(cache, sprite, ctx, col, state)
+                    if pixmap is not None:
+                        register(f'{key}_{col}_{state}', pixmap)
+        self._note_images = image_map
+        return image_map
+
+    def _schedule_with_feeds(self, t, ctx):
+        """`_schedule`, plus this frame's inline note feed when the doc has
+        one. Falls back to the plain fold on any emitter failure - a missing
+        note feed degrades to an empty notefield, never a dead frame."""
+        try:
+            fed = self._note_feed(ctx)
+        except Exception:
+            self._log_note_feed_failure()
+            fed = None
+        if fed is None:
+            return self._schedule(t)
+        slot, count, u_bytes, f_bytes = fed
+        u_raw, f_raw, _uf_raw, n = self._evaluator.frame_with_feeds(
+            float(t), [slot], [count], u_bytes, f_bytes)
+        u = np.frombuffer(u_raw, dtype=np.uint32).reshape(
+            n, self._evaluator.u_stride)
+        f = np.frombuffer(f_raw, dtype=np.float32).reshape(
+            n, self._evaluator.f_stride)
+        return u, f
+
+    def _log_note_feed_failure(self) -> None:
+        if not self._note_feed_failed:
+            self._note_feed_failed = True
+            logger.warning("DrawablePipeline: note feed failed; the notefield "
+                           "draws empty this session", exc_info=True)
 
     def _schedule(self, t):
         """Fold the static doc into a DrawSchedule at ``t``: return the
@@ -502,6 +678,21 @@ class DrawablePipeline:
 
 _SCREEN_W = 640
 _SCREEN_H = 480
+
+
+def _sprite_image(cache, name, ctx, col, state):
+    """One note sprite as a QImage, or None when the cache does not carry it
+    in that (col, state) combination (not every sprite has every state).
+
+    The cache rasterises QPixmaps for the raster path; the GL executor uploads
+    QImages, so this converts at the boundary."""
+    try:
+        pixmap = cache.get(name, ctx, col=col, state=state)
+    except Exception:
+        return None
+    if pixmap is None or pixmap.isNull():
+        return None
+    return pixmap.toImage()
 
 
 def _resolve_gl_texture(handle):
@@ -552,6 +743,33 @@ class _LazyImages:
         image = self._load(image_id)
         self._cache[image_id] = image
         return default if image is None else image
+
+    def put(self, image_id, image) -> None:
+        """Register an already-built QImage under `image_id` (no path). Used
+        for the note sprites a per-frame feed references, which are rasterised
+        by the sprite cache rather than read from disk."""
+        self._cache[int(image_id)] = image
+
+    def warm(self) -> None:
+        """Decode every path on a daemon thread so `get` is a cache hit.
+
+        Without this the first draw of each image pays a disk read + decode
+        ON THE RENDER THREAD, inside the paint bracket - and elements enter
+        their time windows throughout the chart, so the hitches recur as new
+        art appears rather than being a one-off cost at load.
+
+        QImage decoding is not GUI-thread-bound (unlike QPixmap), so this is
+        safe off-thread. The cache is plain dict get/set, atomic under the
+        GIL: a race can only decode the same image twice, never corrupt."""
+        import threading
+
+        def worker():
+            for image_id in list(self._paths):
+                if image_id not in self._cache:
+                    self._cache[image_id] = self._load(image_id)
+
+        threading.Thread(target=worker, daemon=True,
+                         name='drawable-image-warm').start()
 
     def __contains__(self, image_id) -> bool:
         return image_id in self._paths
@@ -604,11 +822,10 @@ def _lazy_images(id_maps):
 
 
 def _drawable_sizes_of(id_maps, evaluator) -> list:
-    """Per-DrawableId logical sizes for the executor. The static doc mints
-    every drawable at the screen size (640x480), and does not export a
-    per-id size table, so fall back to screen-sized drawables sized from the
-    evaluator's drawable_count. An explicit ``drawable_sizes`` (a future doc
-    revision, or the feed-model bridge) still wins when present."""
+    """Per-DrawableId logical sizes for the executor, from the doc's
+    ``drawable_sizes`` table (each drawable is only as big as it needs to
+    be). A producer that exports no table falls back to screen-sized
+    drawables sized from the evaluator's drawable_count."""
     sizes = None
     if isinstance(id_maps, dict):
         sizes = id_maps.get('drawable_sizes')

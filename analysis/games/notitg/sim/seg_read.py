@@ -68,6 +68,24 @@ class SegCurve:
         return tuple(lane.sample(t, cur)
                      for lane, cur in zip(lanes, cursors))
 
+    def is_static(self) -> bool:
+        """True when this prop has NO recorded motion, so `sample` provably
+        returns `rest` at every t and a consumer can skip walking the curve.
+
+        The three sources `sample` reads are token steps, recorded lanes, and
+        the beyond-frontier preview; with none of them the actor never touched
+        this prop. Exporters dense-sample a curve at a fixed dt to discover its
+        shape, which for the (overwhelmingly common) untouched prop is
+        thousands of samples to learn it never moves - this answers that in
+        three dict lookups."""
+        actor = self._sim.env._actors.get(self._rec_id)
+        if actor is None:
+            return True
+        preview = getattr(actor, '_seg_preview', None)
+        return not (actor._seg_tokens.get(self._prop)
+                    or actor._seg.get(self._prop)
+                    or (preview and preview.get(self._prop)))
+
     def _token_at(self, tokens, t: float) -> tuple:
         ts, vals = tokens
         idx = bisect_right(ts, t) - 1

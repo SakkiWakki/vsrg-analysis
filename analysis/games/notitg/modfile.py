@@ -605,12 +605,37 @@ def _wrap_hoisted_ancestors(element, ancestors, start_time, named_keyframes,
             # poked, so plain hoists stay visually unchanged). Only an
             # unrecorded ancestor can never animate and is skipped.
             continue
-        element = _group_element(ancestor, start_time, keyframes,
-                                 (element,), sim)
+        element = _transform_only(
+            _group_element(ancestor, start_time, keyframes, (element,), sim))
     # The band z lives on the TOP-LEVEL element (the renderer bands by
     # it); wrapping must not strand the hoisted element's band on an
     # inner node.
     return element if element.z == band_z else _with_z(element, band_z)
+
+
+# Visibility props a hoisted subtree's ancestor wrapper must NOT contribute,
+# paired with the rest that makes it neutral (shown, fully opaque). The props
+# are REPLACED rather than dropped: an Element's timelines dict is expected to
+# carry the full property set (the document builder reads `timelines['hidden']`
+# directly), so absence is a crash, not a signal.
+_WRAPPER_NEUTRAL_RESTS = {'hidden': 0.0, 'alpha': 1.0}
+
+
+def _transform_only(element):
+    """An ancestor wrapper reduced to PLACEMENT.
+
+    The hoist pulled this subtree out of the tree because the engine draws it
+    as an independent layer (SM draws BGCHANGES behind the notefield, not as a
+    child of the modfile tree); the wrapper exists solely to keep an animated
+    ancestor's TRANSFORM, per _wrap_hoisted_ancestors. Letting its visibility
+    through would hide content the engine still draws - gat's background tree
+    sets `hidden` nowhere, yet a hidden lua-tree wrapper culled the whole
+    background once ancestor chains started composing."""
+    timelines = dict(element.timelines)
+    for prop, rest in _WRAPPER_NEUTRAL_RESTS.items():
+        if prop in timelines:
+            timelines[prop] = EventTimeline([], rest=(rest,))
+    return replace(element, timelines=timelines)
 
 
 # The background band z: below the notes/field (z=0) but a valid

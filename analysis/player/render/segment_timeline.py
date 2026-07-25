@@ -91,9 +91,18 @@ class SegmentTimeline:
     `add_osc`, `add_slab`, `publish`, `finish`) belong to the single
     writer; `sample` belongs to readers."""
 
-    def __init__(self, rest: float = 0.0, eps: float = SIMPLIFY_EPS):
+    def __init__(self, rest: float = 0.0, eps: float = SIMPLIFY_EPS,
+                 step: bool = False):
         self._rest = float(rest)
         self._eps = float(eps)
+        # A STEP lane carries a discrete value (a visibility bit, a sprite
+        # frame index) that only ever jumps. Corridor collapse approximates a
+        # run of instants with a linear ramp, which is sound for a continuous
+        # signal and destroys a discrete one: a 0-then-1 pair becomes a ramp
+        # bridging the gap, so every sample between reads FRACTIONAL. A step
+        # lane holds each poke instead, so its value is always one it was
+        # actually written with.
+        self._step = bool(step)
 
         # Merged directory: segment starts in append order (monotone).
         self._dir_t0: list[float] = []
@@ -140,6 +149,10 @@ class SegmentTimeline:
         to one segment, exactly as `simplify_instants` collapses them
         in batch; the corridor is maintained incrementally so each poke
         is O(1) with no rescan."""
+        if self._step:
+            self.add_hold(t, v)
+            return
+
         if self._run_n == 0:
             self._start_run(t, v)
             return

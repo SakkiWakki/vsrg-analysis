@@ -32,6 +32,16 @@ def _note_view(**kw):
     return SimpleNamespace(**base)
 
 
+def _stream_view(**kw):
+    """A minimal `_StreamView` stand-in: the same positioning/mod surface as a
+    note head plus `kind` (notes_model.KIND_*) and `head_in_window`."""
+    base = dict(kind=0, col=0, lx=0.0, y=0.0, head_in_window=True, alpha=1.0,
+                zoom=1.0, rotation_deg=0.0, glow=0.0, z=0.0, rot_x=0.0,
+                rot_y=0.0)
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
 def _ctx(note_views, keycount=4, lane_w=64.0, judge_y=400.0, note_h=14.0,
          receptor_offsets=None, stream_views=None):
     """A stub with the RenderContext reads the emitter uses: keycount,
@@ -51,7 +61,9 @@ def _ctx(note_views, keycount=4, lane_w=64.0, judge_y=400.0, note_h=14.0,
     return ctx
 
 
-_IMAGE_MAP = {'receptor': 100, 'tap': 200}
+_IMAGE_MAP = {'receptor': 100, 'tap': 200,
+              'mine': 300, 'lift': 301, 'fake': 302,
+              'ln_head': 220, 'ln_tail': 230, 'ln_body': 240}
 
 
 # ── SoA layout ───────────────────────────────────────────────────────
@@ -104,25 +116,96 @@ def test_receptors_first_then_note_order():
     assert list(rows[:, 1]) == [100, 100, 100, 100, 200, 200]
 
 
-def test_lns_and_streams_are_skipped_not_drawn():
-    views = [_note_view(col=0, lx=0.0, y=50.0),
-             _note_view(col=1, lx=64.0, y=150.0, is_ln=True)]
-    ctx = _ctx(views, stream_views=[_note_view()])
-    _, _, count, report = nf.feed_from_context(ctx, _IMAGE_MAP)
-    assert report['taps'] == 1
-    assert report['skipped'] >= 1  # the LN head
-    assert count == 4 + 1
-    assert 'ln_body_path_as_lines_source' in report['seams']
-    assert 'stream_views_second_walk' in report['seams']
+def test_ln_head_and_tail_draw_with_their_own_sprites():
+    image_map = {'receptor': 100, 'tap': 200, 'ln_head': 220, 'ln_tail': 230}
+    views = [_note_view(col=1, lx=64.0, y=150.0, is_ln=True, y_end=40.0)]
+    u, _f, count, report = nf.feed_from_context(_ctx(views), image_map)
+    assert (report['taps'], report['ln_tails']) == (1, 1)
+    assert count == 4 + 2
+    drawn = [int(u[i * nf.FEED_U_STRIDE + 1]) for i in (4, 5)]
+    assert drawn == [220, 230], 'the ln_head sprite, then the ln_tail cap'
+    # No body path on this view, so no ribbon segments.
+    assert report['ln_body_segments'] == 0
 
 
-def test_3d_head_skipped_and_reported():
+def test_ln_tail_rides_the_body_path_tangent():
+    # A folded noodle's end segment runs back UP the lane; the cap follows the
+    # tangent, which is how the vertical flip emerges without a special case.
+    import numpy as _np
+    path = (_np.array([64.0, 64.0]), _np.array([100.0, 140.0]))  # heading DOWN
+    views = [_note_view(col=1, lx=64.0, y=150.0, is_ln=True, y_end=40.0,
+                        body_path=path)]
+    image_map = {'receptor': 100, 'tap': 200, 'ln_head': 220, 'ln_tail': 230}
+    _u, f, _count, report = nf.feed_from_context(_ctx(views), image_map)
+    assert report['ln_tails'] == 1
+    row = f[5 * nf.FEED_F_STRIDE:6 * nf.FEED_F_STRIDE]
+    mat = _np.asarray(row[nf._F_MAT:nf._F_MAT + 9], dtype=float).reshape(3, 3)
+    # The cap sits at the path END (y=140), not the raw y_end (40).
+    centre = mat @ _np.array([0.5, 0.5, 1.0])
+    assert centre[1] == pytest.approx(140.0, abs=1e-4)
+
+
+def test_stream_records_draw_with_their_kind_sprite():
+    # mine / lift / fake each emit one item keyed by kind; a span record whose
+    # head fell outside the cull window draws no head (body stroke only).
+    streams = [_stream_view(kind=0, col=0, lx=0.0, y=50.0),
+               _stream_view(kind=1, col=1, lx=64.0, y=60.0),
+               _stream_view(kind=2, col=2, lx=128.0, y=70.0),
+               _stream_view(kind=0, col=3, lx=192.0, y=80.0,
+                            head_in_window=False)]
+    ctx = _ctx([], stream_views=streams)
+    u, _f, count, report = nf.feed_from_context(ctx, _IMAGE_MAP)
+    assert report['streams'] == 3
+    assert count == 4 + 3
+    assert 'stream_views_second_walk' not in report['seams']
+    drawn = [int(u[i * nf.FEED_U_STRIDE + 1]) for i in range(4, count)]
+    assert drawn == [300, 301, 302]
+
+
+def test_3d_head_draws_through_the_perspective_homography():
+    # A +z push draws, and its mat3 is PROJECTIVE (a non-zero bottom row) -
+    # the 2D placement cannot express that, so its presence proves the note
+    # went through the field camera rather than the flat path.
     views = [_note_view(col=0, lx=0.0, y=50.0, z=120.0)]
+    ctx = _ctx(views)
+    _u, f, count, report = nf.feed_from_context(ctx, _IMAGE_MAP)
+    assert report['taps'] == 1
+    assert count == 4 + 1
+    assert '3d_head_perspective_homography' not in report['seams']
+
+    # A pure z push at the conjugation centre stays AFFINE - it reduces to
+    # the field's d/(d-z) depth scale - so the evidence is the scale change.
+    def head_mat(ctx_):
+        _u, f_, _c, _r = nf.feed_from_context(ctx_, _IMAGE_MAP)
+        row = f_[4 * nf.FEED_F_STRIDE:5 * nf.FEED_F_STRIDE]
+        return np.asarray(row[nf._F_MAT:nf._F_MAT + 9], dtype=np.float64)
+
+    pushed = head_mat(ctx)
+    flat = head_mat(_ctx([_note_view(col=0, lx=0.0, y=50.0)]))
+    assert abs(pushed[0] - flat[0]) > 1e-6, 'z push rescales the head'
+
+
+def test_a_tilted_head_gets_a_projective_mat3():
+    # A tilt (roll/twirl) is what the 2D placement genuinely cannot express:
+    # its homography carries a non-zero projective bottom row.
+    views = [_note_view(col=0, lx=0.0, y=50.0, rot_x=40.0)]
+    _u, f, _count, report = nf.feed_from_context(_ctx(views), _IMAGE_MAP)
+    assert report['taps'] == 1
+    row = f[4 * nf.FEED_F_STRIDE:5 * nf.FEED_F_STRIDE]
+    mat = np.asarray(row[nf._F_MAT:nf._F_MAT + 9], dtype=np.float64)
+    assert abs(mat[6]) > 1e-9 or abs(mat[7]) > 1e-9, 'projective bottom row'
+
+
+def test_a_note_behind_the_eye_draws_nothing():
+    # 'gone' verdict: pushed through the camera, the head has no valid
+    # homography and must be skipped rather than drawn wrong.
+    from analysis.games.notitg import field_projection
+    behind = field_projection.EYE_DISTANCE * 2.0
+    views = [_note_view(col=0, lx=0.0, y=50.0, z=behind)]
     ctx = _ctx(views)
     _, _, count, report = nf.feed_from_context(ctx, _IMAGE_MAP)
     assert report['taps'] == 0
-    assert count == 4  # only receptors
-    assert '3d_head_perspective_homography' in report['seams']
+    assert count == 4  # receptors only
 
 
 def test_stealth_blanked_head_skipped():
@@ -296,3 +379,95 @@ def test_gat1_smoke_prints_counts():
         _, _, count, report = nf.feed_notes(player, t, image_map)
         print(f'gat1 t={t}: items={count} report={report}')
     assert count >= 0
+
+
+def test_stealthglow_emits_an_additive_second_pass():
+    # A stealthed note (alpha 0) is still visible as LIGHT: the fill drops but
+    # an additive glow pass at `glow` strength survives, tinted by glow_rgb.
+    views = [_note_view(col=0, lx=0.0, y=50.0, alpha=0.0, glow=0.75,
+                        glow_rgb=(1.0, 0.5, 0.25))]
+    ctx = _ctx(views)
+    u, f, count, report = nf.feed_from_context(ctx, _IMAGE_MAP)
+
+    assert report['taps'] == 0, 'the blanked fill does not draw'
+    assert report['glows'] == 1
+    assert count == 4 + 1
+
+    i = 4  # after the receptors
+    assert int(u[i * nf.FEED_U_STRIDE + 3]) == 1, 'additive flag set'
+    row = f[i * nf.FEED_F_STRIDE:(i + 1) * nf.FEED_F_STRIDE]
+    assert row[nf._F_OPACITY] == pytest.approx(0.75)
+    assert tuple(row[nf._F_TINT:nf._F_TINT + 3]) == pytest.approx(
+        (1.0, 0.5, 0.25))
+
+
+def test_a_lit_note_draws_both_fill_and_glow():
+    views = [_note_view(col=0, lx=0.0, y=50.0, alpha=1.0, glow=0.5)]
+    ctx = _ctx(views)
+    u, _f, count, report = nf.feed_from_context(ctx, _IMAGE_MAP)
+    assert (report['taps'], report['glows']) == (1, 1)
+    assert count == 4 + 2
+    flags = [int(u[i * nf.FEED_U_STRIDE + 3]) for i in (4, 5)]
+    assert flags == [0, 1], 'fill source-over, then the additive glow'
+
+
+def test_head_sprite_resolves_by_column_and_state():
+    # The raster cache keys heads on (col, state); the feed resolves the same
+    # variant, most specific key first.
+    image_map = {'receptor': 100, 'tap': 200, 'tap_1': 201,
+                 'tap_miss_tap': 210, 'tap_2_miss_tap': 211}
+    views = [_note_view(col=0, lx=0.0, y=50.0),                    # tap
+             _note_view(col=1, lx=64.0, y=60.0),                   # tap_1
+             _note_view(col=3, lx=192.0, y=70.0, miss=True),       # tap_miss_tap
+             _note_view(col=2, lx=128.0, y=80.0, miss=True)]       # tap_2_miss_tap
+    ctx = _ctx(views)
+    u, _f, count, report = nf.feed_from_context(ctx, image_map)
+    assert report['taps'] == 4
+    drawn = [int(u[i * nf.FEED_U_STRIDE + 1]) for i in range(4, count)]
+    assert drawn == [200, 201, 210, 211]
+
+
+def test_press_hide_drops_a_pressed_head():
+    # Under press_hide a tap disappears once pressed; without it the head
+    # keeps drawing. The feed must honour the same gate as the raster layer.
+    view = _note_view(col=0, lx=0.0, y=50.0, state='tap', press_t=1.0)
+    hidden = _ctx([view])
+    hidden.player = SimpleNamespace(press_hide=True)
+    hidden.t_now = 2.0
+    _, _, _count, report = nf.feed_from_context(hidden, _IMAGE_MAP)
+    assert report['taps'] == 0, 'pressed head hidden'
+
+    shown = _ctx([view])
+    shown.player = SimpleNamespace(press_hide=True)
+    shown.t_now = 0.5
+    _, _, _count, report = nf.feed_from_context(shown, _IMAGE_MAP)
+    assert report['taps'] == 1, 'not yet pressed - still drawn'
+
+
+def test_ln_body_emits_a_quad_per_path_segment():
+    # A ribbon IS a quad strip: one item per segment, each rotated to that
+    # segment's angle, so no separate Lines tier is needed.
+    import numpy as _np
+    path = (_np.array([64.0, 64.0, 64.0]), _np.array([40.0, 90.0, 150.0]))
+    views = [_note_view(col=1, lx=64.0, y=150.0, is_ln=True, y_end=40.0,
+                        body_path=path)]
+    u, _f, _count, report = nf.feed_from_context(_ctx(views), _IMAGE_MAP)
+    assert report['ln_body_segments'] == 2, 'three samples -> two segments'
+    body = [int(u[i * nf.FEED_U_STRIDE + 1]) for i in (5, 6)]
+    assert body == [240, 240]
+
+
+def test_ln_body_narrows_where_it_dives_toward_the_camera():
+    # body_scale is the per-sample depth foreshortening; a segment whose
+    # sample scales down must emit a narrower quad.
+    import numpy as _np
+    path = (_np.array([64.0, 64.0]), _np.array([40.0, 140.0]))
+    views = [_note_view(col=1, lx=64.0, y=150.0, is_ln=True, y_end=40.0,
+                        body_path=path, body_scale=_np.array([0.5, 0.5]))]
+    _u, f, _count, report = nf.feed_from_context(_ctx(views), _IMAGE_MAP)
+    assert report['ln_body_segments'] == 1
+    row = f[5 * nf.FEED_F_STRIDE:6 * nf.FEED_F_STRIDE]
+    mat = _np.asarray(row[nf._F_MAT:nf._F_MAT + 9], dtype=float).reshape(3, 3)
+    # The segment runs straight down, rotated -90+90=0... width rides m01/m11.
+    width = _np.hypot(mat[0, 0], mat[1, 0])
+    assert width == pytest.approx(64.0 * 0.5, abs=1e-3)

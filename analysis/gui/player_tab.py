@@ -23,6 +23,15 @@ from analysis.gui.settings import (
 )
 from analysis.gui.widgets import JumpSlider
 
+PLAY_GLYPH = '▶'
+PAUSE_GLYPH = '⏸'
+
+
+def _transport_glyph(paused: bool) -> str:
+    """The transport button labels the action a click performs: play when
+    paused, pause when playing."""
+    return PLAY_GLYPH if paused else PAUSE_GLYPH
+
 
 @dataclass
 class AudioState:
@@ -210,16 +219,16 @@ class PlayerTab(QWidget):
     def _build_transport_bar(self) -> QHBoxLayout:
         bar = QHBoxLayout()
 
-        self.play_btn = QPushButton('▶')
+        self.play_btn = QPushButton()
         # Fixed in BOTH dimensions, sized to the taller of the two
         # glyphs: the pause glyph renders ~3px taller than play in the
         # default font, so a size-to-content button (and with it the
         # whole transport row) visibly resizes on every toggle.
         glyph_heights = []
-        for glyph in ('▶', '⏸'):
+        for glyph in (PLAY_GLYPH, PAUSE_GLYPH):
             self.play_btn.setText(glyph)
             glyph_heights.append(self.play_btn.sizeHint().height())
-        self.play_btn.setText('▶')
+        self.play_btn.setText(_transport_glyph(self.player.paused))
         self.play_btn.setFixedSize(36, max(glyph_heights))
         self.play_btn.setFocusPolicy(Qt.NoFocus)
         self.play_btn.clicked.connect(lambda _checked=False: self._toggle())
@@ -340,7 +349,7 @@ class PlayerTab(QWidget):
         regardless of which call site wrote it (transport button,
         keyboard, scrub grab, end-of-chart, autostart)."""
         paused = self.player.paused
-        self.play_btn.setText('⏸' if paused else '▶')
+        self.play_btn.setText(_transport_glyph(paused))
         self._sync_audio(force=True)
         _sync_gc_to_playback(not paused)
         self.view.update()

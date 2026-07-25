@@ -50,6 +50,7 @@ No Qt import at module load - importable headless.
 from __future__ import annotations
 
 import math
+import os
 
 import numpy as np
 
@@ -133,7 +134,18 @@ def export_channel(timeline, t0: float, t1: float, prop: int = 0):
     """
     if isinstance(timeline, EventTimeline):
         return _export_event_timeline(timeline, prop)
+    if _is_static(timeline):
+        return [], [], [], _rest_value(timeline, prop)
     return _export_dense(timeline, t0, t1, prop)
+
+
+def _is_static(timeline) -> bool:
+    """True when a curve advertises that it never moves (`is_static`), so the
+    dense walk can be skipped for a bare rest channel. A curve that does not
+    implement the probe is assumed animated - the safe direction, since a
+    wrongly-skipped export would silently freeze real motion."""
+    probe = getattr(timeline, 'is_static', None)
+    return probe is not None and probe()
 
 
 def _rest_value(timeline, prop: int) -> float:
@@ -219,11 +231,10 @@ def _export_dense(timeline, t0: float, t1: float, prop: int):
 # --------------------------------------------------------------------------
 
 # A group (ActorFrame) draws nothing itself; its transform composes onto its
-# children. This wave does not yet fold the group transform into the leaves
-# (the item() transform lanes carry each leaf's OWN timelines only), so a group
-# is flattened away and its image leaves emit at their own placement - a
-# documented interim (true group composition awaits the transform-fold wave).
-_SKIP_GROUP = 'group'
+# children. Groups are not drawn, but they are NOT discarded: each leaf carries
+# its ancestor chain root-first and emits it as an `item_link` chain, so the
+# engine's `local @ parent` nesting composes natively (see _flatten_elements).
+_GROUP = 'group'
 
 
 class _FrameCurve:
@@ -248,31 +259,51 @@ class _FrameCurve:
 
 
 def _flatten_elements(elements) -> list:
-    """The element tree flattened to a leaf list in tree order, groups replaced
-    by their children (see `_SKIP_GROUP`). Returns `(leaves, group_count)`."""
-    leaves = []
+    """The element tree flattened to a leaf list in tree order, each leaf paired
+    with its ANCESTOR CHAIN (root-first, groups only). Returns
+    `(pairs, group_count)` where each pair is `(leaf, ancestors)`.
+
+    A group draws nothing itself but carries a transform that composes onto its
+    subtree, so dropping it strands its children at their own local placement
+    (gat 1's `gat_bg` rotates/vibrates a background its leaves never see). The
+    chain rides to `item_link`, which composes it engine-natively."""
+    pairs = []
     groups = 0
-    stack = list(reversed(list(elements)))
+    stack = [(element, ()) for element in reversed(list(elements))]
     while stack:
-        element = stack.pop()
-        if element.kind == _SKIP_GROUP:
+        element, ancestors = stack.pop()
+        if element.kind == _GROUP:
             groups += 1
-            stack.extend(reversed(list(element.children)))
+            chain = ancestors + (element,)
+            stack.extend((child, chain)
+                         for child in reversed(list(element.children)))
             continue
-        leaves.append(element)
-    return leaves, groups
+        pairs.append((element, ancestors))
+    return pairs, groups
 
 
-def _band_elements(leaves):
-    """Split flattened leaves into (below, above) bands by the sign of their
-    band z, each band internally sorted by the renderer's `(z, z_index,
-    t_start)` key - reproducing today's banding as the doc's starting point.
+def _band_elements(pairs):
+    """Split flattened `(leaf, ancestors)` pairs into (below, above) bands, each
+    band internally sorted by the renderer's `(z, z_index, t_start)` key.
     Below-band (z < 0) draws before the field instances, above-band (z >= 0)
     after (true tree-order interleave replaces this in a later wave)."""
-    ordered = sorted(leaves, key=lambda e: (e.z, e.z_index, e.t_start))
-    below = [e for e in ordered if e.z < 0]
-    above = [e for e in ordered if e.z >= 0]
+    ordered = sorted(pairs, key=lambda p: (_band_z(p), p[0].z_index,
+                                           p[0].t_start))
+    below = [p for p in ordered if _band_z(p) < 0]
+    above = [p for p in ordered if _band_z(p) >= 0]
     return below, above
+
+
+def _band_z(pair) -> float:
+    """The band z for a `(leaf, ancestors)` pair: the TOP-LEVEL element's z.
+
+    The compiler puts the band on the root of a hoisted subtree, not on its
+    leaves (modfile `_with_z`: "the band z lives on the TOP-LEVEL element (the
+    renderer bands by it)"), so a background subtree hoisted to z=-100 has
+    leaves still resting at z=0. Reading the leaf's own z drops the hoist and
+    bands the whole background ABOVE the field."""
+    leaf, ancestors = pair
+    return float(ancestors[0].z if ancestors else leaf.z)
 
 
 # --------------------------------------------------------------------------
@@ -294,6 +325,51 @@ _LINK_PROP_ORDER = (
     ('crop_l', 'crop_left'), ('crop_t', 'crop_top'),
     ('crop_r', 'crop_right'), ('crop_b', 'crop_bottom'),
 )
+
+
+# The `item_link` parameters an ELEMENT chain link carries, paired with the
+# element-timeline prop each reads. Mirrors _LINK_PROP_ORDER (the field-instance
+# chain) plus the out-of-plane terms elements animate: a group's rotationx /
+# rotationy / z / zoomz. Anchor (halign/valign) and crop apply to the LEAF only,
+# and the binding's defaults cover every prop an element never sets.
+_ELEMENT_LINK_PROPS = (
+    ('x', 'x'), ('y', 'y'),
+    ('zoom_x', 'scale_x'), ('zoom_y', 'scale_y'), ('scale_z', 'scale_z'),
+    ('rot', 'rotation'),
+    ('rotation_x', 'rotation_x'), ('rotation_y', 'rotation_y'),
+    ('z', 'z'),
+    ('skew_x', 'skew_x'), ('skew_y', 'skew_y'),
+    ('halign', 'halign'), ('valign', 'valign'),
+    ('hidden', 'hidden'), ('alpha', 'alpha'),
+    ('crop_l', 'crop_left'), ('crop_t', 'crop_top'),
+    ('crop_r', 'crop_right'), ('crop_b', 'crop_bottom'),
+)
+
+# The SM LoadMenuPerspective default; a chain resting here needs no camera.
+_DEFAULT_FOV = 45.0
+_FOV_EPS = 1e-4
+
+
+def notes_inline() -> bool:
+    """Whether the base field draws its notes as INLINE ITEMS (note_feed)
+    rather than blitting one captured notefield.
+
+    THE DEFAULT for the unified path: an item placed by its own mat3 cannot be
+    clipped at a capture box it never should have had, which is what cut
+    mod-displaced notes off. `VSRG_DRAWABLE_NOTES=0` reverts to the captured
+    notefield for differential testing."""
+    return os.environ.get('VSRG_DRAWABLE_NOTES', '1').lower() in ('1', 'true', 'yes')
+
+
+def _rotation_order_of(element) -> str:
+    """The element's Euler rotation-order token (SetRotationOrder), or the
+    stock RageMatrix 'xyz'. The order is a token rather than an animatable
+    scalar, so it reads as the timeline's current value, not a channel."""
+    timeline = element.timelines.get('rotation_order')
+    if timeline is None:
+        return 'xyz'
+    (order,) = timeline.sample(0.0)
+    return str(order or 'xyz')
 
 
 class _Ctx:
@@ -359,6 +435,13 @@ class _Builder:
         self._image_ids: dict[str, int] = {}
         self._image_paths: dict[int, str] = {}
         self._image_grids: dict[int, tuple] = {}
+        # Logical size per minted DrawableId (the screen is id 0). Exported
+        # so the executor allocates each drawable at its REAL size instead
+        # of assuming everything is screen-shaped.
+        self._drawable_sizes: dict[int, tuple] = {0: self._screen}
+        # The inline notes feed slot (see notes_inline); None when the
+        # base field blits a captured notefield instead.
+        self._notes_slot = None
         # Per-band emitted counts + per-kind skip counts, surfaced in the report.
         self._elem_below = 0
         self._elem_above = 0
@@ -370,9 +453,21 @@ class _Builder:
 
     # -- drawable minting -------------------------------------------------
 
-    def _new_drawable(self, persistent: bool) -> int:
-        return self._builder.drawable(self._screen[0], self._screen[1],
-                                      persistent=persistent, dynamic=False)
+    def _new_drawable(self, persistent: bool, size=None) -> int:
+        """Mint one drawable and record its logical size in the exported
+        size table. `size` is the drawable's logical box; None = the design
+        screen, which is a DELIBERATE choice at each call site, not a
+        default shape: an AFT slot is an engine screen capture and a field
+        drawable is the design-space capture the link-chain homographies
+        map (TransformChannel's 640x480 content contract). A drawable for
+        anything else should pass its content size - a plain drawable is
+        only as big as what it draws."""
+        w, h = size if size is not None else self._screen
+        drawable = self._builder.drawable(float(w), float(h),
+                                          persistent=persistent,
+                                          dynamic=False)
+        self._drawable_sizes[drawable] = (float(w), float(h))
+        return drawable
 
     def _field_drawable(self, scope: str) -> int:
         drawable = self._field_ids.get(scope)
@@ -492,13 +587,17 @@ class _Builder:
         id_maps = {'screen': _SCREEN_ID, 'slots': dict(self._slot_ids),
                    'fields': dict(self._field_ids),
                    'images': dict(self._image_paths),
-                   'image_grids': dict(self._image_grids)}
+                   'image_grids': dict(self._image_grids),
+                   'drawable_sizes': [self._drawable_sizes[i]
+                                      for i in sorted(self._drawable_sizes)],
+                   'notes_slot': self._notes_slot}
         return evaluator, id_maps
 
     def _banded_elements(self):
-        """(below, above) storyboard-element bands from `compiled['tree']`,
-        groups flattened away (their leaves banded by their own z). The group
-        count is folded into the skip tally so the report accounts for it."""
+        """(below, above) storyboard-element bands from `compiled['tree']`, each
+        entry a `(leaf, ancestors)` pair banded by the leaf's own z. The group
+        count is folded into the skip tally so the report accounts for it (a
+        group is not drawn, but it is composed - see _flatten_elements)."""
         tree = self._compiled.get('tree') or ()
         leaves, groups = _flatten_elements(tree)
         if groups:
@@ -519,6 +618,15 @@ class _Builder:
         player instances ARE the originals and no base is prepended."""
         spec = self._compiled.get('player_fields')
         if spec is not None and getattr(spec, 'note_mods', None):
+            return
+        if notes_inline():
+            # NOTES AS ITEMS: the base field's receptors and notes draw as
+            # ordinary screen items, each placed by its own mat3, instead of
+            # blitting one captured notefield. Nothing but the real render
+            # target bounds them, so a mod that pushes a note outside the
+            # playfield no longer clips it at a capture box.
+            self._notes_slot = self._builder.feed_slot()
+            self._builder.feed_inline(_SCREEN_ID, self._notes_slot)
             return
         field = self._field_drawable('field')
         visible_id, visible_rest = self._visible_from_hidden(
@@ -617,16 +725,16 @@ class _Builder:
 
     # -- storyboard element emission --------------------------------------
 
-    def _emit_element_band(self, leaves) -> int:
-        """Emit each leaf in `leaves` as an Image item (or count its skip);
-        returns the number of items actually emitted."""
+    def _emit_element_band(self, pairs) -> int:
+        """Emit each `(leaf, ancestors)` pair as an Image item (or count its
+        skip); returns the number of items actually emitted."""
         emitted = 0
-        for element in leaves:
-            if self._emit_element(element):
+        for element, ancestors in pairs:
+            if self._emit_element(element, ancestors):
                 emitted += 1
         return emitted
 
-    def _emit_element(self, element) -> bool:
+    def _emit_element(self, element, ancestors=()) -> bool:
         """Emit one leaf element as an SRC_IMAGE item, or count it as a per-kind
         skip. Returns True when an item was emitted. Only image-backed kinds
         (sprite / frames) with a resolvable asset path draw; everything else -
@@ -639,7 +747,7 @@ class _Builder:
         if image_id is None:
             self._count_skip('no_asset')
             return False
-        self._sn_image_item(image_id, element)
+        self._sn_image_item(image_id, element, ancestors)
         return True
 
     def _count_skip(self, kind: str) -> None:
@@ -667,17 +775,82 @@ class _Builder:
             self._image_grids[image_id] = (cols, rows)
         return image_id
 
-    def _sn_image_item(self, image_id: int, element) -> None:
+    def _sn_image_item(self, image_id: int, element, ancestors=()) -> None:
         """Push one SRC_IMAGE item: the element's scalar transform timelines on
         the item's own lanes (export_channel each), the inverted `hidden` gate
-        on `visible`, and the sheet-frame channel on `frame`. The anchor/origin
-        natural-size offset is NOT folded (item lanes are the leaf's own x/y);
-        that placement refinement rides the transform-fold wave."""
+        on `visible`, and the sheet-frame channel on `frame`.
+
+        A leaf under one or more groups additionally emits the ANCESTOR CHAIN
+        (root-first, then the leaf) as `item_link`s, so the engine's
+        `local @ parent` nesting composes natively instead of the leaf drawing
+        at its own local placement. When any link in that chain sets a
+        non-default fov, the chain's perspective camera rides along too."""
         kwargs = self._element_transform_kwargs(element)
         kwargs.update(self._element_frame_kwarg(element))
         kwargs.update(self._element_visible_kwarg(element))
         self._builder.item(_SCREEN_ID, self._sn.SRC_IMAGE, image_id,
                            additive=bool(element.additive), **kwargs)
+        if ancestors:
+            self._emit_element_links(element, ancestors)
+
+    def _emit_element_links(self, element, ancestors) -> None:
+        """Attach the leaf's ancestor chain (root-first, leaf last) to the item
+        just pushed, plus the chain's fov camera when one is set.
+
+        The item's own lanes stay as emitted - `compose_links` REPLACES the TRS
+        mat3 when links are present, so the leaf's transform must ride the
+        chain's final link rather than the item lanes alone."""
+        for link_element in (*ancestors, element):
+            self._builder.item_link(
+                _SCREEN_ID, **self._element_link_kwargs(link_element))
+        fov = self._chain_fov(ancestors, element)
+        if fov is not None:
+            fov_id, fov_rest = fov
+            self._builder.item_projection(
+                _SCREEN_ID, fov_id=fov_id, fov_rest=fov_rest,
+                vanish_x_rest=_SCREEN_W / 2.0,
+                vanish_y_rest=_SCREEN_H / 2.0)
+
+    def _chain_fov(self, ancestors, element):
+        """The chain's effective perspective camera as `(channel id, rest)`, or
+        None when every link rests at the default fov (the flat-chart no-op).
+
+        A frame's fov projects its whole subtree and the INNERMOST frame that
+        set one wins (its LoadMenuPerspective replaces the outer), matching
+        `TransformChannel.at`. gat 1's `gat_all_bg` carries `FOV="60"`."""
+        for link_element in reversed((*ancestors, element)):
+            timeline = link_element.timelines.get('fov')
+            if timeline is None:
+                continue
+            ts, vals, durs, rest = export_channel(timeline, self._t0, self._t1)
+            # An untouched fov rests at the LoadMenuPerspective default with no
+            # breakpoints; minting a channel for it would attach a camera to
+            # every chain (a `_channel` id is always valid, so the id alone
+            # cannot say whether the fov was ever set).
+            if not ts and abs(float(rest) - _DEFAULT_FOV) <= _FOV_EPS:
+                continue
+            chan_id = self._builder.channel(
+                [float(v) for v in ts], [float(v) for v in vals],
+                [float(v) for v in durs], float(rest))
+            return chan_id, float(rest)
+        return None
+
+    def _element_link_kwargs(self, element) -> dict:
+        """The `item_link` kwargs for one element in a chain: an (id, rest)
+        channel per transform prop it carries, plus its Euler rotation order.
+
+        Absent props fall through to the binding's engine-identity defaults, so
+        a group that only sets `x`/`y` composes as a pure translation."""
+        kwargs: dict[str, object] = {}
+        for param, prop in _ELEMENT_LINK_PROPS:
+            timeline = element.timelines.get(prop)
+            if timeline is None:
+                continue
+            chan_id, rest = self._channel(timeline)
+            kwargs[f'{param}_id'] = chan_id
+            kwargs[f'{param}_rest'] = rest
+        kwargs['rotation_order'] = _rotation_order_of(element)
+        return kwargs
 
     def _element_transform_kwargs(self, element) -> dict:
         kwargs: dict[str, object] = {}
@@ -811,6 +984,9 @@ class _RecordingBuilder:
 
     def item_link(self, *args, **kwargs) -> None:
         self.ops.append(('item_link', args, kwargs))
+
+    def item_projection(self, *args, **kwargs) -> None:
+        self.ops.append(('item_projection', args, kwargs))
 
     def snapshot(self, *args, **kwargs) -> None:
         self.ops.append(('snapshot', args, kwargs))
