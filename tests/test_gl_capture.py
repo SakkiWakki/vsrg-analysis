@@ -47,6 +47,28 @@ def gl():
     context.doneCurrent()
 
 
+_LIVE_HOSTS = []
+
+
+@pytest.fixture(autouse=True)
+def _dispose_hosts():
+    """End every host painter the test opened, whether or not it reached
+    `finish()`.
+
+    A QPainter left active outlives the test as garbage, and when the
+    collector finally takes the pair it may destroy the device first -
+    "QPaintDevice: Cannot destroy paint device that is being painted",
+    then a segfault inside whatever collection happens to be running. So a
+    single failed assertion before `finish()` poisoned the entire pytest
+    process, and the crash surfaced in unrelated tests hundreds of items
+    later (a lazy NotITG sweep thread, a dataclass import, a fixture with an
+    unreadable stack). Disposal has to be deterministic, not left to the GC.
+    """
+    yield
+    while _LIVE_HOSTS:
+        _LIVE_HOSTS.pop().dispose()
+
+
 class _GlHost:
     """An FBO-backed host painter standing in for the canvas widget."""
 
@@ -58,12 +80,19 @@ class _GlHost:
         self.painter = QPainter(self.device)
         self.painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         self.painter.fillRect(0, 0, W, H, QColor(0, 0, 0))
+        _LIVE_HOSTS.append(self)
 
     def finish(self):
         self.painter.end()
         image = self.fbo.toImage()
         self.fbo.release()
         return image
+
+    def dispose(self):
+        if self.painter.isActive():
+            self.painter.end()
+        if self.fbo.isBound():
+            self.fbo.release()
 
 
 class _RasterHost:
@@ -72,10 +101,15 @@ class _RasterHost:
         self.pixmap.fill(QColor(0, 0, 0))
         self.painter = QPainter(self.pixmap)
         self.painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        _LIVE_HOSTS.append(self)
 
     def finish(self):
         self.painter.end()
         return self.pixmap.toImage()
+
+    def dispose(self):
+        if self.painter.isActive():
+            self.painter.end()
 
 
 def _probe(image, x, y):

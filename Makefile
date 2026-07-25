@@ -55,7 +55,8 @@ help:
 	@echo "  make overlay    - build the gamescope in-game overlay binary"
 	@echo "  make gl-layer   - build OpenGL/EGL/GLX preload hooks"
 	@echo "  make build      - native + overlay"
-	@echo "  make test       - run pytest"
+	@echo "  make test       - run pytest, minus the real-chart compiles"
+	@echo "  make test-all   - run pytest including them (minutes)"
 	@echo "  make gui        - launch the Qt GUI (assumes build already done)"
 	@echo "  make clean      - remove build artifacts (venv kept)"
 	@echo "  make distclean  - also remove the venv"
@@ -413,9 +414,17 @@ run: build gui
 
 # ─── test ──────────────────────────────────────────────────────────────
 
+# The `slow` tests each compile a real installed chart (gat 1 ~8-18s, gat 2
+# ~14-25s); they are the whole runtime, so the default target leaves them out
+# and `test-all` - what CI runs - puts them back.
 .PHONY: test
 test: venv
-	$(Q)echo "[test] pytest"
+	$(Q)echo "[test] pytest (without the slow real-chart compiles)"
+	$(Q)$(VENV_PYTEST) tests -m "not slow"
+
+.PHONY: test-all
+test-all: venv
+	$(Q)echo "[test] pytest (everything)"
 	$(Q)$(VENV_PYTEST) tests
 
 # ─── run ───────────────────────────────────────────────────────────────

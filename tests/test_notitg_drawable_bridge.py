@@ -323,6 +323,7 @@ _GAT2 = ('/mnt/Yucky/Rhythm Games/Players/NotITG/Songs/'
          'UKSRT9/5. getfucked2/get_fucked_2.sm')
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(not os.path.exists(_GAT2), reason='gat 2 chart not on disk')
 def test_gat2_smoke_build_and_feed():
     """Build the doc + feed three times against the real gat 2 chart: no

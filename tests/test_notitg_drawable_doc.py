@@ -459,6 +459,7 @@ _GAT2 = ('/mnt/Yucky/Rhythm Games/Players/NotITG/Songs/'
          'UKSRT9/5. getfucked2/get_fucked_2.sm')
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(not os.path.exists(_GAT2), reason='gat 2 chart not on disk')
 def test_gat2_smoke_static_doc_parity():
     """Compile the real gat 2 chart via the sim, wait for the lazy compile's
@@ -1072,6 +1073,7 @@ def _natural_lookup():
     return natural
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize('chart_path,label', [
     pytest.param(_GAT1, 'gat1', marks=pytest.mark.skipif(
         not os.path.exists(_GAT1), reason='gat 1 chart not on disk')),

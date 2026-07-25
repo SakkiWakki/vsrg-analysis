@@ -81,3 +81,16 @@ def _isolated_qsettings(tmp_path, monkeypatch, _qapp):
     s.clear()
     s.sync()
     settings_mod._cached = None
+
+
+def pytest_collection_modifyitems(items):
+    """Mark everything under tests/local/ `slow`.
+
+    That directory IS the heavyweight bucket - every file in it needs a game
+    install and compiles a real chart - so marking by location keeps the
+    marker off individual local tests, which are gitignored and would carry
+    it invisibly.
+    """
+    for item in items:
+        if 'tests/local/' in item.nodeid.replace('\\', '/'):
+            item.add_marker('slow')
