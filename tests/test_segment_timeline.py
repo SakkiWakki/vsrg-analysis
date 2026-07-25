@@ -415,3 +415,19 @@ def test_an_interrupted_curved_ease_keeps_its_shape():
     tl.add_hold(2.0, 0.0)
     tl.finish()
     assert _replays_the_timeline(tl, 0.0, 4.0) < 0.5
+
+
+def test_breakpoints_export_across_an_open_run_over_sealed_segments():
+    # An open poke run is just the LAST segment: `sample` gives it priority
+    # from its head time, so the sealed directory is cut off there. This used
+    # to bail to None and the caller dense-sampled instead, which cannot
+    # follow a lane the chart repokes every 20ms - Corrupted's x came out
+    # 176px off.
+    tl = SegmentTimeline(rest=0.0)
+    tl.frontier = math.inf
+    tl.add_hold(0.0, 1.0)
+    tl.add_ramp(1.0, 5.0, 1.0, 50.0)   # still ramping when the run opens
+    tl.poke(2.0, 900.0)                # the open run, mid-ramp
+    exported = tl.breakpoints(10.0)
+    assert exported is not None, 'an open run must not force dense sampling'
+    assert _replays_the_timeline(tl, 0.0, 6.0) < 1e-6

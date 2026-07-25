@@ -392,15 +392,20 @@ class SegmentTimeline:
         channel replays `sample` rather than approximating it, at the
         timeline's own resolution instead of a fixed sampling cadence.
 
-        Returns None when the open poke run starts before the last sealed
-        segment: `sample` gives the run priority over the directory there,
-        which a flat time-ordered breakpoint list cannot express. The caller
-        then falls back to sampling.
+        An OPEN poke run is the last segment: `sample` gives it priority from
+        its head time, so the sealed directory is cut off there and the run's
+        own breakpoints follow. This used to return None instead - a flat
+        time-ordered list could not express the priority while segments
+        exported their full spans - and the caller fell back to DENSE
+        SAMPLING, which cannot follow a lane the chart repokes every 20ms:
+        Corrupted's x came out 176px off that way.
         """
         ts: list[float] = []
         vals: list[float] = []
         durs: list[float] = []
         eases: list[int] = []
+        # The open run shadows the directory from its head time on.
+        sealed_end = self._run_th if self._run_n else math.inf
 
         def emit(t, v, dur=0.0, ease_id=_EASE_LINEAR):
             ts.append(float(t))
@@ -409,7 +414,7 @@ class SegmentTimeline:
             eases.append(int(ease_id))
 
         for idx, t0 in enumerate(self._dir_t0):
-            if t0 > t1:
+            if t0 > t1 or t0 >= sealed_end:
                 break
             # A segment ends where the NEXT one begins, whatever span its own
             # row claims: `sample` picks by bisect over `_dir_t0`, so a later
@@ -419,17 +424,15 @@ class SegmentTimeline:
             # non-monotonic - 1979 of Bonfire's 5447 alpha breakpoints went
             # backwards, and the consumer binary-searches, so it read
             # arbitrary values (0.0009 where the curve says 0.9927).
-            cutoff = (self._dir_t0[idx + 1] if idx + 1 < len(self._dir_t0)
-                      else math.inf)
+            cutoff = min(self._dir_t0[idx + 1]
+                         if idx + 1 < len(self._dir_t0) else math.inf,
+                         sealed_end)
             clipped = self._truncating(idx, cutoff, emit)
             self._segment_breakpoints(idx, t0, clipped, osc_dt)
             clipped.finish()
 
-        if not self._run_n:
-            return ts, vals, durs, eases
-        if ts and self._run_th < ts[-1]:
-            return None
-        self._run_breakpoints(emit)
+        if self._run_n:
+            self._run_breakpoints(emit)
         return ts, vals, durs, eases
 
     def _truncating(self, idx: int, cutoff: float, emit):
