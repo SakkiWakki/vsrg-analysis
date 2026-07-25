@@ -462,29 +462,24 @@ _GAT2 = ('/mnt/Yucky/Rhythm Games/Players/NotITG/Songs/'
 
 @pytest.mark.skipif(not os.path.exists(_GAT2), reason='gat 2 chart not on disk')
 def test_gat2_smoke_static_doc_parity():
-    """Compile the real gat 2 chart via the sim, poll the lazy provider until
-    the topology fills in (~20s sweep), build the static doc, and print the
-    parity report against NotitgFieldInstances.at at a spread of sample times.
+    """Compile the real gat 2 chart via the sim, wait for the lazy compile's
+    background upgrade to hand over the complete topology, build the static
+    doc, and print the parity report against NotitgFieldInstances.at at a
+    spread of sample times.
 
     The static doc's link chains are 2D-affine only, so instances driven by the
     camera-area math (rotation_x/y, quat, z, skew, fov) diverge BY DESIGN - the
     report SURFACES those rather than asserting zero; the assertion is only that
     the compile + evaluate + compare runs cleanly and produces a report."""
-    import time
-
-    from analysis.games.notitg.sim.producers import compile_via_sim
+    from analysis.games.notitg.sim.producers import (
+        compile_via_sim, wait_for_upgrade)
 
     compiled = compile_via_sim(_GAT2)
     assert compiled is not None
     provider = compiled.get('field_instances')
     assert provider is not None
 
-    deadline = time.monotonic() + 60.0
-    while time.monotonic() < deadline:
-        current = list(provider() if callable(provider) else provider)
-        if len(current) > 150:
-            break
-        time.sleep(0.5)
+    assert wait_for_upgrade(compiled)
     count = len(list(provider() if callable(provider) else provider))
     print(f'[gat2] provider instance count: {count}')
 

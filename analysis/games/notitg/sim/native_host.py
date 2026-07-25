@@ -23,7 +23,6 @@ from analysis.player.render.expr import ast as _ast
 from analysis.player.render.expr.frame_eval import (
     Interpreter, Scope, _Return)
 from analysis.player.render.expr.parser import parse_body
-from analysis.player.render.expr.surface import UNRESOLVED
 
 
 class NativeHost:
@@ -65,8 +64,15 @@ class NativeHost:
     def eval_expr(self, expr: str, self_recorder=None):
         """Evaluate `expr` (a Lua expression) and return its value, or a
         fault. Returns (value, error): error is None on success, else the
-        exception string; value is None on fault. A nil result is None; the
-        caller maps UNRESOLVED to nil like the surface does."""
+        exception string; value is None on fault.
+
+        A nil result is None; a result the surface could not answer is
+        UNRESOLVED, and callers must NOT read that as nil. The interpreter
+        returns UNRESOLVED where lupa raised (calling a name the surface does
+        not model used to be "attempt to call a nil value"), so an unresolved
+        value belongs on the caller's FAULT path, not its falsy path - see
+        `SimEnvironment._condition_falsy`, where reading it as nil silently
+        dropped the actor and its whole subtree."""
         try:
             stmts = self._parse(f'return ({expr})')
         except Exception as exc:
@@ -75,8 +81,7 @@ class NativeHost:
         try:
             self._interp.run(stmts, root)
         except _Return as ret:
-            value = ret.args[0][0] if ret.args and ret.args[0] else None
-            return (None if value is UNRESOLVED else value), None
+            return (ret.args[0][0] if ret.args and ret.args[0] else None), None
         except Exception as exc:
             return None, str(exc)
         return None, None

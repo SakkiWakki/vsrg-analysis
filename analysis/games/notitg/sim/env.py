@@ -31,6 +31,7 @@ from analysis.games.notitg.sim.actor import SimActor
 from analysis.games.notitg.xml_actors import (
     _lua50_compat, _lua_expr_body, _strip_lua_wrapper,
     is_lua_function_literal, parse_command_string)
+from analysis.player.render.expr.surface import UNRESOLVED
 from analysis.player.render.lua import LuaHost
 from analysis.player.render.lua.host import LuaScriptError
 
@@ -665,26 +666,30 @@ class SimEnvironment:
             return False
         name = f'{self._actor_label(actor, "?")}.Condition'
         result, error = self._native.eval_expr(expr)
-        if error is not None:
-            self._warnings.append(f'{name}: {error}')
-            # A faulting gate keeps a plain actor (a permissive-stub
-            # error must not drop real content) but DROPS a looped
-            # include - re-expanding on a broken condition would spin
-            # the actorgen loop forever.
+        if error is not None or result is UNRESOLVED:
+            self._warnings.append(f'{name}: {error or "unresolved"}')
+            # A gate the host cannot ANSWER keeps a plain actor (a permissive-
+            # stub gap must not drop real content) but DROPS a looped include -
+            # re-expanding on a broken condition would spin the actorgen loop
+            # forever. UNRESOLVED belongs here and not below: it is the
+            # interpreter's reply where lupa raised ("attempt to call a nil
+            # value" for a name the surface does not model), so reading it as a
+            # nil - a chart saying "skip this" - deletes real content.
             return getattr(actor, '_expand_include', None) is not None
         return result is None or result is False
 
     def _resolve_at_attrs(self, actor) -> None:
         """`@expr` attribute values evaluate as Lua at actor load
         (actorgen's `Type="@actorgen.Type()"`); the result replaces the
-        value. A faulting expression leaves the raw value."""
+        value. An expression that faults - or that the host cannot answer -
+        leaves the raw value."""
         for attr, value in list(actor.attrs.items()):
             if not value.startswith('@'):
                 continue
             name = f'{self._actor_label(actor, "?")}.{attr}@'
             result, error = self._native.eval_expr(value[1:].strip())
-            if error is not None:
-                self._warnings.append(f'{name}: {error}')
+            if error is not None or result is UNRESOLVED:
+                self._warnings.append(f'{name}: {error or "unresolved"}')
                 continue
             if isinstance(result, (str, int, float)) and not isinstance(
                     result, bool):

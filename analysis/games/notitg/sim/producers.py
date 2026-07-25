@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from functools import lru_cache
 from pathlib import Path
 
@@ -119,6 +120,19 @@ def compile_via_sim(sm_path, end_seconds: float | None = None) -> dict | None:
                 'warnings': [f'sim compile aborted: {exc}']}
 
 
+def wait_for_upgrade(compiled: dict | None, timeout: float = 300.0) -> bool:
+    """Block until a lazy compile's background upgrade has landed (driver-
+    injected mods resolved, complete topology handed over, screen shake and
+    scroll/note-path handles filled), and return whether it did inside
+    `timeout`. Eager compiles carry no upgrade and return True immediately.
+
+    For consumers that need EXACT values rather than what has resolved so far -
+    batch exports, tests. Frame readers must never call it: they sample against
+    the frontier and let content appear."""
+    event = (compiled or {}).get('_upgrade_done')
+    return True if event is None else event.wait(timeout)
+
+
 def _compile_live(sm_path, end_seconds) -> dict | None:
     """LAZY compile (near-instant): build a `LiveSim` (load + store, NO ticking)
     and the storyboard element tree whose value timelines are LiveCurves reading
@@ -184,12 +198,14 @@ def _compile_live(sm_path, end_seconds) -> dict | None:
     screen_shake = ScreenShakeHandle()
     scroll_mult = ScrollMultiplierHandle()
     note_path_handle = NotePathHandle()
+    upgrade_done = threading.Event()
     _spawn_background_upgrade(mod_channels, tree, field_instances,
                              sm_path, end, live_sim=shared_sim,
                              to_seconds=doc.to_seconds, doc=doc,
                              screen_shake=screen_shake,
                              scroll_mult=scroll_mult,
-                             note_path_handle=note_path_handle)
+                             note_path_handle=note_path_handle,
+                             upgrade_done=upgrade_done)
 
     return {
         'mod_events': declarative, 'mod_channels': mod_channels,
@@ -203,7 +219,7 @@ def _compile_live(sm_path, end_seconds) -> dict | None:
         'note_path': note_path_handle,
         'aft_bg_visible': None,
         'base_field_hidden': _base_field_hidden_live(live),
-        '_live_sim': live,
+        '_live_sim': live, '_upgrade_done': upgrade_done,
         'named_actors': 0, 'recorded_keyframes': 0,
         'warnings': list(live.warnings) + [
             'lazy replay (VSRG_NOTITG_LAZY): element tree + declarative '
@@ -338,13 +354,22 @@ class _LiveFieldInstances:
         self._cache_sig = sig
         return instances
 
+    def oscillator_context(self, env):
+        """The oscillator synthesis context (span set + the reused static
+        seconds<->beat clock) this provider folds into its instance
+        transforms. Public because the top-level `field_oscillators` key is
+        eager-only: on the lazy path these deltas exist ONLY inside the
+        instances the provider builds, so a consumer that wants the player
+        fields' bounce/bob/wag has to go through here."""
+        return _osc_context(env, self._doc, self._doc.end_seconds,
+                            clock=self._osc_clock)
+
     def _rebuild(self, env):
         # Oscillator state is LIVE (playback env); the instance STRUCTURE uses
         # the swept env once available (complete topology) so proxy/AFT/fill
         # copies all appear. rec_ids match between the two sims, so the links'
         # LiveCurves (keyed by rec_id) still sample the playback sim live.
-        osc_context = _osc_context(env, self._doc, self._doc.end_seconds,
-                                   clock=self._osc_clock)
+        osc_context = self.oscillator_context(env)
         field_oscillators = modfile._field_oscillator_timelines(
             env, osc_context)
         topology_env = self._topology_env if self._topology_env is not None \
@@ -512,7 +537,8 @@ def _spawn_background_upgrade(mod_channels, tree, field_provider,
                              sm_path, end_seconds, live_sim=None,
                              to_seconds=None, doc=None,
                              screen_shake=None,
-                             scroll_mult=None, note_path_handle=None):
+                             scroll_mult=None, note_path_handle=None,
+                             upgrade_done=None):
     """Background pass on a daemon thread: sweep to the chart end, then
     hot-swap three things the instant compile left approximate. With
     `live_sim` (the segment-read default) the sweep advances THAT sim -
@@ -536,12 +562,16 @@ def _spawn_background_upgrade(mod_channels, tree, field_provider,
        allproxies) render missing copies. The swept env holds the COMPLETE
        topology, so tag its AFT fills onto the provider's tree and hand it the
        swept env as the topology source (transforms still sample the playback
-       sim live - rec_ids match, so the LiveCurves resolve either way)."""
-    import threading
+       sim live - rec_ids match, so the LiveCurves resolve either way).
 
+    `upgrade_done` is signalled once every hot-swap above has landed, so a
+    consumer that needs the RESOLVED streams (a batch export, a test asserting
+    exact values) can wait for the handover instead of racing it: the sim's
+    frontier reaching the chart end is necessary but not sufficient - the swaps
+    happen after."""
     from analysis.games.notitg.sim.loop import LiveSim
 
-    def worker():
+    def sweep_to_end():
         sweep_doc = doc
         if live_sim is not None:
             sweep = live_sim
@@ -655,6 +685,15 @@ def _spawn_background_upgrade(mod_channels, tree, field_provider,
               f'({_time.monotonic() - sweep_start:.0f}s elapsed)',
               file=sys.stderr)
         _print_unimplemented(sweep.env, sweep_doc)
+
+    def worker():
+        # The signal fires even on an aborted sweep (an unloadable chart, a
+        # fault mid-swap), so a waiter can never hang on a dead upgrade.
+        try:
+            sweep_to_end()
+        finally:
+            if upgrade_done is not None:
+                upgrade_done.set()
 
     threading.Thread(target=worker, daemon=True,
                      name='notitg-lazy-upgrade').start()

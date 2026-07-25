@@ -327,25 +327,18 @@ _GAT2 = ('/mnt/Yucky/Rhythm Games/Players/NotITG/Songs/'
 def test_gat2_smoke_build_and_feed():
     """Build the doc + feed three times against the real gat 2 chart: no
     exception, nonzero coverage, translated == total, and print the coverage
-    stats. The lazy provider grows as the background sweep runs, so poll it
-    until the topology is populated before sampling."""
-    import time
-
-    from analysis.games.notitg.sim.producers import compile_via_sim
+    stats. The lazy provider only carries the proxy/AFT binds that have fired
+    so far, so the doc is built after the background upgrade hands over the
+    complete topology."""
+    from analysis.games.notitg.sim.producers import (
+        compile_via_sim, wait_for_upgrade)
 
     compiled = compile_via_sim(_GAT2)
     assert compiled is not None
     provider = compiled.get('field_instances')
     assert provider is not None
 
-    # The lazy topology fills in over ~20s (the background sweep). Poll until
-    # the provider carries a substantial instance set.
-    deadline = time.monotonic() + 60.0
-    while time.monotonic() < deadline:
-        current = list(provider() if callable(provider) else provider)
-        if len(current) > 150:
-            break
-        time.sleep(0.5)
+    assert wait_for_upgrade(compiled)
     count = len(list(provider() if callable(provider) else provider))
     print(f'[gat2] provider instance count: {count}')
 

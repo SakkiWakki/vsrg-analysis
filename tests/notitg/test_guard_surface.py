@@ -16,11 +16,14 @@ from analysis.player.render.lua.host import LuaHost
 
 class _FakeEnv:
     """Minimal engine-host stand-in: the two clock accessors the surface
-    reads plus a real Lua host, so lupa-table globals resolve for real."""
+    reads, the recorder-table map it binds its actor lookup to (empty - these
+    cases resolve globals and clocks, never an actor), plus a real Lua host so
+    lupa-table globals resolve for real."""
 
     def __init__(self, beat: float, seconds: float):
         self._clock_beat = beat
         self._seconds = seconds
+        self._tables = {}
         self._host = LuaHost(dialect='luajit21')
 
     def _song_time(self) -> float:
