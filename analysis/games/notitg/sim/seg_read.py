@@ -23,11 +23,32 @@ from analysis.player.render.storyboard.model import (
 _TRUE = {'1', 'true', 'yes', 'on'}
 
 
+_SEGTL: bool | None = None
+
+
 def segtl_enabled() -> bool:
     """Segment-timeline reads are the default lazy-replay read path;
     VSRG_NOTITG_SEGTL=0 reverts to LiveCurves driving the sim from the
-    render thread (the pre-segment behavior, for differential testing)."""
-    return os.environ.get('VSRG_NOTITG_SEGTL', '1').lower() in _TRUE
+    render thread (the pre-segment behavior, for differential testing).
+
+    Resolved ONCE per process. `curve_for` asks this for every property of
+    every actor on every instance-list rebuild - two million calls across
+    180 frames of gat 2, where re-reading the environment each time cost
+    5.0s of a 21.5s profile, a quarter of the frame budget spent deciding a
+    thing that cannot change. The one caller that flips it
+    (`tests/local/segtl_visual_diff.py`) runs each side as its own process;
+    `reset_segtl_cache` covers a test that flips it in-process."""
+    global _SEGTL
+    if _SEGTL is None:
+        _SEGTL = os.environ.get('VSRG_NOTITG_SEGTL', '1').lower() in _TRUE
+    return _SEGTL
+
+
+def reset_segtl_cache() -> None:
+    """Forget the resolved flag, for a test that changes the environment
+    after this module was imported."""
+    global _SEGTL
+    _SEGTL = None
 
 
 class SegCurve:

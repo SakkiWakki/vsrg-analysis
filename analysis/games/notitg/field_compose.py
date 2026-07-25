@@ -128,15 +128,39 @@ def link_live_timelines(sim, rec_id, rests=None) -> dict:
     """LAZY counterpart of `link_timelines`: one `LiveCurve` per link property,
     reading the live sim's actor at draw time (same key set + rests, so
     `TransformChannel` samples it identically). Covers the scalar link props and
-    the tuple ones (rotation_order token, quat)."""
+    the tuple ones (rotation_order token, quat).
+
+    MEMOISED per (sim, rec_id, rests), because the curves are stateless
+    readers: for the same arguments every build produces an equivalent set,
+    and the instance-list rebuild asks for ~900 links at ~30 curves each. On
+    gat 2 that was 70k calls across 180 frames, the largest single term in
+    the rebuild. The cache hangs off the SIM so it dies with it - keying on
+    `id(sim)` would let a freed sim's address be reused by a new one.
+
+    A COPY is returned: callers pin properties on the dict they get back
+    (`_notefield_link` forces `hidden`), and a shared dict would leak that
+    into every other link of the same actor."""
     from analysis.games.notitg.sim.seg_read import curve_for
+
+    cache = getattr(sim, '_link_timeline_cache', None)
+    if cache is None:
+        cache = {}
+        try:
+            sim._link_timeline_cache = cache
+        except AttributeError:  # a slotted stand-in: build every time
+            cache = None
+    key = (rec_id, None if not rests else tuple(sorted(rests.items())))
+    if cache is not None and key in cache:
+        return dict(cache[key])
 
     merged = {**_LINK_RESTS, **(rests or {})}
     timelines = {prop: curve_for(sim, rec_id, prop, rest)
                  for prop, rest in merged.items()}
     for prop, rest in _TUPLE_LINK_RESTS.items():
         timelines[prop] = curve_for(sim, rec_id, prop, rest)
-    return timelines
+    if cache is not None:
+        cache[key] = timelines
+    return dict(timelines)
 
 
 class _SumTimeline:

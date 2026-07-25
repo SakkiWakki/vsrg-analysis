@@ -128,6 +128,12 @@ def main() -> int:
     parser.add_argument('--out', default='frames')
     parser.add_argument('--size', default='1280x900')
     parser.add_argument('--wait-sweep', action='store_true')
+    parser.add_argument('--profile', type=int, default=0,
+                        help='render N consecutive 60fps frames from each '
+                             'time under cProfile instead of writing PNGs')
+    parser.add_argument('--stat-filter', default='analysis/',
+                        help='regex limiting which functions the profile '
+                             'report lists')
     args = parser.parse_args()
 
     width, height = (int(v) for v in args.size.lower().split('x'))
@@ -144,6 +150,9 @@ def main() -> int:
 
     _advance_live_sim(replay, max(args.times), args.wait_sweep)
 
+    if args.profile:
+        return _profile(renderer, player, args, width, height)
+
     os.makedirs(args.out, exist_ok=True)
     for t in args.times:
         print(f'rendering t={t:.3f} ...', flush=True)
@@ -157,6 +166,48 @@ def main() -> int:
         out_path = os.path.join(args.out, f'frame_{t:.3f}.png')
         image.save(out_path)
         print('wrote', out_path, flush=True)
+    return 0
+
+
+def _profile(renderer, player, args, width: int, height: int) -> int:
+    """Render `--profile` consecutive 60fps frames from each requested time
+    under cProfile, and report the cumulative hot functions.
+
+    Frames are consecutive rather than the requested times alone, because
+    per-frame cost is what a framerate is made of: a single frame pays every
+    first-time cost (texture upload, capture allocation) and tells you
+    nothing about the steady state."""
+    import cProfile
+    import pstats
+
+    image = QImage(width, height, QImage.Format.Format_RGB32)
+    frame_ts = [t + i / 60.0 for t in args.times
+                for i in range(args.profile)]
+    print(f'profiling {len(frame_ts)} frames from {len(args.times)} '
+          f'section(s) ...', flush=True)
+
+    def run():
+        for t in frame_ts:
+            image.fill(0xFF000000)
+            painter = QPainter(image)
+            try:
+                renderer.draw(player, painter, float(t))
+            finally:
+                painter.end()
+
+    profiler = cProfile.Profile()
+    began = time.perf_counter()
+    profiler.enable()
+    run()
+    profiler.disable()
+    wall = time.perf_counter() - began
+
+    per_frame = wall / len(frame_ts) * 1000.0
+    print(f'\n{wall:.2f}s for {len(frame_ts)} frames = {per_frame:.1f}ms/frame '
+          f'({1000.0 / per_frame:.1f} fps); a 60fps budget is 16.7ms\n')
+    stats = pstats.Stats(profiler)
+    stats.sort_stats('cumulative')
+    stats.print_stats(args.stat_filter, 28)
     return 0
 
 
