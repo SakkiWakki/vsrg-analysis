@@ -68,6 +68,7 @@ from pathlib import Path
 import numpy as np
 
 from analysis.player.render.effects.timeline import SIMPLIFY_EPS, EventTimeline
+from analysis.player.render.storyboard import record as _rec
 from analysis.player.render.storyboard.sprite_sheet import (
     frame_at_time, frame_steps)
 
@@ -1831,4 +1832,135 @@ def format_parity_report(report) -> str:
             f"  t={r['t']:8.3f}  blits={r['n_blit']:>3} entries={r['n_entry']:>3} "
             f"order={'ok' if r['order_ok'] else 'BAD'} "
             f"a_err={r['max_alpha_err']:.2e} m_err={r['max_mat_err']:.2e}{detail}")
+    return '\n'.join(lines)
+
+
+# --------------------------------------------------------------------------
+# Element parity harness - doc BLIT records vs the legacy painter's own math
+# --------------------------------------------------------------------------
+#
+# The field harness above compares against `NotitgFieldInstances.at`, which
+# hands out sampled transforms. The legacy ELEMENT path has no such surface -
+# `StoryboardEffect` paints straight onto a QPainter - so this compares the
+# quantity that actually decides the pixels: THE FOUR CORNERS OF THE DRAWN
+# QUAD, in design space.
+#
+# Corners rather than the mat3, because the mat3 alone is not the placement:
+# origin, the absolute-size override and scale-to-fit all move the box the
+# mat3 acts on, and those are exactly the lanes most recently added. A mat3
+# comparison would pass with every one of them wrong.
+
+def _legacy_element_quad(element, t, natural):
+    """The design-space corners the legacy painter draws `element` at.
+
+    Transcribes `render.StoryboardRenderer._draw_element`'s bracket at k=1 with
+    no layer offset (design space): translate to the anchored position, rotate,
+    scale, then shift by the origin - the quad itself spanning the UNZOOMED
+    draw size `render._draw_size` picks."""
+    from analysis.player.render.storyboard.render import _draw_size
+
+    ax, ay = element.anchor
+    x = element.sample('x', t)[0]
+    y = element.sample('y', t)[0]
+    rotation = element.sample('rotation', t)[0]
+    sx = element.sample('scale_x', t)[0]
+    sy = element.sample('scale_y', t)[0]
+    w, h = _draw_size(element, t, natural)
+
+    theta = math.radians(rotation)
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
+    ox, oy = element.origin
+    tx = ax * _SCREEN_W + x
+    ty = ay * _SCREEN_H + y
+    corners = []
+    for cx, cy in ((0.0, 0.0), (w, 0.0), (w, h), (0.0, h)):
+        lx, ly = (cx - ox * w) * sx, (cy - oy * h) * sy
+        corners.append((tx + lx * cos_t - ly * sin_t,
+                        ty + lx * sin_t + ly * cos_t))
+    return corners
+
+
+def _record_quad(frec, natural):
+    """The design-space corners a BLIT record draws, folding the same lanes the
+    executor does: the draw box (`_draw_box`), the origin shift, then the
+    record mat3."""
+    from analysis.player.render.storyboard.gl_executor import _draw_box
+
+    w, h = _draw_box(natural, frec)
+    ox = float(frec[_rec.F_ORIGIN]) * w
+    oy = float(frec[_rec.F_ORIGIN + 1]) * h
+    mat = np.asarray(frec[:9], dtype=float).reshape(3, 3)
+    corners = []
+    for cx, cy in ((0.0, 0.0), (w, 0.0), (w, h), (0.0, h)):
+        p = mat @ np.array([cx - ox, cy - oy, 1.0])
+        corners.append((p[0] / p[2], p[1] / p[2]) if abs(p[2]) > 1e-12
+                       else (p[0], p[1]))
+    return corners
+
+
+def element_parity_report(evaluator, elements, natural_sizes, sample_times,
+                          atol: float = 1e-3) -> dict:
+    """Compare the doc's element blits against the legacy painter at each of
+    `sample_times`, in draw order.
+
+    `elements` is the leaf list in the order the doc emits them, and
+    `natural_sizes` the matching `(w, h)` natural box per element - the
+    executor reads that from the uploaded texture, so a caller must supply
+    what the texture would have been.
+
+    Returns `{'times': [...], 'all_ok', 'max_corner_err', 'n_fail'}` with
+    `max_corner_err` in DESIGN PIXELS, which is the number worth quoting: it
+    says how far off the drawn quad lands, not how far off some matrix entry
+    is."""
+    times = []
+    for t in sample_times:
+        blits = [frec for kind, _sid, frec in _element_blits(evaluator, t)
+                 if kind == _rec.SRC_IMAGE]
+        diffs = []
+        worst = 0.0
+        for index, element in enumerate(elements):
+            if index >= len(blits):
+                diffs.append((index, 'missing', None))
+                continue
+            want = _legacy_element_quad(element, t, natural_sizes[index])
+            got = _record_quad(blits[index], natural_sizes[index])
+            err = max(max(abs(a - b) for a, b in zip(wc, gc))
+                      for wc, gc in zip(want, got))
+            worst = max(worst, err)
+            if err > atol:
+                diffs.append((index, 'corner', (want, got)))
+        if len(blits) > len(elements):
+            diffs.append((len(elements), 'extra', len(blits) - len(elements)))
+        times.append({'t': float(t), 'ok': not diffs, 'diffs': diffs,
+                      'n_blit': len(blits), 'max_corner_err': worst})
+    return {
+        'times': times,
+        'all_ok': all(r['ok'] for r in times),
+        'max_corner_err': max((r['max_corner_err'] for r in times), default=0.0),
+        'n_fail': sum(0 if r['ok'] else 1 for r in times),
+    }
+
+
+def _element_blits(evaluator, t):
+    """`(source_kind, source_id, frec)` for every BLIT at `t`, in draw order -
+    the whole record row, not just the mat3, so a caller can read the box
+    lanes the element path depends on."""
+    u_bytes, f_bytes, _uf, n = evaluator.frame(float(t))
+    u = np.frombuffer(u_bytes, dtype=np.uint32).reshape(n, evaluator.u_stride)
+    f = np.frombuffer(f_bytes, dtype=np.float32).reshape(n, evaluator.f_stride)
+    return [(int(u[i, _rec.U_A]), int(u[i, _rec.U_B]), f[i])
+            for i in range(n) if u[i, _rec.U_KIND] == _rec.OP_BLIT]
+
+
+def format_element_parity_report(report) -> str:
+    """A one-line-per-sample-time human summary of `element_parity_report`."""
+    lines = [
+        f"element parity: {'OK' if report['all_ok'] else 'FAIL'} "
+        f"({report['n_fail']}/{len(report['times'])} times failing) "
+        f"max_corner_err={report['max_corner_err']:.3f}px"
+    ]
+    for r in report['times']:
+        detail = '' if r['ok'] else f"  diffs={[d[:2] for d in r['diffs'][:4]]}"
+        lines.append(f"  t={r['t']:8.3f}  blits={r['n_blit']:>3} "
+                     f"corner_err={r['max_corner_err']:.3f}px{detail}")
     return '\n'.join(lines)

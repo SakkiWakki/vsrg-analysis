@@ -75,6 +75,7 @@ from analysis.player.render.shaders.gl_pipeline import (
 from PySide6.QtOpenGL import QOpenGLPaintDevice
 
 from analysis.player.render.shaders.library import notitg_compat
+from analysis.player.render.storyboard import record as _rec
 
 logger = logging.getLogger(__name__)
 
@@ -86,44 +87,32 @@ GL_CLAMP_TO_EDGE = 0x812F
 
 _SCREEN_ID = 0
 
-# u32 lane offsets.
-_U_KIND = 0
-_U_A = 1
-_U_B = 2
-_U_C = 3
-_U_BLEND = 4
-_U_SHADER = 5
-_U_CLIP = 6
-_U_SCREEN_SPACE = 7
-_U_UF_OFFSET = 8
-_U_UF_COUNT = 9
+# Record layout: every offset comes from `record`, the one Python mirror of
+# native/src/evaluate.rs. Restating a lane here is what let a stale stride
+# index past the end of a row when fades were added.
+_U_KIND, _U_A, _U_B, _U_C = _rec.U_KIND, _rec.U_A, _rec.U_B, _rec.U_C
+_U_BLEND, _U_SHADER, _U_CLIP = _rec.U_BLEND, _rec.U_SHADER, _rec.U_CLIP
+_U_SCREEN_SPACE = _rec.U_SCREEN_SPACE
+_U_UF_OFFSET, _U_UF_COUNT = _rec.U_UF_OFFSET, _rec.U_UF_COUNT
 
-# f32 lane offsets.
-_F_OPACITY = 9
-_F_TINT = 10  # ..13
-_F_CROP = 13  # ..17 (l, t, r, b fractions of the SOURCE logical size)
-_F_ORIGIN = 17  # ..19 (x, y fractions of the item's own drawn size)
-_F_SIZE = 19  # ..21 (absolute w, h overriding the natural box; < 0 = natural)
-_F_FIT = 21  # ..24 (ScaleToCover/FitInside: mode, rect w, rect h)
-_F_FADE = 24  # ..28 (SetFade l, r, t, b as fractions of the drawn box)
+_F_OPACITY, _F_TINT, _F_CROP = _rec.F_OPACITY, _rec.F_TINT, _rec.F_CROP
+_F_ORIGIN, _F_SIZE = _rec.F_ORIGIN, _rec.F_SIZE
+_F_FIT, _F_FADE = _rec.F_FIT, _rec.F_FADE
+_FIT_COVER = _rec.FIT_COVER
 
-# ScaleToCover takes the LARGER axis ratio (fills the rect); anything else
-# non-zero fits inside, taking the SMALLER (letterboxes).
-_FIT_COVER = 1.0
-
-# The record strides this executor reads, so a hand-built record can bind to
-# them instead of restating a number that drifts when a lane is added.
-_U_STRIDE_LANES = 10
-_F_STRIDE_LANES = 28
+_U_STRIDE_LANES, _F_STRIDE_LANES = _rec.U_STRIDE, _rec.F_STRIDE
 
 # Op / source / clear codes (kept in sync with storyboard_native; the
 # executor runs without importing it at module load so tests importorskip
 # cleanly).
-_OP_BEGIN, _OP_BLIT, _OP_COPY, _OP_END = 0, 1, 2, 3
-_SRC_IMAGE, _SRC_DRAWABLE, _SRC_MESH, _SRC_FILL, _SRC_LINES = 0, 1, 2, 3, 4
-_CLEAR_TRANSPARENT, _CLEAR_OPAQUE, _CLEAR_RETAIN = 0, 1, 2
+_OP_BEGIN, _OP_BLIT = _rec.OP_BEGIN, _rec.OP_BLIT
+_OP_COPY, _OP_END = _rec.OP_COPY, _rec.OP_END
+_SRC_IMAGE, _SRC_DRAWABLE = _rec.SRC_IMAGE, _rec.SRC_DRAWABLE
+_SRC_MESH, _SRC_FILL, _SRC_LINES = _rec.SRC_MESH, _rec.SRC_FILL, _rec.SRC_LINES
+_CLEAR_TRANSPARENT, _CLEAR_OPAQUE = _rec.CLEAR_TRANSPARENT, _rec.CLEAR_OPAQUE
+_CLEAR_RETAIN = _rec.CLEAR_RETAIN
 
-_BLEND_ADDITIVE = 1
+_BLEND_ADDITIVE = _rec.BLEND_ADDITIVE
 
 _FLOATS_PER_VERTEX = 4
 _QUAD_BYTES = 4 * _FLOATS_PER_VERTEX * 4

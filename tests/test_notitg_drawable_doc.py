@@ -980,3 +980,62 @@ def test_edge_fades_reach_the_record_only_when_poked(doc_elements, tmp_path):
     u, f = _blit_lanes(evaluator, 1.0)
     row = next(i for i in range(len(u)) if u[i, 0] == sn.OP_BLIT)
     assert tuple(f[row, 24:28]) == (0.0, 0.0, 0.0, 0.0)
+
+
+# --------------------------------------------------------------------------
+# element parity harness
+# --------------------------------------------------------------------------
+
+def _parity_element(tmp_path, name, **timelines):
+    asset = tmp_path / f'{name}.png'
+    asset.write_bytes(b'')
+    el = _sprite(0, str(asset))
+    for prop, value in timelines.items():
+        el.timelines[prop] = EventTimeline(
+            [Keyframe(0.0, (value,), 0.0, _EASE_LINEAR)], rest=(value,))
+    return el
+
+
+def test_element_parity_harness_agrees_with_the_legacy_painter(doc_elements,
+                                                               tmp_path):
+    # The harness compares the DRAWN QUAD's corners, because origin, the
+    # absolute-size override and scale-to-fit all move the box the mat3 acts
+    # on - a mat3-only comparison passes with every one of them wrong.
+    el = _parity_element(tmp_path, 'a', x=120.0, y=200.0, rotation=30.0,
+                         scale_x=1.5, scale_y=0.75)
+    evaluator, _id_maps, _report = dd.build_static_doc(
+        _compiled([], tree=[el]))
+
+    rep = dd.element_parity_report(evaluator, [el], [(64.0, 32.0)],
+                                   (0.0, 1.0, 2.5))
+    assert rep['all_ok'], dd.format_element_parity_report(rep)
+    assert rep['max_corner_err'] < 1e-3
+
+
+def test_element_parity_harness_catches_a_dropped_origin(doc_elements,
+                                                         tmp_path):
+    # The harness is only worth having if it FAILS on the bug it exists to
+    # catch: an element drawn top-left-anchored instead of about its origin
+    # lands half its own size off, which is exactly what shipped before
+    # `item_box`.
+    el = _parity_element(tmp_path, 'b', x=100.0, y=100.0)
+    evaluator, _id_maps, _report = dd.build_static_doc(
+        _compiled([], tree=[el]))
+    natural = (64.0, 32.0)
+
+    blits = [f for kind, _sid, f in dd._element_blits(evaluator, 0.0)
+             if kind == sn.SRC_IMAGE]
+    assert len(blits) == 1
+    want = dd._legacy_element_quad(el, 0.0, natural)
+    got = dd._record_quad(blits[0], natural)
+    assert max(max(abs(a - b) for a, b in zip(wc, gc))
+               for wc, gc in zip(want, got)) < 1e-3
+
+    # Zero the origin lanes: the quad must now be off by exactly the origin
+    # offset (half the 64x32 box), and the harness must see it.
+    stripped = blits[0].copy()
+    stripped[dd._rec.F_ORIGIN:dd._rec.F_ORIGIN + 2] = 0.0
+    moved = dd._record_quad(stripped, natural)
+    err = max(max(abs(a - b) for a, b in zip(wc, gc))
+              for wc, gc in zip(want, moved))
+    assert err == pytest.approx(32.0), f'expected half the 64px width, got {err}'
