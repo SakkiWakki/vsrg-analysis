@@ -390,8 +390,8 @@ def test_within_band_sorted_by_z_then_index_then_start(doc_elements):
 
 
 def test_unsupported_kinds_skipped_with_per_kind_counts(doc_elements):
-    # Shapes / text / video / an asset-less sprite are skipped, each tallied by
-    # kind; only the real image sprite emits.
+    # Text / video / an asset-less sprite are skipped, each tallied by kind.
+    # Rects DO draw (as tinted fills), so they emit rather than tally.
     tree = [
         _sprite(_BACKGROUND_Z, '/tmp/real.png', keyframes={'x': _instant(1.0)}),
         _element('rect', _BACKGROUND_Z),
@@ -403,9 +403,8 @@ def test_unsupported_kinds_skipped_with_per_kind_counts(doc_elements):
     compiled = _compiled([], tree=tree)
     evaluator, id_maps, report = dd.build_static_doc(compiled)
 
-    assert report['elements_below'] == 1 and report['elements_above'] == 0
-    assert report['element_skips'] == {'rect': 2, 'text': 1, 'video': 1,
-                                       'no_asset': 1}
+    assert report['elements_below'] == 3 and report['elements_above'] == 0
+    assert report['element_skips'] == {'text': 1, 'video': 1, 'no_asset': 1}
     assert report['images'] == 1
 
 
@@ -1112,3 +1111,42 @@ def test_real_chart_element_parity(chart_path, label, doc_elements):
     assert rep['max_corner_err'] < 1e-2, (
         'element placement diverges from the legacy painter:\n'
         + dd.format_element_parity_report(rep))
+
+
+def test_a_rect_draws_as_a_tinted_fill_sized_by_its_own_box(doc_elements):
+    # A Quad's absolute size IS its whole size, and legacy picks size_x over
+    # w per frame. `_fill_size_as_wh` only mirrors size_x onto w when the size
+    # carries KEYFRAMES, so a quad sized by a plain rest has w=0 and a real
+    # size_x - freezing either choice at compile time gets that one wrong.
+    el = _element('rect', 0)
+    el.timelines['size_x'] = EventTimeline([], rest=(640.0,))
+    el.timelines['size_y'] = EventTimeline([], rest=(480.0,))
+    el.timelines['color'] = EventTimeline([], rest=(1.0, 0.0, 0.0))
+    evaluator, id_maps, report = dd.build_static_doc(_compiled([], tree=[el]))
+
+    assert 'rect' not in report['element_skips'], 'rects draw now'
+    u, f = _blit_lanes(evaluator, 1.0)
+    row = next(i for i in range(len(u)) if u[i, 0] == sn.OP_BLIT)
+    assert int(u[row, 1]) == sn.SRC_FILL
+    assert tuple(f[row, 19:21]) == (640.0, 480.0), 'w=0 must not win over size_x'
+    assert tuple(f[row, 10:13]) == (1.0, 0.0, 0.0)
+
+    rep = dd.element_parity_report(
+        evaluator, id_maps['element_order'],
+        lambda el_: (el_.sample('w', 0.0)[0], el_.sample('h', 0.0)[0]),
+        (0.0, 1.0))
+    assert rep['all_ok'], dd.format_element_parity_report(rep)
+
+
+def test_a_zero_size_rect_draws_nothing_like_legacy(doc_elements):
+    # legacy `_element_size` returns None for a shape with w<=0 or h<=0, so it
+    # never reaches the painter. The doc must not fall back to the executor's
+    # unit quad and paint a 1x1 dot.
+    el = _element('rect', 0)
+    evaluator, _id_maps, _report = dd.build_static_doc(
+        _compiled([], tree=[el]))
+    u, f = _blit_lanes(evaluator, 1.0)
+    rows = [i for i in range(len(u)) if u[i, 0] == sn.OP_BLIT]
+    assert rows, 'the item is still emitted'
+    assert tuple(f[rows[0], 19:21]) == (0.0, 0.0), (
+        'a zero-size fill must reach the executor as zero, which it skips')

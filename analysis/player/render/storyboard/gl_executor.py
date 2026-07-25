@@ -975,7 +975,19 @@ class GLExecutor:
         entry = self._programs[1]
         if entry is None:
             return
-        x0, y0, x1, y1 = _crop_unit_quad(frec)
+        # A fill has no texture to size from, so its natural box is the UNIT
+        # quad the mat3 scales - which is what an AFT curtain relies on. An
+        # item that DOES declare a size (a storyboard Quad, whose w/h are its
+        # zoomto) gets that box instead, and the origin then centres it the
+        # same way it centres a sprite.
+        lw, lh = _draw_box((1.0, 1.0), frec)
+        if lw <= 0.0 or lh <= 0.0:
+            return
+        cx0, cy0, cx1, cy1 = _crop_unit_quad(frec)
+        off_x = float(frec[_F_ORIGIN]) * lw
+        off_y = float(frec[_F_ORIGIN + 1]) * lh
+        x0, y0 = cx0 * lw - off_x, cy0 * lh - off_y
+        x1, y1 = cx1 * lw - off_x, cy1 * lh - off_y
         if x1 <= x0 or y1 <= y0:
             return
         program, locs = entry

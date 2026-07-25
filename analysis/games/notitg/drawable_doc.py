@@ -103,6 +103,12 @@ _REST_EPS = 1e-4
 # - are BGCHANGES sprites, so they land here.
 _IMAGE_KINDS = ('sprite', 'frames')
 
+# Kinds drawn as a solid tinted quad. A Quad's absolute size IS its whole size
+# (modfile._fill_size_as_wh mirrors zoomto onto w/h precisely because there is
+# no natural basis), so the item's own size lanes carry it and the executor
+# needs no texture to size from.
+_FILL_KINDS = ('rect',)
+
 # The element property -> native `item` transform-lane mapping. Each pair is
 # (element timeline prop, the item() id/rest kwarg stem); every lane is a scalar
 # EventTimeline exported once through export_channel. `hidden` is handled apart
@@ -126,6 +132,8 @@ _ELEMENT_ITEM_LANES = (
 _CORNER_COLOR_PROPS = ('color_ul', 'color_ur', 'color_ll', 'color_lr')
 _FADE_PROPS = ('fade_left', 'fade_right', 'fade_top', 'fade_bottom')
 _CORNER_UNSET = -1.0
+# `render._SIZE_UNSET`: a negative absolute size means "use the natural box".
+_SIZE_UNSET = -1.0
 _FADE_OFF = 0.0
 _GLOW_OFF = 0.0
 
@@ -401,6 +409,42 @@ class _FrameCurve:
             return None
         ts, frames = steps
         return ts, [float(f) for f in frames], [0.0] * len(ts), [0] * len(ts)
+
+
+class _FillSizeTimeline:
+    """A fill's drawn extent on one axis: its absolute size when that is set,
+    else its natural `w`/`h`.
+
+    Mirrors `render._draw_size`'s precedence PER FRAME. It cannot be frozen at
+    compile time: `_fill_size_as_wh` only mirrors `size_x` onto `w` when the
+    size carries keyframes, so a Quad sized by a plain rest has `w = 0` and a
+    real `size_x` - and a chart may clear an absolute size by writing a
+    negative one, handing the axis back to `w`."""
+
+    def __init__(self, size, natural):
+        self._size = size
+        self._natural = natural
+        # `is not None`, NOT truthiness: EventTimeline.__bool__ is "has
+        # keyframes", so a real timeline resting at 640 with no keyframes reads
+        # as absent and the axis silently falls back to w.
+        self._rest = (self._pick(
+            _rest_value(size, 0) if size is not None else _SIZE_UNSET,
+            _rest_value(natural, 0) if natural is not None else 0.0),)
+
+    @staticmethod
+    def _pick(size: float, natural: float) -> float:
+        return size if size >= 0.0 else natural
+
+    def is_static(self) -> bool:
+        return ((self._size is None or _is_static(self._size))
+                and (self._natural is None or _is_static(self._natural)))
+
+    def sample(self, t):
+        size = (self._size.sample(t)[0] if self._size is not None
+                else _SIZE_UNSET)
+        natural = (self._natural.sample(t)[0] if self._natural is not None
+                   else 0.0)
+        return (self._pick(size, natural),)
 
 
 class _SpanTimeline:
@@ -1181,11 +1225,17 @@ class _Builder:
         return emitted
 
     def _emit_element(self, element, ancestors=()) -> bool:
-        """Emit one leaf element as an SRC_IMAGE item, or count it as a per-kind
-        skip. Returns True when an item was emitted. Only image-backed kinds
-        (sprite / frames) with a resolvable asset path draw; everything else -
-        shapes, text, video, compound, an image kind with no asset - is skipped
-        and tallied by kind (an asset-less image kind counts as 'no_asset')."""
+        """Emit one leaf element as an item, or count it as a per-kind skip.
+        Returns True when an item was emitted.
+
+        Image-backed kinds (sprite / frames) with a resolvable asset draw as
+        SRC_IMAGE; fill kinds draw as a solid tinted quad. Everything still
+        unsupported - text, bitmaptext, video, compound, an image kind with no
+        asset - is skipped and tallied by kind (an asset-less image kind counts
+        as 'no_asset')."""
+        if element.kind in _FILL_KINDS:
+            self._sn_element_item(self._sn.SRC_FILL, 0, element, ancestors)
+            return True
         if element.kind not in _IMAGE_KINDS:
             self._count_skip(element.kind)
             return False
@@ -1193,7 +1243,7 @@ class _Builder:
         if image_id is None:
             self._count_skip('no_asset')
             return False
-        self._sn_image_item(image_id, element, ancestors)
+        self._sn_element_item(self._sn.SRC_IMAGE, image_id, element, ancestors)
         return True
 
     def _count_skip(self, kind: str) -> None:
@@ -1221,8 +1271,9 @@ class _Builder:
             self._image_grids[image_id] = (cols, rows)
         return image_id
 
-    def _sn_image_item(self, image_id: int, element, ancestors=()) -> None:
-        """Push one SRC_IMAGE item: the element's scalar transform timelines on
+    def _sn_element_item(self, source_kind: int, image_id: int, element,
+                         ancestors=()) -> None:
+        """Push one element item: the element's scalar transform timelines on
         the item's own lanes (export_channel each), the inverted `hidden` gate
         on `visible`, and the sheet-frame channel on `frame`.
 
@@ -1234,7 +1285,7 @@ class _Builder:
         kwargs = self._element_transform_kwargs(element)
         kwargs.update(self._element_frame_kwarg(element))
         kwargs.update(self._element_visible_kwarg(element))
-        self._builder.item(_SCREEN_ID, self._sn.SRC_IMAGE, image_id,
+        self._builder.item(_SCREEN_ID, source_kind, image_id,
                            additive=bool(element.additive), **kwargs)
         self._builder.item_tag(
             _SCREEN_ID, self._tag_element(element, 'content', ancestors))
@@ -1242,10 +1293,11 @@ class _Builder:
         self._emit_element_tint(element)
         if ancestors:
             self._emit_element_links(element, ancestors)
-        self._emit_element_glow(image_id, element, kwargs, ancestors)
+        self._emit_element_glow(source_kind, image_id, element, kwargs,
+                                ancestors)
 
-    def _emit_element_glow(self, image_id: int, element, kwargs,
-                           ancestors=()) -> None:
+    def _emit_element_glow(self, source_kind: int, image_id: int, element,
+                           kwargs, ancestors=()) -> None:
         """Push SM's additive glow pass (Sprite.cpp:536-541) as a SECOND item.
 
         The glow is the same sprite drawn again over the content, tinted to
@@ -1263,7 +1315,7 @@ class _Builder:
         glow_kwargs = dict(kwargs)
         glow_kwargs['opacity_id'] = alpha_id
         glow_kwargs['opacity_rest'] = alpha_rest
-        self._builder.item(_SCREEN_ID, self._sn.SRC_IMAGE, image_id,
+        self._builder.item(_SCREEN_ID, source_kind, image_id,
                            additive=True, **glow_kwargs)
         self._builder.item_tag(
             _SCREEN_ID, self._tag_element(element, 'glow', ancestors))
@@ -1297,8 +1349,16 @@ class _Builder:
         the executor knows."""
         origin_x, origin_y = getattr(element, 'origin', (0.0, 0.0))
         kwargs = {'origin_x': float(origin_x), 'origin_y': float(origin_y)}
-        for axis in ('x', 'y'):
-            timeline = element.timelines.get(f'size_{axis}')
+        # A fill has no texture to fall back to, so its size lanes carry its
+        # WHOLE box - absolute size or natural w/h, resolved per frame. Left
+        # unset it would draw the executor's UNIT quad where a zero-size shape
+        # must draw nothing, which is what legacy's `w > 0 and h > 0` decides.
+        fill = element.kind in _FILL_KINDS
+        for axis, size_prop, wh_prop in (('x', 'size_x', 'w'),
+                                         ('y', 'size_y', 'h')):
+            size = element.timelines.get(size_prop)
+            timeline = (_FillSizeTimeline(size, element.timelines.get(wh_prop))
+                        if fill else size)
             if timeline is None:
                 continue
             chan_id, rest = self._channel(timeline)
@@ -1965,7 +2025,7 @@ def element_parity_report(evaluator, element_order, natural_of, sample_times,
     """
     times = []
     for t in sample_times:
-        drawn = {tag: frec for _kind, _sid, tag, frec
+        drawn = {tag: (kind, frec) for kind, _sid, tag, frec
                  in _element_blits(evaluator, t) if tag}
         diffs = []
         worst = 0.0
@@ -1973,22 +2033,32 @@ def element_parity_report(evaluator, element_order, natural_of, sample_times,
         n_unsized = 0
         for index, entry in enumerate(element_order):
             element, role, ancestors = entry
-            frec = drawn.get(index + 1)
+            record = drawn.get(index + 1)
             # Absent means the evaluator CULLED it - outside its time window,
             # hidden, or fully transparent. That is a legitimate per-frame
             # outcome, not a mismatch, so only drawn items are compared.
-            if frec is None or role != 'content':
+            if record is None or role != 'content':
                 continue
-            natural = natural_of(element)
-            if natural is None:
+            kind, frec = record
+            # The two sides size a FILL differently and both are right: legacy
+            # takes a shape's natural box from its own w/h timelines, while the
+            # executor has no texture and scales the unit quad by the size
+            # lanes. Handing each its own basis is what makes them comparable.
+            if kind == _rec.SRC_FILL:
+                want_natural = (element.sample('w', t)[0],
+                                element.sample('h', t)[0])
+                got_natural = (1.0, 1.0)
+            else:
+                want_natural = got_natural = natural_of(element)
+            if want_natural is None:
                 # The caller could not size this asset. That is a gap in the
                 # MEASUREMENT, not a placement difference, so it is reported
                 # separately - folding it into the diffs would make `all_ok`
                 # mean "every element agreed AND every file was readable".
                 n_unsized += 1
                 continue
-            want = _legacy_element_quad(element, t, natural, ancestors)
-            got = _record_quad(frec, natural)
+            want = _legacy_element_quad(element, t, want_natural, ancestors)
+            got = _record_quad(frec, got_natural)
             err = max(max(abs(a - b) for a, b in zip(wc, gc))
                       for wc, gc in zip(want, got))
             worst = max(worst, err)
