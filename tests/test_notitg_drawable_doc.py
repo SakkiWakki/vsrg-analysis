@@ -1254,15 +1254,8 @@ def test_real_chart_element_parity(chart_path, label, doc_elements):
         'element placement diverges from the legacy painter:\n' + summary)
     assert rep['n_missing'] == 0, (
         'the doc drops an element legacy draws:\n' + summary)
-    # KNOWN GAP, and it is legacy's: a Quad whose zoomto arrives as a plain
-    # REST (no keyframes) leaves `w` at its own rest, `render._element_size`
-    # answers None and the painter drops it, while the doc draws it at the
-    # size the chart asked for. `modfile._fill_size_timelines` closes this
-    # for every quad whose size reaches the built timelines; the ones left
-    # are rest-only sizes on the baked path. Scoped to `rect` so any OTHER
-    # kind appearing here still fails.
-    over_drawn = [entry for r in rep['times'] for entry in r['extra']]
-    assert all(kind == 'rect' for _i, kind, _role in over_drawn), summary
+    assert rep['n_extra'] == 0, (
+        'the doc draws an element legacy culls:\n' + summary)
     for r in rep['times']:
         assert not r['diffs'], summary
 
