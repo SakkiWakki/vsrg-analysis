@@ -618,3 +618,81 @@ def test_out_of_plane_chain_matches_the_legacy_homography(captured_notefield):
     assert rep['all_ok'], dd.format_parity_report(rep)
     assert rep['max_mat_err'] < 1e-3, (
         f"out-of-plane chain diverges from legacy: {rep['max_mat_err']:.2e}")
+
+
+def _blit_lanes(evaluator, t):
+    """(u, f) records for one frame, as (n, stride) arrays."""
+    u_bytes, f_bytes, _uf, n = evaluator.frame(t)
+    u = np.frombuffer(u_bytes, dtype=np.uint32).reshape(n, evaluator.u_stride)
+    f = np.frombuffer(f_bytes, dtype=np.float32).reshape(n, evaluator.f_stride)
+    return u, f
+
+
+def test_fill_carries_its_diffuse_rgb_not_white():
+    # The AFT-rig idiom parks a `diffuse,0,0,0,1` curtain between a capture
+    # node and its samplers. Composited WHITE it paints over the rig instead
+    # of masking it, which is what an untinted item does: Item::of rests the
+    # tint at 1,1,1 and nothing overrode it.
+    fill = fc.instance('curtain', 'fill', 0, [_link(x=320.0, y=240.0)])
+    fill['color'] = EventTimeline(
+        [Keyframe(0.0, (0.0, 0.0, 0.0), 0.0, _EASE_LINEAR)],
+        rest=(0.0, 0.0, 0.0))
+    evaluator, _id_maps, _report = dd.build_static_doc(_compiled([fill]))
+
+    u, f = _blit_lanes(evaluator, 0.0)
+    fills = [i for i in range(len(u))
+             if u[i, 0] == sn.OP_BLIT and u[i, 1] == sn.SRC_FILL]
+    assert len(fills) == 1, 'expected exactly one fill blit'
+    assert tuple(f[fills[0], 10:13]) == (0.0, 0.0, 0.0)
+
+
+def test_blend_add_is_sampled_per_frame_not_baked_at_t0():
+    # `actor:blend('add')` fires inside a section body, so at t=0 the curve
+    # still rests at 0. Sampling it once at build time therefore bakes
+    # SourceOver for the whole chart - which composited gat 2's recursion
+    # samplers as opaque occluders instead of summing them.
+    aft = fc.instance('sampler', 'aft', 0, [_link(x=320.0, y=240.0)])
+    aft['aft_node'] = 'nodeX'
+    aft['blend_add'] = EventTimeline(
+        [Keyframe(0.0, (0.0,), 0.0, _EASE_LINEAR),
+         Keyframe(2.0, (1.0,), 0.0, _EASE_LINEAR)], rest=(0.0,))
+    cap = fc.instance('nodeX', 'capture', 0, [_link()])
+    evaluator, _id_maps, _report = dd.build_static_doc(_compiled([cap, aft]))
+
+    def blend_at(t):
+        u, _f = _blit_lanes(evaluator, t)
+        blits = [i for i in range(len(u)) if u[i, 0] == sn.OP_BLIT]
+        assert len(blits) == 1, 'expected exactly one sampler blit'
+        return int(u[blits[0], 4])
+
+    assert blend_at(0.0) == 0, 'rests source-over before the blend call'
+    assert blend_at(3.0) == 1, 'blend(add) after t=2 must reach the record'
+
+
+def test_capture_sorts_by_its_z_inside_a_sort_span():
+    # A capture node is an ordinary child of its frame, so a z-sorted parent
+    # orders it against its siblings. Reading only Item::z sank every
+    # non-Item command to the span's z=0 slot.
+    #
+    # The sibling's z sits BETWEEN 0 and the capture's, which is what makes
+    # this test able to fail: with the capture pinned at 0 it sorts FIRST
+    # (0 < 5), and only its real z=10 puts it last. A sibling at negative z
+    # would order identically either way and prove nothing.
+    cap = fc.instance('nodeX', 'capture', 0, [_link()])
+    cap['z_group'] = 'g'
+    cap['z_sort'] = EventTimeline(
+        [Keyframe(0.0, (10.0,), 0.0, _EASE_LINEAR)], rest=(10.0,))
+    below = fc.instance('below', 'fill', 0, [_link(x=100.0, y=240.0)])
+    below['z_group'] = 'g'
+    below['z_sort'] = EventTimeline(
+        [Keyframe(0.0, (5.0,), 0.0, _EASE_LINEAR)], rest=(5.0,))
+    evaluator, _id_maps, report = dd.build_static_doc(_compiled([cap, below]))
+    assert report['z_groups'] == 1
+
+    u, _f = _blit_lanes(evaluator, 0.0)
+    ops = [int(u[i, 0]) for i in range(len(u))]
+    copy_at = ops.index(sn.OP_COPY)
+    blit_at = ops.index(sn.OP_BLIT)
+    assert blit_at < copy_at, (
+        'the z=5 sibling must draw before the z=10 capture; '
+        f'ops={ops}')

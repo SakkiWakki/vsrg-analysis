@@ -786,24 +786,44 @@ class _Builder:
     # -- instance emission ------------------------------------------------
 
     def _emit_blit(self, source_kind: int, source_id: int, inst,
-                   additive: bool = False, visible=(-1, 1.0)) -> None:
+                   visible=(-1, 1.0)) -> None:
         z_id, z_rest, has_z = self._z_channel(inst)
         visible_id, visible_rest = visible
         self._builder.item(_SCREEN_ID, source_kind, source_id,
-                           additive=additive, z_id=z_id, z_rest=z_rest,
-                           has_z=has_z, visible_id=visible_id,
-                           visible_rest=visible_rest)
+                           z_id=z_id, z_rest=z_rest, has_z=has_z,
+                           visible_id=visible_id, visible_rest=visible_rest)
+        self._emit_tint(_SCREEN_ID, inst)
+        self._emit_blend(_SCREEN_ID, inst)
         self._emit_links(_SCREEN_ID, inst)
+
+    def _emit_tint(self, target: int, inst) -> None:
+        """Attach the instance's diffuse rgb to the item just pushed, when it
+        carries one. `inst['color']` is a 3-vector timeline (one channel per
+        component); absent it, the item keeps its white rest."""
+        color = inst.get('color')
+        if color is None:
+            return
+        chans = [self._channel(color, prop) for prop in range(3)]
+        (r_id, r_rest), (g_id, g_rest), (b_id, b_rest) = chans
+        self._builder.item_tint(target, r_id=r_id, r_rest=r_rest,
+                                g_id=g_id, g_rest=g_rest,
+                                b_id=b_id, b_rest=b_rest)
+
+    def _emit_blend(self, target: int, inst) -> None:
+        """Attach the instance's additive-blend gate to the item just pushed.
+
+        Every instance kind gets it, not just aft samplers: `blend('add')` is
+        an Actor verb a chart can call on anything, at any time, and sampling
+        it once at build time bakes whatever the rest happened to be."""
+        blend = inst.get('blend_add')
+        if blend is None:
+            return
+        chan_id, rest = self._channel(blend)
+        self._builder.item_blend(target, ch_id=chan_id, ch_rest=rest)
 
     def _z_channel(self, inst):
         """(z_id, z_rest, has_z) for an instance's SortSpan sort key. The
-        z_sort timeline is scalar; absent -> no z (pure insertion order).
-
-        A fill's time-varying diffuse rgb (`inst['color']`) is NOT plumbed: the
-        native `item` seeds the BLIT tint white and offers no per-channel tint
-        setter, so a colored curtain composes white. The parity harness compares
-        source / mat3 / alpha, not tint, so this is invisible there; a fill's
-        real color awaits a tint-channel item API (documented limitation)."""
+        z_sort timeline is scalar; absent -> no z (pure insertion order)."""
         z_sort = inst.get('z_sort')
         if inst.get('z_group') is None or z_sort is None:
             return -1, 0.0, False
@@ -951,14 +971,15 @@ class _Builder:
                 # a bare snapshot re-captured every frame and nothing could
                 # ever freeze.
                 slot = self._slot_drawable(inst['name'])
-                self._builder.snapshot(_SCREEN_ID, slot)
+                z_id, z_rest, has_z = self._z_channel(inst)
+                self._builder.snapshot(_SCREEN_ID, slot, z_id=z_id,
+                                       z_rest=z_rest, has_z=has_z)
                 self._emit_links(_SCREEN_ID, inst, camera=False)
             case 'fill':
                 self._emit_blit(sn.SRC_FILL, 0, inst)
             case 'aft':
                 slot = self._slot_drawable(_aft_slot_key(inst))
-                additive = self._aft_additive(inst)
-                self._emit_blit(sn.SRC_DRAWABLE, slot, inst, additive=additive)
+                self._emit_blit(sn.SRC_DRAWABLE, slot, inst)
             case 'player' | 'proxy':
                 scope = self._field_scope(inst)
                 # A 'player' instance IS the base field, so it disappears
@@ -977,9 +998,11 @@ class _Builder:
                     # per-player 'field{N}' scope keeps the capture blit -
                     # its content differs per player and the feed carries
                     # player 1's items only.
+                    z_id, z_rest, has_z = self._z_channel(inst)
                     self._builder.feed_inline(
                         _SCREEN_ID, self._notes_slot_for(scope),
-                        visible_id=visible[0], visible_rest=visible[1])
+                        visible_id=visible[0], visible_rest=visible[1],
+                        z_id=z_id, z_rest=z_rest, has_z=has_z)
                     self._emit_links(_SCREEN_ID, inst)
                     return
                 drawable = self._field_drawable(scope)
@@ -997,10 +1020,6 @@ class _Builder:
             self._base_gate = self._visible_from_hidden(
                 self._compiled.get('base_field_hidden'))
         return self._base_gate
-
-    def _aft_additive(self, inst) -> bool:
-        blend = inst.get('blend_add')
-        return blend is not None and blend.sample(self._t0)[0] >= 0.5
 
     def _field_scope(self, inst) -> str:
         """The field-capture scope a proxy/player blits, mirroring

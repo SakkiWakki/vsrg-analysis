@@ -45,7 +45,7 @@ mod transform;
 
 use crate::channels::ChannelRef;
 use crate::doc::{
-    Blend, CameraRef, ClipDesc, Cmd, DrawableDoc, Item, LinkRef, MeshDesc, ShaderDesc, Source,
+    CameraRef, ClipDesc, Cmd, DrawableDoc, Item, LinkRef, MeshDesc, ShaderDesc, Source,
     Space, TransformRef,
 };
 use crate::doc::Reaction;
@@ -201,8 +201,10 @@ impl DocBuilder {
     /// channel: < 0.5 emits nothing). Follow with `item_link` calls to
     /// attach a consumer transform chain - the chain's H then composes
     /// over each fed item's mat3 (a proxy/player field re-render).
-    #[pyo3(signature = (target, slot, visible_id=-1, visible_rest=1.0))]
-    fn feed_inline(&mut self, target: u32, slot: u32, visible_id: i64, visible_rest: f32) {
+    #[pyo3(signature = (target, slot, visible_id=-1, visible_rest=1.0,
+                        z_id=-1, z_rest=0.0, has_z=false))]
+    fn feed_inline(&mut self, target: u32, slot: u32, visible_id: i64, visible_rest: f32,
+                   z_id: i64, z_rest: f32, has_z: bool) {
         let doc = self.doc.as_mut().expect("builder already finished");
         doc.drawables[target as usize]
             .commands
@@ -212,6 +214,7 @@ impl DocBuilder {
                 flip_base_y: false,
                 visible: chan(visible_id, visible_rest),
                 projection: None,
+                z: has_z.then(|| chan(z_id, z_rest)),
             });
     }
 
@@ -295,6 +298,39 @@ impl DocBuilder {
     /// Set a clip on the last-pushed item without a shader.
     fn item_clip(&mut self, target: u32, clip_id: u32) {
         self.last_item(target).clip = Some(clip_id);
+    }
+
+    /// Additive-blend gate on the item most recently pushed onto `target`,
+    /// sampled every frame (>= 0.5 additive). Use instead of `item`'s
+    /// `additive=` flag whenever the chart can change blending at runtime -
+    /// the flag bakes one mode for the whole chart.
+    #[pyo3(signature = (target, ch_id=-1, ch_rest=0.0))]
+    fn item_blend(&mut self, target: u32, ch_id: i64, ch_rest: f32) {
+        self.last_item(target).blend_add = chan(ch_id, ch_rest);
+    }
+
+    /// Per-channel diffuse tint on the item most recently pushed onto
+    /// `target`, sampled every frame. Rests at white, so an item that
+    /// never calls this composes untinted.
+    ///
+    /// A Quad's diffuse IS its colour in the engine, and the AFT-rig idiom
+    /// puts a `diffuse,0,0,0,1` curtain between a capture node and its
+    /// samplers - untinted that curtain composes WHITE and paints over the
+    /// rig instead of masking it.
+    #[pyo3(signature = (target, r_id=-1, r_rest=1.0, g_id=-1, g_rest=1.0,
+                        b_id=-1, b_rest=1.0))]
+    fn item_tint(
+        &mut self,
+        target: u32,
+        r_id: i64,
+        r_rest: f32,
+        g_id: i64,
+        g_rest: f32,
+        b_id: i64,
+        b_rest: f32,
+    ) {
+        self.last_item(target).tint =
+            [chan(r_id, r_rest), chan(g_id, g_rest), chan(b_id, b_rest)];
     }
 
     /// Attach an event-driven drawing reaction to the item most recently
@@ -544,7 +580,7 @@ impl DocBuilder {
         };
         item.opacity = chan(opacity_id, opacity_rest);
         item.visible = chan(visible_id, visible_rest);
-        item.blend = if additive { Blend::Additive } else { Blend::SourceOver };
+        item.blend_add = ChannelRef::constant(additive as u32 as f32);
         item.space = if screen_space { Space::Screen } else { Space::Scene };
         item.z = has_z.then(|| chan(z_id, z_rest));
         self.push(target, Cmd::Item(item));
@@ -596,11 +632,13 @@ impl DocBuilder {
         Ok(lower(&root, t0, horizon, &state).fires)
     }
 
-    fn snapshot(&mut self, target: u32, into: u32) {
+    #[pyo3(signature = (target, into, z_id=-1, z_rest=0.0, has_z=false))]
+    fn snapshot(&mut self, target: u32, into: u32, z_id: i64, z_rest: f32, has_z: bool) {
         self.push(target, Cmd::Snapshot {
             into,
             links: Vec::new(),
             flip_base_y: false,
+            z: has_z.then(|| chan(z_id, z_rest)),
         });
     }
 

@@ -221,7 +221,11 @@ pub struct Item {
     pub space: Space,
     pub opacity: ChannelRef,
     pub tint: [ChannelRef; 3],
-    pub blend: Blend,
+    /// Additive-blend gate, sampled every frame: >= 0.5 draws Additive,
+    /// else SourceOver. A CHANNEL rather than a baked mode because charts
+    /// flip blending at runtime mid-section (`actor:blend('add')`), and a
+    /// mode fixed at build time freezes whatever the rest happened to be.
+    pub blend_add: ChannelRef,
     pub crop: [ChannelRef; 4], // l, t, r, b fractions
     pub visible: ChannelRef,   // >= 0.5 draws
     pub shader: Option<u32>,   // ShaderId into DrawableDoc.shaders
@@ -250,7 +254,7 @@ impl Item {
             space: Space::Scene,
             opacity: ChannelRef::constant(1.0),
             tint: [ChannelRef::constant(1.0); 3],
-            blend: Blend::SourceOver,
+            blend_add: ChannelRef::constant(0.0),
             crop: [ChannelRef::constant(0.0); 4],
             visible: ChannelRef::constant(1.0),
             shader: None,
@@ -276,6 +280,10 @@ pub enum Cmd {
         /// relies on. An empty chain means "always capture".
         links: Vec<LinkRef>,
         flip_base_y: bool,
+        /// Sort key inside a SortSpan, as for `Item::z`. A capture node is
+        /// an ordinary child of its frame, so a z-sorted parent orders it
+        /// against its siblings like any other.
+        z: Option<ChannelRef>,
     },
     /// The next `len` commands re-sort stably by their sampled `z`
     /// before drawing (SetDrawByZPosition).
@@ -308,6 +316,10 @@ pub enum Cmd {
         /// needs the same perspective divide an Item's does - without it a
         /// rotated field is a flat squash, not a 3D turn.
         projection: Option<CameraRef>,
+        /// Sort key inside a SortSpan, as for `Item::z`. The feed stands in
+        /// for ONE actor (the field its items belong to), so it sorts by
+        /// that actor's z - the fed items keep their own order within it.
+        z: Option<ChannelRef>,
     },
 }
 

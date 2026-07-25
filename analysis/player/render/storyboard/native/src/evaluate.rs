@@ -278,11 +278,8 @@ fn feed_item(u: &[u32], f: &[f32]) -> Item {
         ChannelRef::constant(f[15]),
         ChannelRef::constant(f[16]),
     ];
-    item.blend = if flags & FEED_FLAG_ADDITIVE != 0 {
-        crate::doc::Blend::Additive
-    } else {
-        crate::doc::Blend::SourceOver
-    };
+    item.blend_add = ChannelRef::constant(
+        ((flags & FEED_FLAG_ADDITIVE != 0) as u32) as f32);
     item.space = if flags & FEED_FLAG_SCREEN != 0 {
         crate::doc::Space::Screen
     } else {
@@ -457,6 +454,7 @@ fn emit_commands(
                 flip_base_y,
                 visible,
                 projection,
+                ..
             } => {
                 // Inline: the slot's fed items draw HERE, as ordinary items of
                 // the enclosing drawable, so nothing bounds them but the real
@@ -480,6 +478,7 @@ fn emit_commands(
                 into,
                 links,
                 flip_base_y,
+                ..
             } => {
                 if snapshot_live(doc, links, *flip_base_y, t) {
                     schedule.op(OP_COPY, *into, 0);
@@ -490,13 +489,17 @@ fn emit_commands(
                 let span_end = (i + 1 + *len as usize).min(commands.len());
                 let mut keyed: Vec<(f32, usize)> = (i + 1..span_end)
                     .map(|j| {
+                        // Every drawing command in a span sorts by its own z:
+                        // a feed stands in for one actor and a snapshot IS
+                        // one, so reading only Item::z sank both to the
+                        // span's z=0 slot regardless of where they sit.
                         let z = match &commands[j] {
-                            Cmd::Item(item) => item
-                                .z
-                                .map(|r| doc.channels.sample(r, t))
-                                .unwrap_or(0.0),
-                            _ => 0.0,
-                        };
+                            Cmd::Item(item) => item.z,
+                            Cmd::Feed { z, .. } | Cmd::Snapshot { z, .. } => *z,
+                            Cmd::SortSpan { .. } => None,
+                        }
+                        .map(|r| doc.channels.sample(r, t))
+                        .unwrap_or(0.0);
                         (z, j)
                     })
                     .collect();
@@ -509,6 +512,7 @@ fn emit_commands(
                             into,
                             links,
                             flip_base_y,
+                            ..
                         } => {
                             if snapshot_live(doc, links, *flip_base_y, t) {
                                 schedule.op(OP_COPY, *into, 0);
@@ -523,6 +527,7 @@ fn emit_commands(
                             flip_base_y,
                             visible,
                             projection,
+                            ..
                         } => emit_feed(
                             doc,
                             *slot,
@@ -841,7 +846,11 @@ fn emit_item_folded(
     u[1] = src_kind;
     u[2] = src_id;
     u[3] = src_aux;
-    u[4] = item.blend as u32;
+    u[4] = if doc.channels.sample(item.blend_add, t) >= 0.5 {
+        crate::doc::Blend::Additive
+    } else {
+        crate::doc::Blend::SourceOver
+    } as u32;
     u[5] = item.shader.map(|s| s + 1).unwrap_or(0);
     u[6] = item.clip.map(|c| c + 1).unwrap_or(0);
     u[7] = matches!(item.space, crate::doc::Space::Screen) as u32;
@@ -1074,7 +1083,7 @@ mod tests {
             Source::Image { image, .. } => assert_eq!(image, 5),
             _ => panic!("item 0 should be an image"),
         }
-        assert!(matches!(items[0].blend, crate::doc::Blend::Additive));
+        assert_eq!(items[0].blend_add.rest, 1.0);
         assert!(matches!(items[0].space, crate::doc::Space::Scene));
         assert!(items[0].z.is_none());
         assert_eq!(
