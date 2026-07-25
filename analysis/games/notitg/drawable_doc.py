@@ -596,7 +596,7 @@ _LINK_PROP_ORDER = (
     ('base_scale_x', 'base_scale_x'), ('base_scale_y', 'base_scale_y'),
     ('base_scale_z', 'base_scale_z'),
     ('halign', 'halign'), ('valign', 'valign'),
-    ('hidden', 'hidden'), ('alpha', 'alpha'),
+    ('hidden', 'hidden'), ('awake', 'awake'), ('alpha', 'alpha'),
     ('crop_l', 'crop_left'), ('crop_t', 'crop_top'),
     ('crop_r', 'crop_right'), ('crop_b', 'crop_bottom'),
 )
@@ -615,7 +615,7 @@ _ELEMENT_LINK_PROPS = (
     ('z', 'z'),
     ('skew_x', 'skew_x'), ('skew_y', 'skew_y'),
     ('halign', 'halign'), ('valign', 'valign'),
-    ('hidden', 'hidden'), ('alpha', 'alpha'),
+    ('hidden', 'hidden'), ('awake', 'awake'), ('alpha', 'alpha'),
     ('crop_l', 'crop_left'), ('crop_t', 'crop_top'),
     ('crop_r', 'crop_right'), ('crop_b', 'crop_bottom'),
 )

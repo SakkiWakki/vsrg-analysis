@@ -56,6 +56,7 @@ pub struct TransformState {
     pub halign: f32,
     pub valign: f32,
     pub hidden: f32,
+    pub awake: f32,
     pub alpha: f32,
     /// left, top, right, bottom edge insets (fractions of the texture).
     pub crop: [f32; 4],
@@ -87,6 +88,7 @@ impl Default for TransformState {
             halign: 0.5,
             valign: 0.5,
             hidden: 0.0,
+            awake: 1.0,
             alpha: 1.0,
             crop: [0.0; 4],
             natural_w: DESIGN_W,
@@ -311,6 +313,9 @@ pub fn compose_links(
     let mut world: Option<Mat3> = None;
     let mut world4: Option<crate::camera::Mat4> = None;
     for (i, link) in links.iter().enumerate() {
+        if link.awake < 0.5 {
+            return None;
+        }
         if link.hidden >= 0.5 {
             return None;
         }
@@ -457,6 +462,7 @@ mod tests {
             halign: g(9),
             valign: g(10),
             hidden: g(11),
+            awake: 1.0,
             alpha: g(12),
             crop: [g(13), g(14), g(15), g(16)],
             natural_w: DESIGN_W,

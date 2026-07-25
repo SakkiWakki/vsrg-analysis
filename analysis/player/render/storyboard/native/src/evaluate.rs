@@ -628,6 +628,7 @@ fn sample_link(
         halign: ch.sample(link.halign, t),
         valign: ch.sample(link.valign, t),
         hidden: ch.sample(link.hidden, t),
+        awake: ch.sample(link.awake, t),
         alpha: ch.sample(link.alpha, t),
         crop: [
             ch.sample(link.crop[0], t),

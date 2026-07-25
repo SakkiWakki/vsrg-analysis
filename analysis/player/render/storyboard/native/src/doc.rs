@@ -155,6 +155,10 @@ pub struct LinkRef {
     pub halign: ChannelRef,
     pub valign: ChannelRef,
     pub hidden: ChannelRef,
+    /// SM's sleep bit: an asleep actor neither updates nor DRAWS, so a
+    /// link resting below 0.5 removes the whole instance. Rests at 1
+    /// (born awake), so a chain that never sleeps composes unchanged.
+    pub awake: ChannelRef,
     pub alpha: ChannelRef,
     pub crop: [ChannelRef; 4], // l, t, r, b
     pub natural_w: ChannelRef,
