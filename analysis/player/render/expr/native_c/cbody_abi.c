@@ -115,7 +115,7 @@ void cbody_set_frontier(CBody *b, void *ctx,
         void *symbol, void *gget, void *gset, void *getter, void *poke,
         void *call, void *call_value, void *index, void *set_index, void *length,
         void *table_insert, void *iter_setup, void *iter_next, void *fallback,
-        void *aborted) {
+        void *abort_flag) {
     b->fe.ctx = ctx;
     b->fe.symbol     = (CValue(*)(void*,const char*))symbol;
     b->fe.global_get = (CValue(*)(void*,const char*))gget;
@@ -131,7 +131,7 @@ void cbody_set_frontier(CBody *b, void *ctx,
     b->fe.iter_setup = (uint64_t(*)(void*,const CValue*,int))iter_setup;
     b->fe.iter_next  = (int(*)(void*,uint64_t,CValue*,int))iter_next;
     b->fe.fallback   = (CValue(*)(void*,int,CValue*,int))fallback;
-    b->fe.aborted    = (int(*)(void*))aborted;
+    b->fe.abort_flag = (const int *)abort_flag;
 }
 
 /* --- run one tick ------------------------------------------------------- */

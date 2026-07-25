@@ -181,20 +181,14 @@ class OpStreamCompiledBody:
         self._rec_id = rec_id
         self._name = name
         try:
-            import os
-            import sys
             # The C op-stream executor is game-agnostic and lives in the shared
             # render/expr tree; NotITG supplies only the surface + program.
-            # __file__ = analysis/games/notitg/sim/compiled_body.py; four
-            # dirnames reach the `analysis` dir, then into the shared expr tree.
-            nc = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.dirname(
-                    os.path.dirname(__file__)))),
-                'player', 'render', 'expr', 'native_c')
-            if nc not in sys.path:
-                sys.path.insert(0, nc)
-            import opstream
-            import cbody
+            # Imported by PACKAGE path: both modules import absolutely, and a
+            # sys.path hack to load them top-level as `cbody`/`opstream` gave
+            # the process a SECOND copy of each - a second dlopen handle, a
+            # second set of CFUNCTYPE prototypes, and a class whose identity
+            # did not match the package-path one.
+            from analysis.player.render.expr.native_c import cbody, opstream
         except Exception:
             self._ok = False
             return

@@ -59,8 +59,13 @@ typedef struct CFrontier {
      * for a statement). frame/globals are shared via the exec state the host
      * captured. */
     CValue (*fallback)(void *ctx, int node_id, CValue *frame, int nslots);
-    /* whether a frontier call raised (aborts the tick, matching the interp). */
-    int    (*aborted)(void *ctx);
+    /* Host-owned: nonzero once a frontier call has raised (aborts the tick,
+     * matching the interp). A FLAG the executor loads, not a callback it
+     * calls - the four crossings that can raise polled it after every one
+     * (85x/tick on gat, 2.2M over the chart) and the answer is a constant 0
+     * for any surface that does not model aborting. The host clears it per
+     * run and sets it from the crossing that raised. */
+    const int *abort_flag;
 } CFrontier;
 
 /* Crossing trim: per-run symbol memo + cross-run stable cache + the

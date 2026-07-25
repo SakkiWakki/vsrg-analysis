@@ -87,14 +87,15 @@ int cexec_run(CExecState *st, CValue self_val) {
     /* NEXT does NOT poll abort - only a frontier call can raise, so CHECK_ABORT
      * is invoked only by the ops that cross (getter/poke/call/index/global/
      * fallback). Polling every op was ~276K ctypes round-trips/tick = the
-     * dominant cost. */
+     * dominant cost. The check itself is a LOAD of the host's flag, not a
+     * crossing of its own - see CFrontier.abort_flag. */
     #define NEXT() goto *DISPATCH[ops[pc].op]
-    #define CHECK_ABORT() do { if (fe->aborted(fe->ctx)) return 1; } while (0)
+    #define CHECK_ABORT() do { if (*fe->abort_flag) return 1; } while (0)
     #define OP(name) L_##name:
     goto *DISPATCH[ops[pc].op];
 #else
     #define NEXT() goto dispatch
-    #define CHECK_ABORT() do { if (fe->aborted(fe->ctx)) return 1; } while (0)
+    #define CHECK_ABORT() do { if (*fe->abort_flag) return 1; } while (0)
     #define OP(name) case OP_##name:
     dispatch: switch (ops[pc].op) {
 #endif

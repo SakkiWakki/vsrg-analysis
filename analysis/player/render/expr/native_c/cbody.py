@@ -154,7 +154,6 @@ _TINSERT  = ctypes.CFUNCTYPE(None, ctypes.c_void_p, U64, U64)
 _ITERSET  = ctypes.CFUNCTYPE(U64, ctypes.c_void_p, ctypes.POINTER(U64), ctypes.c_int)
 _ITERNEXT = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, U64, ctypes.POINTER(U64), ctypes.c_int)
 _FALLBACK = ctypes.CFUNCTYPE(U64, ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(U64), ctypes.c_int)
-_ABORTED  = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p)
 
 
 class CompiledBodyC:
@@ -198,6 +197,10 @@ class CompiledBodyC:
             self._lib.cbody_set_name(self._b, i, e, len(e))
         self._name_id = {nm: i for i, nm in enumerate(ser['names'])}
         self._clock_wired = False
+
+        # Abort flag the executor LOADS (never calls). Cleared per run;
+        # set by a raising crossing when the surface models aborting.
+        self._abort = ctypes.c_int(0)
 
         # handle registry: id -> python object (non-scalar values crossing out)
         self._handles: dict[int, object] = {}
@@ -452,10 +455,26 @@ class CompiledBodyC:
             node = self._nodes[node_id]
             v = self._fallback_run(node)
             return self._to_cv(v)
-        def aborted(ctx):
-            if hasattr(surf, 'aborted'):
-                return 1 if surf.aborted() else 0
-            return 0
+        # Abort reporting is a FLAG the executor loads (CFrontier.abort_flag),
+        # not a callback it polls. Only the four crossings that can raise -
+        # getter, poke, call, call_value - have to refresh it, and only when
+        # the surface models aborting at all. No surface in the tree does, so
+        # the usual case installs the bare callbacks and the flag stays 0 for
+        # the whole run.
+        surf_aborted = getattr(surf, 'aborted', None)
+
+        def reporting(fn):
+            """Wrap a raising crossing so the host flag reflects the surface."""
+            def wrapped(*args):
+                result = fn(*args)
+                if surf_aborted():
+                    self._abort.value = 1
+                return result
+            return wrapped
+
+        if surf_aborted is not None:
+            getter, poke = reporting(getter), reporting(poke)
+            call, call_value = reporting(call), reporting(call_value)
 
         # keep alive
         self._cb = (
@@ -464,10 +483,11 @@ class CompiledBodyC:
             _INDEX(index), _SETINDEX(set_index),
             _LENGTH(length), _TINSERT(table_insert),
             _ITERSET(iter_setup), _ITERNEXT(iter_next), _FALLBACK(fallback),
-            _ABORTED(aborted),
         )
         ptrs = [ctypes.cast(c, ctypes.c_void_p) for c in self._cb]
-        self._lib.cbody_set_frontier(self._b, None, *ptrs)
+        self._lib.cbody_set_frontier(
+            self._b, None, *ptrs,
+            ctypes.cast(ctypes.byref(self._abort), ctypes.c_void_p))
 
     def _arena_rows(self, table_cv):
         """Iterate a snapshotted (arena) table as (index_cv, element_cv) pairs,
@@ -489,6 +509,7 @@ class CompiledBodyC:
                     self._name_id.get('GetSongTime', -1))
             self._lib.cbody_set_clock(self._b, float(beat), float(t))
         self._handles.clear(); self._obj_to_handle.clear()
+        self._abort.value = 0
         rc = self._lib.cbody_run(self._b, self._to_cv(self_table))
         return rc
 
