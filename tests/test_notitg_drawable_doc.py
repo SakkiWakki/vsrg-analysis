@@ -1229,3 +1229,35 @@ def test_a_codepoint_outside_the_atlas_grid_draws_nothing_but_advances(
     assert len(blits) == 1, "'A' (65) is outside an 8x8 grid; '!' (33) is not"
     assert int(u[blits[0], 3]) == ord('!')
     assert round(float(f[blits[0], 2]), 3) == 5.0, 'the dropped glyph still advanced'
+
+
+def test_a_run_crop_is_redistributed_across_the_glyphs(doc_elements, tmp_path):
+    # SM crops the whole TEXT ACTOR, but the doc draws one item per glyph and
+    # `compose_links` takes crop from the LEAF - so a run crop is dropped
+    # unless each glyph gets its share. Windfall hides its seizure warning
+    # with `cropright(1)` and nothing else, which is why it covered the screen.
+    font = _bitmap_font(tmp_path, advance=10.0)
+    el = _element('bitmaptext', 0, text='ABCD', font=font)
+    el.timelines['crop_right'] = EventTimeline([], rest=(0.5,))
+    evaluator, _id_maps, _report = dd.build_static_doc(
+        _compiled([], tree=[el]))
+
+    u, f = _blit_lanes(evaluator, 1.0)
+    blits = [i for i in range(len(u)) if u[i, 0] == sn.OP_BLIT]
+    assert len(blits) == 4
+    # Half the 40px run is cropped: the first two glyphs are untouched, the
+    # last two entirely gone.
+    assert [round(float(f[i, 15]), 3) for i in blits] == [0.0, 0.0, 1.0, 1.0]
+
+
+def test_a_full_run_crop_removes_every_glyph(doc_elements, tmp_path):
+    font = _bitmap_font(tmp_path, advance=10.0)
+    el = _element('bitmaptext', 0, text='ABCD', font=font)
+    el.timelines['crop_right'] = EventTimeline([], rest=(1.0,))
+    evaluator, _id_maps, _report = dd.build_static_doc(
+        _compiled([], tree=[el]))
+
+    u, f = _blit_lanes(evaluator, 1.0)
+    blits = [i for i in range(len(u)) if u[i, 0] == sn.OP_BLIT]
+    assert all(round(float(f[i, 15]), 3) == 1.0 for i in blits), (
+        'cropright(1) must leave nothing visible')

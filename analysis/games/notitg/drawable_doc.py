@@ -447,6 +447,48 @@ class _FillSizeTimeline:
         return (self._pick(size, natural),)
 
 
+class _GlyphCropTimeline:
+    """One glyph's share of a bitmaptext run's horizontal crop.
+
+    SM crops the whole TEXT ACTOR, but the doc draws a run as one item per
+    glyph, and `compose_links` takes its crop from the LEAF link - so a run
+    crop left on the element is dropped entirely. Windfall hides its seizure
+    warning with `cropright(1)` and nothing else, which is why it covered the
+    screen.
+
+    The share is computed in ADVANCE space: the run spans `[0, total]`, this
+    glyph `[start, start + advance]`, and the visible window is
+    `[total*left, total*(1 - right)]`. Advance space is not cell space - a
+    glyph's drawn cell may be wider than its advance - so a partly-cropped
+    glyph is off by that difference. It is exact where it matters (fully in,
+    fully out) and the reveal it drives is a wipe, not a measurement.
+    """
+
+    def __init__(self, crop, total: float, start: float, advance: float,
+                 leading: bool):
+        self._crop = crop
+        self._total = float(total)
+        self._start = float(start)
+        self._advance = float(advance)
+        self._leading = leading
+        self._rest = (self._share(_rest_value(crop, 0)),)
+
+    def _share(self, fraction: float) -> float:
+        if self._advance <= 0.0:
+            return 1.0 if fraction > 0.0 else 0.0
+        if self._leading:
+            cut = self._total * fraction - self._start
+        else:
+            cut = self._start + self._advance - self._total * (1.0 - fraction)
+        return min(1.0, max(0.0, cut / self._advance))
+
+    def is_static(self) -> bool:
+        return _is_static(self._crop)
+
+    def sample(self, t):
+        return (self._share(self._crop.sample(t)[0]),)
+
+
 class _SpanTimeline:
     """The signed distance between two scalar timelines, as a timeline.
 
@@ -1365,25 +1407,56 @@ class _Builder:
 
         codepoints = [ord(char) for char in element.text]
         advances = [font.advance(cp) for cp in codepoints]
-        pen = -sum(advances) / 2.0
+        total = sum(advances)
+        run = 0.0
         emitted = 0
         for codepoint, advance in zip(codepoints, advances):
-            centre = pen + advance / 2.0
-            pen += advance
+            centre = run + advance / 2.0 - total / 2.0
+            start = run
+            run += advance
             if not 0 <= codepoint < cells:
                 # Outside the atlas grid: legacy's `font.cell` returns None and
                 # draws nothing, but the pen still advanced.
                 continue
-            self._sn_glyph_item(image_id, codepoint, centre, element, ancestors)
+            self._sn_glyph_item(image_id, codepoint, centre, element, ancestors,
+                                self._glyph_crop(element, total, start, advance))
             emitted += 1
         if not emitted:
             self._count_skip('bitmaptext')
         return bool(emitted)
 
+    def _glyph_crop(self, element, total: float, start: float,
+                    advance: float) -> dict:
+        """`item_link` crop kwargs for one glyph: its share of the run's
+        horizontal crop, and the run's vertical crop unchanged (a run is one
+        cell tall, so top/bottom apply to every glyph alike)."""
+        kwargs: dict = {}
+        for param, prop, leading in (('crop_l', 'crop_left', True),
+                                     ('crop_r', 'crop_right', False)):
+            timeline = element.timelines.get(prop)
+            if timeline is None:
+                continue
+            share = _GlyphCropTimeline(timeline, total, start, advance, leading)
+            chan_id, rest = self._channel(share)
+            kwargs[f'{param}_id'] = chan_id
+            kwargs[f'{param}_rest'] = rest
+        for param, prop in (('crop_t', 'crop_top'), ('crop_b', 'crop_bottom')):
+            timeline = element.timelines.get(prop)
+            if timeline is None:
+                continue
+            chan_id, rest = self._channel(timeline)
+            kwargs[f'{param}_id'] = chan_id
+            kwargs[f'{param}_rest'] = rest
+        return kwargs
+
     def _sn_glyph_item(self, image_id: int, codepoint: int, centre: float,
-                       element, ancestors) -> None:
+                       element, ancestors, crop=None) -> None:
         """One glyph of a bitmaptext run, placed by a constant offset link so
-        the offset rides INSIDE the element's own rotation and scale."""
+        the offset rides INSIDE the element's own rotation and scale.
+
+        That offset link is the chain's LEAF, and `compose_links` takes its
+        crop from the leaf - so the run's crop share rides here too, or it is
+        dropped."""
         kwargs = self._element_visible_kwarg(element)
         kwargs['frame_rest'] = float(codepoint)
         self._builder.item(_SCREEN_ID, self._sn.SRC_IMAGE, image_id,
@@ -1396,7 +1469,8 @@ class _Builder:
             self._builder.item_link(
                 _SCREEN_ID, **self._element_link_kwargs(link_element))
         self._builder.item_link(_SCREEN_ID, x_rest=float(centre), y_rest=0.0,
-                                natural_w_rest=0.0, natural_h_rest=0.0)
+                                natural_w_rest=0.0, natural_h_rest=0.0,
+                                **(crop or {}))
 
     def _tag_element(self, element, role: str, ancestors=()) -> int:
         """Record `(element, role, ancestors)` in emission order and return its
