@@ -114,6 +114,35 @@ _ELEMENT_ITEM_LANES = (
     ('alpha', 'opacity'),
 )
 
+# Element verbs the doc cannot yet express, each counted as a skip so an
+# unsupported chart shows up in the report rather than just looking slightly
+# wrong once legacy stops drawing elements.
+#
+# Both rest at a sentinel the flat draw ignores, so "carries the timeline" is
+# NOT the test - `build_timelines` mints every property on every element. A
+# corner is unset while its red is negative (render._corners); a fade is off
+# at 0.
+_CORNER_COLOR_PROPS = ('color_ul', 'color_ur', 'color_ll', 'color_lr')
+_FADE_PROPS = ('fade_left', 'fade_right', 'fade_top', 'fade_bottom')
+_CORNER_UNSET = -1.0
+_FADE_OFF = 0.0
+
+
+def _is_poked(element, props, unset: float) -> bool:
+    """Whether `element` ever moves any of `props` off `unset`.
+
+    A timeline with no keyframes never leaves its rest, so it is untouched
+    when that rest IS the unset sentinel. `_is_static` is the wrong probe
+    here: it answers False for a plain keyframe-less EventTimeline, which is
+    the safe direction for export but would report every element as poked."""
+    for prop in props:
+        timeline = element.timelines.get(prop)
+        if timeline is None:
+            continue
+        if bool(timeline) or _rest_value(timeline, 0) != unset:
+            return True
+    return False
+
 
 # --------------------------------------------------------------------------
 # export_channel - the shared timeline -> breakpoint-array primitive
@@ -368,6 +397,27 @@ class _FrameCurve:
             return None
         ts, frames = steps
         return ts, [float(f) for f in frames], [0.0] * len(ts), [0] * len(ts)
+
+
+class _SpanTimeline:
+    """The signed distance between two scalar timelines, as a timeline.
+
+    A fit rect is recorded as four edges but only its EXTENT scales the
+    sprite, so the doc sends `right - left` and `bottom - top` rather than
+    four lanes the executor would immediately subtract. Static when both
+    edges are, which is the usual case (a rect set once), so the common path
+    exports one constant rather than a dense walk."""
+
+    def __init__(self, lo, hi):
+        self._lo = lo
+        self._hi = hi
+        self._rest = (_rest_value(hi, 0) - _rest_value(lo, 0),)
+
+    def is_static(self) -> bool:
+        return _is_static(self._lo) and _is_static(self._hi)
+
+    def sample(self, t):
+        return (self._hi.sample(t)[0] - self._lo.sample(t)[0],)
 
 
 def _read_shader_source(path):
@@ -1180,6 +1230,37 @@ class _Builder:
         self._emit_element_tint(element)
         if ancestors:
             self._emit_element_links(element, ancestors)
+        self._emit_element_glow(image_id, element, kwargs, ancestors)
+
+    def _emit_element_glow(self, image_id: int, element, kwargs,
+                           ancestors=()) -> None:
+        """Push SM's additive glow pass (Sprite.cpp:536-541) as a SECOND item.
+
+        The glow is the same sprite drawn again over the content, tinted to
+        the glow colour and composited additively at the glow alpha - so it
+        needs no record lanes of its own, only a duplicate item whose tint and
+        opacity read the glow curve. It draws immediately after the content,
+        matching the painter's content-then-glow order.
+
+        `glow` rests at alpha 0, so a statically un-glowed element emits
+        nothing rather than doubling every element's op count."""
+        glow = element.timelines.get('glow')
+        if glow is None or (_is_static(glow) and _rest_value(glow, 3) <= 0.0):
+            return
+        alpha_id, alpha_rest = self._channel(glow, 3)
+        glow_kwargs = dict(kwargs)
+        glow_kwargs['opacity_id'] = alpha_id
+        glow_kwargs['opacity_rest'] = alpha_rest
+        self._builder.item(_SCREEN_ID, self._sn.SRC_IMAGE, image_id,
+                           additive=True, **glow_kwargs)
+        self._emit_element_box(element)
+        chans = [self._channel(glow, prop) for prop in range(3)]
+        (r_id, r_rest), (g_id, g_rest), (b_id, b_rest) = chans
+        self._builder.item_tint(_SCREEN_ID, r_id=r_id, r_rest=r_rest,
+                                g_id=g_id, g_rest=g_rest,
+                                b_id=b_id, b_rest=b_rest)
+        if ancestors:
+            self._emit_element_links(element, ancestors)
 
     def _emit_element_box(self, element) -> None:
         """Attach the element's draw-box origin and any absolute size.
@@ -1190,9 +1271,9 @@ class _Builder:
         size. `size_x`/`size_y` carry `zoomto`/`setsize`, which REPLACE the
         natural basis - a negative rest keeps the natural size.
 
-        `fit_mode`/`fit_*` (ScaleToCover / ScaleToFitInside) are NOT handled:
-        the fitted size is a function of the natural size, which only the
-        executor knows, so it needs its own lanes rather than this override."""
+        ScaleToCover / ScaleToFitInside rides `_emit_element_fit`, which
+        overrides this - the fitted size needs the natural size, which only
+        the executor knows."""
         origin_x, origin_y = getattr(element, 'origin', (0.0, 0.0))
         kwargs = {'origin_x': float(origin_x), 'origin_y': float(origin_y)}
         for axis in ('x', 'y'):
@@ -1203,13 +1284,44 @@ class _Builder:
             kwargs[f'size_{axis}_id'] = chan_id
             kwargs[f'size_{axis}_rest'] = rest
         self._builder.item_box(_SCREEN_ID, **kwargs)
+        self._emit_element_fit(element)
+
+    def _emit_element_fit(self, element) -> None:
+        """Attach ScaleToCover / ScaleToFitInside to the item just pushed.
+
+        Only the recorded rect's EXTENT is sent: the engine's zoom is
+        `rect/natural` per axis and then the larger (cover) or smaller
+        (fit-inside) of the two, so the rect's position never reaches the
+        draw. `_SpanTimeline` turns the recorded edge pairs into those
+        extents without a lane each."""
+        mode = element.timelines.get('fit_mode')
+        if mode is None:
+            return
+        mode_id, mode_rest = self._channel(mode)
+        kwargs = {'mode_id': mode_id, 'mode_rest': mode_rest}
+        for param, lo, hi in (('w', 'fit_left', 'fit_right'),
+                              ('h', 'fit_top', 'fit_bottom')):
+            lo_tl, hi_tl = element.timelines.get(lo), element.timelines.get(hi)
+            if lo_tl is None or hi_tl is None:
+                continue
+            chan_id, rest = self._channel(_SpanTimeline(lo_tl, hi_tl))
+            kwargs[f'{param}_id'] = chan_id
+            kwargs[f'{param}_rest'] = rest
+        self._builder.item_fit(_SCREEN_ID, **kwargs)
 
     def _emit_element_tint(self, element) -> None:
         """Attach the element's flat diffuse rgb, when it carries one.
 
-        Per-corner gradients (`color_ul`/`ur`/`ll`/`lr`) are NOT handled - the
-        item tint is one colour for the whole quad, so a gradient would need
-        per-vertex colour."""
+        Per-corner gradients (`color_ul`/`ur`/`ll`/`lr`) are NOT handled - one
+        item tint colours the whole quad, so a gradient needs per-vertex
+        colour. Neither reference chart uses one, so the verb waits for a
+        chart that does; an element carrying one is COUNTED, because once
+        legacy stops drawing elements an unimplemented verb is invisible
+        rather than obviously missing."""
+        if _is_poked(element, _CORNER_COLOR_PROPS, _CORNER_UNSET):
+            self._count_skip('corner_gradient')
+        if _is_poked(element, _FADE_PROPS, _FADE_OFF):
+            self._count_skip('edge_fade')
         color = element.timelines.get('color')
         if color is None:
             return

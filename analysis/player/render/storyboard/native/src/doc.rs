@@ -229,6 +229,13 @@ pub struct Item {
     /// sentinel `_draw_size` tests, because `zoomto`/`setsize` REPLACE the
     /// basis that `scale_x/y` then multiplies rather than scaling it.
     pub size: [ChannelRef; 2],
+    /// ScaleToCover / ScaleToFitInside as `[mode, rect_w, rect_h]`, sampled
+    /// each frame. mode < 0.5 is off; 1.0 is cover (the LARGER axis ratio,
+    /// filling the rect), anything else fits inside (the SMALLER, letterbox).
+    /// Only the rect's EXTENT matters, not its corners, so the doc sends the
+    /// spans rather than four edges. Takes precedence over `size`, matching
+    /// `_draw_size`, which tests fit before the absolute override.
+    pub fit: [ChannelRef; 3],
     pub opacity: ChannelRef,
     pub tint: [ChannelRef; 3],
     /// Additive-blend gate, sampled every frame: >= 0.5 draws Additive,
@@ -264,6 +271,7 @@ impl Item {
             space: Space::Scene,
             origin: [0.0, 0.0],
             size: [ChannelRef::constant(-1.0); 2],
+            fit: [ChannelRef::constant(0.0); 3],
             opacity: ChannelRef::constant(1.0),
             tint: [ChannelRef::constant(1.0); 3],
             blend_add: ChannelRef::constant(0.0),

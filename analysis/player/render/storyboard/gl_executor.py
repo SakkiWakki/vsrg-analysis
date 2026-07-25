@@ -13,13 +13,14 @@ pops the target stack. ``execute`` returns the screen drawable's FBO read
 back as a ``QImage`` (``toImage``) for tests.
 
 Record layout (frozen; mirrors native/src/evaluate.rs, U_STRIDE=10 /
-F_STRIDE=22) - identical to RasterExecutor:
+F_STRIDE=24) - identical to RasterExecutor:
 
   U lanes: [kind, a, b, c, blend, shader+1, clip+1, screen_space,
             uf_offset, uf_count]
   F lanes: mat3 [0..9], opacity [9], tint rgb [10..13],
            crop l,t,r,b [13..17], origin x,y [17..19],
-           size w,h [19..21] (< 0 = natural), reserved [21]
+           size w,h [19..21] (< 0 = natural),
+           fit mode,w,h [21..24]
 
 The mat3 is the RECORD's column-vector convention (p' = M @ p, translation
 in lanes 2/5), source logical -> target logical; homographies welcome (the
@@ -103,11 +104,16 @@ _F_TINT = 10  # ..13
 _F_CROP = 13  # ..17 (l, t, r, b fractions of the SOURCE logical size)
 _F_ORIGIN = 17  # ..19 (x, y fractions of the item's own drawn size)
 _F_SIZE = 19  # ..21 (absolute w, h overriding the natural box; < 0 = natural)
+_F_FIT = 21  # ..24 (ScaleToCover/FitInside: mode, rect w, rect h)
+
+# ScaleToCover takes the LARGER axis ratio (fills the rect); anything else
+# non-zero fits inside, taking the SMALLER (letterboxes).
+_FIT_COVER = 1.0
 
 # The record strides this executor reads, so a hand-built record can bind to
 # them instead of restating a number that drifts when a lane is added.
 _U_STRIDE_LANES = 10
-_F_STRIDE_LANES = 22
+_F_STRIDE_LANES = 24
 
 # Op / source / clear codes (kept in sync with storyboard_native; the
 # executor runs without importing it at module load so tests importorskip
@@ -187,6 +193,28 @@ def _crop_unit_quad(frec):
     right = _clamp01(float(frec[_F_CROP + 2]))
     bottom = _clamp01(float(frec[_F_CROP + 3]))
     return left, top, 1.0 - right, 1.0 - bottom
+
+
+def _draw_box(logical, frec):
+    """The item's UNZOOMED draw size: the source's natural box unless the
+    record overrides it. Mirrors `render._draw_size` - fit wins over the
+    absolute size, and the item's scale still multiplies on top (already
+    folded into the mat3), because SM applies zoom AFTER zoomto/scaletofit.
+
+    A per-axis absolute size REPLACES the natural basis, so a zero is an
+    explicit zero-size draw and only a NEGATIVE lane means "keep natural"."""
+    nat_w, nat_h = logical
+    fit_mode = float(frec[_F_FIT])
+    if fit_mode >= 0.5:
+        rect_w, rect_h = float(frec[_F_FIT + 1]), float(frec[_F_FIT + 2])
+        ratio_x = abs(rect_w / nat_w) if nat_w else 0.0
+        ratio_y = abs(rect_h / nat_h) if nat_h else 0.0
+        zoom = max(ratio_x, ratio_y) if fit_mode == _FIT_COVER \
+            else min(ratio_x, ratio_y)
+        return nat_w * zoom, nat_h * zoom
+    size_w, size_h = float(frec[_F_SIZE]), float(frec[_F_SIZE + 1])
+    return (size_w if size_w >= 0.0 else nat_w,
+            size_h if size_h >= 0.0 else nat_h)
 
 
 def _expanded_extent(sub, lw, lh):
@@ -951,12 +979,7 @@ class GLExecutor:
         # An absolute size REPLACES the natural box rather than scaling it
         # (SM zoomto/setsize); the item's scale lanes still multiply on top,
         # already folded into mat3.
-        lw, lh = logical
-        size_w, size_h = float(frec[_F_SIZE]), float(frec[_F_SIZE + 1])
-        if size_w >= 0.0:
-            lw = size_w
-        if size_h >= 0.0:
-            lh = size_h
+        lw, lh = _draw_box(logical, frec)
         if lw <= 0.0 or lh <= 0.0 or sw <= 0 or sh <= 0:
             return
         # Crops are fractions of the source's LOGICAL box; inset the quad

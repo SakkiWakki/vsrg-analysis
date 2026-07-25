@@ -329,6 +329,33 @@ impl DocBuilder {
         item.size = [chan(size_x_id, size_x_rest), chan(size_y_id, size_y_rest)];
     }
 
+    /// ScaleToCover / ScaleToFitInside on the item most recently pushed onto
+    /// `target`: the uniform zoom that fits the source's natural box to a
+    /// recorded rect. `mode` < 0.5 is off, 1.0 is cover, else fit-inside.
+    ///
+    /// Only the rect's EXTENT is sent - the zoom is `rect/natural` per axis
+    /// and then the larger or smaller of the two, so the corners never
+    /// matter. The natural size lives in the executor, which is why this
+    /// cannot fold into `item_box`'s absolute size.
+    #[pyo3(signature = (target, mode_id=-1, mode_rest=0.0, w_id=-1, w_rest=0.0,
+                        h_id=-1, h_rest=0.0))]
+    fn item_fit(
+        &mut self,
+        target: u32,
+        mode_id: i64,
+        mode_rest: f32,
+        w_id: i64,
+        w_rest: f32,
+        h_id: i64,
+        h_rest: f32,
+    ) {
+        self.last_item(target).fit = [
+            chan(mode_id, mode_rest),
+            chan(w_id, w_rest),
+            chan(h_id, h_rest),
+        ];
+    }
+
     /// Additive-blend gate on the item most recently pushed onto `target`,
     /// sampled every frame (>= 0.5 additive). Use instead of `item`'s
     /// `additive=` flag whenever the chart can change blending at runtime -

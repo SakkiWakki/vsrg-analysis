@@ -864,3 +864,109 @@ def test_element_origin_and_size_reach_the_record(doc_elements, tmp_path):
     assert tuple(f[row, 17:19]) == (0.5, 0.5), 'element origin not forwarded'
     assert float(f[row, 19]) == 20.0, 'zoomto width not forwarded'
     assert float(f[row, 20]) < 0.0, 'unset height must stay natural'
+
+
+def test_glow_emits_a_second_additive_item_tinted_to_the_glow_colour(
+        doc_elements, tmp_path):
+    # SM's glow pass is the same sprite drawn again, additively, tinted to the
+    # glow colour at the glow alpha (Sprite.cpp:536-541) - so it is a second
+    # item, not a record lane.
+    asset = tmp_path / 'g.png'
+    asset.write_bytes(b'')
+    el = _sprite(0, str(asset))
+    el.timelines['glow'] = EventTimeline(
+        [Keyframe(1.0, (1.0, 0.0, 0.0, 0.5), 0.0, _EASE_LINEAR)],
+        rest=(1.0, 1.0, 1.0, 0.0))
+    evaluator, _id_maps, _report = dd.build_static_doc(
+        _compiled([], tree=[el]))
+
+    u, f = _blit_lanes(evaluator, 2.0)
+    blits = [i for i in range(len(u)) if u[i, 0] == sn.OP_BLIT]
+    assert len(blits) == 2, 'content then glow'
+    content, glow = blits
+    assert content < glow, 'glow draws over the content'
+    assert int(u[content, 4]) == 0, 'content stays source-over'
+    assert int(u[glow, 4]) == 1, 'glow composites additively'
+    assert tuple(f[glow, 10:13]) == (1.0, 0.0, 0.0), 'glow tint'
+    assert float(f[glow, 9]) == pytest.approx(0.5), 'glow alpha as opacity'
+
+
+def test_an_unglowed_element_emits_no_second_item(doc_elements, tmp_path):
+    # glow rests at alpha 0, so a static rest must not double every element's
+    # op count for a pass that draws nothing.
+    asset = tmp_path / 'p.png'
+    asset.write_bytes(b'')
+    evaluator, _id_maps, _report = dd.build_static_doc(
+        _compiled([], tree=[_sprite(0, str(asset))]))
+
+    u, _f = _blit_lanes(evaluator, 1.0)
+    assert sum(1 for i in range(len(u)) if u[i, 0] == sn.OP_BLIT) == 1
+
+
+def test_scale_to_cover_sends_the_rect_extent_not_its_corners(doc_elements,
+                                                              tmp_path):
+    # The engine's fit zoom is rect/natural per axis, then the larger (cover)
+    # or smaller (fit-inside) of the two - the rect's POSITION never reaches
+    # the draw, so the doc sends spans and the executor keeps the natural size.
+    asset = tmp_path / 'f.png'
+    asset.write_bytes(b'')
+    el = _sprite(0, str(asset))
+    for prop, value in (('fit_mode', 1.0), ('fit_left', 100.0),
+                        ('fit_right', 420.0), ('fit_top', 40.0),
+                        ('fit_bottom', 280.0)):
+        el.timelines[prop] = EventTimeline(
+            [Keyframe(0.0, (value,), 0.0, _EASE_LINEAR)], rest=(value,))
+    evaluator, _id_maps, _report = dd.build_static_doc(
+        _compiled([], tree=[el]))
+
+    u, f = _blit_lanes(evaluator, 1.0)
+    row = next(i for i in range(len(u)) if u[i, 0] == sn.OP_BLIT)
+    assert float(f[row, 21]) == 1.0, 'cover mode'
+    assert float(f[row, 22]) == 320.0, 'right - left'
+    assert float(f[row, 23]) == 240.0, 'bottom - top'
+
+
+def test_span_timeline_is_static_only_when_both_edges_are():
+    lo = EventTimeline([Keyframe(0.0, (10.0,), 0.0, _EASE_LINEAR)],
+                       rest=(10.0,))
+    moving = EventTimeline([Keyframe(0.0, (50.0,), 0.0, _EASE_LINEAR),
+                            Keyframe(1.0, (90.0,), 2.0, _EASE_LINEAR)],
+                           rest=(50.0,))
+    still = EventTimeline([], rest=(90.0,))
+
+    assert dd._SpanTimeline(lo, still).sample(0.0) == (80.0,)
+    assert dd._SpanTimeline(lo, moving).sample(0.0) == (40.0,)
+    # A moving edge must NOT collapse to a constant channel.
+    assert dd._SpanTimeline(lo, moving).is_static() is False
+
+
+def test_a_corner_gradient_is_counted_not_silently_dropped(doc_elements,
+                                                           tmp_path):
+    # Neither reference chart uses one, so per-vertex colour waits for a chart
+    # that does - but once legacy stops drawing elements an unimplemented verb
+    # is invisible, so it has to show up in the report.
+    asset = tmp_path / 'grad.png'
+    asset.write_bytes(b'')
+    el = _sprite(0, str(asset))
+    el.timelines['color_ul'] = EventTimeline(
+        [Keyframe(0.0, (1.0, 0.0, 0.0), 0.0, _EASE_LINEAR)],
+        rest=(1.0, 1.0, 1.0))
+    _evaluator, _id_maps, report = dd.build_static_doc(
+        _compiled([], tree=[el]))
+
+    assert report['element_skips'].get('corner_gradient') == 1
+
+
+def test_an_edge_fade_is_counted_not_silently_dropped(doc_elements, tmp_path):
+    # SetFade* is used 21 times across the two reference charts, so unlike a
+    # corner gradient this one has to be BUILT - the counter exists so the gap
+    # is visible until it is.
+    asset = tmp_path / 'fade.png'
+    asset.write_bytes(b'')
+    el = _sprite(0, str(asset))
+    el.timelines['fade_top'] = EventTimeline(
+        [Keyframe(0.0, (0.25,), 0.0, _EASE_LINEAR)], rest=(0.0,))
+    _evaluator, _id_maps, report = dd.build_static_doc(
+        _compiled([], tree=[el]))
+
+    assert report['element_skips'].get('edge_fade') == 1
