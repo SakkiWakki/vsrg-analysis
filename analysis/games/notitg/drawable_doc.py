@@ -375,9 +375,10 @@ def _flatten_elements(elements) -> list:
     `(pairs, group_count)` where each pair is `(leaf, ancestors)`.
 
     A group draws nothing itself but carries a transform that composes onto its
-    subtree, so dropping it strands its children at their own local placement
-    (gat 1's `gat_bg` rotates/vibrates a background its leaves never see). The
-    chain rides to `item_link`, which composes it engine-natively."""
+    subtree, so dropping it strands its children at their own local placement -
+    a background frame that rotates/vibrates its whole subtree leaves the
+    subtree still. The chain rides to `item_link`, which composes it
+    engine-natively."""
     pairs = []
     groups = 0
     stack = [(element, ()) for element in reversed(list(elements))]
@@ -722,7 +723,7 @@ class _Builder:
                                            or 'xyz')
         return kwargs
 
-    def _emit_links(self, target: int, inst) -> None:
+    def _emit_links(self, target: int, inst, camera: bool = True) -> None:
         """Attach the instance's full leaf-link chain (root-first) to the item
         most recently pushed onto `target`, plus the chain's perspective camera
         when the chain leaves the z=0 plane. The leaf link carries the aft flip
@@ -734,16 +735,23 @@ class _Builder:
         `fold_projection` (evaluate.rs), so a rotated field comes out a flat
         horizontal squash instead of a 3D turn: at gat's t=78 legacy gives a
         trapezoid (near edge 745px tall, far edge 354px) where the unfolded
-        block gives a plain rectangle, ~232px of corner error."""
+        block gives a plain rectangle, ~232px of corner error.
+
+        `camera=False` attaches the chain WITHOUT its projection, for a tail
+        command that reads the chain as a liveness gate rather than as
+        geometry. A capture is the case: `snapshot_live` (evaluate.rs) asks
+        only whether the chain composes at all, and folds it with no
+        projection, so a camera would be state nothing reads - and `Cmd
+        ::Snapshot` accordingly has no projection slot to put it in."""
         links = inst['transform']._links
         flip = getattr(inst['transform'], '_flip_base_y', False)
         leaf = len(links) - 1
         for i, link in enumerate(links):
             self._builder.item_link(
                 target, **self._link_kwargs(link, flip and i == leaf))
-        camera = self._chain_camera(links)
-        if camera is not None:
-            fov_id, fov_rest = camera
+        chain_camera = self._chain_camera(links) if camera else None
+        if chain_camera is not None:
+            fov_id, fov_rest = chain_camera
             self._builder.item_projection(
                 target, fov_id=fov_id, fov_rest=fov_rest,
                 vanish_x_rest=_SCREEN_W / 2.0,
@@ -936,8 +944,15 @@ class _Builder:
                 # the static doc's fold is the Snapshot/slot topology.
                 return
             case 'capture':
+                # The node's OWN chain gates the slot update: the engine
+                # captures only while the node DRAWS, so a hidden or faint
+                # node leaves the slot holding its last capture. That retained
+                # image IS the freeze a still-frames rig relies on - emitting
+                # a bare snapshot re-captured every frame and nothing could
+                # ever freeze.
                 slot = self._slot_drawable(inst['name'])
                 self._builder.snapshot(_SCREEN_ID, slot)
+                self._emit_links(_SCREEN_ID, inst, camera=False)
             case 'fill':
                 self._emit_blit(sn.SRC_FILL, 0, inst)
             case 'aft':
@@ -1098,7 +1113,8 @@ class _Builder:
 
         A frame's fov projects its whole subtree and the INNERMOST frame that
         set one wins (its LoadMenuPerspective replaces the outer), matching
-        `TransformChannel.at`. gat 1's `gat_all_bg` carries `FOV="60"`."""
+        `TransformChannel.at`. The authoring form is a frame-level `FOV="60"`
+        on a background group."""
         for link_element in reversed((*ancestors, element)):
             timeline = link_element.timelines.get('fov')
             if timeline is None:

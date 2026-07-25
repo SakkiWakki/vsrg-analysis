@@ -476,8 +476,14 @@ fn emit_commands(
                 );
                 i += 1;
             }
-            Cmd::Snapshot { into } => {
-                schedule.op(OP_COPY, *into, 0);
+            Cmd::Snapshot {
+                into,
+                links,
+                flip_base_y,
+            } => {
+                if snapshot_live(doc, links, *flip_base_y, t) {
+                    schedule.op(OP_COPY, *into, 0);
+                }
                 i += 1;
             }
             Cmd::SortSpan { len } => {
@@ -499,7 +505,15 @@ fn emit_commands(
                 for (_, j) in keyed {
                     match &commands[j] {
                         Cmd::Item(item) => emit_item(doc, item, t, events, cache, schedule),
-                        Cmd::Snapshot { into } => schedule.op(OP_COPY, *into, 0),
+                        Cmd::Snapshot {
+                            into,
+                            links,
+                            flip_base_y,
+                        } => {
+                            if snapshot_live(doc, links, *flip_base_y, t) {
+                                schedule.op(OP_COPY, *into, 0);
+                            }
+                        }
                         // A z-sorted span holds only drawing items; a feed
                         // slot inside one has no single z to sort by, so it
                         // draws in place (its own items keep their order).
@@ -679,6 +693,30 @@ fn emit_feed(
     for item in feed.items {
         emit_item_folded(doc, item, t, events, cache, schedule, Some((&chain, alpha)));
     }
+}
+
+/// Whether a Snapshot's node is DRAWING this frame, so its slot updates.
+///
+/// Mirrors legacy's `entry = transform.at(t); if entry is None: skip` - a
+/// chain that is hidden, faint or degenerate composes to None and the capture
+/// is skipped, leaving the slot's retained content in place. That retained
+/// image is the freeze: a still-frames rig flashes its node visible for a few
+/// hundredths of a second to grab one, and hiding the node holds it.
+/// A chain-less Snapshot always captures (the pre-chain behaviour).
+fn snapshot_live(
+    doc: &DrawableDoc,
+    links: &[crate::doc::LinkRef],
+    flip_base_y: bool,
+    t: f32,
+) -> bool {
+    if links.is_empty() {
+        return true;
+    }
+    let states: Vec<crate::transform::TransformState> = links
+        .iter()
+        .map(|l| sample_link(&doc.channels, l, t))
+        .collect();
+    crate::transform::compose_links(&states, flip_base_y, None).is_some()
 }
 
 fn emit_item(
@@ -896,7 +934,11 @@ mod tests {
                 image: 0,
                 frame: ChannelRef::constant(0.0),
             })));
-        doc.drawables[0].commands.push(Cmd::Snapshot { into: slot });
+        doc.drawables[0].commands.push(Cmd::Snapshot {
+            into: slot,
+            links: Vec::new(),
+            flip_base_y: false,
+        });
         doc.drawables[0]
             .commands
             .push(Cmd::Item(Item::of(Source::Drawable(slot))));

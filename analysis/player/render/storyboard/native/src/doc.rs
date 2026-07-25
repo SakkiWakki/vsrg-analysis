@@ -267,7 +267,16 @@ pub enum Cmd {
     Item(Item),
     /// At-position capture: copy this drawable's in-progress composite
     /// into another drawable now (AFT capture semantics).
-    Snapshot { into: u32 },
+    Snapshot {
+        into: u32,
+        /// The capture NODE's own link chain. The engine captures only while
+        /// the node DRAWS (EnablePreserveTexture holds the last capture across
+        /// hidden frames), so a hidden or faint node must leave the slot
+        /// untouched - that retained image IS the freeze a still-frames rig
+        /// relies on. An empty chain means "always capture".
+        links: Vec<LinkRef>,
+        flip_base_y: bool,
+    },
     /// The next `len` commands re-sort stably by their sampled `z`
     /// before drawing (SetDrawByZPosition).
     SortSpan { len: u32 },
@@ -464,7 +473,11 @@ mod tests {
         let cmds = &mut doc.drawables[0].commands;
         cmds.push(Cmd::SortSpan { len: 2 });
         cmds.push(image_item());
-        cmds.push(Cmd::Snapshot { into: slot });
+        cmds.push(Cmd::Snapshot {
+            into: slot,
+            links: Vec::new(),
+            flip_base_y: false,
+        });
         assert!(doc.find_nested_sort_span().is_ok());
     }
 }

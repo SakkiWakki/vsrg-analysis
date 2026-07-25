@@ -597,7 +597,11 @@ impl DocBuilder {
     }
 
     fn snapshot(&mut self, target: u32, into: u32) {
-        self.push(target, Cmd::Snapshot { into });
+        self.push(target, Cmd::Snapshot {
+            into,
+            links: Vec::new(),
+            flip_base_y: false,
+        });
     }
 
     fn sort_span(&mut self, target: u32, len: u32) {
@@ -663,6 +667,7 @@ impl DocBuilder {
         match commands.last_mut() {
             Some(Cmd::Item(item)) => (&mut item.links, &mut item.flip_base_y),
             Some(Cmd::Feed { links, flip_base_y, .. }) => (links, flip_base_y),
+            Some(Cmd::Snapshot { links, flip_base_y, .. }) => (links, flip_base_y),
             _ => panic!("last command on target {target} takes no links"),
         }
     }
