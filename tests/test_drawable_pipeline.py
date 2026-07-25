@@ -735,3 +735,38 @@ def test_end_to_end_through_the_real_static_doc(gl, monkeypatch):
     # without disabling itself.
     assert drew is True
     assert pipe.healthy is True
+
+
+def test_an_empty_inline_feed_declines_the_frame_instead_of_drawing_no_notes(
+        gl, monkeypatch):
+    # A doc whose notes are INLINE fed items has no captured notefield behind
+    # them, so folding with an empty feed composites a notefield containing
+    # nothing and the notes silently vanish for as long as the emitter fails.
+    # Declining drops through to the legacy path, which draws real notes.
+    player, pipe = _build_pipeline(monkeypatch, _fake_doc())
+    ctx = _Ctx(t_now=1.0, player=player)
+    drew, _target = _spin_present(pipe, ctx)
+    assert drew is True, 'baseline: the doc with no feed slots still draws'
+
+    # Give it inline note slots, then starve the feed.
+    pipe._id_maps = dict(pipe._id_maps or {}, note_feeds={'field': 1})
+    monkeypatch.setattr(pipe, '_note_feed', lambda ctx: None)
+    assert pipe._has_note_slots() is True
+    assert pipe._schedule_with_feeds(1.0, ctx) == (None, None)
+
+    gt = _GLTarget(CHART_RECT)
+    assert gt.present(pipe, ctx)[0] is False, 'must decline, not draw empty'
+    assert pipe.healthy is True, 'a decline is not a disable'
+
+
+def test_a_captured_notefield_doc_still_folds_without_a_feed(gl, monkeypatch):
+    # The other half of the rule: with NO inline slots the notes come from a
+    # captured field, so the plain fold is the whole frame and declining would
+    # be a regression.
+    player, pipe = _build_pipeline(monkeypatch, _fake_doc())
+    ctx = _Ctx(t_now=1.0, player=player)
+    _spin_present(pipe, ctx)
+    monkeypatch.setattr(pipe, '_note_feed', lambda ctx: None)
+    assert pipe._has_note_slots() is False
+    u, _f = pipe._schedule_with_feeds(1.0, ctx)
+    assert u is not None

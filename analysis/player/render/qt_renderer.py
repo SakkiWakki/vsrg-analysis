@@ -686,7 +686,21 @@ class QtPlayerRenderer:
         """True when any field copy this frame is 'full' scope (carries
         the background), so the backdrop (background clear + below-draws)
         must be captured for those copies to blit. The identity original
-        and 'field' copies never need it."""
+        and 'field' copies never need it.
+
+        DORMANT - ALWAYS FALSE. Nothing produces a 'full' scope any more:
+        `NotitgFieldInstances._scope` returns only field / field{N} / screen /
+        screen_prev / fill / capture. The producer was
+        `NotitgAdapter.field_capture_scope` (added 6738397 for gat's ShowAFTBG
+        rig) and 7d16290 deleted it, replacing whole-screen capture with the
+        'screen' / 'screen_prev' retained-composite scopes - but left every
+        consumer branch here standing.
+
+        So this gate, `_begin_backdrop_capture`, `self._backdrop_src` and the
+        background/below-draw redirection are all unreachable. They READ as a
+        live feature, which has already cost review time chasing a stale-handle
+        bug that cannot execute. Do not revive 'full' to get a whole-screen
+        proxy copy - 'screen'/'screen_prev' are the supported route."""
         if frame is None or not frame.fields:
             return False
         return any(_field_scope(entry) == 'full' for entry in frame.fields)

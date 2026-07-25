@@ -700,14 +700,25 @@ class DrawablePipeline:
 
     def _schedule_with_feeds(self, t, ctx):
         """`_schedule`, plus this frame's inline note feed when the doc has
-        one. Falls back to the plain fold on any emitter failure - a missing
-        note feed degrades to an empty notefield, never a dead frame."""
+        one.
+
+        A doc with NO feed slots draws its notes from a captured notefield, so
+        the plain fold is the whole frame. A doc that HAS slots and gets no
+        items is a different thing entirely: folding anyway composites a
+        notefield with no notes in it, and because the slots are inline there
+        is no captured field underneath to show through - the notes simply
+        vanish, silently, for as long as the emitter keeps failing. Declining
+        the frame instead (returning None) drops through to the legacy path in
+        `_blit_field_instances`, which draws real notes. A visibly older
+        rendering beats a chart with no notes."""
         try:
             fed = self._note_feed(ctx)
         except Exception:
             self._log_note_feed_failure()
             fed = None
         if fed is None:
+            if self._has_note_slots():
+                return None, None
             return self._schedule(t)
         slots, count, u_bytes, f_bytes = fed
         u_raw, f_raw, _uf_raw, n = self._evaluator.frame_with_feeds(
@@ -718,6 +729,13 @@ class DrawablePipeline:
         f = np.frombuffer(f_raw, dtype=np.float32).reshape(
             n, self._evaluator.f_stride)
         return u, f
+
+    def _has_note_slots(self) -> bool:
+        """Whether the doc draws its notes as INLINE fed items. When it does,
+        an empty feed means an empty notefield with nothing behind it."""
+        id_maps = self._id_maps or {}
+        return bool(id_maps.get('note_feeds')
+                    or id_maps.get('notes_slot') is not None)
 
     def _log_note_feed_failure(self) -> None:
         if not self._note_feed_failed:

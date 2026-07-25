@@ -159,6 +159,17 @@ _SAMPLE_TIMES = (0.0, 0.5, 1.0, 2.0, 4.0, 6.0)
 
 
 @pytest.fixture
+def doc_elements(monkeypatch):
+    """Enable the doc's storyboard-element items.
+
+    They are OFF by default (`drawable_doc.elements_in_doc`) because the legacy
+    StoryboardEffect paints the same tree unconditionally, so emitting them too
+    double-draws every element. These tests ARE the element path's contract, so
+    they opt in."""
+    monkeypatch.setenv('VSRG_DRAWABLE_ELEMENTS', '1')
+
+
+@pytest.fixture
 def captured_notefield(monkeypatch):
     """Pin the base field to the CAPTURED-notefield representation.
 
@@ -304,7 +315,8 @@ def _sprite(z, path, **kw):
     return _element('sprite', z, asset=path, **kw)
 
 
-def test_below_and_above_bands_split_around_the_field_stream(captured_notefield):
+def test_below_and_above_bands_split_around_the_field_stream(captured_notefield,
+                                                            doc_elements):
     # A background sprite (z<0) and a foreground sprite (z>=0) around one proxy:
     # the below sprite draws first, the field instance next, the above last.
     below = _sprite(_BACKGROUND_Z, '/tmp/bg.png',
@@ -328,7 +340,8 @@ def test_below_and_above_bands_split_around_the_field_stream(captured_notefield)
     assert sn.SRC_DRAWABLE in kinds[1:-1]
 
 
-def test_field_instance_subsequence_unchanged_by_elements(captured_notefield):
+def test_field_instance_subsequence_unchanged_by_elements(captured_notefield,
+                                                          doc_elements):
     # The field-instance parity must hold IDENTICALLY whether or not storyboard
     # elements are present: the harness compares the field-instance subsequence.
     scene = _synthetic_scene()
@@ -358,7 +371,7 @@ def test_field_instance_subsequence_unchanged_by_elements(captured_notefield):
     assert rep_elem['elements_below'] == 1 and rep_elem['elements_above'] == 1
 
 
-def test_within_band_sorted_by_z_then_index_then_start():
+def test_within_band_sorted_by_z_then_index_then_start(doc_elements):
     # Three below-band sprites out of z/z_index/t_start order; the emitted image
     # order must be the renderer's (z, z_index, t_start) sort.
     a = _sprite(-100, '/tmp/a.png', z_index=1, keyframes={'x': _instant(10.0)})
@@ -376,7 +389,7 @@ def test_within_band_sorted_by_z_then_index_then_start():
     assert report['elements_below'] == 3 and report['elements_above'] == 0
 
 
-def test_unsupported_kinds_skipped_with_per_kind_counts():
+def test_unsupported_kinds_skipped_with_per_kind_counts(doc_elements):
     # Shapes / text / video / an asset-less sprite are skipped, each tallied by
     # kind; only the real image sprite emits.
     tree = [
@@ -396,7 +409,7 @@ def test_unsupported_kinds_skipped_with_per_kind_counts():
     assert report['images'] == 1
 
 
-def test_group_children_band_by_the_top_level_z():
+def test_group_children_band_by_the_top_level_z(doc_elements):
     # A group draws nothing itself (tallied as a skip); its sprite children
     # emit as items but band by the TOP-LEVEL element's z - the legacy
     # StoryboardEffect bands top-level elements only, and the compiler puts a
@@ -421,7 +434,7 @@ def test_group_children_band_by_the_top_level_z():
     assert report['elements_below'] == 1  # the background hoist
 
 
-def test_sheet_sprite_gets_a_frame_channel():
+def test_sheet_sprite_gets_a_frame_channel(doc_elements):
     # A frame-animated sheet sprite carries a frame lane that steps through its
     # states over time; a plain 1x1 sprite does not.
     sheet = _element('frames', -100, z_index=0, t_start=0.0,

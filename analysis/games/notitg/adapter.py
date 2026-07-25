@@ -320,10 +320,20 @@ class NotitgAdapter(EtternaAdapter):
             effects.append(NotitgScreenCamera(screen_transform,
                                               oscillator=screen_shake))
         if instances:
+            player_fields = self._player_fields(
+                replay, snapshot, lazy=callable(instances))
+            # The SAME spec has to reach the drawable doc, which resolves a
+            # proxy's per-player scope from `compiled['player_fields']`
+            # (drawable_doc._field_scope). Nothing else writes that key, so
+            # without this the doc sees no per-player consumers at all: every
+            # proxy scopes to the primary 'field' and a player-2 copy shows
+            # player 1's notes, `id_maps['fields']` comes back empty (so the
+            # renderer's capture handover is silently dropped), and the
+            # dual-player base-field suppression can never fire.
+            compiled['player_fields'] = player_fields
             effects.append(NotitgFieldInstances(
                 instances, base_hidden=base_hidden,
-                player_fields=self._player_fields(
-                    replay, snapshot, lazy=callable(instances))))
+                player_fields=player_fields))
         return effects
 
     def engine_beat_px(self):

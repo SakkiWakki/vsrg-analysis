@@ -40,12 +40,22 @@ The parity harness (`compare_at` / `parity_report`) compares the evaluator's
 BLIT stream against `NotitgFieldInstances.at` at N sample times - order, alpha,
 and the design-space mat3 - and is the deliverable quality bar.
 
-Scope note (native transform coverage): the Rust `compose_links` path models the
-2D affine link chain only (x/y, scale, in-plane rotation, base-scale, anchor,
-crop, flip) - NOT z-translation, rotation_x/y, quaternion spin, skew, or the fov
-perspective the Python `TransformChannel` also folds. Instances exercising those
-diverge from the Python homography BY DESIGN (they await the camera-area port);
-the parity harness reports such divergences rather than hiding them.
+Scope note (native transform coverage): the Rust `compose_links` path folds the
+full 3D link chain - x/y/z, scale incl. scale_z, in-plane rotation AND
+rotation_x/y under the chain's Euler order, base-scale, skew, anchor, crop, flip
+(`camera::local_matrix`, native/src/transform.rs). `_LINK_PROP_ORDER` forwards
+all of it.
+
+(This note used to say the native path was 2D-affine only and that out-of-plane
+instances diverged BY DESIGN. That stopped being true when the camera area was
+ported, but the prop list was never widened to match - so every 3D field
+transform was silently dropped, and the stale note is what made it look
+intentional. Kept as a caution: a "by design" limitation is worth re-checking
+against the code before trusting it.)
+
+Still not forwarded for field instances: quaternion spin, and the fov
+perspective (`item_projection`, which the ELEMENT chain does emit). The parity
+harness reports such divergences rather than hiding them.
 
 No Qt import at module load - importable headless.
 """
@@ -415,12 +425,22 @@ def _band_z(pair) -> float:
 # name they read. `zoom_*`/`rot` rename `scale_*`/`rotation`; crop lanes rename
 # the crop_* edges; halign/valign/base_scale carry through. natural_w/h are
 # constants (the 640x480 capture), passed as rests.
+#
+# The OUT-OF-PLANE props (z, rotation_x/y, scale_z, base_scale_z) are here
+# because both ends have always supported them and only this list dropped
+# them: `camera::local_matrix` composes [x, y, z] / [rotation_x, rotation_y,
+# rot] / scale_z * base_scale_z (native/src/transform.rs:170-180), and the
+# legacy `TransformChannel` composes exactly the same (field_compose.py:266-269).
+# Omitting them silently discarded every 3D field transform on the drawable
+# path - a chart whose whole effect is `a:rotationy(...)` simply lost it.
 _LINK_PROP_ORDER = (
-    ('x', 'x'), ('y', 'y'),
-    ('zoom_x', 'scale_x'), ('zoom_y', 'scale_y'),
+    ('x', 'x'), ('y', 'y'), ('z', 'z'),
+    ('zoom_x', 'scale_x'), ('zoom_y', 'scale_y'), ('scale_z', 'scale_z'),
     ('rot', 'rotation'),
+    ('rotation_x', 'rotation_x'), ('rotation_y', 'rotation_y'),
     ('skew_x', 'skew_x'), ('skew_y', 'skew_y'),
     ('base_scale_x', 'base_scale_x'), ('base_scale_y', 'base_scale_y'),
+    ('base_scale_z', 'base_scale_z'),
     ('halign', 'halign'), ('valign', 'valign'),
     ('hidden', 'hidden'), ('alpha', 'alpha'),
     ('crop_l', 'crop_left'), ('crop_t', 'crop_top'),
@@ -460,6 +480,26 @@ def notes_inline() -> bool:
     mod-displaced notes off. `VSRG_DRAWABLE_NOTES=0` reverts to the captured
     notefield for differential testing."""
     return os.environ.get('VSRG_DRAWABLE_NOTES', '1').lower() in ('1', 'true', 'yes')
+
+
+def elements_in_doc() -> bool:
+    """Whether the doc emits the chart's storyboard ELEMENTS as its own image
+    items. OFF by default, because today it double-draws them.
+
+    The legacy `StoryboardEffect` paints the same `compiled['tree']`
+    unconditionally (it has no idea the pipeline exists), so with this on every
+    image element composites TWICE - and the doc's copy is the WORSE of the
+    two: it carries no anchor (the compiler stamps `origin=(0.5, 0.5)`, which
+    `_ELEMENT_ITEM_LANES` never forwards), no natural size, no tint, no
+    zoomto/fit basis and no glow, so it lands displaced, white and mis-sized
+    while legacy's lands correctly. Suppressing the wrong copy is a pure
+    subtraction that returns element rendering to legacy exactly as it bands
+    them; suppressing legacy's instead would keep the wrong one.
+
+    `VSRG_DRAWABLE_ELEMENTS=1` re-enables them for parity work - the element
+    lanes have to reach parity against a harness BEFORE this becomes the
+    default and the legacy effect can be retired."""
+    return os.environ.get('VSRG_DRAWABLE_ELEMENTS', '0').lower() in ('1', 'true', 'yes')
 
 
 def _rotation_order_of(element) -> str:
@@ -565,6 +605,8 @@ class _Builder:
         # channel (every sheet sprite animating on one shared frame lane).
         # Holding a reference for the build's lifetime makes the key honest.
         self._chan_keyed: list = []
+        # The shared 'player'-kind visibility gate (see _base_hidden_gate).
+        self._base_gate = None
 
     # -- drawable minting -------------------------------------------------
 
@@ -644,6 +686,14 @@ class _Builder:
         kwargs['natural_w_rest'] = _SCREEN_W
         kwargs['natural_h_rest'] = _SCREEN_H
         kwargs['flip_base_y'] = flip_base_y
+        # The Euler order is a TOKEN, not an animatable scalar, so it reads as
+        # the timeline's current value rather than riding a channel - the same
+        # treatment `_element_link_kwargs` gives it. It only matters once the
+        # out-of-plane rotations above are non-rest.
+        order = link.get('rotation_order')
+        if order is not None:
+            kwargs['rotation_order'] = str(order.sample(self._t0)[0]
+                                           or 'xyz')
         return kwargs
 
     def _emit_links(self, target: int, inst) -> None:
@@ -660,11 +710,13 @@ class _Builder:
     # -- instance emission ------------------------------------------------
 
     def _emit_blit(self, source_kind: int, source_id: int, inst,
-                   additive: bool = False) -> None:
+                   additive: bool = False, visible=(-1, 1.0)) -> None:
         z_id, z_rest, has_z = self._z_channel(inst)
+        visible_id, visible_rest = visible
         self._builder.item(_SCREEN_ID, source_kind, source_id,
                            additive=additive, z_id=z_id, z_rest=z_rest,
-                           has_z=has_z)
+                           has_z=has_z, visible_id=visible_id,
+                           visible_rest=visible_rest)
         self._emit_links(_SCREEN_ID, inst)
 
     def _z_channel(self, inst):
@@ -693,7 +745,7 @@ class _Builder:
         the leaves are sorted by the renderer's `(z, z_index, t_start)` key. This
         is the starting point - a true tree-order interleave of elements and
         instances replaces it once the producers emit element tree positions."""
-        below, above = self._banded_elements()
+        below, above = self._banded_elements() if elements_in_doc() else ((), ())
         self._elem_below = self._emit_element_band(below)
 
         instances = self._current_instances_ensured()
@@ -826,6 +878,14 @@ class _Builder:
                 self._emit_blit(sn.SRC_DRAWABLE, slot, inst, additive=additive)
             case 'player' | 'proxy':
                 scope = self._field_scope(inst)
+                # A 'player' instance IS the base field, so it disappears
+                # while the chart hides it - legacy's
+                # `if kind == 'player' and base_hidden: continue`
+                # (field_instances.py:289-290). A 'proxy' is a copy and
+                # keeps drawing. Statically this is the item's visible gate
+                # rather than a per-frame skip.
+                visible = (self._base_hidden_gate() if kind == 'player'
+                           else (-1, 1.0))
                 if notes_inline() and scope == 'field':
                     # RE-RENDER, don't blit (the copy-render rule): the
                     # consumer's chain composes over the shared fed note
@@ -835,13 +895,25 @@ class _Builder:
                     # its content differs per player and the feed carries
                     # player 1's items only.
                     self._builder.feed_inline(
-                        _SCREEN_ID, self._notes_slot_for(scope))
+                        _SCREEN_ID, self._notes_slot_for(scope),
+                        visible_id=visible[0], visible_rest=visible[1])
                     self._emit_links(_SCREEN_ID, inst)
                     return
                 drawable = self._field_drawable(scope)
-                self._emit_blit(sn.SRC_DRAWABLE, drawable, inst)
+                self._emit_blit(sn.SRC_DRAWABLE, drawable, inst,
+                                visible=visible)
             case _:
                 return
+
+    def _base_hidden_gate(self):
+        """(visible_id, visible_rest) that drops a 'player' instance while the
+        chart hides the base field. Minted once and shared - every player
+        instance gates on the same `base_field_hidden` timeline, so this must
+        not push a channel per instance."""
+        if self._base_gate is None:
+            self._base_gate = self._visible_from_hidden(
+                self._compiled.get('base_field_hidden'))
+        return self._base_gate
 
     def _aft_additive(self, inst) -> bool:
         blend = inst.get('blend_add')
