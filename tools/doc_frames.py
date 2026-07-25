@@ -88,18 +88,27 @@ def describe(u, f, index: int) -> str:
             f'tr=({frec[2]:.0f},{frec[5]:.0f})')
 
 
-def warm_frames(t: float, count: int, step: float):
+def warm_frames(t: float, count: int, step: float, since: float | None):
     """The times to run before `t` so RETAINED drawables hold real content.
 
     An AFT slot keeps its last capture across frames - that retention IS the
     freeze a still-frames rig relies on. Composing a single frame cold leaves
     every slot the chart captured EARLIER empty, so a sampler blitting one
     draws nothing and the frame reads as a blackout that the running app
-    never shows."""
+    never shows.
+
+    A short warm-up is NOT always enough, and a freeze is exactly the case:
+    the rig gates its capture off for the whole frozen section, so the slot's
+    content dates from before the section began. `since` walks from an
+    explicit earlier time in `count` steps instead, which is how you reach a
+    capture that a two-second warm-up runs straight past."""
+    if since is not None and since < t:
+        step = (t - since) / max(1, count)
+        return [since + step * i for i in range(count)]
     return [t - step * i for i in range(count, 0, -1)]
 
 
-def render(compiled, times, out_dir: str, dump: bool, warm: int) -> None:
+def render(compiled, times, out_dir, dump, warm, warm_from) -> None:
     from analysis.games.notitg import drawable_doc as dd
 
     evaluator, id_maps, report = dd.build_static_doc(compiled)
@@ -125,7 +134,7 @@ def render(compiled, times, out_dir: str, dump: bool, warm: int) -> None:
         return executor.execute(u, f, np.frombuffer(uf_raw, dtype=np.float32))
 
     for t in times:
-        for warm_t in warm_frames(float(t), warm, 1.0 / 60.0):
+        for warm_t in warm_frames(float(t), warm, 1.0 / 60.0, warm_from):
             compose(warm_t)
         u_raw, f_raw, uf_raw, n = evaluator.frame(float(t))
         u = np.frombuffer(u_raw, dtype=np.uint32).reshape(n, evaluator.u_stride)
@@ -153,6 +162,10 @@ def main() -> int:
     parser.add_argument('--warm', type=int, default=120,
                         help='frames to compose before each time so retained '
                              'AFT slots hold real content (0 = cold)')
+    parser.add_argument('--warm-from', type=float, default=None,
+                        help='spread the warm-up from this chart time instead '
+                             'of the 60Hz window, to reach a capture taken '
+                             'before a frozen section began')
     args = parser.parse_args()
 
     os.environ['VSRG_DRAWABLE_ELEMENTS'] = args.elements
@@ -170,7 +183,8 @@ def main() -> int:
         print(f'could not compile {args.chart}')
         return 1
     wait_for_upgrade(compiled)
-    render(compiled, args.times, args.out, args.dump, args.warm)
+    render(compiled, args.times, args.out, args.dump, args.warm,
+           args.warm_from)
     return 0
 
 

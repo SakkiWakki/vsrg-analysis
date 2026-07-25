@@ -631,3 +631,30 @@ def test_a_curtain_fill_covers_its_target():
     ex.set_clear(SCREEN_ID, CLEAR_TRANSPARENT)
     screen = ex.execute(*_frames(ev, 0.0))
     assert _alpha(screen, 7, 7) == 255
+
+
+def test_a_projective_item_is_not_read_as_its_affine_block():
+    # The record mat3 is a full homography for any chain that leaves the z=0
+    # plane, and the 6-argument QTransform constructor silently drops the
+    # projective row. gat's AFT sampler at fov 80 / rotationy 40 carries a
+    # translation of 94372 that only means anything divided by the w row, so
+    # an affine-only read put the frozen playfield off screen and rendered
+    # the whole section black.
+    b = sn.DocBuilder(8.0, 8.0)
+    b.item(0, sn.SRC_FILL, 0)
+    b.item_box(0, size_x_rest=8.0, size_y_rest=8.0)
+    ev = b.finish()
+
+    u, f = _frames(ev, 0.0)
+    f = _paint_fill_tint(u, f, (1.0, 1.0, 1.0))
+    row = next(i for i in range(u.shape[0]) if u[i, 0] == sn.OP_BLIT)
+    # A homography whose w row scales everything back onto the target: the
+    # affine block alone would place this quad 100x off screen.
+    f[row, 0:9] = [100.0, 0.0, 0.0,
+                   0.0, 100.0, 0.0,
+                   0.0, 0.0, 100.0]
+
+    ex = RasterExecutor({}, [(8.0, 8.0)])
+    ex.set_clear(SCREEN_ID, CLEAR_TRANSPARENT)
+    screen = ex.execute(u, f)
+    assert _alpha(screen, 4, 4) == 255, 'the w row must divide, not be dropped'

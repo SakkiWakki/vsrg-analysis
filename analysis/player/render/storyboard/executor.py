@@ -405,15 +405,22 @@ class RasterExecutor:
         ]
 
     def _qtransform(self, frec: np.ndarray) -> QTransform:
-        # mat3 is row-major [m00 m01 m02; m10 m11 m12; 0 0 1]. QTransform's
-        # constructor is column-order (m11=xx, m12=xy, m21=yx, m22=yy,
-        # dx, dy) with the maps p' = p * M, so QTransform(m00, m10, m01,
-        # m11, m02, m12) applies the same affine as the row-major mat3.
+        # The record mat3 is row-major COLUMN-vector (p' = M @ p); QTransform
+        # is row-vector (p' = p @ Q), so Q is M transposed.
+        #
+        # The FULL 3x3, not the affine block. The 6-argument constructor drops
+        # the projective row, and a perspective item's remaining terms are
+        # nonsense on their own - gat's AFT sampler at fov 80 / rotationy 40
+        # carries a translation of 94372 that only means anything once divided
+        # by the w row, so an affine-only read put the whole frozen playfield
+        # off screen and the section rendered black. QPainter executes the
+        # perspective directly (transform3d.qtransform_from_h relies on the
+        # same).
         m = frec
         return QTransform(
-            float(m[0]), float(m[3]),
-            float(m[1]), float(m[4]),
-            float(m[2]), float(m[5]),
+            float(m[0]), float(m[3]), float(m[6]),
+            float(m[1]), float(m[4]), float(m[7]),
+            float(m[2]), float(m[5]), float(m[8]),
         )
 
     def _draw_fill(self, painter: QPainter, frec: np.ndarray, target_size,
