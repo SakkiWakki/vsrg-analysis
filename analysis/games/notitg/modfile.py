@@ -1368,10 +1368,30 @@ class _LiveStatePin:
         self._anchors = None
 
     def sample(self, t):
-        actor = self._sim.env._actors.get(self._rec_id)
-        if actor is None:
+        if not self.anchored():
             return (sprite_sheet.frame_at_time(self._states,
                                                t - self._t_start),)
+        return self._anchors.sample(t)
+
+    def steps(self, t0: float, t1: float, limit: int):
+        """The frames shown across `[t0, t1]` as `(ts, frames)` step points,
+        or None when they would exceed `limit` - the closed-form read an
+        exporter takes instead of sampling this sampler."""
+        if not self.anchored():
+            return sprite_sheet.frame_steps(self._states, self._t_start,
+                                            t0, t1, limit)
+        return self._anchors.steps(t0, t1, limit)
+
+    def anchored(self) -> bool:
+        """Whether the chart has actually re-anchored this sheet, refreshing
+        the anchors when the recorded stream has grown.
+
+        Unanchored the sheet is the plain periodic auto-animation, which a
+        consumer can read in closed form (`sprite_sheet.frame_steps`) instead
+        of sampling it - so this is the probe as much as the resolve."""
+        actor = self._sim.env._actors.get(self._rec_id)
+        if actor is None:
+            return False
         frames = actor.keyframes()
         state_kfs = frames.get(_STATE_PROP) or ()
         paused_kfs = frames.get(_STATE_PAUSED_PROP) or ()
@@ -1381,10 +1401,7 @@ class _LiveStatePin:
             self._anchors = (_state_anchors(state_kfs, paused_kfs,
                                             self._states, self._t_start)
                              if count else None)
-        if self._anchors is None:
-            return (sprite_sheet.frame_at_time(self._states,
-                                               t - self._t_start),)
-        return self._anchors.sample(t)
+        return self._anchors is not None
 
 
 # StepMania's built-in flat-color texture: the renderer synthesizes it,

@@ -29,10 +29,12 @@ per instance:
 
 `export_channel` is THE shared primitive: it converts one of the Python timeline
 objects an instance's links carry (an `EventTimeline`, or a lazy
-`LiveCurve`/`SegCurve`) into the `(ts, vals, durs)` breakpoint triple
-`DocBuilder.channel` ingests, exactly for `EventTimeline` and by dense sampling
-for the lazy curves. It is documented for later extraction (other games' static
-scenes will reuse it verbatim).
+`LiveCurve`/`SegCurve`) into the `(ts, vals, durs, rest, eases)` breakpoint
+arrays `DocBuilder.channel` ingests - exactly, by asking a curve that knows its
+own closed form (`SegCurve` over the sim's recorded segments, a sheet's frame
+cycle) or by translating an `EventTimeline`'s keyframes, and otherwise by
+sampling and collapsing. It is documented for later extraction (other games'
+static scenes will reuse it verbatim).
 
 The parity harness (`compare_at` / `parity_report`) compares the evaluator's
 BLIT stream against `NotitgFieldInstances.at` at N sample times - order, alpha,
@@ -54,8 +56,9 @@ import os
 
 import numpy as np
 
-from analysis.player.render.effects.timeline import EventTimeline
-from analysis.player.render.storyboard.sprite_sheet import frame_at_time
+from analysis.player.render.effects.timeline import SIMPLIFY_EPS, EventTimeline
+from analysis.player.render.storyboard.sprite_sheet import (
+    frame_at_time, frame_steps)
 
 # The design chart region: SM's fixed 640x480 screen. Sampling the effect over
 # this region makes the design map the identity (kx=ky=1, ox=oy=0), so an
@@ -102,18 +105,22 @@ _ELEMENT_ITEM_LANES = (
 
 
 # --------------------------------------------------------------------------
-# export_channel - the shared timeline -> breakpoint-triple primitive
+# export_channel - the shared timeline -> breakpoint-array primitive
 # --------------------------------------------------------------------------
 
 def export_channel(timeline, t0: float, t1: float, prop: int = 0):
-    """Convert one Python timeline into the `(ts, vals, durs)` breakpoint
-    triple `DocBuilder.channel` ingests, over the window `[t0, t1]`.
+    """Convert one Python timeline into the breakpoint arrays
+    `DocBuilder.channel` ingests, over the window `[t0, t1]`.
 
     The native channel (native/src/channels.rs) serves `rest` before the first
     breakpoint, then at each breakpoint either holds its value (dur <= 0) or
-    ramps LINEARLY toward the next breakpoint's value over `dur`. This helper
-    emits breakpoints reproducing the timeline's own playback under that model:
+    ramps toward the next breakpoint's value over `dur` under that
+    breakpoint's ease id. This helper emits breakpoints reproducing the
+    timeline's own playback under that model, most structural source first:
 
+    - a curve exposing `breakpoints(t0, t1, prop)` (`SegCurve` over the sim's
+      recorded segment lanes): EXACT and free - the closed-form segments are
+      translated straight across, at the sim's own resolution.
     - `EventTimeline`: EXACT. Its keyframes are translated directly - an instant
       (duration 0) becomes one hold breakpoint; a linearly-eased ramp becomes a
       (start-value, dur) breakpoint plus a (target, hold) breakpoint, matching
@@ -121,22 +128,44 @@ def export_channel(timeline, t0: float, t1: float, prop: int = 0):
       densified across its own span at `_DENSE_DT` (the native ramp is linear,
       so a curved ease cannot be one breakpoint). Rest before the first keyframe
       is carried on the ChannelRef, so no pre-roll breakpoint is emitted.
-    - anything else (`LiveCurve` / `SegCurve`, or any `.sample(t)` duck):
-      dense-sampled at `_DENSE_DT` across `[t0, t1]` (the documented interim
-      approximation - these lazy curves expose no keyframe structure).
+    - anything else (any `.sample(t)` duck): dense-sampled at `_DENSE_DT`
+      across `[t0, t1]` and collapsed to the breakpoints the reconstruction
+      actually needs.
 
     `prop` selects the value index within the timeline's sampled tuple (link
-    timelines are scalar, index 0). Returns `(ts, vals, durs, rest)` - the four
-    args of `DocBuilder.channel` - as plain Python lists + a float rest.
+    timelines are scalar, index 0). Returns `(ts, vals, durs, rest, eases)` -
+    the five args of `DocBuilder.channel` - as plain Python lists + a float
+    rest.
 
     Examples: called by `_channel_id` for every per-property link channel of a
     field instance, and by the fill-tint export.
     """
+    structural = _export_structural(timeline, t0, t1, prop)
+    if structural is not None:
+        return structural
     if isinstance(timeline, EventTimeline):
         return _export_event_timeline(timeline, prop)
     if _is_static(timeline):
-        return [], [], [], _rest_value(timeline, prop)
+        return [], [], [], _rest_value(timeline, prop), []
     return _export_dense(timeline, t0, t1, prop)
+
+
+def _export_structural(timeline, t0: float, t1: float, prop: int):
+    """The curve's own breakpoints when it can produce them, else None.
+
+    A curve backed by closed-form segments knows its shape exactly; asking it
+    replaces a dense sampling walk (one Python call per sample per property)
+    with a read of what the writer already recorded. A curve that declines -
+    no such method, or a window it cannot answer for - falls through to the
+    sampling paths."""
+    export = getattr(timeline, 'breakpoints', None)
+    if export is None:
+        return None
+    exported = export(t0, t1, prop)
+    if exported is None:
+        return None
+    ts, vals, durs, eases = exported
+    return ts, vals, durs, _rest_value(timeline, prop), eases
 
 
 def _is_static(timeline) -> bool:
@@ -164,6 +193,7 @@ def _export_event_timeline(timeline: EventTimeline, prop: int):
     ts: list[float] = []
     vals: list[float] = []
     durs: list[float] = []
+    eases: list[int] = []
 
     def emit(bt: float, value: float, dur: float) -> None:
         # Collapse a redundant hold onto the previous breakpoint of equal value
@@ -174,6 +204,7 @@ def _export_event_timeline(timeline: EventTimeline, prop: int):
         ts.append(bt)
         vals.append(value)
         durs.append(dur)
+        eases.append(_EASE_LINEAR)
 
     prev = rest
     for idx, kf in enumerate(keyframes):
@@ -188,14 +219,16 @@ def _export_event_timeline(timeline: EventTimeline, prop: int):
             emit(kf.t + kf.duration, target, 0.0)
         else:
             # A curved ease: the native ramp is linear, so densify the span.
-            _densify_span(timeline, prop, kf.t, kf.t + kf.duration, ts, vals, durs)
+            _densify_span(timeline, prop, kf.t, kf.t + kf.duration,
+                          ts, vals, durs, eases)
             emit(kf.t + kf.duration, target, 0.0)
         prev = target
 
-    return ts, vals, durs, rest
+    return ts, vals, durs, rest, eases
 
 
-def _densify_span(timeline, prop, a: float, b: float, ts, vals, durs) -> None:
+def _densify_span(timeline, prop, a: float, b: float, ts, vals, durs,
+                  eases) -> None:
     """Append linear-ramp breakpoints tracing `timeline` across `[a, b)` at
     `_DENSE_DT`, so the piecewise-linear reconstruction follows the curve."""
     n = max(1, int(np.ceil((b - a) / _DENSE_DT)))
@@ -205,25 +238,70 @@ def _densify_span(timeline, prop, a: float, b: float, ts, vals, durs) -> None:
         ts.append(bt)
         vals.append(float(timeline.sample(bt)[prop]))
         durs.append(step)
+        eases.append(_EASE_LINEAR)
 
 
 def _export_dense(timeline, t0: float, t1: float, prop: int):
-    """Dense-sample a duck-typed curve across `[t0, t1]` at `_DENSE_DT`
-    (the interim approximation for LiveCurve / SegCurve)."""
+    """Dense-sample a duck-typed curve across `[t0, t1]` at `_DENSE_DT`,
+    collapsed to the breakpoints the reconstruction needs.
+
+    The fallback for a curve with no structural export: its shape can only be
+    discovered by looking. What is emitted, though, is not the walk - a whole
+    chart's worth of samples per property is hundreds of megabytes of
+    breakpoints, nearly all of them redundant - but the corners
+    `_collapse_ramps` keeps."""
     rest = _rest_value(timeline, prop)
     if t1 <= t0:
-        return [], [], [], rest
+        return [], [], [], rest, []
     n = max(1, int(np.ceil((t1 - t0) / _DENSE_DT)))
     step = (t1 - t0) / n
-    ts: list[float] = []
-    vals: list[float] = []
-    durs: list[float] = []
-    for k in range(n + 1):
-        bt = t0 + k * step
-        ts.append(bt)
-        vals.append(float(timeline.sample(bt)[prop]))
-        durs.append(step if k < n else 0.0)
-    return ts, vals, durs, rest
+    sample = timeline.sample
+    ts = [t0 + k * step for k in range(n + 1)]
+    vals = [float(sample(bt)[prop]) for bt in ts]
+    ts, vals, durs = _collapse_ramps(ts, vals)
+    return ts, vals, durs, rest, [_EASE_LINEAR] * len(ts)
+
+
+# How far a collapsed reconstruction may stray from the samples it replaces.
+# `SIMPLIFY_EPS`, the same bound the sim's own instant collapse holds: in
+# design pixels / degrees / alpha units it is sub-visible.
+_COLLAPSE_EPS = SIMPLIFY_EPS
+
+
+def _collapse_ramps(ts, vals, eps: float = _COLLAPSE_EPS):
+    """`(ts, vals, durs)` keeping only the samples a piecewise-LINEAR
+    reconstruction of `(ts, vals)` needs to stay within `eps`.
+
+    The slope corridor `SegmentTimeline.poke` maintains, in batch: each
+    accepted point narrows the feasible slope interval from the anchor, and a
+    point whose own chord slope falls outside it becomes the next anchor. Every
+    kept span is emitted as a RAMP (never a hold), so a smooth run of samples
+    reconstructs as motion rather than a staircase."""
+    n = len(ts)
+    if n == 0:
+        return [], [], []
+    out_ts, out_vals = [ts[0]], [vals[0]]
+    anchor = 0
+    lo, hi = -math.inf, math.inf
+    j = 1
+    while j < n:
+        dt = ts[j] - ts[anchor]
+        slope = (vals[j] - vals[anchor]) / dt
+        if lo <= slope <= hi:
+            tol = eps / dt
+            lo, hi = max(lo, slope - tol), min(hi, slope + tol)
+            j += 1
+            continue
+        anchor = j - 1
+        out_ts.append(ts[anchor])
+        out_vals.append(vals[anchor])
+        lo, hi = -math.inf, math.inf
+    if out_ts[-1] != ts[-1]:
+        out_ts.append(ts[-1])
+        out_vals.append(vals[-1])
+    durs = [out_ts[i + 1] - out_ts[i] for i in range(len(out_ts) - 1)]
+    durs.append(0.0)
+    return out_ts, out_vals, durs
 
 
 # --------------------------------------------------------------------------
@@ -239,7 +317,7 @@ _GROUP = 'group'
 
 class _FrameCurve:
     """A `.sample(t)`-duck curve tracing a sheet sprite's current frame index
-    over time, so `export_channel` dense-samples it into the item's frame lane.
+    over time, for `export_channel` to put on the item's frame lane.
 
     Mirrors `render._sheet_frame`: a recorded `state_pin` sampler wins; else the
     sheet auto-animates through `sheet_states` on the element's own clock. A
@@ -256,6 +334,29 @@ class _FrameCurve:
         if element.state_pin is not None:
             return (float(element.state_pin.sample(t)[0]),)
         return (float(frame_at_time(element.sheet_states, t - element.t_start)),)
+
+    def breakpoints(self, t0: float, t1: float, prop: int = 0):
+        """The frame lane's steps as hold breakpoints, or None to be sampled.
+
+        A frame lane is a step function whose changes are known in closed form
+        - the sheet's own animation cycle, re-anchored by whatever
+        `setstate`/`animate` the chart recorded - so both the pinned and the
+        auto-animating sheet hand them over rather than being sampled for
+        them. `limit` bounds the export by what the sampling walk it replaces
+        would have cost; a sheet cycling faster than that is sampled instead."""
+        element = self._element
+        pin = element.state_pin
+        limit = int((t1 - t0) / _DENSE_DT)
+        if pin is not None:
+            export = getattr(pin, 'steps', None)
+            steps = None if export is None else export(t0, t1, limit)
+        else:
+            steps = frame_steps(element.sheet_states, float(element.t_start),
+                                t0, t1, limit)
+        if steps is None:
+            return None
+        ts, frames = steps
+        return ts, [float(f) for f in frames], [0.0] * len(ts), [0] * len(ts)
 
 
 def _flatten_elements(elements) -> list:
@@ -399,12 +500,17 @@ def _aft_slot_key(inst) -> str:
 
 
 def _horizon(compiled, default: float = 600.0) -> float:
-    """The channel export window end. Prefer an explicit compiled horizon;
-    fall back to a generous default (channels hold their tail past it)."""
+    """The channel export window end. Prefer an explicit compiled horizon,
+    then the live sim's own end - the point past which nothing is recorded and
+    every channel holds its tail anyway, so exporting beyond it is pure cost.
+    Absent both, a generous default."""
     for key in ('duration', 'horizon', 'song_length'):
         value = compiled.get(key)
         if isinstance(value, (int, float)) and value > 0.0:
             return float(value)
+    end = getattr(compiled.get('_live_sim'), '_end_seconds', None)
+    if isinstance(end, (int, float)) and end > 0.0:
+        return float(end)
     return default
 
 
@@ -498,18 +604,20 @@ class _Builder:
 
     # -- channel export ---------------------------------------------------
 
-    def _channel(self, timeline, prop: int = 0) -> tuple[int, float]:
+    def _channel(self, timeline, prop: int = 0, window=None) -> tuple[int, float]:
         """The (channel_id, rest) for a timeline+prop, exported once and
         memoized. id < 0 sentinel is never returned here - a real channel is
-        always pushed (the rest still rides the ChannelRef)."""
-        key = (id(timeline), prop)
+        always pushed (the rest still rides the ChannelRef).
+
+        `window` narrows the export to a `(t0, t1)` sub-range of the build's
+        own window, for a lane nothing reads outside it."""
+        t0, t1 = window if window is not None else (self._t0, self._t1)
+        key = (id(timeline), prop, t0, t1)
         cached = self._chan_cache.get(key)
         if cached is not None:
             return cached
-        ts, vals, durs, rest = export_channel(timeline, self._t0, self._t1, prop)
-        chan_id = self._builder.channel(
-            [float(v) for v in ts], [float(v) for v in vals],
-            [float(v) for v in durs], float(rest))
+        ts, vals, durs, rest, eases = export_channel(timeline, t0, t1, prop)
+        chan_id = self._builder.channel(ts, vals, durs, float(rest), eases)
         result = (chan_id, float(rest))
         self._chan_cache[key] = result
         return result
@@ -656,11 +764,9 @@ class _Builder:
         native visibility gate drops the base while the chart hides the field."""
         if hidden is None:
             return -1, 1.0
-        ts, vals, durs, rest = export_channel(hidden, self._t0, self._t1)
-        inv_vals = [1.0 - v for v in vals]
-        chan_id = self._builder.channel(
-            [float(v) for v in ts], inv_vals,
-            [float(v) for v in durs], 1.0 - float(rest))
+        ts, vals, durs, rest, eases = export_channel(hidden, self._t0, self._t1)
+        chan_id = self._builder.channel(ts, [1.0 - v for v in vals], durs,
+                                        1.0 - float(rest), eases)
         return chan_id, 1.0 - float(rest)
 
     def _ensure_player_consumers(self, instances) -> None:
@@ -849,16 +955,15 @@ class _Builder:
             timeline = link_element.timelines.get('fov')
             if timeline is None:
                 continue
-            ts, vals, durs, rest = export_channel(timeline, self._t0, self._t1)
+            ts, vals, durs, rest, eases = export_channel(
+                timeline, self._t0, self._t1)
             # An untouched fov rests at the LoadMenuPerspective default with no
             # breakpoints; minting a channel for it would attach a camera to
             # every chain (a `_channel` id is always valid, so the id alone
             # cannot say whether the fov was ever set).
             if not ts and abs(float(rest) - _DEFAULT_FOV) <= _FOV_EPS:
                 continue
-            chan_id = self._builder.channel(
-                [float(v) for v in ts], [float(v) for v in vals],
-                [float(v) for v in durs], float(rest))
+            chan_id = self._builder.channel(ts, vals, durs, float(rest), eases)
             return chan_id, float(rest)
         return None
 
@@ -892,11 +997,23 @@ class _Builder:
 
     def _element_frame_kwarg(self, element) -> dict:
         """A sheet sprite carries a frame lane tracing its current cell; a plain
-        1x1 sprite rests at frame 0 (no lane)."""
+        1x1 sprite rests at frame 0 (no lane).
+
+        The lane is exported over the element's OWN existence window: outside
+        it the item's `visible` gate is shut, so the cell it would show is
+        never read - and a sheet cycling every few frames traced across a whole
+        chart is a lane of breakpoints nothing looks at."""
         if element.sheet_cols * element.sheet_rows <= 1 and element.state_pin is None:
             return {}
-        chan_id, rest = self._channel(_FrameCurve(element))
+        chan_id, rest = self._channel(_FrameCurve(element),
+                                      window=self._element_window(element))
         return {'frame_id': chan_id, 'frame_rest': rest}
+
+    def _element_window(self, element):
+        """The element's existence window, clipped to the build's export
+        window."""
+        return (max(self._t0, float(element.t_start)),
+                min(self._t1, float(element.t_end)))
 
     def _element_visible_kwarg(self, element) -> dict:
         """The element's visible gate: its existence WINDOW [t_start, t_end)
@@ -921,7 +1038,8 @@ class _Builder:
             chan_id = self._builder.channel(
                 ts, vals, [0.0] * len(ts), 0.0)
             return {'visible_id': chan_id, 'visible_rest': 0.0}
-        hts, hvals, _durs, hrest = export_channel(hidden, self._t0, self._t1)
+        hts, hvals, _durs, hrest, _eases = export_channel(
+            hidden, self._t0, self._t1)
         inv = [1.0 - float(v) for v in hvals]
         inv_rest = 1.0 - float(hrest)
 

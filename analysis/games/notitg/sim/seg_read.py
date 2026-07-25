@@ -86,6 +86,55 @@ class SegCurve:
                     or actor._seg.get(self._prop)
                     or (preview and preview.get(self._prop)))
 
+    def breakpoints(self, t0: float, t1: float, index: int = 0):
+        """`(ts, vals, durs, eases)` reproducing `sample(t)[index]` over
+        `[t0, t1]` for a piecewise linear-ramp consumer, or None when the
+        structural export does not apply and the caller must sample.
+
+        This is the exporter's fast path. Dense-sampling a curve to discover
+        its shape costs one Python call per sample per property - tens of
+        millions for a full chart - and quantizes real motion to the sampling
+        cadence. The recorded lanes ALREADY hold the shape in closed form, so
+        an exporter reads it out instead: the breakpoints come back at the
+        sim's own resolution, exactly, in the number of segments the actor
+        actually wrote.
+
+        None is returned for the cases the lanes cannot answer alone: an
+        unpublished future the beyond-frontier preview would serve, a
+        non-numeric token stream (a rotation-order name is not a channel),
+        and a lane set too narrow for `index`.
+        """
+        actor = self._sim.env._actors.get(self._rec_id)
+        if actor is None:
+            return [], [], [], []
+        if t1 > self._sim.frontier and getattr(actor, '_seg_preview', None):
+            return None
+
+        tokens = actor._seg_tokens.get(self._prop)
+        if tokens is not None:
+            return self._token_breakpoints(tokens, t1, index)
+
+        lanes = actor._seg.get(self._prop)
+        if not lanes:
+            return [], [], [], []
+        if index >= len(lanes):
+            return None
+        return lanes[index].breakpoints(t1)
+
+    def _token_breakpoints(self, tokens, t1: float, index: int):
+        """A token stream's steps as hold breakpoints (mirroring
+        `_token_at`), or None when the tokens are not numeric."""
+        ts, vals = tokens
+        out_ts, out_vals = [], []
+        for t, value in zip(ts, vals):
+            if t > t1:
+                break
+            if index >= len(value) or not isinstance(value[index], (int, float)):
+                return None
+            out_ts.append(float(t))
+            out_vals.append(float(value[index]))
+        return out_ts, out_vals, [0.0] * len(out_ts), [0] * len(out_ts)
+
     def _token_at(self, tokens, t: float) -> tuple:
         ts, vals = tokens
         idx = bisect_right(ts, t) - 1

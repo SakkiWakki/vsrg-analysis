@@ -1,4 +1,5 @@
 """SM 3.95 sprite-sheet decode + sheet-aware storyboard rendering."""
+import bisect
 from types import SimpleNamespace
 
 import pytest
@@ -6,8 +7,9 @@ import pytest
 from analysis.games.notitg import sprite_sheet as sm_sheet
 from analysis.player.render.storyboard import Storyboard, StoryboardEffect
 from analysis.player.render.storyboard.model import Element, build_timelines
-from analysis.player.render.storyboard.sprite_sheet import (frame_at_time,
-                                                            frame_source_rect)
+from analysis.player.render.storyboard.sprite_sheet import (
+    StateAnchors, frame_at_time, frame_at_time_anchored, frame_steps,
+    frame_source_rect)
 
 
 def _ctx(t=0.0, rect=(0, 0, 200, 200)):
@@ -409,3 +411,59 @@ def test_underscore_hidden_texture_resolves(tmp_path):
     (tmp_path / 'toss 3x1.png').write_bytes(b'\x89PNG')
     assert _resolve_texture_path('toss 3x1.png', tmp_path) \
         == str(tmp_path / 'toss 3x1.png')
+
+
+# ── frame steps: the closed-form read of the animation --------------------
+
+def _steps_replay(steps, t):
+    ts, frames = steps
+    i = bisect.bisect_right(ts, t) - 1
+    return frames[i] if i >= 0 else 0
+
+
+def _steps_match_sampling(states, t_start, t0, t1, anchors=None):
+    """The times where the step export disagrees with the sampler it replaces,
+    ignoring the step instants themselves (a boundary sample lands on either
+    side by a float ulp)."""
+    if anchors is None:
+        steps = frame_steps(states, t_start, t0, t1, 10 ** 7)
+
+        def at(t):
+            return frame_at_time(states, t - t_start)
+    else:
+        steps = StateAnchors(anchors, states, t_start).steps(t0, t1, 10 ** 7)
+
+        def at(t):
+            return frame_at_time_anchored(states, anchors, t, t_start)
+
+    assert steps is not None
+    times = [t0 + (t1 - t0) * i / 4000 for i in range(4000)]
+    return [t for t in times
+            if _steps_replay(steps, t) != at(t)
+            and all(abs(t - s) > 1e-9 for s in steps[0])]
+
+
+def test_frame_steps_replay_the_auto_animation():
+    states = ((0, 0.5), (1, 0.125), (0, 0.125), (1, 0.125))
+    assert _steps_match_sampling(states, 1.3, 0.0, 20.0) == []
+
+
+def test_frame_steps_hold_a_single_state():
+    assert frame_steps(((4, 999.0),), 0.0, 2.0, 9.0, 100) == ([2.0], [4])
+
+
+def test_frame_steps_decline_an_animation_faster_than_the_budget():
+    # 5000 changes over the window; a caller budgeting 100 breakpoints gets
+    # None and samples instead.
+    assert frame_steps(((0, 0.001), (1, 0.001)), 0.0, 0.0, 5.0, 100) is None
+
+
+def test_state_anchors_steps_replay_frozen_and_resumed_spans():
+    states = ((0, 0.25), (1, 0.25), (2, 0.5))
+    anchors = ((2.0, 1, True), (5.0, 2, False), (9.0, 0, True))
+    assert _steps_match_sampling(states, 0.7, 0.0, 15.0, anchors=anchors) == []
+
+
+def test_state_anchors_steps_replay_with_no_anchors():
+    states = ((3, 0.2), (7, 0.4))
+    assert _steps_match_sampling(states, -1.5, 0.0, 10.0, anchors=()) == []

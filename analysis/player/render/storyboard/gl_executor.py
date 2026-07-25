@@ -216,15 +216,20 @@ def _compose_cell(sub, cell):
     return u0, v0, u0 + span_u, v0 + span_v
 
 
-def _mat_source_to_ndc(mat3: np.ndarray, w: int, h: int) -> QMatrix3x3:
+def _mat_source_to_ndc(mat3, w: int, h: int) -> QMatrix3x3:
     """Compose the record's column-vector mat3 (source logical -> target
     logical) with target-logical -> NDC (y-down, top-left at (-1, +1); 1
-    logical unit = 1 device px). Returns the 3x3 for u_mat."""
-    to_ndc = np.array([[2.0 / w, 0.0, -1.0],
-                       [0.0, -2.0 / h, 1.0],
-                       [0.0, 0.0, 1.0]], dtype=np.float64)
-    m = to_ndc @ mat3.astype(np.float64).reshape(3, 3)
-    return QMatrix3x3([float(v) for v in m.flatten()])
+    logical unit = 1 device px). Returns the 3x3 for u_mat.
+
+    Multiplied out rather than assembled: this runs once per BLIT, and
+    building two 3x3 arrays for a matmul that only ever scales the first two
+    rows and folds the third into them is the composite loop's largest
+    per-op cost."""
+    m0, m1, m2, m3, m4, m5, m6, m7, m8 = (float(v) for v in mat3)
+    sx, sy = 2.0 / w, -2.0 / h
+    return QMatrix3x3([sx * m0 - m6, sx * m1 - m7, sx * m2 - m8,
+                       sy * m3 + m6, sy * m4 + m7, sy * m5 + m8,
+                       m6, m7, m8])
 
 
 def _identity_ndc() -> QMatrix3x3:
@@ -784,7 +789,7 @@ class GLExecutor:
         # allocated at logical * resolution_scale pixels (the viewport
         # handles that - geometry must not).
         tw, th = self._sizes[target_id]
-        mat3 = np.array(frec[:9], dtype=np.float64)
+        mat3 = frec[:9]
         # A per-item frag program shades IMAGE / DRAWABLE source draws; Fill
         # and Lines/Mesh keep the default path (the shaded blit is a textured
         # pass over the item's OWN source, drawable-ir.md attach point #1).

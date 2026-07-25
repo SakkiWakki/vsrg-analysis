@@ -17,6 +17,7 @@ provider, builds the static doc, and prints the parity report.
 """
 import math
 import os
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -70,10 +71,9 @@ def _channel_sampler(timeline, t0, t1, prop=0):
     """Round-trip a timeline through export_channel + a real doc channel, and
     return a `sample(t)` reading the native channel back (via a linkless item's
     x lane). This is the exact substrate the static doc feeds link props into."""
-    ts, vals, durs, rest = dd.export_channel(timeline, t0, t1, prop)
+    ts, vals, durs, rest, eases = dd.export_channel(timeline, t0, t1, prop)
     builder = sn.DocBuilder(640.0, 480.0)
-    chan_id = builder.channel([float(v) for v in ts], [float(v) for v in vals],
-                              [float(v) for v in durs], float(rest))
+    chan_id = builder.channel(ts, vals, durs, float(rest), eases)
     builder.item(0, sn.SRC_FILL, 0, x_id=chan_id, x_rest=rest)
     evaluator = builder.finish()
 
@@ -492,3 +492,64 @@ def test_gat2_smoke_static_doc_parity():
     # The harness must run end-to-end and produce a per-time report.
     assert len(rep['times']) == len(sample_times)
     assert all('n_blit' in r for r in rep['times'])
+
+
+def test_export_channel_prefers_a_curves_own_breakpoints():
+    # A curve that knows its closed form hands the breakpoints over; the
+    # exporter must take them and never fall back to sampling it.
+    class _Structural:
+        _rest = (5.0,)
+
+        def __init__(self):
+            self.sampled = 0
+
+        def sample(self, t):
+            self.sampled += 1
+            return (5.0,)
+
+        def breakpoints(self, t0, t1, prop=0):
+            # Hold 10 from t=1, then ramp 10 -> 30 over [2, 3].
+            return [1.0, 2.0, 3.0], [10.0, 10.0, 30.0], [0.0, 1.0, 0.0], [0, 0, 0]
+
+    curve = _Structural()
+    native = _channel_sampler(curve, 0.0, 6.0)
+    assert curve.sampled == 0
+    for t, want in ((0.5, 5.0), (1.5, 10.0), (2.5, 20.0), (5.0, 30.0)):
+        assert abs(native(t) - want) < 1e-3, t
+
+
+def test_export_channel_samples_a_curve_that_declines_to_export():
+    # None means "I cannot answer for this window" - the exporter samples.
+    class _Declines:
+        _rest = (0.0,)
+
+        def sample(self, t):
+            return (math.sin(t),)
+
+        def breakpoints(self, t0, t1, prop=0):
+            return None
+
+    native = _channel_sampler(_Declines(), 0.0, 6.0)
+    assert max(abs(native(t) - math.sin(t))
+               for t in np.linspace(0.0, 6.0, 61)) < 0.05
+
+
+def test_dense_export_collapses_a_held_curve_to_two_breakpoints():
+    # A curve that never moves must not cost one breakpoint per sample.
+    class _Held:
+        _rest = (0.0,)
+
+        def sample(self, t):
+            return (7.0,)
+
+    ts, vals, _durs, _rest, _eases = dd.export_channel(_Held(), 0.0, 600.0)
+    assert len(ts) == 2 and vals == [7.0, 7.0]
+
+
+def test_horizon_falls_back_to_the_live_sims_end():
+    # Nothing else names the chart's length, so exporting to a fixed default
+    # past the sim's end is pure cost.
+    live = SimpleNamespace(_end_seconds=123.5)
+    assert dd._horizon({'_live_sim': live}) == 123.5
+    assert dd._horizon({'_live_sim': live, 'duration': 60.0}) == 60.0
+    assert dd._horizon({}) == 600.0

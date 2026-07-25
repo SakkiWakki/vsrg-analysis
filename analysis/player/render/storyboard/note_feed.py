@@ -464,33 +464,17 @@ def _place(cx, cy, w, h, rotation_deg):
     Composition (applied right-to-left to a unit-box point):
         T(cx, cy) . R(deg) . S(w, h) . T(-1/2, -1/2)
     so the unit box centers on the origin, scales to the note size, spins,
-    then translates to the design center."""
-    theta = np.radians(rotation_deg)
-    cos_t, sin_t = np.cos(theta), np.sin(theta)
-
-    center = _translate(-0.5, -0.5)
-    scale = _scale(w, h)
-    rotate = np.array([[cos_t, -sin_t, 0.0],
-                       [sin_t, cos_t, 0.0],
-                       [0.0, 0.0, 1.0]])
-    place = _translate(cx, cy)
-
-    m = place @ rotate @ scale @ center
-    return (m[0, 0], m[0, 1], m[0, 2],
-            m[1, 0], m[1, 1], m[1, 2],
-            m[2, 0], m[2, 1], m[2, 2])
-
-
-def _translate(tx, ty):
-    return np.array([[1.0, 0.0, tx],
-                     [0.0, 1.0, ty],
-                     [0.0, 0.0, 1.0]])
-
-
-def _scale(sx, sy):
-    return np.array([[sx, 0.0, 0.0],
-                     [0.0, sy, 0.0],
-                     [0.0, 0.0, 1.0]])
+    then translates to the design center. Multiplied out rather than
+    assembled: this runs once per visible note per frame, and four 3x3
+    allocations plus two matmuls to produce six non-trivial scalars is the
+    emitter's single largest per-frame cost."""
+    theta = math.radians(rotation_deg)
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
+    m00, m01 = cos_t * w, -sin_t * h
+    m10, m11 = sin_t * w, cos_t * h
+    return (m00, m01, cx - 0.5 * (m00 + m01),
+            m10, m11, cy - 0.5 * (m10 + m11),
+            0.0, 0.0, 1.0)
 
 
 # ── image lookup ─────────────────────────────────────────────────────
@@ -559,17 +543,16 @@ class _EmitBuffer:
         self._f = []
         self.count = 0
 
+    # Lanes 13..17: every fed item is uncropped and carries no z - a
+    # receptor or note head is never cropped and never sorts.
+    _TAIL = (*_NO_CROP, 0.0)
+
     def add(self, image_id, mat, opacity, tint=_WHITE, additive=False,
             frame=0):
-        self._u.extend((SRC_IMAGE, int(image_id), int(frame),
+        self._u.extend((SRC_IMAGE, image_id, frame,
                         _FEED_FLAG_ADDITIVE if additive else 0))
-        row = [0.0] * FEED_F_STRIDE
-        row[_F_MAT:_F_MAT + 9] = [float(v) for v in mat]
-        row[_F_OPACITY] = float(opacity)
-        row[_F_TINT:_F_TINT + 3] = [float(c) for c in tint]
-        row[_F_CROP:_F_CROP + 4] = _NO_CROP
-        row[_F_Z] = 0.0
-        self._f.extend(row)
+        self._f.extend(mat)
+        self._f.extend((opacity, tint[0], tint[1], tint[2], *self._TAIL))
         self.count += 1
 
     def finish(self):

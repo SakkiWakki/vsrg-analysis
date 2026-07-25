@@ -7,11 +7,13 @@ the same collapse run incrementally. Both paths promise the poked
 values back within SIMPLIFY_EPS, so they may differ from each other by
 at most 2 * SIMPLIFY_EPS at any poked time.
 """
+import bisect
 import math
 import random
 
 import pytest
 
+from analysis.player.render.effects.easing import ease
 from analysis.player.render.effects.timeline import (
     EventTimeline, Keyframe, SIMPLIFY_EPS, simplify_instants)
 from analysis.player.render.segment_timeline import (
@@ -294,3 +296,75 @@ def test_out_of_order_segment_start_asserts():
     tl.add_ramp(5.0, 6.0, 0.0, 1.0)
     with pytest.raises(AssertionError):
         tl.add_ramp(1.0, 2.0, 0.0, 1.0)
+
+
+# ── breakpoint export ----------------------------------------------------
+
+def _replay(ts, vals, durs, eases, rest, t):
+    """Sample the breakpoint arrays the way a consumer channel does
+    (storyboard_native channels.rs): rest before the first, hold when the
+    duration is non-positive, else ease toward the next value."""
+    i = bisect.bisect_right(ts, t) - 1
+    if i < 0:
+        return rest
+    if durs[i] <= 0.0 or i + 1 >= len(vals):
+        return vals[i]
+    u = min(1.0, max(0.0, (t - ts[i]) / durs[i]))
+    return vals[i] + (vals[i + 1] - vals[i]) * ease(eases[i], u)
+
+
+def _replays_the_timeline(tl, lo, hi, samples=2001):
+    """Max deviation between the exported breakpoints' replay and the
+    timeline's own `sample` across [lo, hi]."""
+    exported = tl.breakpoints(hi + 1.0)
+    assert exported is not None
+    ts, vals, durs, eases = exported
+    return max(abs(_replay(ts, vals, durs, eases, tl._rest, t) - tl.sample(t))
+               for t in (lo + (hi - lo) * i / samples for i in range(samples + 1)))
+
+
+def test_breakpoints_replay_holds_ramps_and_slabs_exactly():
+    tl = SegmentTimeline(rest=5.0)
+    tl.add_hold(1.0, 10.0)
+    tl.add_ramp(2.0, 3.0, 10.0, 30.0)
+    tl.add_ramp(4.0, 6.0, 30.0, -10.0, -3)   # an SM tween curve, not linear
+    tl.add_slab(7.0, 10.0, [1.0, 2.0, 5.0, 4.0])
+    tl.finish()
+    assert _replays_the_timeline(tl, 0.0, 12.0) < 1e-6
+
+
+def test_breakpoints_replay_a_collapsed_poke_run_exactly():
+    tl = SegmentTimeline(rest=0.0)
+    for k in range(200):
+        tl.poke(k / 20.0, math.sin(k / 20.0))
+    tl.finish()
+    assert _replays_the_timeline(tl, 0.0, 12.0) < 1e-6
+
+
+def test_breakpoints_track_an_open_poke_run():
+    # No finish(): the run is still open, and `sample` gives it priority over
+    # the sealed directory, so the export must mirror `_run_value`.
+    tl = SegmentTimeline(rest=0.0)
+    tl.frontier = math.inf
+    tl.add_hold(0.0, -1.0)
+    for k in range(20):
+        tl.poke(1.0 + k / 10.0, 2.0 * k)
+    assert _replays_the_timeline(tl, 0.0, 6.0) < 1e-6
+
+
+def test_breakpoints_approximate_an_oscillator_within_a_pixel():
+    tl = SegmentTimeline(rest=0.0)
+    tl.add_osc(0.0, 4.0, 100.0, 20.0, 0.5, shape_id=OSC_SIN)
+    tl.finish()
+    # The one kind with no exact breakpoint form (the consumer ramps
+    # linearly); traced fine enough to stay sub-visible in design pixels.
+    assert _replays_the_timeline(tl, 0.0, 6.0) < 0.5
+
+
+def test_breakpoints_stop_at_the_requested_end():
+    tl = SegmentTimeline(rest=0.0)
+    for t in (1.0, 2.0, 3.0, 40.0, 50.0):
+        tl.add_hold(t, t)
+    tl.finish()
+    ts, _vals, _durs, _eases = tl.breakpoints(3.5)
+    assert ts == [1.0, 2.0, 3.0]

@@ -366,5 +366,105 @@ class SegmentTimeline:
         hi = self._slab_pool[off + min(i + 1, last)]
         return lo + (hi - lo) * f
 
+    # An OSC span has no exact breakpoint form (the consumer ramps
+    # LINEARLY between breakpoints), so it is the one kind the export
+    # approximates - at a cadence fine enough that a design-space
+    # oscillation reads smooth.
+    OSC_EXPORT_DT = 1.0 / 60.0
+
+    def breakpoints(self, t1: float, osc_dt: float = OSC_EXPORT_DT):
+        """This timeline as `(ts, vals, durs, eases)` for a piecewise
+        linear-ramp consumer, covering every segment starting at or before
+        `t1`, or None when the export cannot be trusted (see below).
+
+        The consumer model (`storyboard_native` channels, `SegmentTimeline`'s
+        own lowered form): before `ts[0]` it serves the channel's rest; at
+        breakpoint `i` it holds `vals[i]` when `durs[i] <= 0`, else eases
+        `vals[i] -> vals[i+1]` over `durs[i]` under ease id `eases[i]`.
+        Every kind but OSC maps onto that exactly - HOLD is one breakpoint,
+        RAMP is its two endpoints carrying its own ease, SLAB is its sample
+        grid (whose linear interpolation IS the consumer's) - so an exported
+        channel replays `sample` rather than approximating it, at the
+        timeline's own resolution instead of a fixed sampling cadence.
+
+        Returns None when the open poke run starts before the last sealed
+        segment: `sample` gives the run priority over the directory there,
+        which a flat time-ordered breakpoint list cannot express. The caller
+        then falls back to sampling.
+        """
+        ts: list[float] = []
+        vals: list[float] = []
+        durs: list[float] = []
+        eases: list[int] = []
+
+        def emit(t, v, dur=0.0, ease_id=_EASE_LINEAR):
+            ts.append(float(t))
+            vals.append(float(v))
+            durs.append(float(dur))
+            eases.append(int(ease_id))
+
+        for idx, t0 in enumerate(self._dir_t0):
+            if t0 > t1:
+                break
+            self._segment_breakpoints(idx, t0, emit, osc_dt)
+
+        if not self._run_n:
+            return ts, vals, durs, eases
+        if ts and self._run_th < ts[-1]:
+            return None
+        self._run_breakpoints(emit)
+        return ts, vals, durs, eases
+
+    def _segment_breakpoints(self, idx: int, t0: float, emit, osc_dt) -> None:
+        """Append one segment's breakpoints through `emit` (see
+        `breakpoints`); mirrors `_segment_value` kind for kind."""
+        row = self._dir_row[idx]
+        match self._dir_kind[idx]:
+            case 0:
+                emit(t0, self._hold_v[row])
+            case 1:
+                self._ramp_breakpoints(row, t0, emit)
+            case 2:
+                self._osc_breakpoints(row, t0, emit, osc_dt)
+            case _:
+                self._slab_breakpoints(row, t0, emit)
+
+    def _ramp_breakpoints(self, row: int, t0: float, emit) -> None:
+        t1, v0, v1 = self._ramp_t1[row], self._ramp_v0[row], self._ramp_v1[row]
+        if t1 <= t0:
+            emit(t0, v1)
+            return
+        emit(t0, v0, t1 - t0, self._ramp_ease[row])
+        emit(t1, v1)
+
+    def _osc_breakpoints(self, row: int, t0: float, emit, osc_dt) -> None:
+        """The one approximated kind: trace the oscillator across its span
+        as linear ramps, then hold its base (what `_osc_value` serves past
+        `t1`)."""
+        t1 = self._osc_t1[row]
+        steps = max(1, int(math.ceil((t1 - t0) / osc_dt)))
+        step = (t1 - t0) / steps
+        for k in range(steps):
+            emit(t0 + k * step, self._osc_value(row, t0, t0 + k * step), step)
+        emit(t1, self._osc_base[row])
+
+    def _slab_breakpoints(self, row: int, t0: float, emit) -> None:
+        off, n = self._slab_off[row], self._slab_n[row]
+        step = 1.0 / self._slab_hz[row]
+        for i in range(n - 1):
+            emit(t0 + i * step, self._slab_pool[off + i], step)
+        emit(self._slab_t1[row], self._slab_pool[off + n - 1])
+
+    def _run_breakpoints(self, emit) -> None:
+        """The open poke run's breakpoints, mirroring `_run_value`: a run of
+        one or two points steps, a longer one is the chord it will seal as."""
+        if self._run_n <= 2:
+            emit(self._run_th, self._run_vh)
+            if self._run_tl > self._run_th:
+                emit(self._run_tl, self._run_vl)
+            return
+        emit(self._run_th, self._run_vh, self._run_tl - self._run_th)
+        emit(self._run_tl, self._run_vl)
+
     def __len__(self) -> int:
         return len(self._dir_t0)
