@@ -225,6 +225,8 @@ class DrawablePipeline:
         # number the interleaved start/heartbeat/finish lines could not be
         # matched up to each other.
         self._prepare_n = 0
+        # One-shot: a scope the doc declares but the renderer never feeds.
+        self._unfed_logged = False
         self._assembly = None
         self._signature = None
         self._res_scale = None
@@ -302,17 +304,40 @@ class DrawablePipeline:
         handles (``gl_capture._GLHandle``): the GL executor binds their FBO
         textures directly (no readback), which is the GL-only app path -
         the raster executor is reference/test-only and never runs here."""
-        if not field_captures:
-            return
         fields = self._id_maps.get('fields') if isinstance(self._id_maps, dict) else None
         if not fields:
             return
-        for scope, handle in field_captures.items():
+        for scope, handle in (field_captures or {}).items():
             drawable_id = fields.get(scope)
             if drawable_id is None:
                 continue
             self._bind_capture(drawable_id, handle,
                                (overscan or {}).get(scope), chart_rect)
+        self._report_unfed_scopes(field_captures or {}, fields)
+
+    def _report_unfed_scopes(self, field_captures, fields) -> None:
+        """Name, once, any field scope the DOC declares that the renderer
+        never hands a capture for.
+
+        Such a drawable carries only what is bound, so it reads EMPTY and its
+        copies draw nothing - a whole section can go black with every
+        transform correct and nothing else in the log. The doc's scope set and
+        the renderer's capture set are produced by different code paths
+        (`drawable_doc._field_scope` against `qt_renderer
+        ._capture_second_field`), so they can disagree silently."""
+        if self._unfed_logged:
+            return
+        unfed = sorted(s for s in fields
+                       if field_captures.get(s) is None)
+        if not unfed:
+            return
+        self._unfed_logged = True
+        logger.warning(
+            "DrawablePipeline: the doc declares field scope(s) %s that the "
+            "renderer fed no capture for - those copies draw EMPTY. Fed this "
+            "frame: %s", unfed,
+            sorted(s for s, h in field_captures.items() if h is not None)
+            or 'none')
 
     def _bind_capture(self, drawable_id, handle, margins=None,
                       chart_rect=None) -> None:

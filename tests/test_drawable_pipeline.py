@@ -133,6 +133,25 @@ class _Adapter:
         return self._compiled
 
 
+def test_an_unfed_field_scope_is_named_once(gl, monkeypatch, caplog):
+    # A field drawable carries only what is bound, so a scope the doc declares
+    # and the renderer never feeds reads EMPTY and its copies draw nothing - a
+    # whole section can go black with every transform correct and nothing in
+    # the log. The two sides are produced by different code paths and can
+    # disagree silently, so the pipeline says which scope was starved.
+    import logging
+
+    player, pipe = _build_pipeline(monkeypatch, _field_doc())
+    ctx = _Ctx(t_now=0.0, player=player)
+    with caplog.at_level(logging.WARNING):
+        _spin_present(pipe, ctx, field_captures={'field': None})
+        _spin_present(pipe, ctx, field_captures={'field': None})
+
+    starved = [r for r in caplog.records if 'draw EMPTY' in r.getMessage()]
+    assert len(starved) == 1, 'named once, not once per frame'
+    assert "'field'" in starved[0].getMessage()
+
+
 # --------------------------------------------------------------------------
 # Fake static-doc compilers (build_static_doc -> (evaluator, id_maps, report))
 # --------------------------------------------------------------------------
