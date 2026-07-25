@@ -1102,9 +1102,14 @@ def test_real_chart_element_parity(chart_path, label, doc_elements):
     print(f'[{label}] element blits: {roles} '
           f'images={report["images"]} skips={report["element_skips"]}')
 
+    # Off round seconds on purpose: channel breakpoint times are f32, so a
+    # segment starting at 60.00000000000378 rounds to exactly 60.0 and wins
+    # the lookup at t=60.0 that the f64 timeline does not. The window is
+    # ~4e-12s - unreachable from an audio clock, but round sample times sit
+    # in it exactly.
     rep = dd.element_parity_report(
         evaluator, order, _natural_lookup(),
-        [30.0, 60.0, 120.0, 180.0, 240.0, 300.0, 400.0])
+        [30.037, 60.037, 120.037, 180.037, 240.037, 300.037, 400.037])
     print(f'[{label}] ' +
           dd.format_element_parity_report(rep).replace('\n', f'\n[{label}] '))
     assert rep['all_ok'], (
