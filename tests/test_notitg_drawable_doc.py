@@ -1024,7 +1024,7 @@ def test_element_parity_harness_catches_a_dropped_origin(doc_elements,
         _compiled([], tree=[el]))
     natural = (64.0, 32.0)
 
-    blits = [f for kind, _sid, _tag, f in dd._element_blits(evaluator, 0.0)
+    blits = [f for kind, _sid, _tag, f in dd._blit_records(evaluator, 0.0)
              if kind == sn.SRC_IMAGE]
     assert len(blits) == 1
     want = dd._legacy_element_quad(el, 0.0, natural, ())
@@ -1040,6 +1040,60 @@ def test_element_parity_harness_catches_a_dropped_origin(doc_elements,
     err = max(max(abs(a - b) for a, b in zip(wc, gc))
               for wc, gc in zip(want, moved))
     assert err == pytest.approx(32.0), f'expected half the 64px width, got {err}'
+
+
+# --------------------------------------------------------------------------
+# field-instance parity harness
+# --------------------------------------------------------------------------
+
+def test_field_parity_harness_agrees_with_the_legacy_effect(captured_notefield):
+    compiled = _compiled(_synthetic_scene())
+    evaluator, id_maps, _report = dd.build_static_doc(compiled)
+
+    rep = dd.field_parity_report(evaluator, compiled,
+                                 id_maps['instance_order'], _SAMPLE_TIMES)
+    assert rep['all_ok'], dd.format_field_parity_report(rep)
+    # Not vacuous: a run where every instance is 3D or uncomparable reports OK
+    # having compared nothing at all, which is the failure mode a "0 diffs"
+    # summary hides best.
+    assert all(r['n_compared'] > 0 for r in rep['times'])
+    assert rep['n_missing'] == 0 and rep['n_extra'] == 0
+
+
+def test_the_legacy_field_reference_is_read_row_vector(captured_notefield):
+    # A field transform is a ROW-vector homography; the record mat3 and
+    # `_apply_h` are column-vector. Read untransposed the reference collapses
+    # to a degenerate point, and every instance reports hundreds of pixels off
+    # against a doc that is exactly right.
+    scene = _synthetic_scene()
+    proxy = next(i for i in scene if i.get('name') == 'proxyA')
+    quad = dd._legacy_field_draws(scene, False, 0.0)[id(proxy)][0]
+
+    width = max(x for x, _y in quad) - min(x for x, _y in quad)
+    height = max(y for _x, y in quad) - min(y for _x, y in quad)
+    assert width == pytest.approx(320.0)   # 640 design px at the proxy's 0.5x
+    assert height == pytest.approx(240.0)
+
+
+def test_field_parity_harness_catches_a_moved_instance(captured_notefield,
+                                                       monkeypatch):
+    # The harness is only worth having if it FAILS on the difference it exists
+    # to catch. A curtain that drew one design pixel wide instead of covering
+    # its target passed the mat3-level `parity_report` for exactly as long as
+    # that report was the only one.
+    compiled = _compiled(_synthetic_scene())
+    evaluator, id_maps, _report = dd.build_static_doc(compiled)
+
+    real_quad = dd._record_quad
+    monkeypatch.setattr(dd, '_record_quad',
+                        lambda frec, natural: [(x + 7.0, y)
+                                               for x, y in real_quad(frec, natural)])
+    rep = dd.field_parity_report(evaluator, compiled,
+                                 id_maps['instance_order'], _SAMPLE_TIMES)
+    assert not rep['all_ok']
+    # The harness's own 1e-3 bar: record lanes are f32, so a 640px quad
+    # reconstructs to about 1e-5.
+    assert rep['max_corner_err'] == pytest.approx(7.0, abs=1e-3)
 
 
 _GAT1 = ('/mnt/Yucky/Rhythm Games/Players/NotITG/Songs/'

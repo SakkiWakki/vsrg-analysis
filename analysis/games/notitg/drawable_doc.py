@@ -624,6 +624,11 @@ _ELEMENT_LINK_PROPS = (
 _DEFAULT_FOV = 45.0
 _FOV_EPS = 1e-4
 
+# Elements and field instances share the record's ONE tag lane. Element tags
+# count from 1; an instance tag is this base plus its index, so a reader tells
+# the two apart by magnitude and 0 still means "untagged" (a fed note).
+_INSTANCE_TAG_BASE = 1 << 20
+
 
 def notes_inline() -> bool:
     """Whether the base field draws its notes as INLINE ITEMS (note_feed)
@@ -668,18 +673,19 @@ _OUT_OF_PLANE_RESTS = (('rotation_x', 0.0), ('rotation_y', 0.0), ('z', 0.0),
 def _link_is_planar(link) -> bool:
     """Whether one link stays on the z=0 plane for the whole chart.
 
-    A prop counts as off-plane when it MOVES (not static) or when it rests
-    somewhere other than its identity value - a chain pinned at rotation_y=30
-    needs the camera just as much as one sweeping through it."""
-    for prop, rest in _OUT_OF_PLANE_RESTS:
-        timeline = link.get(prop)
-        if timeline is None:
-            continue
-        if not _is_static(timeline):
-            return False
-        if abs(_rest_value(timeline, 0) - rest) > _REST_EPS:
-            return False
-    return True
+    A prop counts as off-plane when it is ever poked off its identity value -
+    a chain pinned at rotation_y=30 needs the camera just as much as one
+    sweeping through it, so `_moves_off` covers both the keyframed and the
+    resting case.
+
+    `_is_static` is the WRONG probe here, and using it made this return False
+    for EVERY link: a plain keyframe-less EventTimeline answers False to the
+    static probe (the safe direction for export, not for a predicate about
+    motion). Every field chain therefore carried a perspective camera it never
+    needed, and the field parity harness classified every instance as 3D and
+    compared nothing at all."""
+    return not any(_moves_off(link.get(prop), rest)
+                   for prop, rest in _OUT_OF_PLANE_RESTS)
 
 
 def _rotation_order_of(element) -> str:
@@ -792,6 +798,12 @@ class _Builder:
         # stream against this rather than re-deriving which elements glow
         # (a glowing element emits a SECOND image blit for its glow pass).
         self._element_order: list[tuple] = []
+        # The FIELD-INSTANCE commands this build emits, in draw order, as
+        # `(instance, command)` - the field parity harness pairs the record
+        # stream against this. Snapshots and feeds are recorded alongside items
+        # even though only an item can carry a tag, so an instance that emits
+        # no comparable quad reads as "not a quad" rather than "gated off".
+        self._instance_order: list[tuple] = []
         # `text` elements whose glyphs the consumer rasterises: image id ->
         # (text, pixel size). See `_text_image_id`.
         self._text_images: dict[int, tuple] = {}
@@ -960,6 +972,7 @@ class _Builder:
         self._builder.item(_SCREEN_ID, source_kind, source_id,
                            z_id=z_id, z_rest=z_rest, has_z=has_z,
                            visible_id=visible_id, visible_rest=visible_rest)
+        self._builder.item_tag(_SCREEN_ID, self._tag_instance(inst, 'item'))
         self._emit_tint(_SCREEN_ID, inst)
         self._emit_blend(_SCREEN_ID, inst)
         self._emit_shader(_SCREEN_ID, inst)
@@ -1093,7 +1106,8 @@ class _Builder:
                    'shaders': list(self._shader_descs),
                    'text_images': dict(self._text_images),
                    'image_specs': dict(self._image_specs),
-                   'element_order': list(self._element_order)}
+                   'element_order': list(self._element_order),
+                   'instance_order': list(self._instance_order)}
         return evaluator, id_maps
 
     def _banded_elements(self):
@@ -1199,6 +1213,7 @@ class _Builder:
                 z_id, z_rest, has_z = self._z_channel(inst)
                 self._builder.snapshot(_SCREEN_ID, slot, z_id=z_id,
                                        z_rest=z_rest, has_z=has_z)
+                self._tag_instance(inst, 'snapshot')
                 self._emit_links(_SCREEN_ID, inst, camera=False)
             case 'fill':
                 self._emit_blit(sn.SRC_FILL, 0, inst)
@@ -1228,6 +1243,7 @@ class _Builder:
                         _SCREEN_ID, self._notes_slot_for(scope),
                         visible_id=visible[0], visible_rest=visible[1],
                         z_id=z_id, z_rest=z_rest, has_z=has_z)
+                    self._tag_instance(inst, 'feed')
                     self._emit_links(_SCREEN_ID, inst)
                     return
                 drawable = self._field_drawable(scope)
@@ -1535,9 +1551,21 @@ class _Builder:
     def _tag_element(self, element, role: str, ancestors=()) -> int:
         """Record `(element, role, ancestors)` in emission order and return its
         record tag. Tags count from 1 so 0 stays "untagged" - every item the
-        doc does NOT tag (fields, notes, curtains) reads back as 0."""
+        doc does NOT tag (fed notes) reads back as 0."""
         self._element_order.append((element, role, tuple(ancestors)))
         return len(self._element_order)
+
+    def _tag_instance(self, inst, command: str) -> int:
+        """Record `(instance, command)` in emission order and return its record
+        tag.
+
+        Instances and elements share the record's ONE tag lane, so instance
+        tags start past `_INSTANCE_TAG_BASE` and a reader tells them apart by
+        magnitude. Snapshots and feeds are recorded here too even though
+        `item_tag` can only write an Item: without them the order list would
+        skip entries and every later tag would name the wrong instance."""
+        self._instance_order.append((inst, command))
+        return _INSTANCE_TAG_BASE + len(self._instance_order)
 
     def _emit_element_box(self, element) -> None:
         """Attach the element's draw-box origin and any absolute size.
@@ -2129,19 +2157,22 @@ def format_parity_report(report) -> str:
 
 
 # --------------------------------------------------------------------------
-# Element parity harness - doc BLIT records vs the legacy painter's own math
+# Quad parity harnesses - doc BLIT records vs what legacy actually draws
 # --------------------------------------------------------------------------
 #
-# The field harness above compares against `NotitgFieldInstances.at`, which
-# hands out sampled transforms. The legacy ELEMENT path has no such surface -
-# `StoryboardEffect` paints straight onto a QPainter - so this compares the
-# quantity that actually decides the pixels: THE FOUR CORNERS OF THE DRAWN
-# QUAD, in design space.
+# Both harnesses here compare the quantity that decides the pixels: THE FOUR
+# CORNERS OF THE DRAWN QUAD, in design space.
 #
 # Corners rather than the mat3, because the mat3 alone is not the placement:
 # origin, the absolute-size override and scale-to-fit all move the box the
-# mat3 acts on, and those are exactly the lanes most recently added. A mat3
-# comparison would pass with every one of them wrong.
+# mat3 acts on. `parity_report` above compares mat3 + alpha + order against
+# `NotitgFieldInstances.at`, and it passed a curtain that drew ONE DESIGN
+# PIXEL wide - a fill's mat3 is identical either way, and the whole
+# difference lives in the size lanes it never looks at.
+#
+# `element_parity_report` covers the storyboard elements (whose legacy path,
+# `StoryboardEffect`, paints straight onto a QPainter and exposes no sampled
+# transform at all) and `field_parity_report` the field instances.
 
 def _element_bracket(element, t) -> np.ndarray:
     """One element's own painter bracket as a 3x3: translate to its anchored
@@ -2288,7 +2319,8 @@ def element_parity_report(evaluator, element_order, natural_of, sample_times,
     times = []
     for t in sample_times:
         drawn = {tag: (kind, frec) for kind, _sid, tag, frec
-                 in _element_blits(evaluator, t) if tag}
+                 in _blit_records(evaluator, t)
+                 if 0 < tag < _INSTANCE_TAG_BASE}
         diffs = []
         worst = 0.0
         n_compared = 0
@@ -2357,16 +2389,222 @@ def element_parity_report(evaluator, element_order, natural_of, sample_times,
     }
 
 
-def _element_blits(evaluator, t):
+def _blit_records(evaluator, t):
     """`(source_kind, source_id, tag, frec)` for every BLIT at `t`, in draw
     order - the whole record row, not just the mat3, so a caller can read the
-    box lanes the element path depends on, and the tag that says which item
-    produced it."""
+    box lanes a drawn quad depends on, and the tag that says which item
+    produced it. Both quad harnesses read the stream through this."""
     u_bytes, f_bytes, _uf, n = evaluator.frame(float(t))
     u = np.frombuffer(u_bytes, dtype=np.uint32).reshape(n, evaluator.u_stride)
     f = np.frombuffer(f_bytes, dtype=np.float32).reshape(n, evaluator.f_stride)
     return [(int(u[i, _rec.U_A]), int(u[i, _rec.U_B]), int(u[i, _rec.U_TAG]), f[i])
             for i in range(n) if u[i, _rec.U_KIND] == _rec.OP_BLIT]
+
+
+# The design box every field-instance blit spans: a field capture and an AFT
+# slot are both whole-screen drawables, and legacy's curtain fill covers the
+# chart region outright.
+_DESIGN_QUAD = ((0.0, 0.0), (_SCREEN_W, 0.0), (_SCREEN_W, _SCREEN_H),
+                (0.0, _SCREEN_H))
+
+
+def _legacy_field_draws(instances, base_hidden, t) -> dict:
+    """`id(instance) -> (quad, alpha, kind)` for every field instance the
+    legacy effect DRAWS at `t`.
+
+    The gate is legacy's own: `transform.at(t)` is the very object
+    `NotitgFieldInstances.at` calls, not a transcription of it, and the
+    base-hidden rule and stage fold call the same helpers. What IS restated
+    here is the loop that walks the instances - which exists only to keep the
+    instance IDENTITY that `at()` discards, and which `field_parity_report`
+    cross-checks against `at()`'s own entry count so a drift shows up as a
+    self-check failure rather than a wrong reference.
+    """
+    from analysis.games.notitg.field_instances import _fold_stage_chain
+
+    stages: dict = {}
+    slots: set = set()
+    draws: dict = {}
+    for inst in instances:
+        kind = inst['kind']
+        if kind == 'stage':
+            sampled = inst['transform'].at(t)
+            if sampled is not None:
+                stages[inst['name']] = (*sampled, inst['transform'].crop_at(t),
+                                        inst['source'])
+            continue
+        if kind == 'player' and base_hidden:
+            continue
+        sampled = inst['transform'].at(t)
+        if sampled is None:
+            continue
+        h, alpha = sampled
+        if kind == 'capture':
+            slots.add(inst['name'])
+        elif kind == 'aft':
+            h, alpha, _crop, _extra = _fold_stage_chain(
+                stages, slots, inst, h, alpha, inst['transform'].crop_at(t),
+                None)
+        # A curtain covers the chart region outright - legacy's `batch.fill`
+        # takes the colour and the crop and ignores the transform entirely
+        # (qt_renderer._blit_field_instance), so its quad is the design box.
+        #
+        # TRANSPOSED: a field transform is a ROW-vector homography ([x y 1] @ H,
+        # the Qt QTransform layout `transform3d.qtransform_from_h` hands
+        # straight to Qt), while the record mat3 and `_apply_h` are
+        # column-vector. Comparing them untransposed reports every instance as
+        # degenerate rather than as a placement difference.
+        quad = _DESIGN_QUAD if kind == 'fill' \
+            else _apply_h(np.asarray(h, dtype=float).reshape(3, 3).T,
+                          _DESIGN_QUAD)
+        draws[id(inst)] = (quad, min(1.0, alpha), kind)
+    return draws
+
+
+def field_parity_report(evaluator, compiled, instance_order, sample_times,
+                        atol: float = 1e-3) -> dict:
+    """Compare the doc's FIELD-INSTANCE commands against the legacy effect at
+    each of `sample_times`, per instance.
+
+    The twin of `element_parity_report` for the other half of the doc. It
+    answers the question a corner error cannot: which instances does legacy
+    draw that the doc drops, and vice versa. `instance_order` is
+    `id_maps['instance_order']`.
+
+    A doc instance that emits a Snapshot or a Feed carries no comparable quad
+    (a snapshot draws nothing; a feed re-renders notes as many items), so those
+    are counted as `n_uncomparable` and only their PRESENCE is checked - which
+    is still the interesting half, since a dropped feed is a field that
+    vanished.
+
+    A chain that leaves the z=0 plane is counted as `n_projected` and not
+    compared, the same ruling `element_parity_report` makes: legacy's projected
+    path is not the oracle for 3D. On a chart like gat that is most of the
+    instances, so read `n_compared` before reading the corner error.
+
+    `self_check` is False for a time where this walk disagrees with
+    `NotitgFieldInstances.at` about how many entries legacy draws. That means
+    the reference is wrong, so the whole row is untrustworthy rather than a
+    finding about the doc.
+    """
+    from types import SimpleNamespace
+
+    from analysis.games.notitg.field_instances import NotitgFieldInstances
+
+    provider = compiled.get('field_instances')
+    base_gate = compiled.get('base_field_hidden')
+    effect = NotitgFieldInstances(provider, base_hidden=base_gate,
+                                  player_fields=compiled.get('player_fields'))
+    ctx = SimpleNamespace(chart_rect=(0.0, 0.0, _SCREEN_W, _SCREEN_H))
+
+    times = []
+    for t in sample_times:
+        t = float(t)
+        instances = provider() if callable(provider) else provider
+        base_hidden = (base_gate is not None
+                       and base_gate.sample(t)[0] >= 0.5)
+        want = _legacy_field_draws(instances or (), base_hidden, t)
+        ctx.t_now = t
+        frame = effect.at(ctx)
+        got = {tag: (kind, sid, frec) for kind, sid, tag, frec
+               in _blit_records(evaluator, t) if tag >= _INSTANCE_TAG_BASE}
+
+        missing, extra, diffs = [], [], []
+        worst = 0.0
+        n_compared = n_uncomparable = n_projected = 0
+        for index, (inst, command) in enumerate(instance_order):
+            record = got.get(_INSTANCE_TAG_BASE + index + 1)
+            expected = want.get(id(inst))
+            name = inst.get('name') or inst['kind']
+            if expected is None:
+                if record is not None:
+                    extra.append((index, name, inst['kind']))
+                continue
+            if command != 'item':
+                # Present-or-not is all a snapshot/feed can be checked on, and
+                # a snapshot emits no record at all, so only a feed is even
+                # observable here. Counted, never silently passed.
+                n_uncomparable += 1
+                continue
+            if record is None:
+                missing.append((index, name, inst['kind']))
+                continue
+            if not all(_link_is_planar(link)
+                       for link in inst['transform']._links):
+                # Counted, not compared - the same ruling `_chain_is_3d` makes
+                # for elements. Legacy folds a field chain through its own
+                # projected path, and that path is not the oracle for 3D; the
+                # engine is. Comparing anyway would report a real difference
+                # against a reference that has no authority.
+                n_projected += 1
+                continue
+            _kind, _sid, frec = record
+            # Every field-instance blit sizes from the design box: a field
+            # capture and an AFT slot are whole-screen drawables, and a
+            # curtain fill takes its target's box (`_draw_fill`) because it
+            # has no texture of its own.
+            err = max(max(abs(a - b) for a, b in zip(wc, gc))
+                      for wc, gc in zip(expected[0],
+                                        _record_quad(frec, (_SCREEN_W,
+                                                            _SCREEN_H))))
+            worst = max(worst, err)
+            n_compared += 1
+            if err > atol:
+                diffs.append((index, name, round(float(err), 3)))
+        n_frame = 0 if frame is None else len(frame.fields)
+        times.append({
+            't': t, 'n_legacy': len(want), 'n_doc': len(got),
+            'n_compared': n_compared, 'n_uncomparable': n_uncomparable,
+            'n_projected': n_projected,
+            'missing': missing, 'extra': extra, 'diffs': diffs,
+            'max_corner_err': worst,
+            # `at()` prepends a base-field entry when the base is visible; the
+            # walk above only sees real instances, so that one is expected.
+            'self_check': n_frame - (0 if base_hidden else 1) == len(want),
+            'ok': not (missing or extra or diffs),
+        })
+    return {
+        'times': times,
+        'all_ok': all(r['ok'] and r['self_check'] for r in times),
+        'max_corner_err': max((r['max_corner_err'] for r in times), default=0.0),
+        'n_missing': sum(len(r['missing']) for r in times),
+        'n_extra': sum(len(r['extra']) for r in times),
+        # Read this BEFORE `all_ok`. A chart whose field rig is entirely 3D
+        # (gat is) compares nothing, and an unqualified "OK" over zero
+        # comparisons is the most convincing wrong answer this report can give.
+        'n_compared': sum(r['n_compared'] for r in times),
+        'n_projected': sum(r['n_projected'] for r in times),
+        'n_fail': sum(0 if r['ok'] else 1 for r in times),
+    }
+
+
+def format_field_parity_report(report) -> str:
+    """A one-line-per-sample-time human summary of `field_parity_report`."""
+    verdict = ('OK' if report['all_ok'] else 'FAIL') if report['n_compared'] \
+        else 'VACUOUS (nothing planar to compare)'
+    lines = [
+        f"field parity: {verdict} "
+        f"({report['n_fail']}/{len(report['times'])} times failing) "
+        f"compared={report['n_compared']} 3d={report['n_projected']} "
+        f"missing={report['n_missing']} extra={report['n_extra']} "
+        f"max_corner_err={report['max_corner_err']:.3f}px"
+    ]
+    for r in report['times']:
+        detail = ''
+        if r['missing']:
+            detail += f"  MISSING={[m[1] for m in r['missing'][:5]]}"
+        if r['extra']:
+            detail += f"  EXTRA={[e[1] for e in r['extra'][:5]]}"
+        if r['diffs']:
+            detail += f"  diffs={[(d[1], d[2]) for d in r['diffs'][:4]]}"
+        if not r['self_check']:
+            detail += '  [self-check FAILED: reference untrustworthy]'
+        lines.append(f"  t={r['t']:8.3f}  legacy={r['n_legacy']:>3} "
+                     f"doc={r['n_doc']:>3} compared={r['n_compared']:>3} "
+                     f"3d={r['n_projected']:>3} "
+                     f"uncomparable={r['n_uncomparable']:>3} "
+                     f"corner_err={r['max_corner_err']:.3f}px{detail}")
+    return '\n'.join(lines)
 
 
 def format_element_parity_report(report) -> str:
