@@ -553,3 +553,34 @@ def test_horizon_falls_back_to_the_live_sims_end():
     assert dd._horizon({'_live_sim': live}) == 123.5
     assert dd._horizon({'_live_sim': live, 'duration': 60.0}) == 60.0
     assert dd._horizon({}) == 600.0
+
+
+def test_each_sheet_element_gets_its_own_frame_lane():
+    # `_channel` memoizes on `id(timeline)`, but `_element_frame_kwarg` passes a
+    # TEMPORARY `_FrameCurve` that dies as soon as the call returns - and
+    # CPython recycles the address immediately, so the next element hit the
+    # cache and inherited the previous one's frame lane. Every sheet sprite
+    # then animated on one shared timeline, and a chart freezing one sprite on
+    # a frame had the freeze overwritten.
+    class _Rec:
+        def __init__(self):
+            self.channels = []
+
+        def channel(self, ts, vals, durs, rest, eases=()):
+            self.channels.append(list(vals))
+            return len(self.channels) - 1
+
+    def sheet(states):
+        return SimpleNamespace(sheet_states=states, t_start=0.0,
+                               t_end=float('inf'), state_pin=None,
+                               sheet_cols=2, sheet_rows=1)
+
+    rec = _Rec()
+    builder = dd._Builder({}, 640.0, 480.0, builder=rec)
+    slow = builder._element_frame_kwarg(sheet(((0, 1.0), (1, 1.0))))
+    fast = builder._element_frame_kwarg(sheet(((7, 0.1), (9, 0.1))))
+
+    assert slow['frame_id'] != fast['frame_id'], 'sheets share one frame lane'
+    # And the lanes carry each sheet's OWN frames, not the first one's.
+    assert set(rec.channels[slow['frame_id']]) == {0.0, 1.0}
+    assert set(rec.channels[fast['frame_id']]) == {7.0, 9.0}

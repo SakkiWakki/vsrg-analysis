@@ -557,7 +557,14 @@ class _Builder:
         # Memoize channel ids by timeline object identity + prop, so a link's
         # shared rest timelines (a whole field of untouched props) collapse to
         # one channel each.
-        self._chan_cache: dict[tuple[int, int], tuple[int, float]] = {}
+        self._chan_cache: dict[tuple, tuple[int, float]] = {}
+        # `id()` only identifies an object while it is ALIVE. Some callers key
+        # on a TEMPORARY - `_element_frame_kwarg` builds a `_FrameCurve` inline
+        # per element - and CPython recycles the freed address immediately, so
+        # the next element would hit this cache and inherit the previous one's
+        # channel (every sheet sprite animating on one shared frame lane).
+        # Holding a reference for the build's lifetime makes the key honest.
+        self._chan_keyed: list = []
 
     # -- drawable minting -------------------------------------------------
 
@@ -620,6 +627,7 @@ class _Builder:
         chan_id = self._builder.channel(ts, vals, durs, float(rest), eases)
         result = (chan_id, float(rest))
         self._chan_cache[key] = result
+        self._chan_keyed.append(timeline)
         return result
 
     def _link_kwargs(self, link, flip_base_y: bool) -> dict:

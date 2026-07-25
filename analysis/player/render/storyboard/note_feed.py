@@ -72,6 +72,7 @@ still wants.
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 
 import numpy as np
 
@@ -425,10 +426,14 @@ def _translate_row(tx, ty):
                      [float(tx), float(ty), 1.0]], dtype=np.float64)
 
 
+@lru_cache(maxsize=1)
 def _note_camera():
     """The per-note perspective camera (notes._note_camera): the field's
     LoadMenuPerspective at its fov/eye distance, centred on the origin, so a
-    note's z push scales by the same d/(d-z) the field uses."""
+    note's z push scales by the same d/(d-z) the field uses.
+
+    Cached like its raster twin: this is called once per out-of-plane note per
+    frame, and the projection depends on nothing that varies."""
     from analysis.player.render import transform3d as t3d
     from analysis.games.notitg import field_projection
     return t3d.projection(field_projection.FOV, field_projection.DESIGN_W,
