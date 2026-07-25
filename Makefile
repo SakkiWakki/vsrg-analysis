@@ -20,10 +20,16 @@ Q ?= @
 
 PY         ?= python3
 VENV       ?= .venv
+# Run the tools as MODULES, not as the venv's console scripts: those scripts
+# hard-code the interpreter path in their shebang, so moving the checkout
+# (~/Desktop -> ~/dev) breaks every one of them with a bare "No such file or
+# directory" while `python -m ...` keeps working. Only maturin has no module
+# entry point and stays a script.
 VENV_PY    := $(VENV)/bin/python
-VENV_PIP   := $(VENV)/bin/pip
+VENV_PIP   := $(VENV_PY) -m pip
 VENV_MATURIN := $(VENV)/bin/maturin
-VENV_PYTEST  := $(VENV)/bin/pytest
+VENV_PYTEST  := $(VENV_PY) -m pytest
+VENV_DEPS    := $(VENV)/.deps-stamp
 
 NATIVE_DIR    := analysis/games/osu/native
 FRAME_NATIVE_DIR := analysis/games/notitg/native
@@ -68,11 +74,17 @@ $(VENV_PY):
 	$(Q)$(PY) -m venv $(VENV)
 	$(Q)$(VENV_PIP) install --upgrade pip wheel >/dev/null
 
-.PHONY: venv
-venv: $(VENV_PY)
+# Stamped so the install runs when requirements.txt changes, not on every
+# target that depends on the venv: pip re-resolving an already-satisfied
+# requirements file costs ~28s, which dwarfed `make test` itself.
+$(VENV_DEPS): requirements.txt | $(VENV_PY)
 	$(Q)echo "[venv] pip install -r requirements.txt"
 	$(Q)$(VENV_PIP) install -r requirements.txt
 	$(Q)$(VENV_PIP) install maturin pytest
+	$(Q)touch $@
+
+.PHONY: venv
+venv: $(VENV_DEPS)
 
 # ─── native PyO3 extension ─────────────────────────────────────────────
 
