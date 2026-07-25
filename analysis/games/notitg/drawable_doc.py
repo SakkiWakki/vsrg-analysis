@@ -1958,6 +1958,52 @@ def _element_bracket(element, t) -> np.ndarray:
     ])
 
 
+_OUT_OF_PLANE_ELEMENT_PROPS = (('rotation_x', 0.0), ('rotation_y', 0.0),
+                               ('z', 0.0), ('skew_x', 0.0), ('skew_y', 0.0),
+                               ('scale_z', 1.0))
+
+
+def _chain_is_3d(chain, t) -> bool:
+    """Whether legacy would paint this chain through its perspective camera.
+
+    Mirrors `render._paint_element`'s `active_3d`: a non-default fov anywhere
+    in the chain, or ANY link leaving the z=0 plane, switches the whole subtree
+    to the projected path.
+
+    Such a chain is NOT compared here, and the deeper reason is not that the
+    2D bracket would measure the wrong renderer - it is that LEGACY'S
+    PROJECTED PATH IS NOT THE ORACLE. The engine is. Grading the doc's 3D
+    against legacy's 3D would chase legacy's own perspective bugs, which is
+    exactly the bug-for-bug outcome this pipeline exists to avoid. 3D
+    placement is settled against NotITG itself - the app and the reference
+    captures - not against another of our renderers."""
+    for link in chain:
+        fov = link.timelines.get('fov')
+        if fov is not None and abs(fov.sample(t)[0] - _DEFAULT_FOV) > _FOV_EPS:
+            return True
+        for prop, rest in _OUT_OF_PLANE_ELEMENT_PROPS:
+            timeline = link.timelines.get(prop)
+            if timeline is not None and abs(timeline.sample(t)[0] - rest) > 1e-6:
+                return True
+    return False
+
+
+def _sample_or(element, prop: str, default: float, t: float) -> float:
+    timeline = element.timelines.get(prop)
+    return default if timeline is None else timeline.sample(t)[0]
+
+
+def _apply_h(homography, corners) -> list:
+    """`corners` through a 3x3 homography, perspective-divided."""
+    mat = np.asarray(homography, dtype=float).reshape(3, 3)
+    out = []
+    for cx, cy in corners:
+        p = mat @ np.array([cx, cy, 1.0])
+        out.append((p[0] / p[2], p[1] / p[2]) if abs(p[2]) > 1e-12
+                   else (p[0], p[1]))
+    return out
+
+
 def _legacy_element_quad(element, t, natural, ancestors=()):
     """The design-space corners the legacy painter draws `element` at.
 
@@ -1967,22 +2013,23 @@ def _legacy_element_quad(element, t, natural, ancestors=()):
     (`_paint_children`), so leaving the chain out puts the element at its own
     local placement instead of where the chart put it.
 
+    ONLY the 2D bracket. A chain that leaves the z=0 plane or sets an fov
+    routes through legacy's projected path, which this does not model -
+    `element_parity_report` counts those separately rather than comparing them
+    against the wrong renderer. See `_chain_is_3d`.
+
     The quad spans the UNZOOMED draw size `render._draw_size` picks, shifted by
     the origin - that shift is the leaf's alone; a group carries no size."""
     from analysis.player.render.storyboard.render import _draw_size
 
-    world = np.eye(3)
-    for link in (*ancestors, element):
-        world = world @ _element_bracket(link, t)
-
+    chain = (*ancestors, element)
     w, h = _draw_size(element, t, natural)
+    world = np.eye(3)
+    for link in chain:
+        world = world @ _element_bracket(link, t)
     ox, oy = element.origin
-    corners = []
-    for cx, cy in ((0.0, 0.0), (w, 0.0), (w, h), (0.0, h)):
-        p = world @ np.array([cx - ox * w, cy - oy * h, 1.0])
-        corners.append((p[0] / p[2], p[1] / p[2]) if abs(p[2]) > 1e-12
-                       else (p[0], p[1]))
-    return corners
+    return _apply_h(world, ((-ox * w, -oy * h), (w - ox * w, -oy * h),
+                            (w - ox * w, h - oy * h), (-ox * w, h - oy * h)))
 
 
 def _record_quad(frec, natural):
@@ -2031,6 +2078,7 @@ def element_parity_report(evaluator, element_order, natural_of, sample_times,
         worst = 0.0
         n_compared = 0
         n_unsized = 0
+        n_projected = 0
         for index, entry in enumerate(element_order):
             element, role, ancestors = entry
             record = drawn.get(index + 1)
@@ -2057,6 +2105,13 @@ def element_parity_report(evaluator, element_order, natural_of, sample_times,
                 # mean "every element agreed AND every file was readable".
                 n_unsized += 1
                 continue
+            if _chain_is_3d((*ancestors, element), t):
+                # Counted, not compared - legacy's projected path is not the
+                # oracle for this (see `_chain_is_3d`). Reported so the gap is
+                # visible: an unmeasured element is exactly the blind spot
+                # that hid 118 missing rects behind a 0.001px result.
+                n_projected += 1
+                continue
             want = _legacy_element_quad(element, t, want_natural, ancestors)
             got = _record_quad(frec, got_natural)
             err = max(max(abs(a - b) for a, b in zip(wc, gc))
@@ -2067,7 +2122,8 @@ def element_parity_report(evaluator, element_order, natural_of, sample_times,
                 diffs.append((index, 'corner', round(float(err), 3)))
         times.append({'t': float(t), 'ok': not diffs, 'diffs': diffs,
                       'n_blit': len(drawn), 'n_compared': n_compared,
-                      'n_unsized': n_unsized, 'max_corner_err': worst})
+                      'n_unsized': n_unsized, 'n_projected': n_projected,
+                      'max_corner_err': worst})
     return {
         'times': times,
         'all_ok': all(r['ok'] for r in times),
@@ -2098,6 +2154,7 @@ def format_element_parity_report(report) -> str:
     for r in report['times']:
         detail = '' if r['ok'] else f"  diffs={[d[:2] for d in r['diffs'][:4]]}"
         unsized = f" unsized={r['n_unsized']}" if r['n_unsized'] else ''
+        unsized += f" 3d={r['n_projected']}" if r['n_projected'] else ''
         lines.append(f"  t={r['t']:8.3f}  drawn={r['n_blit']:>4} "
                      f"compared={r['n_compared']:>4}{unsized} "
                      f"corner_err={r['max_corner_err']:.3f}px{detail}")
