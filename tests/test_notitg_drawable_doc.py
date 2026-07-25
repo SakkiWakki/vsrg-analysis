@@ -160,12 +160,12 @@ _SAMPLE_TIMES = (0.0, 0.5, 1.0, 2.0, 4.0, 6.0)
 
 @pytest.fixture
 def doc_elements(monkeypatch):
-    """Enable the doc's storyboard-element items.
+    """Pin the doc's storyboard-element items ON.
 
-    They are OFF by default (`drawable_doc.elements_in_doc`) because the legacy
-    StoryboardEffect paints the same tree unconditionally, so emitting them too
-    double-draws every element. These tests ARE the element path's contract, so
-    they opt in."""
+    They are the default now (`drawable_doc.elements_in_doc`), but these tests
+    ARE the element path's contract, so they state the requirement rather than
+    inheriting it - the flag exists to turn them OFF for differential testing,
+    and a suite that silently followed it would stop testing this path."""
     monkeypatch.setenv('VSRG_DRAWABLE_ELEMENTS', '1')
 
 

@@ -749,23 +749,27 @@ def notes_inline() -> bool:
 
 
 def elements_in_doc() -> bool:
-    """Whether the doc emits the chart's storyboard ELEMENTS as its own image
-    items. OFF by default, because today it double-draws them.
+    """Whether the doc emits the chart's storyboard ELEMENTS as its own items.
+    ON by default; `VSRG_DRAWABLE_ELEMENTS=0` hands them back to the legacy
+    `StoryboardEffect` for differential testing.
 
-    The legacy `StoryboardEffect` paints the same `compiled['tree']`
-    unconditionally (it has no idea the pipeline exists), so with this on every
-    image element composites TWICE - and the doc's copy is the WORSE of the
-    two: it carries no anchor (the compiler stamps `origin=(0.5, 0.5)`, which
-    `_ELEMENT_ITEM_LANES` never forwards), no natural size, no tint, no
-    zoomto/fit basis and no glow, so it lands displaced, white and mis-sized
-    while legacy's lands correctly. Suppressing the wrong copy is a pure
-    subtraction that returns element rendering to legacy exactly as it bands
-    them; suppressing legacy's instead would keep the wrong one.
+    This was off while the doc's copy was the worse of the two - no anchor, no
+    natural size, no tint, no zoomto/fit basis, no glow - and `adapter
+    .storyboard` suppresses legacy's copy when this is on, so flipping it
+    early would have kept the wrong one. The bar for flipping was a MEASURED
+    equivalence, not an eyeball: `element_parity_report` compares the drawn
+    quad's corners, the composited opacity, and whether each side draws at
+    all, and `doc_sweep` runs it over the library.
 
-    `VSRG_DRAWABLE_ELEMENTS=1` re-enables them for parity work - the element
-    lanes have to reach parity against a harness BEFORE this becomes the
-    default and the legacy effect can be retired."""
-    return os.environ.get('VSRG_DRAWABLE_ELEMENTS', '0').lower() in ('1', 'true', 'yes')
+    At the flip: 65 charts, `missing=0` and `extra=0` on every one, worst
+    corner error 0.097px (Corrupted's densely-repoked x lane; every other
+    chart is exact). Chains where legacy is knowingly NOT the reference - 3D,
+    and rotate-then-scale against the engine's scale-after-the-spin - are
+    counted and excluded rather than compared.
+
+    It is also what retires the legacy storyboard painter, which was 5.1s of
+    a 12.6s gat 2 profile."""
+    return os.environ.get('VSRG_DRAWABLE_ELEMENTS', '1').lower() in ('1', 'true', 'yes')
 
 
 # The link props that take a chain off the z=0 plane, with their rest values.
