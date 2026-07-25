@@ -53,6 +53,7 @@ Retain=2.
 from __future__ import annotations
 
 import logging
+import os
 import struct
 
 import numpy as np
@@ -230,6 +231,24 @@ def _crop_unit_quad(frec):
 # The draw box lives with the record layout, so the raster backend resolves
 # it identically instead of carrying its own copy (or, as it did, none).
 _draw_box = _rec.draw_box
+
+_SHADERS_ON: bool | None = None
+
+
+def _shaders_enabled() -> bool:
+    """Whether per-item fragment shaders run. `VSRG_DRAWABLE_SHADERS=0` draws
+    every blit unshaded.
+
+    A bisect switch, for the question a black section always raises first: is
+    the geometry wrong, or is a shader painting over it? The raster reference
+    backend answers it by accident (it has never run shaders), but only for a
+    frame you can render offline. Resolved once - it is a session decision,
+    and `_resolve_shader` asks per blit."""
+    global _SHADERS_ON
+    if _SHADERS_ON is None:
+        _SHADERS_ON = os.environ.get(
+            'VSRG_DRAWABLE_SHADERS', '1').lower() not in ('0', 'false', 'no')
+    return _SHADERS_ON
 
 
 def _expanded_extent(sub, lw, lh):
@@ -1187,7 +1206,7 @@ class GLExecutor:
         the plain textured program). ``sampler0`` = the source texture at
         GL_TEXTURE0, bound by the caller's texture draw."""
         shader_plus_one = int(urec[_U_SHADER])
-        if shader_plus_one == 0:
+        if shader_plus_one == 0 or not _shaders_enabled():
             return None
         shader_id = shader_plus_one - 1
         entry = self._shader_program(gf, shader_id)
