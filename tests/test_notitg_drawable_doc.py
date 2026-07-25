@@ -1006,8 +1006,8 @@ def test_element_parity_harness_agrees_with_the_legacy_painter(doc_elements,
     evaluator, _id_maps, _report = dd.build_static_doc(
         _compiled([], tree=[el]))
 
-    rep = dd.element_parity_report(evaluator, [el], [(64.0, 32.0)],
-                                   (0.0, 1.0, 2.5))
+    rep = dd.element_parity_report(evaluator, _id_maps['element_order'],
+                                   lambda _el: (64.0, 32.0), (0.0, 1.0, 2.5))
     assert rep['all_ok'], dd.format_element_parity_report(rep)
     assert rep['max_corner_err'] < 1e-3
 
@@ -1023,10 +1023,10 @@ def test_element_parity_harness_catches_a_dropped_origin(doc_elements,
         _compiled([], tree=[el]))
     natural = (64.0, 32.0)
 
-    blits = [f for kind, _sid, f in dd._element_blits(evaluator, 0.0)
+    blits = [f for kind, _sid, _tag, f in dd._element_blits(evaluator, 0.0)
              if kind == sn.SRC_IMAGE]
     assert len(blits) == 1
-    want = dd._legacy_element_quad(el, 0.0, natural)
+    want = dd._legacy_element_quad(el, 0.0, natural, ())
     got = dd._record_quad(blits[0], natural)
     assert max(max(abs(a - b) for a, b in zip(wc, gc))
                for wc, gc in zip(want, got)) < 1e-3
@@ -1039,3 +1039,80 @@ def test_element_parity_harness_catches_a_dropped_origin(doc_elements,
     err = max(max(abs(a - b) for a, b in zip(wc, gc))
               for wc, gc in zip(want, moved))
     assert err == pytest.approx(32.0), f'expected half the 64px width, got {err}'
+
+
+_GAT1 = ('/mnt/Yucky/Rhythm Games/Players/NotITG/Songs/'
+         'UKSRT8/5. gat/gat.sm')
+
+
+def _natural_lookup():
+    """`element -> (w, h)` logical frame size, read from the asset header the
+    way the executor reads it from the uploaded texture.
+
+    Returns None for an element with no readable asset, which the harness
+    skips - a missing file is a fixture problem, not a placement diff."""
+    from PySide6.QtGui import QImageReader
+    from analysis.player.render.storyboard.asset_size import (
+        AssetSizeSpec, resolve)
+
+    cache = {}
+
+    def natural(element):
+        path = element.asset or (element.frames[0] if element.frames else None)
+        if not path:
+            return None
+        if path not in cache:
+            size = QImageReader(str(path)).size()
+            if not size.isValid():
+                cache[path] = None
+            else:
+                spec = element.size_spec or AssetSizeSpec(
+                    cols=element.sheet_cols, rows=element.sheet_rows)
+                logical = resolve(size.width(), size.height(), spec)
+                cache[path] = logical.natural
+        return cache[path]
+
+    return natural
+
+
+@pytest.mark.parametrize('chart_path,label', [
+    pytest.param(_GAT1, 'gat1', marks=pytest.mark.skipif(
+        not os.path.exists(_GAT1), reason='gat 1 chart not on disk')),
+    pytest.param(_GAT2, 'gat2', marks=pytest.mark.skipif(
+        not os.path.exists(_GAT2), reason='gat 2 chart not on disk')),
+])
+def test_real_chart_element_parity(chart_path, label, doc_elements):
+    """Measure the doc's storyboard-element placement against the legacy
+    painter on a REAL chart, in design pixels.
+
+    This is the gate for turning `VSRG_DRAWABLE_ELEMENTS` on: the doc copy
+    replaces a legacy copy that renders correctly today, so it has to be
+    shown equivalent rather than eyeballed. The assertion is deliberately
+    loose - it reports the number and fails only on a gross divergence, so
+    the measurement lands in CI output either way."""
+    from analysis.games.notitg.sim.producers import (
+        compile_via_sim, wait_for_upgrade)
+
+    compiled = compile_via_sim(chart_path)
+    assert compiled is not None
+    assert wait_for_upgrade(compiled)
+
+    evaluator, id_maps, report = dd.build_static_doc(compiled)
+    order = id_maps['element_order']
+    roles = {}
+    for _el, role, _ancestors in order:
+        roles[role] = roles.get(role, 0) + 1
+    print(f'[{label}] element blits: {roles} '
+          f'images={report["images"]} skips={report["element_skips"]}')
+
+    rep = dd.element_parity_report(
+        evaluator, order, _natural_lookup(),
+        [30.0, 60.0, 120.0, 180.0, 240.0, 300.0, 400.0])
+    print(f'[{label}] ' +
+          dd.format_element_parity_report(rep).replace('\n', f'\n[{label}] '))
+    assert rep['all_ok'], (
+        'element placement diverges from the legacy painter:\n'
+        + dd.format_element_parity_report(rep))
+    assert rep['max_corner_err'] < 1e-2, (
+        'element placement diverges from the legacy painter:\n'
+        + dd.format_element_parity_report(rep))

@@ -300,6 +300,16 @@ impl DocBuilder {
         self.last_item(target).clip = Some(clip_id);
     }
 
+    /// Tag the item most recently pushed onto `target` with an opaque id
+    /// written to a record lane. Diagnostics only - it never affects drawing.
+    ///
+    /// A differential tool needs to pair a per-frame record back to the item
+    /// that produced it, and build order cannot do that: visibility gates and
+    /// time windows cull items, so the Nth record is not the Nth item.
+    fn item_tag(&mut self, target: u32, tag: u32) {
+        self.last_item(target).tag = tag;
+    }
+
     /// Draw-box origin and absolute size on the item most recently pushed
     /// onto `target`.
     ///

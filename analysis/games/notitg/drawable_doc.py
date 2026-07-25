@@ -127,22 +127,25 @@ _CORNER_COLOR_PROPS = ('color_ul', 'color_ur', 'color_ll', 'color_lr')
 _FADE_PROPS = ('fade_left', 'fade_right', 'fade_top', 'fade_bottom')
 _CORNER_UNSET = -1.0
 _FADE_OFF = 0.0
+_GLOW_OFF = 0.0
+
+
+def _moves_off(timeline, unset: float, prop: int = 0) -> bool:
+    """Whether `timeline` ever leaves `unset` on component `prop`.
+
+    A timeline with no keyframes never leaves its rest, so it is untouched
+    when that rest IS the sentinel. `_is_static` is the WRONG probe for this:
+    it answers False for a plain keyframe-less EventTimeline - the safe
+    direction for export, but here it reports everything as poked, which
+    silently built a glow item for every element in the chart."""
+    return timeline is not None and (
+        bool(timeline) or _rest_value(timeline, prop) != unset)
 
 
 def _is_poked(element, props, unset: float) -> bool:
-    """Whether `element` ever moves any of `props` off `unset`.
-
-    A timeline with no keyframes never leaves its rest, so it is untouched
-    when that rest IS the unset sentinel. `_is_static` is the wrong probe
-    here: it answers False for a plain keyframe-less EventTimeline, which is
-    the safe direction for export but would report every element as poked."""
-    for prop in props:
-        timeline = element.timelines.get(prop)
-        if timeline is None:
-            continue
-        if bool(timeline) or _rest_value(timeline, 0) != unset:
-            return True
-    return False
+    """Whether `element` ever moves any of `props` off `unset`."""
+    return any(_moves_off(element.timelines.get(prop), unset)
+               for prop in props)
 
 
 # --------------------------------------------------------------------------
@@ -698,6 +701,11 @@ class _Builder:
         self._chan_keyed: list = []
         # The shared 'player'-kind visibility gate (see _base_hidden_gate).
         self._base_gate = None
+        # The image blits this build emits, in draw order, as
+        # `(element, role)` - the element parity harness pairs the record
+        # stream against this rather than re-deriving which elements glow
+        # (a glowing element emits a SECOND image blit for its glow pass).
+        self._element_order: list[tuple] = []
         # Per-item fragment programs: one id per distinct (frag, vert, names),
         # with the descs exported positionally for GLExecutor.set_shaders.
         self._shader_ids: dict[tuple, int] = {}
@@ -990,7 +998,8 @@ class _Builder:
                                       for i in sorted(self._drawable_sizes)],
                    'notes_slot': self._notes_slots.get('field'),
                    'note_feeds': dict(self._notes_slots),
-                   'shaders': list(self._shader_descs)}
+                   'shaders': list(self._shader_descs),
+                   'element_order': list(self._element_order)}
         return evaluator, id_maps
 
     def _banded_elements(self):
@@ -1227,6 +1236,8 @@ class _Builder:
         kwargs.update(self._element_visible_kwarg(element))
         self._builder.item(_SCREEN_ID, self._sn.SRC_IMAGE, image_id,
                            additive=bool(element.additive), **kwargs)
+        self._builder.item_tag(
+            _SCREEN_ID, self._tag_element(element, 'content', ancestors))
         self._emit_element_box(element)
         self._emit_element_tint(element)
         if ancestors:
@@ -1246,7 +1257,7 @@ class _Builder:
         `glow` rests at alpha 0, so a statically un-glowed element emits
         nothing rather than doubling every element's op count."""
         glow = element.timelines.get('glow')
-        if glow is None or (_is_static(glow) and _rest_value(glow, 3) <= 0.0):
+        if not _moves_off(glow, _GLOW_OFF, prop=3):
             return
         alpha_id, alpha_rest = self._channel(glow, 3)
         glow_kwargs = dict(kwargs)
@@ -1254,6 +1265,8 @@ class _Builder:
         glow_kwargs['opacity_rest'] = alpha_rest
         self._builder.item(_SCREEN_ID, self._sn.SRC_IMAGE, image_id,
                            additive=True, **glow_kwargs)
+        self._builder.item_tag(
+            _SCREEN_ID, self._tag_element(element, 'glow', ancestors))
         self._emit_element_box(element)
         chans = [self._channel(glow, prop) for prop in range(3)]
         (r_id, r_rest), (g_id, g_rest), (b_id, b_rest) = chans
@@ -1262,6 +1275,13 @@ class _Builder:
                                 b_id=b_id, b_rest=b_rest)
         if ancestors:
             self._emit_element_links(element, ancestors)
+
+    def _tag_element(self, element, role: str, ancestors=()) -> int:
+        """Record `(element, role, ancestors)` in emission order and return its
+        record tag. Tags count from 1 so 0 stays "untagged" - every item the
+        doc does NOT tag (fields, notes, curtains) reads back as 0."""
+        self._element_order.append((element, role, tuple(ancestors)))
+        return len(self._element_order)
 
     def _emit_element_box(self, element) -> None:
         """Attach the element's draw-box origin and any absolute size.
@@ -1407,6 +1427,15 @@ class _Builder:
             kwargs[f'{param}_id'] = chan_id
             kwargs[f'{param}_rest'] = rest
         kwargs['rotation_order'] = _rotation_order_of(element)
+        # No content centering on an element chain. `compose_links` centres the
+        # LEAF by -natural/2, and `item_link` defaults that to the 640x480
+        # design screen - which shifted every grouped element by (320, 240),
+        # the largest error the parity harness found on the real charts. An
+        # element's own centering is its `origin`, applied by the executor
+        # against the size it actually draws, so the chain must not also do it
+        # (and could not do it correctly: the natural size is not known here).
+        kwargs['natural_w_rest'] = 0.0
+        kwargs['natural_h_rest'] = 0.0
         return kwargs
 
     def _element_transform_kwargs(self, element) -> dict:
@@ -1850,33 +1879,49 @@ def format_parity_report(report) -> str:
 # mat3 acts on, and those are exactly the lanes most recently added. A mat3
 # comparison would pass with every one of them wrong.
 
-def _legacy_element_quad(element, t, natural):
+def _element_bracket(element, t) -> np.ndarray:
+    """One element's own painter bracket as a 3x3: translate to its anchored
+    position, rotate, scale. Shared by a leaf and by every group above it -
+    `render._paint_children` applies the SAME bracket to a group, which is why
+    a group needs no size (it has "a zero-size anchor box")."""
+    ax, ay = element.anchor
+    tx = ax * _SCREEN_W + element.sample('x', t)[0]
+    ty = ay * _SCREEN_H + element.sample('y', t)[0]
+    theta = math.radians(element.sample('rotation', t)[0])
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
+    sx = element.sample('scale_x', t)[0]
+    sy = element.sample('scale_y', t)[0]
+    return np.array([
+        [cos_t * sx, -sin_t * sy, tx],
+        [sin_t * sx, cos_t * sy, ty],
+        [0.0, 0.0, 1.0],
+    ])
+
+
+def _legacy_element_quad(element, t, natural, ancestors=()):
     """The design-space corners the legacy painter draws `element` at.
 
     Transcribes `render.StoryboardRenderer._draw_element`'s bracket at k=1 with
-    no layer offset (design space): translate to the anchored position, rotate,
-    scale, then shift by the origin - the quad itself spanning the UNZOOMED
-    draw size `render._draw_size` picks."""
+    no layer offset (design space), composed under every ANCESTOR group's
+    bracket - a leaf under a group draws in the group's transformed space
+    (`_paint_children`), so leaving the chain out puts the element at its own
+    local placement instead of where the chart put it.
+
+    The quad spans the UNZOOMED draw size `render._draw_size` picks, shifted by
+    the origin - that shift is the leaf's alone; a group carries no size."""
     from analysis.player.render.storyboard.render import _draw_size
 
-    ax, ay = element.anchor
-    x = element.sample('x', t)[0]
-    y = element.sample('y', t)[0]
-    rotation = element.sample('rotation', t)[0]
-    sx = element.sample('scale_x', t)[0]
-    sy = element.sample('scale_y', t)[0]
-    w, h = _draw_size(element, t, natural)
+    world = np.eye(3)
+    for link in (*ancestors, element):
+        world = world @ _element_bracket(link, t)
 
-    theta = math.radians(rotation)
-    cos_t, sin_t = math.cos(theta), math.sin(theta)
+    w, h = _draw_size(element, t, natural)
     ox, oy = element.origin
-    tx = ax * _SCREEN_W + x
-    ty = ay * _SCREEN_H + y
     corners = []
     for cx, cy in ((0.0, 0.0), (w, 0.0), (w, h), (0.0, h)):
-        lx, ly = (cx - ox * w) * sx, (cy - oy * h) * sy
-        corners.append((tx + lx * cos_t - ly * sin_t,
-                        ty + lx * sin_t + ly * cos_t))
+        p = world @ np.array([cx - ox * w, cy - oy * h, 1.0])
+        corners.append((p[0] / p[2], p[1] / p[2]) if abs(p[2]) > 1e-12
+                       else (p[0], p[1]))
     return corners
 
 
@@ -1898,41 +1943,61 @@ def _record_quad(frec, natural):
     return corners
 
 
-def element_parity_report(evaluator, elements, natural_sizes, sample_times,
+def element_parity_report(evaluator, element_order, natural_of, sample_times,
                           atol: float = 1e-3) -> dict:
     """Compare the doc's element blits against the legacy painter at each of
     `sample_times`, in draw order.
 
-    `elements` is the leaf list in the order the doc emits them, and
-    `natural_sizes` the matching `(w, h)` natural box per element - the
-    executor reads that from the uploaded texture, so a caller must supply
-    what the texture would have been.
+    `element_order` is `id_maps['element_order']` - the `(element, role)`
+    sequence the build emitted, which the caller must NOT reconstruct: a
+    glowing element emits a second blit for its glow pass, so a leaf list
+    would misalign the whole stream from the first glow onward.
+
+    `natural_of` maps an element to its `(w, h)` natural box. The executor
+    reads that from the uploaded texture, so a caller supplies what the
+    texture would have been.
 
     Returns `{'times': [...], 'all_ok', 'max_corner_err', 'n_fail'}` with
-    `max_corner_err` in DESIGN PIXELS, which is the number worth quoting: it
-    says how far off the drawn quad lands, not how far off some matrix entry
-    is."""
+    `max_corner_err` in DESIGN PIXELS - the number worth quoting, because it
+    says how far the drawn quad lands from legacy's, not how far off some
+    matrix entry is. Only the CONTENT blits are compared: the glow pass draws
+    the same quad, so its placement is the content's.
+    """
     times = []
     for t in sample_times:
-        blits = [frec for kind, _sid, frec in _element_blits(evaluator, t)
-                 if kind == _rec.SRC_IMAGE]
+        drawn = {tag: frec for _kind, _sid, tag, frec
+                 in _element_blits(evaluator, t) if tag}
         diffs = []
         worst = 0.0
-        for index, element in enumerate(elements):
-            if index >= len(blits):
-                diffs.append((index, 'missing', None))
+        n_compared = 0
+        n_unsized = 0
+        for index, entry in enumerate(element_order):
+            element, role, ancestors = entry
+            frec = drawn.get(index + 1)
+            # Absent means the evaluator CULLED it - outside its time window,
+            # hidden, or fully transparent. That is a legitimate per-frame
+            # outcome, not a mismatch, so only drawn items are compared.
+            if frec is None or role != 'content':
                 continue
-            want = _legacy_element_quad(element, t, natural_sizes[index])
-            got = _record_quad(blits[index], natural_sizes[index])
+            natural = natural_of(element)
+            if natural is None:
+                # The caller could not size this asset. That is a gap in the
+                # MEASUREMENT, not a placement difference, so it is reported
+                # separately - folding it into the diffs would make `all_ok`
+                # mean "every element agreed AND every file was readable".
+                n_unsized += 1
+                continue
+            want = _legacy_element_quad(element, t, natural, ancestors)
+            got = _record_quad(frec, natural)
             err = max(max(abs(a - b) for a, b in zip(wc, gc))
                       for wc, gc in zip(want, got))
             worst = max(worst, err)
+            n_compared += 1
             if err > atol:
-                diffs.append((index, 'corner', (want, got)))
-        if len(blits) > len(elements):
-            diffs.append((len(elements), 'extra', len(blits) - len(elements)))
+                diffs.append((index, 'corner', round(float(err), 3)))
         times.append({'t': float(t), 'ok': not diffs, 'diffs': diffs,
-                      'n_blit': len(blits), 'max_corner_err': worst})
+                      'n_blit': len(drawn), 'n_compared': n_compared,
+                      'n_unsized': n_unsized, 'max_corner_err': worst})
     return {
         'times': times,
         'all_ok': all(r['ok'] for r in times),
@@ -1942,13 +2007,14 @@ def element_parity_report(evaluator, elements, natural_sizes, sample_times,
 
 
 def _element_blits(evaluator, t):
-    """`(source_kind, source_id, frec)` for every BLIT at `t`, in draw order -
-    the whole record row, not just the mat3, so a caller can read the box
-    lanes the element path depends on."""
+    """`(source_kind, source_id, tag, frec)` for every BLIT at `t`, in draw
+    order - the whole record row, not just the mat3, so a caller can read the
+    box lanes the element path depends on, and the tag that says which item
+    produced it."""
     u_bytes, f_bytes, _uf, n = evaluator.frame(float(t))
     u = np.frombuffer(u_bytes, dtype=np.uint32).reshape(n, evaluator.u_stride)
     f = np.frombuffer(f_bytes, dtype=np.float32).reshape(n, evaluator.f_stride)
-    return [(int(u[i, _rec.U_A]), int(u[i, _rec.U_B]), f[i])
+    return [(int(u[i, _rec.U_A]), int(u[i, _rec.U_B]), int(u[i, _rec.U_TAG]), f[i])
             for i in range(n) if u[i, _rec.U_KIND] == _rec.OP_BLIT]
 
 
@@ -1961,6 +2027,8 @@ def format_element_parity_report(report) -> str:
     ]
     for r in report['times']:
         detail = '' if r['ok'] else f"  diffs={[d[:2] for d in r['diffs'][:4]]}"
-        lines.append(f"  t={r['t']:8.3f}  blits={r['n_blit']:>3} "
+        unsized = f" unsized={r['n_unsized']}" if r['n_unsized'] else ''
+        lines.append(f"  t={r['t']:8.3f}  drawn={r['n_blit']:>4} "
+                     f"compared={r['n_compared']:>4}{unsized} "
                      f"corner_err={r['max_corner_err']:.3f}px{detail}")
     return '\n'.join(lines)

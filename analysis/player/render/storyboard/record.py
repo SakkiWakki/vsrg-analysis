@@ -20,7 +20,7 @@ either.
 from __future__ import annotations
 
 # Record strides. Checked against `evaluator.u_stride` / `f_stride`.
-U_STRIDE = 10
+U_STRIDE = 11
 F_STRIDE = 28
 
 # u32 lanes.
@@ -34,6 +34,7 @@ U_CLIP = 6     # clip id + 1; 0 = unclipped
 U_SCREEN_SPACE = 7
 U_UF_OFFSET = 8
 U_UF_COUNT = 9
+U_TAG = 10     # caller-assigned item id; 0 = untagged, diagnostics only
 
 # f32 lanes.
 F_MAT = 0       # ..9  (mat3, row-major, column-vector convention)

@@ -56,11 +56,12 @@ pub const SRC_LINES: u32 = 4;
 /// u32 lanes per op record. Lanes:
 ///   [0] op kind, [1] a, [2] b, [3] c (BLIT src_aux / frame),
 ///   [4] blend, [5] shader+1 (0 = none), [6] clip+1 (0 = none),
-///   [7] screen_space, [8] uniform_offset, [9] uniform_count.
+///   [7] screen_space, [8] uniform_offset, [9] uniform_count,
+///   [10] item tag (0 = untagged; diagnostics only, never drawn).
 /// The uniform offset/count index the schedule's third flat buffer
 /// (`uf`), holding this BLIT's sampled shader-uniform VALUES as f32.
 /// count == 0 => the op binds no uniforms (offset is then unused).
-pub const U_STRIDE: usize = 10;
+pub const U_STRIDE: usize = 11;
 /// f32 lanes per op record: mat3 (row-major) + opacity + tint rgb +
 /// crop ltrb + origin xy + size xy + fit (mode, w, h) + fade lrtb.
 pub const F_STRIDE: usize = 28;
@@ -866,6 +867,7 @@ fn emit_item_folded(
     u[7] = matches!(item.space, crate::doc::Space::Screen) as u32;
     u[8] = uniform_offset;
     u[9] = uniform_count;
+    u[10] = item.tag;
     schedule.push(u, f);
 }
 

@@ -223,6 +223,12 @@ pub struct Item {
     /// the quad before the transform (SM's `translate(-origin*w, -origin*h)`).
     /// Rests at the top-left (0, 0); a centred actor is (0.5, 0.5). Static,
     /// not a channel - SM's halign/valign are set, not tweened.
+    /// Opaque caller-assigned id, written to a record lane and otherwise
+    /// unused by drawing. 0 means untagged. It exists so a differential tool
+    /// can pair a per-frame record back to the item that produced it: the
+    /// build-order index cannot, because visibility and time windows cull
+    /// items, and predicting which would mean duplicating the evaluator.
+    pub tag: u32,
     pub origin: [f32; 2],
     /// Absolute draw size overriding the source's NATURAL box, per axis,
     /// sampled each frame. Negative means "use the natural size" - the same
@@ -274,6 +280,7 @@ impl Item {
             fed_mat: None,
             projection: None,
             space: Space::Scene,
+            tag: 0,
             origin: [0.0, 0.0],
             size: [ChannelRef::constant(-1.0); 2],
             fit: [ChannelRef::constant(0.0); 3],
