@@ -10,6 +10,7 @@ and the output is pixel-equivalent per ``tests/test_sidebar_output.py``.
 """
 from __future__ import annotations
 
+import sys
 import time
 
 from PySide6.QtCore import Qt, QTimer
@@ -36,6 +37,7 @@ class PlayerCanvas(QOpenGLWidget):
         self.renderer = QtPlayerRenderer(player.plugins)
         self.renderer.shader_pipeline = ShaderGLPipeline()
         self._last_swap = 0.0
+        self._paint_warned = False
         if swap_paced:
             # Presentation-driven render loop: schedule the next paint
             # each time a frame is handed to the compositor, so paints
@@ -86,11 +88,36 @@ class PlayerCanvas(QOpenGLWidget):
         paint_profiler.begin_frame()
         painter = QPainter(self)
         try:
+            if not painter.isActive():
+                # A QOpenGLWidget paints through a QOpenGLPaintDevice, which
+                # needs the widget's context CURRENT to begin. It is not,
+                # here: the context went away under us (a compositor or GPU
+                # reset, an expose before the swap chain is back). Running a
+                # whole frame against a dead painter draws nothing and warns
+                # per call - hundreds of Qt messages a frame, and the render
+                # pass leaves its capture slots believing they opened. Skip
+                # the frame and ask for another; the chain re-primes the way
+                # it does after a seek.
+                self._paint_unavailable()
+                return
             painter.setRenderHint(QPainter.Antialiasing, False)
             self.renderer.draw(self.player, painter, self.player.t)
         finally:
             painter.end()
             paint_profiler.end_frame()
+
+    def _paint_unavailable(self) -> None:
+        """Report the first lost-context frame and re-arm the paint chain.
+
+        Once, because the condition repeats every frame until the context
+        comes back and the point of skipping is to stop the flood. Re-armed
+        through the timer rather than `update()` so a context that never
+        returns cannot spin the GUI thread."""
+        if not self._paint_warned:
+            self._paint_warned = True
+            print('PlayerCanvas: GL context not current at paint; '
+                  'skipping frames until it returns', file=sys.stderr)
+        QTimer.singleShot(_SPIN_DEFER_MS, self.update)
 
     def mousePressEvent(self, ev):
         self.setFocus(Qt.MouseFocusReason)
