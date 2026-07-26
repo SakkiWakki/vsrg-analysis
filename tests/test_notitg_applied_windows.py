@@ -73,3 +73,17 @@ def test_large_magnitude_windows_survive_the_string_round_trip():
         assert reparsed[0] == pytest.approx(-99999.99)
         assert reparsed[1] == pytest.approx(1000000.0)
         assert reparsed[2] == 'cover'
+
+
+def test_clearall_reverts_the_scale_family_to_full_size():
+    # `clearall` runs PlayerOptions::Init, and the scale family's default
+    # there is 100%, not 0. Reverting zoomx to 0 collapses the field to a
+    # point and HOLDS it: gat 2 stopped driving zoomx at 1:26 and its
+    # notes stayed gone for the next 31 seconds.
+    rows = (_rows('clearall, *10000 40 zoomx, *10000 50 drunk', ticks=60)
+            + _rows('clearall', ticks=60, start=1.0))
+    zoomx = [e for e in chase_events(rows) if e.mod == 'zoomx']
+    drunk = [e for e in chase_events(rows) if e.mod == 'drunk']
+    assert zoomx[0].value == pytest.approx(0.4)
+    assert zoomx[-1].value == pytest.approx(1.0), 'zoomx clears to 100%'
+    assert drunk[-1].value == 0.0, 'everything else still clears to 0'

@@ -20,7 +20,7 @@ from functools import lru_cache
 from operator import itemgetter
 
 from analysis.games.notitg.mod_channels import (
-    parse_modstring, parse_speed_mods)
+    MOD_INIT_DEFAULTS, parse_modstring, parse_speed_mods)
 
 # Calls further apart than this many seconds belong to different
 # windows. The template reapplies every Update (~0.02s); 2.5 ticks of
@@ -79,10 +79,14 @@ def _row_plan(modstring: str) -> tuple:
             frozenset(name for _value, _speed, name in mods))
 
 
-# The template's per-frame `clearall` retargets every mod to 0 at this
-# approach speed before the live windows reapply (same constant the
-# harvest decode used); within one frame the reapply wins per-channel.
+# The template's per-frame `clearall` retargets every mod to its ENGINE
+# DEFAULT at this approach speed before the live windows reapply (same
+# constant the harvest decode used); within one frame the reapply wins
+# per-channel. The default is 0 for all but the scale family, where it is
+# 100% - clearing `zoomx` to 0 collapses the field to a point and holds it
+# there for as long as the chart leaves the mod alone.
 _CLEARALL_SPEED = 1.0
+_clearall_target = MOD_INIT_DEFAULTS.get
 
 
 # The resolved-row sort key (row[2] is `t`). A C-level itemgetter, not a
@@ -132,7 +136,9 @@ def _frame_resolved(applied) -> list:
                     held = pending_get(key)
                     if held is not None and t - held[0] >= same_frame:
                         out_append((name, index, *held))
-                    pending[key] = cleared
+                    default = _clearall_target(name)
+                    pending[key] = cleared if default is None else \
+                        (t, beat, default, _CLEARALL_SPEED)
 
         for value, speed, name in mods:
             for index in indexes:
