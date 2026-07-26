@@ -181,6 +181,62 @@ def test_base_hidden_suppresses_identity_original():
     assert len(hidden) == 1
 
 
+def test_the_fold_waits_until_something_reads_the_entries():
+    """The drawable pipeline draws the copies itself and never reads these
+    entries, so composing them is the frame's most expensive dead work.
+    They fold on first read, not when the frame is built."""
+    copy = _proxy(keyframes={'x': [_kf(0.0, 160.0)]})
+    reads = []
+    folded = copy['transform'].at
+
+    def counted(t):
+        reads.append(t)
+        return folded(t)
+
+    copy['transform'].at = counted
+    frame = NotitgFieldInstances([copy]).at(_Ctx(1.0))
+    # One read: the liveness probe that decides the frame exists at all.
+    assert len(reads) == 1
+    assert frame.fields          # non-emptiness costs nothing more
+    assert len(reads) == 1
+    assert list(frame.fields)    # reading them folds, once
+    assert len(reads) == 2
+    assert list(frame.fields)
+    assert len(reads) == 2
+
+
+def test_scopes_are_declared_without_folding():
+    """The renderer asks which capture scopes are live to decide whether the
+    chart region composites offscreen. That answer comes from the instance
+    topology, so asking it must not fold anything."""
+    aft = _instance('gat_aft', 'aft', 0, {})
+    proxy = _proxy(keyframes={'x': [_kf(0.0, 160.0)]})
+    frame = NotitgFieldInstances([proxy, aft]).at(_Ctx(1.0))
+    assert frame.fields.scopes == {'field', 'screen'}
+
+
+def test_a_gated_off_copy_declares_no_scope():
+    """A hidden AFT sampler is not in play, so the frame does not have to
+    composite the chart region offscreen for it. gat 2 spends 59% of its
+    frames in exactly that state."""
+    aft = _instance('gat_aft', 'aft', 0, {'hidden': [_kf(0.0, 1.0)]})
+    proxy = _proxy(keyframes={'x': [_kf(0.0, 160.0)]})
+    frame = NotitgFieldInstances([proxy, aft]).at(_Ctx(1.0))
+    assert frame.fields.scopes == {'field'}
+
+
+def test_a_copy_only_its_geometry_rules_out_still_declares():
+    """The scope probe reads the visibility gates, not the composed
+    transform - so a copy whose SCALE collapses it still declares. Erring
+    that way costs one offscreen composite; erring the other way would drop
+    the capture the next frame's `screen_prev` sampler reads."""
+    aft = _instance('gat_aft', 'aft', 0, {'scale_x': [_kf(0.0, 0.0)]})
+    proxy = _proxy(keyframes={'x': [_kf(0.0, 160.0)]})
+    frame = NotitgFieldInstances([proxy, aft]).at(_Ctx(1.0))
+    assert frame.fields.scopes == {'field', 'screen'}
+    assert all(entry[2] != 'screen' for entry in frame.fields)
+
+
 # -- dual-player fields (item 43/50/54) ----------------------------------
 
 def _spec(*players):

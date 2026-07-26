@@ -40,6 +40,11 @@ _FILL_SCOPE = 'fill'
 # not-yet-updated slot = last frame's content, the recursion leg.
 _CAPTURE_SCOPE = 'capture'
 
+# The scopes that read a RETAINED composite of the chart region, so their
+# presence forces the region to composite offscreen and be snapshotted.
+_RETAINED_SCOPES = frozenset((_SCREEN_SCOPE, _SCREEN_PREV_SCOPE,
+                              _CAPTURE_SCOPE))
+
 # Field captures render with extra margin per side: a proxied or
 # transformed field instance maps the capture boundary into view, and
 # any note a mod pushed past that boundary gets sliced flat on the
@@ -77,6 +82,23 @@ def _field_entry(entry):
 
 def _field_scope(entry) -> str:
     return entry[2] if len(entry) >= 3 else _DEFAULT_FIELD_SCOPE
+
+
+def _field_scopes(frame) -> frozenset:
+    """Every capture scope this frame's field copies can carry.
+
+    Taken from the sequence's own `scopes` when it declares one. That
+    declaration comes from the instance TOPOLOGY, which is known without
+    folding a single transform - and a producer is free to defer that fold
+    (games/notitg/field_instances._FieldEntries), so reading the entries to
+    answer a scope question would undo it. A plain tuple of entries has no
+    declaration and is read directly."""
+    if frame is None or not frame.fields:
+        return frozenset()
+    declared = getattr(frame.fields, 'scopes', None)
+    if declared is not None:
+        return declared
+    return frozenset(_field_scope(entry) for entry in frame.fields)
 
 
 def _field_extra(entry):
@@ -701,9 +723,7 @@ class QtPlayerRenderer:
         live feature, which has already cost review time chasing a stale-handle
         bug that cannot execute. Do not revive 'full' to get a whole-screen
         proxy copy - 'screen'/'screen_prev' are the supported route."""
-        if frame is None or not frame.fields:
-            return False
-        return any(_field_scope(entry) == 'full' for entry in frame.fields)
+        return 'full' in _field_scopes(frame)
 
     @staticmethod
     def _has_screen_copy(frame) -> bool:
@@ -711,11 +731,7 @@ class QtPlayerRenderer:
         whole chart region must composite offscreen and the node-point
         capture be taken for this frame's 'screen' copies and next
         frame's 'screen_prev' ones."""
-        if frame is None or not frame.fields:
-            return False
-        return any(_field_scope(entry) in (_SCREEN_SCOPE, _SCREEN_PREV_SCOPE,
-                                           _CAPTURE_SCOPE)
-                   for entry in frame.fields)
+        return bool(_field_scopes(frame) & _RETAINED_SCOPES)
 
     def _abort_frame_captures(self) -> None:
         """Unwind every capture opened this frame after a mid-frame

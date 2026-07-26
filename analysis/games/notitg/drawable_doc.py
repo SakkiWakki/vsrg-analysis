@@ -1205,7 +1205,7 @@ class _Builder:
 
     def _emit_base_field(self, instances) -> None:
         """The single-player base original: an identity blit of the primary
-        'field' capture, drawn FIRST (mirrors NotitgFieldInstances._single_frame
+        'field' capture, drawn FIRST (mirrors NotitgFieldInstances._entries
         prepending `(None, 1.0, 'field')`). Gated visible by `1 - base_hidden`,
         so when the chart hides the real field the item drops (matching the
         base-hidden placeholder). Suppressed on the dual-player path, where the

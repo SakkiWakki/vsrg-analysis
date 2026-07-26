@@ -218,6 +218,57 @@ def _screen_transform(H, kx, ky, ox, oy) -> QTransform | None:
     return to_design * transform3d.qtransform_from_h(H) * to_screen
 
 
+class _FieldEntries:
+    """This frame's field entries, FOLDED ON FIRST READ.
+
+    A frame asks its field copies three things, in rising order of cost:
+    is there anything to blit, which capture scopes are in play (which
+    decides whether the chart region composites offscreen), and where each
+    copy actually lands. Only the last needs every link of every instance
+    sampled per property and composed - three quarters of gat 2's
+    per-frame Python - and the drawable pipeline answers it itself,
+    natively, without ever reading these entries.
+
+    So each answer is computed when it is asked for, and no sooner: the
+    fold runs only if something ITERATES, which is the fallback blit path
+    and nothing else.
+    """
+
+    __slots__ = ('_fold', '_declare', '_scopes', '_entries')
+
+    def __init__(self, fold, declare):
+        self._fold = fold
+        self._declare = declare
+        self._scopes = None
+        self._entries = None
+
+    @property
+    def scopes(self) -> frozenset:
+        if self._scopes is None:
+            self._scopes = self._declare()
+        return self._scopes
+
+    def _folded(self) -> tuple:
+        if self._entries is None:
+            self._entries = self._fold()
+        return self._entries
+
+    def __bool__(self) -> bool:
+        # Never empty: `at` returns no frame at all rather than an empty
+        # one, so a frame that exists has at least the original or its
+        # zero-opacity placeholder.
+        return True
+
+    def __iter__(self):
+        return iter(self._folded())
+
+    def __len__(self) -> int:
+        return len(self._folded())
+
+    def __getitem__(self, index):
+        return self._folded()[index]
+
+
 class NotitgFieldInstances:
     """Effect turning compiled field instances into per-frame
     `EffectFrame.fields`.
@@ -266,7 +317,62 @@ class NotitgFieldInstances:
                  and (player := inst.get('player') or 1) > 1})
         t = float(ctx.t_now)
         base_hidden = self._base_field_hidden(t)
-        kx, ky, ox, oy = _design_map(ctx.chart_rect)
+        spec = self._player_fields_spec
+        dual = spec is not None and bool(spec.note_mods)
+        if not dual and not base_hidden and not self._any_live(instances, t):
+            # No copy draws and the base field is visible: no frame at all,
+            # so the renderer draws the field directly with no capture.
+            return None
+        fields = _FieldEntries(
+            lambda: self._entries(instances, base_hidden, dual, t,
+                                  ctx.chart_rect),
+            lambda: self._live_scopes(instances, t))
+        # A lazy factory spec with no minted consumer yet is inert: the
+        # chart has referenced no player > 1, so the single-player frame
+        # stands.
+        return EffectFrame(fields=fields, second_field=spec if dual else None)
+
+    def _live_scopes(self, instances, t) -> frozenset:
+        """The capture scopes in play at `t`: one per instance the chain's
+        visibility gates do not already rule out, plus the primary field
+        the original (or its placeholder) always blits.
+
+        Read off `may_draw` rather than the folded entries, because the
+        renderer asks this to decide whether the chart region composites
+        offscreen - a decision that must not drag the whole fold with it.
+        `may_draw` cannot see a copy ruled out by its GEOMETRY, so the set
+        can name a scope no entry ends up carrying; the cost of that is one
+        offscreen composite the frame did not need."""
+        return frozenset(
+            self._scope(inst) for inst in instances
+            if inst['kind'] != 'stage' and inst['transform'].may_draw(t)
+        ) | {_PROXY_SCOPE}
+
+    def _any_live(self, instances, t) -> bool:
+        """Whether any instance draws at `t`.
+
+        The one question the frame's EXISTENCE turns on, asked apart from
+        the fold so that the answer 'none' costs only the fold's own early
+        outs (`TransformChannel.at` returns None off two samples for a
+        hidden link). Only reached with the base field visible and no
+        second player, where the entries would be the identity original
+        plus whatever copies draw - and an original alone is what the
+        renderer's direct-draw path already is."""
+        return any(inst['kind'] != 'stage'
+                   and inst['transform'].at(t) is not None
+                   for inst in instances)
+
+    def _entries(self, instances, base_hidden, dual, t, chart_rect) -> tuple:
+        """Every field copy this frame, folded: one
+        `(transform, opacity, scope, extra, crop)` per drawing instance, in
+        z order, with the single-player original prepended when the base
+        field is not hidden.
+
+        THE FRAME'S MOST EXPENSIVE PYTHON - every link of every instance
+        sampled per property and composed - and the drawable pipeline
+        needs none of it, since it evaluates the same instances natively.
+        `_FieldEntries` is what keeps it off the delegating path."""
+        kx, ky, ox, oy = _design_map(chart_rect)
 
         entries = []
         sort_keys = []
@@ -307,32 +413,13 @@ class NotitgFieldInstances:
                 None if group is None
                 else (group, inst['z_sort'].sample(t)[0]))
         _z_sort_entries(entries, sort_keys)
-
-        spec = self._player_fields_spec
-        if spec is not None and spec.note_mods:
-            return EffectFrame(
-                fields=tuple(entries or [(None, 0.0, _PROXY_SCOPE)]),
-                second_field=spec)
-        # A lazy factory spec with no minted consumer yet is inert: the
-        # chart has referenced no player > 1, so the single-player frame
-        # (and its direct-draw fast path) stands.
-        return self._single_frame(base_hidden, entries)
-
-    def _single_frame(self, base_hidden, entries) -> EffectFrame | None:
-        """Single-player: one centered identity original, present only
-        alongside copies (or a placeholder when the base is hidden).
-        Base visible with no copies -> None (the renderer's fast path
-        draws the base directly)."""
-        if not base_hidden and not entries:
-            return None
-        if base_hidden:
-            # Base suppressed (copies replace it). A zero-opacity
-            # placeholder keeps `fields` non-empty even with no visible
-            # copies, so the renderer takes the capture path.
-            entries = entries or [(None, 0.0, _PROXY_SCOPE)]
-        else:
-            entries = [(None, 1.0, _PROXY_SCOPE), *entries]
-        return EffectFrame(fields=tuple(entries))
+        if base_hidden or dual:
+            # No original to add: the base is suppressed (copies replace
+            # it), or the two player instances ARE the originals. A
+            # zero-opacity placeholder keeps `fields` non-empty even with no
+            # visible copies, so the renderer still takes the capture path.
+            return tuple(entries or [(None, 0.0, _PROXY_SCOPE)])
+        return ((None, 1.0, _PROXY_SCOPE), *entries)
 
     def _base_field_hidden(self, t) -> bool:
         return (self._base_hidden is not None

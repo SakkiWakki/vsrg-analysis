@@ -118,7 +118,7 @@ def composite(effects, ctx) -> CompositeFrame:
     draws = []
     opacity = 1.0
     shaders = []
-    fields = []
+    field_sources = []
     second_field = None
     for effect in effects:
         frame = effect.at(ctx)
@@ -134,7 +134,8 @@ def composite(effects, ctx) -> CompositeFrame:
         draws.extend(frame.draws)
         opacity *= frame.opacity
         shaders.extend(frame.shaders)
-        fields.extend(frame.fields)
+        if frame.fields:
+            field_sources.append(frame.fields)
         if frame.second_field is not None:
             second_field = frame.second_field
 
@@ -149,5 +150,19 @@ def composite(effects, ctx) -> CompositeFrame:
                           opacity=max(0.0, min(1.0, opacity)),
                           shaders=tuple(shaders),
                           scene_transform=scene_transform,
-                          fields=tuple(fields),
+                          fields=_merge_fields(field_sources),
                           second_field=second_field)
+
+
+def _merge_fields(sources):
+    """The frame's field instances, from every effect that supplied any.
+
+    A single source passes through AS THE OBJECT IT IS. Concatenating would
+    read it, and a source is allowed to fold its entries lazily - which is
+    the whole point when the drawable pipeline draws the instances itself
+    and never looks (games/notitg/field_instances._FieldEntries). Two
+    effects both supplying fields is not a shape any game produces today;
+    if one arises, it concatenates and pays for it."""
+    if len(sources) == 1:
+        return sources[0]
+    return tuple(entry for source in sources for entry in source)

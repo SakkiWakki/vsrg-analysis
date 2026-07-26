@@ -334,6 +334,29 @@ class TransformChannel:
             return None
         return H, alpha
 
+    def may_draw(self, t) -> bool:
+        """True unless the chain's VISIBILITY gates already rule this
+        instance out at `t` - hidden, asleep, or faded past `_MIN_ALPHA`
+        anywhere along it.
+
+        The cheap half of `at`: three samples per link and no geometry.
+        `at` applies the same gates and then folds the transform, which can
+        rule out more (a degenerate scale, a plane turned past the eye), so
+        a True here is 'in play', not 'drawn'. For a caller that only needs
+        to know whether an instance is in play - which capture scopes a
+        frame must prepare for, say - that is the whole question, at a
+        sixth of the cost."""
+        if self._t0 is not None:
+            t = max(float(t), self._t0)
+        alpha = 1.0
+        for link in self._links:
+            if link['hidden'].sample(t)[0] >= 0.5:
+                return False
+            if link['awake'].sample(t)[0] < 0.5:
+                return False
+            alpha *= link['alpha'].sample(t)[0]
+        return alpha >= _MIN_ALPHA
+
     def crop_at(self, t):
         """The instance's crop insets `(left, top, right, bottom)` as
         fractions of its texture, or None at rest (no crop - today's
