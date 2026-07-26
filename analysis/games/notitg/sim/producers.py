@@ -1446,6 +1446,15 @@ def _node_instances(name, actor, graph, slot_nodes, seen_actors, parents,
     node_links = [_instance_link(link_actor, env, actor_keyframes,
                                  osc_context, live_sim)
                   for link_actor in reversed(node_chain)]
+    # Document order, the same stamp the drawable doc sorts every other
+    # instance by. A capture is an AT-POSITION snapshot: it records the
+    # screen as of where the node sits in the tree, so without this the doc
+    # sorts it by whatever instance happened to precede it. gat 2's
+    # `aft#306` inherited a curtain's position ~90 actors early and
+    # snapshotted a screen that had been blacked out and not yet
+    # re-backgrounded - every pane fed from that slot drew black through the
+    # four-way spin.
+    at_position = modfile._tree_index_of(actor)
     if upstream is not None:
         sprite = seen_actors.get(graph.stage_of(name))
         if sprite is None:
@@ -1456,12 +1465,16 @@ def _node_instances(name, actor, graph, slot_nodes, seen_actors, parents,
                  for link_actor in reversed(chain)]
         stage = field_compose.instance(name, 'stage', 0, links, t0=t0)
         stage['source'] = upstream
-        return [field_compose.instance(name, 'capture', 0, node_links,
-                                       t0=t0),
-                stage]
+        stage['tree_index'] = at_position
+        capture = field_compose.instance(name, 'capture', 0, node_links,
+                                         t0=t0)
+        capture['tree_index'] = at_position
+        return [capture, stage]
     if name not in slot_nodes:
         return []
-    return [field_compose.instance(name, 'capture', 0, node_links, t0=t0)]
+    capture = field_compose.instance(name, 'capture', 0, node_links, t0=t0)
+    capture['tree_index'] = at_position
+    return [capture]
 
 
 def _aft_chain_graph(doc, env, aft_nodes, proxy_players):
