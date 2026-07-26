@@ -85,19 +85,28 @@ _SCREEN_H = 480.0
 # Drawable 0 is always the screen root (minted by the builder).
 _SCREEN_ID = 0
 
-# The screen root clears OPAQUE BLACK, which is what the engine's framebuffer
-# clear is: NotITG renders the whole chart region, so the doc's screen surface
-# is the scene and not an overlay on someone else's.
-#
-# It is also what an AFT capture of the screen must find. A chart's screen-scope
-# node snapshots this surface; cleared transparent, every capture came back a
-# cutout wherever the scene was only background, and the freeze that replayed it
-# showed through to whatever the renderer had painted underneath instead of to
-# black. The legacy `draw_background` fill stays - it also clears the region
-# OUTSIDE the chart rect, which the doc's surface does not cover.
-# `executor.CLEAR_OPAQUE`, named here so the doc declares its own surface rather
-# than the pipeline assuming it.
-_SCREEN_CLEAR = 1
+# `executor.CLEAR_OPAQUE` / `CLEAR_TRANSPARENT`, named here so the doc declares
+# its own surface rather than the pipeline assuming one.
+_CLEAR_TRANSPARENT, _CLEAR_OPAQUE = 0, 1
+
+
+def opaque_screen() -> bool:
+    """Whether the doc's screen root clears OPAQUE BLACK, which is what the
+    engine's framebuffer clear is: NotITG renders the whole chart region, so
+    the doc's surface is the scene and not an overlay on someone else's.
+
+    It is also what an AFT capture of the screen must find. A chart's
+    screen-scope node snapshots this surface; cleared transparent, every
+    capture came back a cutout wherever the scene was only background. The
+    legacy `draw_background` fill stays either way - it also clears OUTSIDE
+    the chart rect, which the doc's surface does not cover.
+
+    `VSRG_DRAWABLE_OPAQUE_SCREEN=0` reverts to a transparent surface, which
+    is a BISECT SWITCH: an opaque surface hides whatever the renderer painted
+    under the chart region, so it is the first thing to rule out when the
+    region goes black."""
+    return os.environ.get('VSRG_DRAWABLE_OPAQUE_SCREEN',
+                          '1').lower() not in ('0', 'false', 'no')
 
 # The lazy-curve sampling cadence (LiveCurve / SegCurve have no exposed
 # keyframes, so they are densely sampled). 1/30s: the interim approximation the
@@ -1172,7 +1181,9 @@ class _Builder:
         self._elem_below, self._elem_above = below, above
 
         evaluator = self._builder.finish()
-        id_maps = {'screen': _SCREEN_ID, 'screen_clear': _SCREEN_CLEAR,
+        id_maps = {'screen': _SCREEN_ID,
+                   'screen_clear': (_CLEAR_OPAQUE if opaque_screen()
+                                    else _CLEAR_TRANSPARENT),
                    'slots': dict(self._slot_ids),
                    'fields': dict(self._field_ids),
                    'images': dict(self._image_paths),

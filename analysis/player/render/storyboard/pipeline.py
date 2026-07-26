@@ -180,12 +180,27 @@ def _topology_signature(compiled):
 
 
 def _sweep_in_progress(compiled):
-    """True/False when the chart has a lazy sweep still short of the chart
-    end, or None when it has no live sim at all (nothing to wait for).
+    """True/False when the chart's lazy background upgrade has yet to land,
+    or None when it has none (nothing to wait for).
 
-    Reads the published frontier, which the sweep advances monotonically -
-    a passive read, never a seek."""
-    live = compiled.get('_live_sim') if compiled else None
+    The signal is the producer's OWN handover event, not the frontier. The
+    frontier reaching the chart end is necessary but not sufficient, and
+    `producers._spawn_background_upgrade` says so in as many words: the
+    hot-swaps happen after it, and one of them hands the provider the swept
+    env - the COMPLETE proxy/AFT topology, which is the thing the static doc
+    is built out of. Gating on the frontier started the first prepare on
+    whatever had bound by the playhead, and the handover then grew the list
+    and forced a rebuild: gat 1 built its doc twice, gat 2 three times, each
+    one the full channel export.
+
+    A never-signalled event reads as still in progress, which is the safe
+    direction - the pipeline waits and the legacy path draws."""
+    if not compiled:
+        return None
+    event = compiled.get('_upgrade_done')
+    if event is not None:
+        return not event.is_set()
+    live = compiled.get('_live_sim')
     if live is None:
         return None
     try:

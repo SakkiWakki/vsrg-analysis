@@ -1488,3 +1488,15 @@ def test_legacy_storyboard_is_suppressed_when_the_doc_owns_elements(
     monkeypatch.setenv('VSRG_DRAWABLE_ELEMENTS', '1')
     monkeypatch.setenv('VSRG_DRAWABLE_PIPELINE', '1')
     assert adapter.storyboard(object()) is None, 'exactly one owner'
+
+
+def test_the_screen_clear_is_declared_and_switchable(monkeypatch):
+    """The doc says what its own surface is, so the pipeline does not have to
+    assume. `VSRG_DRAWABLE_OPAQUE_SCREEN=0` is the bisect switch: an opaque
+    surface hides whatever the renderer painted under the chart region."""
+    from analysis.games.notitg import drawable_doc as dd
+
+    monkeypatch.delenv('VSRG_DRAWABLE_OPAQUE_SCREEN', raising=False)
+    assert dd.opaque_screen() is True
+    monkeypatch.setenv('VSRG_DRAWABLE_OPAQUE_SCREEN', '0')
+    assert dd.opaque_screen() is False

@@ -35,6 +35,7 @@ raises out of a frame (any error permanently self-disables), and a build
 that cannot proceed reports unavailable rather than crashing.
 """
 import os
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -887,3 +888,27 @@ def test_a_slot_with_no_emission_of_its_own_falls_back_to_the_primary(
         lambda emit: {'field': emit(SimpleNamespace(tag=7))})
     assert slots == [1, 2] and counts == [1, 1]
     assert u_bytes == bytes([7] * 8)
+
+
+def test_the_prepare_gate_waits_for_the_handover_not_the_frontier():
+    """A lazy chart's topology is handed over AFTER its frontier reaches the
+    chart end (`producers._spawn_background_upgrade`: "necessary but not
+    sufficient - the swaps happen after"). Gating on the frontier built the
+    doc on whatever had bound by the playhead and then rebuilt when the
+    handover grew the list - gat 1 twice, gat 2 three times, each one the
+    full channel export."""
+    import threading
+
+    from analysis.player.render.storyboard.pipeline import _sweep_in_progress
+
+    done = threading.Event()
+    live = SimpleNamespace(frontier=999.0, _end_seconds=100.0)
+    compiled = {'_live_sim': live, '_upgrade_done': done}
+    # Frontier past the end, handover not landed: still in progress.
+    assert _sweep_in_progress(compiled) is True
+    done.set()
+    assert _sweep_in_progress(compiled) is False
+
+    # No event at all (an eager compile): the frontier is all there is.
+    assert _sweep_in_progress({'_live_sim': live}) is False
+    assert _sweep_in_progress({}) is None
