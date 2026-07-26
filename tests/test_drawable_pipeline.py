@@ -912,3 +912,14 @@ def test_the_prepare_gate_waits_for_the_handover_not_the_frontier():
     # No event at all (an eager compile): the frontier is all there is.
     assert _sweep_in_progress({'_live_sim': live}) is False
     assert _sweep_in_progress({}) is None
+
+
+def test_a_shader_with_no_source_costs_its_item_not_the_frame():
+    """A .frag the doc declared and whose source never loaded used to reach
+    `_adapt_dialect`, whose regex raised on None - and the TypeError unwound
+    out of `render_and_present`, so one unreadable shader cost the WHOLE
+    frame its present, every frame ("present failed (expected string or
+    bytes-like object, got 'NoneType')")."""
+    from analysis.player.render.storyboard.gl_executor import _build_program
+
+    assert _build_program(None, ('u_mat',), quiet=True) is None

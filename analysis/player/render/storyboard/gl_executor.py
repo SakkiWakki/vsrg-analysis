@@ -341,11 +341,31 @@ def _set_sample_params(f, texture) -> None:
     f.glBindTexture(GL_TEXTURE_2D, 0)
 
 
+def _is_gles() -> bool:
+    """Whether the current context is OpenGL ES (Qt picks it under
+    Wayland/EGL and ANGLE), which is where a desktop-GLSL chart shader's
+    implicit int->float casts are rejected. No context reads as desktop -
+    the caller is then not compiling anything anyway."""
+    context = QOpenGLContext.currentContext()
+    return context is not None and context.isOpenGLES()
+
+
 def _build_program(frag_src, uniforms, vert_src=None, quiet=False):
     """Compile+link one program, or None. `quiet` suppresses the failure log
     for an attempt the caller intends to RETRY - a chart frag is tried
     faithfully first and again with int literals promoted, and shouting about
     the first attempt made a recovered shader read as a broken one."""
+    if frag_src is None:
+        # A shader the doc declared and whose source never loaded. It used to
+        # reach `_adapt_dialect`, which does a regex over it, and the
+        # TypeError unwound all the way out of `render_and_present` - so one
+        # unreadable .frag cost the WHOLE FRAME its present, every frame,
+        # reported as "present failed (expected string or bytes-like object,
+        # got 'NoneType')". A missing shader costs its own item its shading
+        # and nothing else.
+        if not quiet:
+            logger.warning('GLExecutor: shader has no source, drawn unshaded')
+        return None
     program = QOpenGLShaderProgram()
     built = (program.addShaderFromSourceCode(
                  QOpenGLShader.ShaderTypeBit.Vertex,
@@ -1255,22 +1275,25 @@ class GLExecutor:
         uniforms, so _draw_texture and _resolve_shader bind by lookup."""
         base = ('u_mat', 'u_tex', 'u_resolution', 'u_opacity')
         try:
-            contract = notitg_compat.translate(frag_src, uv_source='varying')
-            # Quiet: a chart authored desktop GLSL 1.20, whose implicit
-            # int->float casts an ES context rejects, is EXPECTED to fail here
-            # and build on the retry. Logging the first attempt made every
-            # recovered shader look like a broken one.
-            built = _build_program(contract, base + tuple(names), quiet=True)
-            if built is None:
-                relaxed = notitg_compat.translate(
-                    notitg_compat.promote_int_literals(frag_src),
-                    uv_source='varying')
-                built = _build_program(relaxed, base + tuple(names))
+            # ES FIRST. A chart authors desktop GLSL 1.20, whose implicit
+            # int->float casts an ES context rejects, so on ES the faithful
+            # source is the one EXPECTED to fail. Trying it first was quiet on
+            # our side but not on Qt's - `QOpenGLShader::compile` prints the
+            # error and the whole shader body itself, every session, for a
+            # shader that then builds fine. Promotion only appends `.0` to
+            # bare literals a float context reads identically, so leading with
+            # it costs a correct shader nothing.
+            sources = [frag_src]
+            if _is_gles():
+                sources.insert(0, notitg_compat.promote_int_literals(frag_src))
+            built = None
+            for index, source in enumerate(sources):
+                last = index == len(sources) - 1
+                built = _build_program(
+                    notitg_compat.translate(source, uv_source='varying'),
+                    base + tuple(names), quiet=not last)
                 if built is not None:
-                    self._log_once(
-                        'shader_promoted',
-                        'GLExecutor: per-item frag built after int-literal '
-                        'promotion (the chart is desktop GLSL 1.20)')
+                    break
         except (ValueError, OSError) as exc:
             self._log_once('shader_build', f'GLExecutor: per-item frag failed to translate ({exc}), drawn unshaded')
             return None
