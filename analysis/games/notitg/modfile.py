@@ -2034,13 +2034,29 @@ class OscDeltaChannel:
         self._seed = int(seed)
         self._end = end_seconds
         self._zoom = zoom
+        # The spans that drive THIS property, settled once. A span's kind
+        # never changes, so the membership test is a constant - and `sample`
+        # is the hottest thing in the whole static-doc build (29M calls on
+        # gat 2), so a dict lookup and a tuple scan per span per call is real
+        # money. Its `end` is NOT precomputed: a chart can still close a span
+        # after this channel is built, so `_effective_end` has to be read
+        # live.
+        self._driven = tuple(span for span in spans
+                             if prop in _SPAN_PROPS.get(span.kind, ()))
 
     def sample(self, t):
         t = float(t)
         total = 0.0
-        for span in self._spans:
-            if span.start <= t < _effective_end(span, self._end) \
-                    and self._prop in _SPAN_PROPS.get(span.kind, ()):
+        end = self._end
+        for span in self._driven:
+            if span.start > t:
+                continue
+            # `_effective_end` inline: one call per span per sample is 29M
+            # calls of pure overhead on a chart like gat 2.
+            stop = span.end
+            if not (span.explicit_end or end is None) and end > stop:
+                stop = end
+            if t < stop:
                 total += self._span_delta(span, t)
         return (total,)
 
@@ -2083,9 +2099,7 @@ class OscDeltaChannel:
         measured from the span's START (that is what `_span_delta` rolls
         cells against), not from the window's."""
         out = set()
-        for span in self._spans:
-            if self._prop not in _SPAN_PROPS.get(span.kind, ()):
-                continue
+        for span in self._driven:
             start = max(float(span.start), t0)
             end = min(_effective_end(span, self._end), t1)
             if end <= start:
@@ -2100,9 +2114,8 @@ class OscDeltaChannel:
     def _active(self, t: float) -> list:
         """The spans driving this property at `t` (`sample`'s own test, for
         the export path - which needs to know WHICH ones, not just the sum)."""
-        return [span for span in self._spans
-                if span.start <= t < _effective_end(span, self._end)
-                and self._prop in _SPAN_PROPS.get(span.kind, ())]
+        return [span for span in self._driven
+                if span.start <= t < _effective_end(span, self._end)]
 
     def _span_delta(self, span, t) -> float:
         if span.kind == 'vibrate':
