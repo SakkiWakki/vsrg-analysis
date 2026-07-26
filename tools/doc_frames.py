@@ -15,11 +15,19 @@ which needs no GL context, and writes one PNG per requested time.
                      visible; 'inline' takes the note-feed path, which
                      draws nothing here because no feed is attached
     --dump           also print the op stream for each time
+    --backend MODE   'raster' (default) or 'gl': compose through the real
+                     GLExecutor on an offscreen context
 
 What this is and is not: the raster executor is the REFERENCE backend, not
 the shipping one. It draws unshaded and unfaded (it says so, once, per run)
 and skips Mesh sources. Geometry - which is what a placement bug is about -
 is the same records the GL executor consumes.
+
+`--backend gl` runs the SHIPPING backend instead, so the per-item shader tier
+is finally visible offline - a rig whose whole visual is its `Frag=` (gat 2's
+lumikey tunnel, monitor, horizon) draws as a plain copy on raster and can
+only be judged here. Needs a GL 3.2 core context; falls back to raster with a
+note when none can be made.
 
 The field placeholder is deliberately not a real notefield: a labelled grid
 makes a flipped, cropped or mis-scaled copy obvious, where real notes would
@@ -108,21 +116,87 @@ def warm_frames(t: float, count: int, step: float, since: float | None):
     return [t - step * i for i in range(count, 0, -1)]
 
 
-def render(compiled, times, out_dir, dump, warm, warm_from) -> None:
+def gl_executor(images, sizes, id_maps):
+    """A GLExecutor on a current offscreen GL 3.2 core context, wired the way
+    the pipeline wires it, or None when no context can be made.
+
+    The GL tier is where the shader lanes actually run: the raster backend
+    says so itself ("shader lane not implemented"), so a rig whose whole
+    visual IS its per-item .frag - gat 2's lumikey tunnel, monitor, horizon -
+    cannot be looked at on the raster path at all. Keeps the CONTEXT alive on
+    the returned executor: dropping it frees every FBO mid-run."""
+    from PySide6.QtGui import (QOffscreenSurface, QOpenGLContext,
+                               QSurfaceFormat)
+    from analysis.player.render.storyboard.gl_executor import GLExecutor
+
+    fmt = QSurfaceFormat()
+    fmt.setMajorVersion(3)
+    fmt.setMinorVersion(2)
+    fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
+    context = QOpenGLContext()
+    context.setFormat(fmt)
+    surface = QOffscreenSurface()
+    surface.setFormat(fmt)
+    surface.create()
+    if not (context.create() and surface.isValid()
+            and context.makeCurrent(surface)):
+        return None
+    executor = GLExecutor(
+        images, sizes,
+        image_grids=id_maps.get('image_grids'),
+        image_specs=id_maps.get('image_specs'))
+    # Positional by the shader id the BLIT lanes carry. Without it every
+    # shader lane resolves to None and a shaded sampler blits through the
+    # plain textured program - the exact failure this backend exists to see.
+    executor.set_shaders(id_maps.get('shaders') or [])
+    executor._offscreen = (context, surface)
+    return executor
+
+
+def seed_field(executor, drawable_id: int, w: int, h: int):
+    """Put the labelled placeholder in a field drawable, whichever backend is
+    running, and return whatever must stay alive for it to keep working.
+
+    The two executors take a field's stand-in content differently: raster
+    takes the QImage, GL takes an EXTERNAL texture id it does not own - so on
+    GL the caller has to hold the QOpenGLTexture, or it is collected and the
+    drawable samples a deleted name."""
+    image = field_placeholder(w, h)
+    if not hasattr(executor, 'set_drawable_texture'):
+        executor.set_drawable_image(drawable_id, image)
+        return None
+    from PySide6.QtGui import QTransform
+    from PySide6.QtOpenGL import QOpenGLTexture
+    # GL textures are bottom-up and the executor samples an external one like
+    # the drawable's own FBO texture, so the top-down QImage flips first.
+    texture = QOpenGLTexture(image.transformed(QTransform().scale(1.0, -1.0)))
+    executor.set_drawable_texture(drawable_id, texture.textureId(), w, h)
+    return texture
+
+
+def render(compiled, times, out_dir, dump, warm, warm_from,
+           backend='raster') -> None:
     from analysis.games.notitg import drawable_doc as dd
 
     evaluator, id_maps, report = dd.build_static_doc(compiled)
     print(f'doc: {report}')
     sizes = _drawable_sizes_of(id_maps, evaluator)
     images = _lazy_images(id_maps)
-    executor = RasterExecutor(images, sizes)
+    executor = None
+    if backend == 'gl':
+        images.warm()
+        executor = gl_executor(images, sizes, id_maps)
+        if executor is None:
+            print('no OpenGL context available; falling back to raster')
+    if executor is None:
+        executor = RasterExecutor(images, sizes)
     # Transparent, matching the pipeline: an opaque clear would make every
     # frame's alpha 255 and hide what the doc did NOT draw.
     executor.set_clear(SCREEN_ID, CLEAR_TRANSPARENT)
+    seeded = []
     for scope, drawable_id in (id_maps.get('fields') or {}).items():
         w, h = sizes[drawable_id]
-        executor.set_drawable_image(drawable_id,
-                                    field_placeholder(int(w), int(h)))
+        seeded.append(seed_field(executor, drawable_id, int(w), int(h)))
         print(f'seeded {scope!r} (drawable {drawable_id}) at {int(w)}x{int(h)}')
 
     os.makedirs(out_dir, exist_ok=True)
@@ -149,6 +223,12 @@ def render(compiled, times, out_dir, dump, warm, warm_from) -> None:
         screen.save(path)
         print(f'wrote {path}  ({n} ops)')
 
+    # While the context is still current: a GL texture collected after it goes
+    # away warns that it "has not been destroyed" and leaks the name.
+    for texture in seeded:
+        if texture is not None:
+            texture.destroy()
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -159,6 +239,10 @@ def main() -> int:
     parser.add_argument('--notes', default='captured',
                         choices=('captured', 'inline'))
     parser.add_argument('--dump', action='store_true')
+    parser.add_argument('--backend', default='raster', choices=('raster', 'gl'),
+                        help="'gl' composes through the real GLExecutor on an "
+                             'offscreen context, which is the only way to see '
+                             'the per-item shader tier (lumikey, monitor)')
     parser.add_argument('--warm', type=int, default=120,
                         help='frames to compose before each time so retained '
                              'AFT slots hold real content (0 = cold)')
@@ -184,7 +268,7 @@ def main() -> int:
         return 1
     wait_for_upgrade(compiled)
     render(compiled, args.times, args.out, args.dump, args.warm,
-           args.warm_from)
+           args.warm_from, args.backend)
     return 0
 
 
