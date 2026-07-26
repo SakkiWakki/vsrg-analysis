@@ -139,6 +139,7 @@ def _field_measure(compiled, times) -> dict:
         'instances': len(order),
         'field_compared': rep['n_compared'],
         'field_3d': rep['n_projected'],
+        'field_chained': rep['n_chain_folded'],
         'field_missing': rep['n_missing'],
         'field_extra': rep['n_extra'],
         'field_err': round(float(rep['max_corner_err']), 4),
@@ -246,6 +247,7 @@ def main() -> int:
             print(f'      fields: {result["instances"]} instances '
                   f'compared={result["field_compared"]} '
                   f'3d={result["field_3d"]} '
+                  f'chained={result["field_chained"]} '
                   f'missing={result["field_missing"]} '
                   f'extra={result["field_extra"]} '
                   f'err={result["field_err"]}px', flush=True)

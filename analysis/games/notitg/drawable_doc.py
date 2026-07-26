@@ -2628,8 +2628,8 @@ def _instance_key(inst):
 
 
 def _legacy_field_draws(instances, base_hidden, t) -> dict:
-    """`_instance_key -> (quad, alpha, kind)` for every field instance the
-    legacy effect DRAWS at `t`.
+    """`_instance_key -> (quad, alpha, kind, chain_folded)` for every field
+    instance the legacy effect DRAWS at `t`.
 
     The gate is legacy's own: `transform.at(t)` is the very object
     `NotitgFieldInstances.at` calls, not a transcription of it, and the
@@ -2658,12 +2658,15 @@ def _legacy_field_draws(instances, base_hidden, t) -> dict:
         if sampled is None:
             continue
         h, alpha = sampled
+        folded = False
         if kind == 'capture':
             slots.add(inst['name'])
         elif kind == 'aft':
+            own = h
             h, alpha, _crop, _extra = _fold_stage_chain(
                 stages, slots, inst, h, alpha, inst['transform'].crop_at(t),
                 None)
+            folded = not np.allclose(own, h, atol=1e-9)
         # TRANSPOSED: a field transform is a ROW-vector homography ([x y 1] @ H,
         # the Qt QTransform layout `transform3d.qtransform_from_h` hands
         # straight to Qt), while the record mat3 and `_apply_h` are
@@ -2681,7 +2684,7 @@ def _legacy_field_draws(instances, base_hidden, t) -> dict:
         # defect, so the transform applies to every kind.
         quad = _apply_h(np.asarray(h, dtype=float).reshape(3, 3).T,
                         _DESIGN_QUAD)
-        draws[_instance_key(inst)] = (quad, min(1.0, alpha), kind)
+        draws[_instance_key(inst)] = (quad, min(1.0, alpha), kind, folded)
     return draws
 
 
@@ -2701,10 +2704,15 @@ def field_parity_report(evaluator, compiled, instance_order, sample_times,
     is still the interesting half, since a dropped feed is a field that
     vanished.
 
-    A chain that leaves the z=0 plane is counted as `n_projected` and not
-    compared, the same ruling `element_parity_report` makes: legacy's projected
-    path is not the oracle for 3D. On a chart like gat that is most of the
-    instances, so read `n_compared` before reading the corner error.
+    Two families are counted rather than compared, because for them legacy is
+    knowingly not the reference:
+      - `n_projected`: a chain off the z=0 plane. The same ruling
+        `element_parity_report` makes - legacy's projected path is not the
+        oracle for 3D, the engine is. On a chart like gat that is most of the
+        instances, so read `n_compared` before reading the corner error.
+      - `n_chain_folded`: an AFT consumer whose upstream legacy folded into
+        its quad while the doc renders it into the upstream's own slot. The
+        pixels agree; only where the matrix is kept differs.
 
     `self_check` is False for a time where this walk disagrees with
     `NotitgFieldInstances.at` about how many entries legacy draws. That means
@@ -2740,6 +2748,7 @@ def field_parity_report(evaluator, compiled, instance_order, sample_times,
         missing, extra, diffs = [], [], []
         worst = 0.0
         n_compared = n_uncomparable = n_projected = 0
+        n_chain_folded = 0
         # An instance legacy draws that the doc emitted NO command for is
         # invisible to the walk below, which only iterates what the doc
         # emitted. Naming those first is the whole point of the report.
@@ -2772,6 +2781,17 @@ def field_parity_report(evaluator, compiled, instance_order, sample_times,
                 # against a reference that has no authority.
                 n_projected += 1
                 continue
+            if expected[3]:
+                # An AFT consumer whose upstream legacy folded INTO ITS QUAD.
+                # The doc puts that upstream in the SLOT instead - each chain
+                # node renders into its own capture, which is the whole point
+                # of the composed-capture design - so the consumer's quad
+                # carries only its own transform and the two legitimately
+                # differ by exactly the upstream. Same pixels, different place
+                # to keep the matrix; nothing here can tell them apart.
+                # Comparing anyway put 8 charts on a 320px-to-11840px cliff.
+                n_chain_folded += 1
+                continue
             _kind, _sid, frec = record
             got_alpha = float(frec[_rec.F_OPACITY])
             if abs(expected[1] - got_alpha) > _ALPHA_ATOL:
@@ -2794,6 +2814,7 @@ def field_parity_report(evaluator, compiled, instance_order, sample_times,
             't': t, 'n_legacy': len(want), 'n_doc': len(got),
             'n_compared': n_compared, 'n_uncomparable': n_uncomparable,
             'n_projected': n_projected,
+            'n_chain_folded': n_chain_folded,
             'missing': missing, 'extra': extra, 'diffs': diffs,
             'max_corner_err': worst,
             # `at()` prepends a base-field entry when the base is visible; the
@@ -2817,6 +2838,7 @@ def field_parity_report(evaluator, compiled, instance_order, sample_times,
         # comparisons is the most convincing wrong answer this report can give.
         'n_compared': sum(r['n_compared'] for r in times),
         'n_projected': sum(r['n_projected'] for r in times),
+        'n_chain_folded': sum(r['n_chain_folded'] for r in times),
         'n_fail': sum(0 if r['ok'] else 1 for r in times),
     }
 
@@ -2829,6 +2851,7 @@ def format_field_parity_report(report) -> str:
         f"field parity: {verdict} "
         f"({report['n_fail']}/{len(report['times'])} times failing) "
         f"compared={report['n_compared']} 3d={report['n_projected']} "
+        f"chained={report['n_chain_folded']} "
         f"missing={report['n_missing']} extra={report['n_extra']} "
         f"max_corner_err={report['max_corner_err']:.3f}px"
     ]
@@ -2845,6 +2868,7 @@ def format_field_parity_report(report) -> str:
         lines.append(f"  t={r['t']:8.3f}  legacy={r['n_legacy']:>3} "
                      f"doc={r['n_doc']:>3} compared={r['n_compared']:>3} "
                      f"3d={r['n_projected']:>3} "
+                     f"chained={r['n_chain_folded']:>3} "
                      f"uncomparable={r['n_uncomparable']:>3} "
                      f"corner_err={r['max_corner_err']:.3f}px{detail}")
     return '\n'.join(lines)
