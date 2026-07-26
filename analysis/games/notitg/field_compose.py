@@ -169,6 +169,27 @@ _EASE_LINEAR = 0
 # motion rather than float noise, in design pixels / degrees.
 _FLAT_EPS = 1e-9
 
+# How finely a CURVED span is subdivided when a sum is read back across it.
+# The sum is read as straight lines between the times its parts change, and
+# a curve is not straight, so it contributes a grid of its own.
+_TRACE_DT = 1.0 / 60.0
+
+
+def _add_part_times(times: set, exported, t0: float, t1: float) -> None:
+    """Add one part's breakpoint times to `times`, subdividing any span it
+    eases NON-LINEARLY so the chords across it follow the curve."""
+    ts, _vals, durs, eases = exported
+    for bt, dur, ease in zip(ts, durs, eases):
+        if t0 < bt < t1:
+            times.add(bt)
+        if ease == _EASE_LINEAR or dur <= 0.0:
+            continue
+        steps = max(1, int(np.ceil(dur / _TRACE_DT)))
+        for k in range(1, steps):
+            traced = bt + k * dur / steps
+            if t0 < traced < t1:
+                times.add(traced)
+
 
 class _SumTimeline:
     """Additive overlay: oscillator deltas riding on a recorded stream."""
@@ -188,7 +209,9 @@ class _SumTimeline:
         is one straight line there and reading it back describes that line
         exactly. Which is what makes the sum exportable at all: two channels
         cannot be added breakpoint-wise, but they can be re-read on the union
-        of their breakpoint times.
+        of their breakpoint times. A part that CURVES between its own
+        breakpoints subdivides its span into that union, since a curve is
+        the one thing a straight-line reading cannot carry.
 
         A part carrying a step is why a ramp's TARGET can need its own
         breakpoint: the consumer ramps toward `vals[i+1]`, which is not the
@@ -243,11 +266,8 @@ class _SumTimeline:
         return 1.5 * lo - 0.5 * hi, 1.5 * hi - 0.5 * lo
 
     def _union_times(self, t0: float, t1: float, index: int):
-        """Every time any part changes shape, plus the window's own ends - or
-        None when a part declines, or carries a CURVED ease. A curve between
-        breakpoints breaks the straight-line reading `breakpoints` depends
-        on, and linearising one part's ease to publish another part's steps
-        would trade a known error for a silent one."""
+        """Every time any part changes shape, plus the window's own ends -
+        or None when a part cannot describe its own shape at all."""
         times = {float(t0), float(t1)}
         for part in self._timelines:
             export = getattr(part, 'breakpoints', None)
@@ -256,10 +276,7 @@ class _SumTimeline:
             exported = export(t0, t1, index)
             if exported is None:
                 return None
-            part_ts, _vals, _durs, eases = exported
-            if any(ease != _EASE_LINEAR for ease in eases):
-                return None
-            times.update(t for t in part_ts if t0 < t < t1)
+            _add_part_times(times, exported, t0, t1)
         return sorted(times)
 
 

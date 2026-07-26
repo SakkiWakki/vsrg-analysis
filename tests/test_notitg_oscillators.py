@@ -234,24 +234,28 @@ def test_the_delta_sum_exports_the_teleport_the_grid_would_alias():
         assert _replay(exported, 0.0, t) == pytest.approx(total.sample(t)[0])
 
 
-def test_the_delta_sum_declines_rather_than_linearise_a_curved_ease():
-    """Two channels cannot be added breakpoint-wise; the union export reads
-    the sum back as straight lines between the parts' own breakpoints, which
-    a curved-eased span is not. Declining sends the caller to its sampling
-    fallback instead of publishing a silently flattened curve. (An
-    EventTimeline never triggers this - it traces its own curved eases into
-    linear ramps first - but a recorded segment lane carries its ease id.)"""
+def test_the_delta_sum_subdivides_a_part_that_curves():
+    """The union export reads the sum back as straight lines between the
+    parts' own breakpoints, which a CURVED span is not - so the curve
+    subdivides its own span into the union. A recorded segment lane carries
+    its ease id this way (disperagioia's field was 16px off when the export
+    gave up on one instead)."""
     from analysis.games.notitg.field_compose import _SumTimeline
 
     class _CurvedLane:
         def sample(self, t):
-            return (t * t,)
+            return (float(t) ** 2,)
 
         def breakpoints(self, t0, t1, index=0):
             return [t0], [t0 * t0], [t1 - t0], [3]
 
     delta = _vibrate_channel(_span('vibrate', 1.0, 4.0, (30.0, 30.0, 30.0)))
-    assert _SumTimeline((_CurvedLane(), delta)).breakpoints(0.0, 6.0) is None
+    total = _SumTimeline((_CurvedLane(), delta))
+    exported = total.breakpoints(0.0, 6.0)
+    assert exported is not None
+    for t in _probe_times(0.0, 6.0):
+        assert _replay(exported, 0.0, t) == pytest.approx(total.sample(t)[0],
+                                                          abs=1e-3)
 
 
 def test_a_sum_of_ducks_with_no_shape_of_their_own_declines():
