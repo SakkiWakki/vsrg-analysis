@@ -622,8 +622,33 @@ def _tree_order_units(elements, instances):
         seq += 1
     close_run()
 
-    units.sort(key=lambda u: (u.band, u.z, u.z_index, u.tree_index, u.seq))
+    units.sort(key=_unit_order)
     return units
+
+
+def _unit_order(unit):
+    """The sort key: DOCUMENT ORDER, and z only to break a tie within it.
+
+    The engine walks its actor tree once and draws what it meets, so tree
+    index IS the order. Sorting by a band first - which this did, to keep a
+    BGCHANGES subtree behind the field "wherever its actors sit" - overrides
+    that with a compile-time invention, and a background hoisted to z=-75 can
+    then never be painted over something at z=0 no matter where the chart put
+    it.
+
+    gat 2 ends on exactly that: its curtain quad sits at tree index 211 and
+    `bg4.png` at 213, so the engine paints the curtain black and the
+    background red over it. Banding sank the background under the curtain and
+    the last minute of the chart drew black. The compiler's hoist
+    (`modfile._with_z`) exists for the LEGACY painter, which had no
+    field-instance stream to interleave with and needed a z to sort by; this
+    stream has both and needs neither.
+
+    z and z_index still break ties among elements that share a tree position
+    (the storyboard layer sort), and a z_group run stays one unit so its
+    SortSpan keeps its members contiguous.
+    """
+    return (unit.tree_index, unit.z, unit.z_index, unit.seq)
 
 
 def _instance_index(inst, fallback: int) -> int:
