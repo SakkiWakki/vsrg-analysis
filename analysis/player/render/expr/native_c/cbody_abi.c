@@ -30,6 +30,7 @@ typedef struct {
     CValue   *frame;  int nslots;
     CValue   *regs;   int reg_cap;
     CTrim     trim;                /* crossing trim (see exec.h) */
+    CActorProps props;             /* settled actor mirror (see exec.h) */
 } CBody;
 
 /* --- lifecycle ---------------------------------------------------------- */
@@ -54,6 +55,9 @@ void cbody_free(CBody *b) {
     free(b->trim.memo_val);
     free(b->trim.memo_gen);
     free(b->trim.stable);
+    free(b->props.value);
+    free(b->props.present);
+    free(b->props.tweening);
     free(b->frame);
     free(b->regs);
     free(b);
@@ -115,7 +119,7 @@ void cbody_set_frontier(CBody *b, void *ctx,
         void *symbol, void *gget, void *gset, void *getter, void *poke,
         void *call, void *call_value, void *index, void *set_index, void *length,
         void *table_insert, void *iter_setup, void *iter_next, void *fallback,
-        void *abort_flag) {
+        void *get_prop, void *set_prop, void *abort_flag) {
     b->fe.ctx = ctx;
     b->fe.symbol     = (CValue(*)(void*,const char*))symbol;
     b->fe.global_get = (CValue(*)(void*,const char*))gget;
@@ -131,6 +135,8 @@ void cbody_set_frontier(CBody *b, void *ctx,
     b->fe.iter_setup = (uint64_t(*)(void*,const CValue*,int))iter_setup;
     b->fe.iter_next  = (int(*)(void*,uint64_t,CValue*,int))iter_next;
     b->fe.fallback   = (CValue(*)(void*,int,CValue*,int))fallback;
+    b->fe.get_prop   = (CValue(*)(void*,CValue,int))get_prop;
+    b->fe.set_prop   = (void(*)(void*,CValue,int,CValue))set_prop;
     b->fe.abort_flag = (const int *)abort_flag;
 }
 
@@ -146,13 +152,70 @@ int cbody_run(CBody *b, uint64_t self_val) {
     st.regs = b->regs; st.reg_cap = b->reg_cap;
     if (b->trim.memo_val) {
         b->trim.memo_epoch++;          /* a new tick refetches non-stable */
-        b->trim.clock_recv_set = 0;    /* handle ids are per-tick */
+        /* clock_recv is NOT reset. It used to be, because the host minted a
+         * fresh handle for the clock receiver on every read, so a learned id
+         * was stale by the next tick. The host now boxes a NAMED host object in
+         * one stable CValue (cbody.py::_out_named), so the learned receiver
+         * stays valid and the fast path survives across ticks - which is the
+         * whole point of learning it. If that boxing ever goes away, this reset
+         * has to come back. */
         st.trim = &b->trim;
+    }
+    if (b->props.value) {
+        st.props = &b->props;
     }
     return cexec_run(&st, (CValue)self_val);
 }
 
 /* --- crossing trim ------------------------------------------------------ */
+/* Drop every cross-run stable entry. The host calls this when host code it
+ * cannot see may have rebound a global - the cache's one invalidation. */
+/* Size the settled-actor mirror. Grows as a chart mints actors; never shrinks,
+ * and dies with the CBody, which is per-environment - a rec_id from a previous
+ * env would name a different actor. */
+void cbody_actor_capacity(CBody *b, int nactors, int nprops) {
+    if (nactors <= b->props.nactors && nprops == b->props.nprops)
+        return;
+    int old_n = b->props.nactors, np = nprops;
+    double *value = calloc((size_t)nactors * np, sizeof(double));
+    uint8_t *present = calloc((size_t)nactors * np, sizeof(uint8_t));
+    uint8_t *tweening = calloc((size_t)nactors, sizeof(uint8_t));
+    if (b->props.value && np == b->props.nprops) {
+        memcpy(value, b->props.value, (size_t)old_n * np * sizeof(double));
+        memcpy(present, b->props.present, (size_t)old_n * np);
+        memcpy(tweening, b->props.tweening, (size_t)old_n);
+    }
+    free(b->props.value); free(b->props.present); free(b->props.tweening);
+    b->props.value = value; b->props.present = present;
+    b->props.tweening = tweening;
+    b->props.nactors = nactors; b->props.nprops = np;
+}
+void cbody_set_actor_prop(CBody *b, int rec_id, int prop_id, double v) {
+    if (rec_id < 0 || rec_id >= b->props.nactors) return;
+    if (prop_id < 0 || prop_id >= b->props.nprops) return;
+    int slot = rec_id * b->props.nprops + prop_id;
+    b->props.value[slot] = v;
+    b->props.present[slot] = 1;
+}
+void cbody_set_actor_tweening(CBody *b, int rec_id, int flag) {
+    if (rec_id >= 0 && rec_id < b->props.nactors)
+        b->props.tweening[rec_id] = (uint8_t)(flag ? 1 : 0);
+}
+void cbody_clear_stable(CBody *b) {
+    if (b->trim.stable)
+        memset(b->trim.stable, 0, (size_t)b->nnames * sizeof(uint8_t));
+}
+/* Refresh a cross-run cached symbol IN PLACE. The host re-resolves each
+ * cached name once per tick and pushes the answer here, which is what makes
+ * the cache sound without knowing when host code rebinds: it is a VERIFY every
+ * tick, not an assumption that nothing changed. One update replaces however
+ * many reads the body makes of that name in the tick. */
+void cbody_set_stable(CBody *b, int name_id, uint64_t cv) {
+    if (b->trim.stable && name_id >= 0 && name_id < b->nnames) {
+        b->trim.memo_val[name_id] = (CValue)cv;
+        b->trim.stable[name_id] = 2;
+    }
+}
 void cbody_mark_stable(CBody *b, int name_id) {
     if (b->trim.stable && name_id >= 0 && name_id < b->nnames)
         b->trim.stable[name_id] = 1;
@@ -224,3 +287,7 @@ int    cbody_is_table(uint64_t v) { return cv_is_table((CValue)v); }
 double cbody_as_num(uint64_t v)   { return cv_as_num((CValue)v); }
 int    cbody_bool_val(uint64_t v) { return cv_bool_val((CValue)v); }
 uint64_t cbody_handle_id(uint64_t v) { return cv_payload((CValue)v); }
+/* Actor-tag constructors/inspectors. Used by the ABI round-trip tests; the hot
+ * path boxes and unboxes in Python against the documented bit layout. */
+uint64_t cbody_actor(uint64_t rec_id) { return (uint64_t)cv_actor(rec_id); }
+int      cbody_is_actor(uint64_t v)   { return cv_is_actor((CValue)v); }

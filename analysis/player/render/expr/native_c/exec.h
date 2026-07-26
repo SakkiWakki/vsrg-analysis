@@ -2,11 +2,13 @@
  *
  * Runs one compiled Update body (a flat op array) per tick with NO per-node
  * interpretation: a program counter walks the ops, direct-threaded dispatch
- * (computed goto where the compiler supports it, switch fallback otherwise).
+ * (computed goto).
  * Values are NaN-boxed CValues; tables/strings live in the kernel arena; the
  * only per-tick crossings back to the host are the frontier vtable calls
  * (getter/poke/symbol/global for live SimActor state), ~3.4K/tick measured.
  *
+ * The point is to not rely on any Python for execution during playback.
+ * 
  * Trust model: the op array + const pool are built by the validated upstream
  * Python compiler (opstream.py). The executor assumes well-formed input (in-
  * range slot/const/name ids, balanced stack, valid jump targets); it does not
@@ -36,6 +38,13 @@ typedef struct CFrontier {
     void   (*global_set)(void *ctx, const char *name, CValue v);
     /* recv:verb(args) in VALUE position - a live getter (self:GetX()). */
     CValue (*getter)(void *ctx, CValue recv, const char *verb, const CValue *args, int argc);
+    /* recv's PROPERTY `prop_id` - a getter whose verb resolved to a plain
+     * property at compile time, so no name crosses and the host does no verb
+     * routing. Same answer as `getter` would give for that verb. */
+    CValue (*get_prop)(void *ctx, CValue recv, int prop_id);
+    /* recv's PROPERTY `set_id` = value - a setter whose verb resolved to a
+     * single property at compile time. Same effect as `poke` with that verb. */
+    void   (*set_prop)(void *ctx, CValue recv, int set_id, CValue value);
     /* recv:verb(args) in EFFECT position - a poke (self:zoom(x)). */
     void   (*poke)(void *ctx, CValue recv, const char *verb, const CValue *args, int argc);
     /* a free call name(args) the core did not service. */
@@ -96,6 +105,30 @@ typedef struct {
 
 typedef struct { uint64_t tid; int64_t i, n; } CArenaIter;
 
+/* Settled actor properties, mirrored from the host so a property read need not
+ * cross at all.
+ *
+ * Only the SETTLED value is here. A read while the actor's head tween is
+ * running is a live interpolation off that tween (SimActor.get lerps between
+ * the ease-from and the queue tail), which would mean mirroring the whole queue
+ * - so those keep crossing, flagged per actor. Measured on gat: 98.4% of actor
+ * reads are settled, 1.1% interpolate.
+ *
+ * Indexed [rec_id * nprops + prop_id]. `present` distinguishes "never written"
+ * (the host answers with the property's rest value, which the executor does not
+ * know) from a real 0.0.
+ *
+ * DOUBLE, not float: the host's values are Python floats and the recorded
+ * keyframes compare exactly. Storing them at single precision rounded every
+ * mirrored read and diverged the keyframe stream - the mirror has to be a
+ * mirror, not an approximation. */
+typedef struct {
+    double  *value;      /* [nactors * nprops] */
+    uint8_t *present;    /* [nactors * nprops] */
+    uint8_t *tweening;   /* [nactors] - head tween running: read must cross */
+    int nactors, nprops;
+} CActorProps;
+
 /* Execution state for one body, persisted across ticks (the frame's globals /
  * accumulators live host-side behind the frontier; the slot frame is cleared
  * each tick except slot 0 = self). */
@@ -109,6 +142,7 @@ typedef struct {
     CValue      *regs;   int reg_cap;     /* eval register stack */
     CTrim       *trim;                    /* NULL = trim disabled */
     CArenaIter   iters[CEXEC_ITER_DEPTH]; int niter;  /* in-C for cursors */
+    CActorProps *props;                   /* NULL = every read crosses */
 } CExecState;
 
 /* Run the body once (one tick). `self_val` is rebound into slot 0; other slots

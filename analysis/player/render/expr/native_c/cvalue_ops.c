@@ -39,7 +39,10 @@ int cv_eq(CArena *a, CValue x, CValue y) {
     if (cv_is_nil(x) && cv_is_nil(y)) return 1;
     if (cv_is_handle(x) && cv_is_handle(y)) return cv_payload(x) == cv_payload(y);
     if (cv_is_table(x) && cv_is_table(y)) return cv_payload(x) == cv_payload(y); /* id identity */
-    if (cv_is_func(x) && cv_is_func(y)) return cv_payload(x) == cv_payload(y);
+    /* Two references to the same actor are EQUAL. Under the old handle-only
+     * representation they never were: lupa mints a fresh wrapper per read, so
+     * every crossing-out minted a new handle id and `P1 == P1` was false. */
+    if (cv_is_actor(x) && cv_is_actor(y)) return cv_payload(x) == cv_payload(y);
     (void)a;
     return 0;
 }

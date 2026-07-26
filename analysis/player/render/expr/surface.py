@@ -110,6 +110,20 @@ class Surface(Protocol):
         path), or None when `name` is not a clock-backed driver."""
         ...
 
+    def actor_id(self, value) -> int | None:
+        """The surface's STABLE id for a live actor `value`, or None when
+        `value` is not one. Stable means valid for as long as the surface is:
+        unlike a per-tick registry handle, an id may be cached across ticks and
+        compared for identity. A surface with no actor concept returns None for
+        everything, which is the correct answer, not a degraded one."""
+        ...
+
+    def actor_value(self, actor_id: int):
+        """The host object an `actor_id` came from - the same value every other
+        Surface method expects to receive as `recv`. None when the id is not
+        one this surface issued."""
+        ...
+
 
 class ConstSurface:
     """A surface that resolves ONLY literals and a fixed constant table -

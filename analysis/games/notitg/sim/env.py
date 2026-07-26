@@ -148,7 +148,23 @@ class SimEnvironment:
     def __init__(self, load_seconds: float, rng_seed: int = 0,
                  to_seconds=None, song_dir=None):
         self._song_dir = Path(song_dir) if song_dir is not None else None
-        self._host = LuaHost(dialect='luajit21')
+        # observe_globals: the sandbox becomes a store-backed proxy that
+        # reports every global write, including ones through a computed name
+        # (`_G['uksrt_p'..pn..'bonus'] = 0`). That is the only way to know when
+        # a cached symbol went stale - chart Lua rebinds globals from command
+        # bodies and mod-action payloads that Python never sees into.
+        # Raw table ops on `_host.env` no longer see anything: use
+        # `_host.has_global` / `_host.global_items`.
+        self._host = LuaHost(dialect='luajit21', observe_globals=True)
+        # Fan-out for global-write notifications. The host reports one
+        # callback; several consumers want the signal (each compiled body
+        # caching symbols), so the env owns the list.
+        self._global_write_observers: list = []
+        # Settled-property mirror sinks, installed by a consumer that can serve
+        # actor reads without crossing. None until then, so nothing pays.
+        self._prop_mirror = None
+        self._tween_mirror = None
+        self._host.observe_global_writes(self._notify_global_write)
         self._host.run(_SIM_BOOTSTRAP, name='bootstrap')
         self._load_seconds = float(load_seconds)
         self._to_seconds = to_seconds or (lambda beat: float(beat))
@@ -216,6 +232,12 @@ class SimEnvironment:
         # use_native_body when both are set. Set False to force the Python
         # interpreter for the compiled path (e.g. differential testing).
         self.use_opstream_body = True
+        # Bumped whenever control passes to HOST code that could rebind a
+        # global without us seeing which one - a command body, a classic body,
+        # a mod-action payload. A cross-tick symbol cache has to drop
+        # everything when this moves, because the write itself is invisible
+        # from here (lupa does not report `X = 5` inside a chunk).
+        self._global_gen = 0
         self._compiled_body = None
         self._native_host = None
         self._install()
@@ -238,7 +260,8 @@ class SimEnvironment:
         are DECLARATIVE events - `{beat, len, modstring, end|len, pn}` -
         the load pass populates; reading them straight is the fast path
         that needs no per-frame simulation."""
-        table = self._host.env[name] if name in self._host.env else None
+        table = (self._host.env[name]
+                 if self._host.has_global(name) else None)
         if table is None:
             return []
         rows = []
@@ -403,7 +426,7 @@ class SimEnvironment:
         # e.g. a decayed-to-zero effectmagnitude frozen at a stale
         # nonzero value). Park the template's cursor past the end so
         # its loop never enters.
-        if self._staged_actions and 'curaction' in self._host.env:
+        if self._staged_actions and self._host.has_global('curaction'):
             self._host.env['curaction'] = float(len(rows) + 1)
         return len(self._staged_actions)
 
@@ -554,7 +577,7 @@ class SimEnvironment:
     def _named_actors(self) -> dict:
         """Sandbox globals bound to one of our recorder tables."""
         out = {}
-        for key, value in self._host.env.items():
+        for key, value in self._host.global_items():
             if not isinstance(key, str):
                 continue
             actor = self._actor_for_table(value)
@@ -570,7 +593,7 @@ class SimEnvironment:
         chosen label is what keyframe_diff joins on."""
         out = {}
         for key, value in sorted(
-                ((k, v) for k, v in self._host.env.items()
+                ((k, v) for k, v in self._host.global_items()
                  if isinstance(k, str)), key=lambda kv: kv[0]):
             rec_id = self._table_rec_id(value)
             if rec_id is not None and rec_id not in out:
@@ -582,7 +605,8 @@ class SimEnvironment:
         or None when the global is unbound / not one of our recorder tables.
         The inverse of the label map: the lazy field producer reads the SAME
         actor eager's `named_actor_keyframes()[name]` came from."""
-        value = self._host.env[name] if name in self._host.env else None
+        value = (self._host.env[name]
+                 if self._host.has_global(name) else None)
         return self._table_rec_id(value) if value is not None else None
 
     def screen_child_ids(self) -> dict:
@@ -950,6 +974,7 @@ class SimEnvironment:
     def _call_command_fn(self, rec_id, fn, name) -> None:
         """A load-resolved `%expr` command: call the captured function
         with the actor's recorder as `self`."""
+        self._global_gen += 1
         self._sync(rec_id)
         saved = self._host.env['self']
         self._host.env['self'] = self._tables[rec_id]
@@ -960,12 +985,53 @@ class SimEnvironment:
         finally:
             self._host.env['self'] = saved
 
+    def install_prop_mirror(self, on_prop, on_tween) -> None:
+        """Register a consumer for settled property writes and tween-queue
+        transitions. Registers NOTHING on any actor yet - see `mirror_actor`."""
+        self._prop_mirror = on_prop
+        self._tween_mirror = on_tween
+
+    def mirror_actor(self, rec_id: int) -> None:
+        """Start reporting this actor's settled state to the mirror consumer.
+
+        Per actor, on demand, because the populations are wildly lopsided: on
+        gat 147 actors have a mirrored property written while the body READS
+        only 6 of them. Mirroring all of them cost more than the reads it
+        served (measured +11.5%); mirroring the read ones is nearly free.
+
+        The caller invokes this the first time it has to answer a read for an
+        actor the hard way, so the first read pays and the rest are served."""
+        actor = self._actors.get(rec_id)
+        if actor is None or actor.prop_notify is not None:
+            return
+        on_prop, on_tween = self._prop_mirror, self._tween_mirror
+        if on_prop is None:
+            return
+        actor.prop_notify = (
+            lambda prop, value, r=rec_id: on_prop(r, prop, value))
+        actor.tween_notify = lambda busy, r=rec_id: on_tween(r, busy)
+        # Seed: the actor has been poked since creation and the mirror is empty.
+        for prop, value in actor._current.items():
+            on_prop(rec_id, prop, value)
+        on_tween(rec_id, bool(actor._tweens))
+
+    def observe_global_write(self, callback) -> None:
+        """Call `callback(name)` whenever chart Lua writes that global - a
+        computed name included. The sandbox is proxied precisely so this is
+        knowable; see LuaHost(observe_globals=True)."""
+        self._global_write_observers.append(callback)
+
+    def _notify_global_write(self, name) -> None:
+        for observer in self._global_write_observers:
+            observer(name)
+
     def _run_lua_body(self, rec_id, body, name, load=False) -> None:
         """Run a command body with `self` = the actor's recorder. Bodies
         fire many times (a chara Idle chain re-queues itself for the
         whole song), so each body string compiles ONCE and the cached
         chunk is called thereafter - `self` resolves through the sandbox
         env at call time, so one chunk serves every fire."""
+        self._global_gen += 1
         chunk = self._body_chunks.get(body)
         if chunk is None:
             try:
@@ -991,6 +1057,7 @@ class SimEnvironment:
             self._host.env['self'] = saved
 
     def _run_classic_body(self, rec_id, value) -> None:
+        self._global_gen += 1
         self._sync(rec_id)
         actor = self._actors[rec_id]
         parsed = self._classic_cache.get(value)

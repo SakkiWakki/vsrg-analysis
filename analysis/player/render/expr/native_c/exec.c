@@ -15,6 +15,7 @@ enum {
     OP_JUMP_IF_FALSE, OP_JIF_FALSE_KEEP, OP_JIF_TRUE_KEEP, OP_DUP,
     OP_RETURN_HALT, OP_ITER_SETUP, OP_ITER_NEXT, OP_FALLBACK,
     OP_NUMFOR_TEST, OP_NUMFOR_STEP, OP_TABLE_INSERT, OP_CALL_VALUE,
+    OP_GET_PROP, OP_SET_PROP,
     OP__COUNT
 };
 
@@ -82,7 +83,8 @@ int cexec_run(CExecState *st, CValue self_val) {
         &&L_NEWTABLE_ARR, &&L_POKE, &&L_SET_INDEX, &&L_SET_FIELD, &&L_POP, &&L_JUMP,
         &&L_JUMP_IF_FALSE, &&L_JIF_FALSE_KEEP, &&L_JIF_TRUE_KEEP, &&L_DUP,
         &&L_RETURN_HALT, &&L_ITER_SETUP, &&L_ITER_NEXT, &&L_FALLBACK,
-        &&L_NUMFOR_TEST, &&L_NUMFOR_STEP, &&L_TABLE_INSERT, &&L_CALL_VALUE
+        &&L_NUMFOR_TEST, &&L_NUMFOR_STEP, &&L_TABLE_INSERT, &&L_CALL_VALUE,
+        &&L_GET_PROP, &&L_SET_PROP
     };
     /* NEXT does NOT poll abort - only a frontier call can raise, so CHECK_ABORT
      * is invoked only by the ops that cross (getter/poke/call/index/global/
@@ -114,7 +116,24 @@ int cexec_run(CExecState *st, CValue self_val) {
     }
     OP(STORE_GLOBAL) {
         fe->global_set(fe->ctx, st->names[ops[pc].a], POP());
-        if (st->trim) st->trim->memo_epoch++;
+        if (st->trim) {
+            st->trim->memo_epoch++;
+            /* A name this body STORES is by definition not process-stable, so
+             * drop it out of the stable cache permanently (0, not back to 1 -
+             * the host probes a name for snapshotting only once, and a name
+             * the body writes must never re-promote). Bumping the epoch alone
+             * does NOT cover this: LOAD_SYMBOL tests `stable == 2` BEFORE the
+             * epoch, so a stable entry would survive its own overwrite and
+             * serve the pre-store value for the life of the CBody.
+             *
+             * Reachable because a name can compile to LOAD_SYMBOL at its reads
+             * while STORE_GLOBAL writes it: `collect_global_writes` subtracts
+             * every name that is EVER a local anywhere, so a name that is
+             * `local` in one scope and an implicit global in another is not in
+             * `_global_writes` and `_sym` routes it to LOAD_SYMBOL. Harmless
+             * only while such names hold values that never get marked stable. */
+            st->trim->stable[ops[pc].a] = 0;
+        }
         pc++; NEXT();
     }
     OP(LOAD_SYMBOL) {
@@ -127,10 +146,14 @@ int cexec_run(CExecState *st, CValue self_val) {
         CValue sv = fe->symbol(fe->ctx, st->names[id]);
         if (tr) {
             tr->memo_val[id] = sv; tr->memo_gen[id] = tr->memo_epoch;
-            /* handle values dangle across runs (the host clears its
-             * registry per tick); only self-contained values (numbers,
-             * arena tables/strings) may cache forever. */
-            if (tr->stable[id] == 1 && !cv_is_handle(sv)) tr->stable[id] = 2;
+            /* The HOST decides what may cache across runs, and only marks a
+             * name it can keep valid: an arena snapshot, or a value it boxes
+             * per NAME so the CValue is stable (cbody._out_named). Handles are
+             * no longer refused here - a pinned name box is a handle whose
+             * payload outlives the tick, and refusing it would exclude exactly
+             * the singletons this exists for. The host drops every mark via
+             * cbody_clear_stable when unseen host code may have rebound. */
+            if (tr->stable[id] == 1) tr->stable[id] = 2;
         }
         PUSH(sv); pc++; NEXT();
     }
@@ -141,8 +164,10 @@ int cexec_run(CExecState *st, CValue self_val) {
     OP(UNARY) {
         CValue a = POP();
         /* #handle (host table length) crosses the frontier; arena tables/strings
-         * are handled natively by cv_unary. (op id 2 = CUN_LEN.) */
-        if (ops[pc].a == 2 && cv_is_handle(a)) {
+         * are handled natively by cv_unary. (op id 2 = CUN_LEN.) An ACTOR is a
+         * host table too - without it here `#P1` would stop crossing and become
+         * UNRESOLVED instead of the 0 the host answers. */
+        if (ops[pc].a == 2 && (cv_is_handle(a) || cv_is_actor(a))) {
             int64_t n = fe->length(fe->ctx, a);
             PUSH(n < 0 ? cv_unresolved() : cv_num((double)n)); pc++; NEXT();
         }
@@ -189,6 +214,38 @@ int cexec_run(CExecState *st, CValue self_val) {
             tr->clock_recv = recv; tr->clock_recv_set = 1;
         }
         PUSH(r); pc++; NEXT();
+    }
+    OP(GET_PROP) {
+        /* A getter whose verb resolved to a plain property at compile time.
+         * Carries an int, not a name: nothing to decode, nothing to route.
+         * A settled property on a live actor is answered from the mirror with
+         * no crossing at all; a running head tween means the value is being
+         * interpolated host-side, so that read still crosses. */
+        CValue recv = POP();
+        CActorProps *ap = st->props;
+        if (ap && cv_is_actor(recv)) {
+            uint64_t rec = cv_payload(recv);
+            if ((int)rec < ap->nactors && !ap->tweening[rec]) {
+                int slot = (int)rec * ap->nprops + ops[pc].a;
+                if (ap->present[slot]) {
+                    PUSH(cv_num(ap->value[slot])); pc++; NEXT();
+                }
+            }
+        }
+        CValue r = fe->get_prop(fe->ctx, recv, ops[pc].a);
+        CHECK_ABORT();
+        PUSH(r); pc++; NEXT();
+    }
+    OP(SET_PROP) {
+        /* A setter resolved to a property at compile time. Still crosses - the
+         * write records a keyframe host-side - but carries an int, so there is
+         * no name to decode and no verb table to walk. */
+        CValue value = POP();
+        CValue recv = POP();
+        fe->set_prop(fe->ctx, recv, ops[pc].a, value);
+        if (st->trim) st->trim->memo_epoch++;
+        CHECK_ABORT();
+        pc++; NEXT();
     }
     OP(METHOD) {  /* same shape as GETTER for now (GetChild/GetShader) */
         int argc = ops[pc].b;

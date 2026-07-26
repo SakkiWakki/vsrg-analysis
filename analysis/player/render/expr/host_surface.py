@@ -87,6 +87,14 @@ class LuaHostSurface:
     `_global(name)` and the game-specific `symbol`/`call`/`method`/`poke`/
     `clock_reader`."""
 
+    def actor_id(self, value) -> int | None:
+        """No actor concept at this level - a lupa host is just tables. A game
+        subclass that models actors overrides both this and `actor_value`."""
+        return None
+
+    def actor_value(self, actor_id: int):
+        return None
+
     def _global(self, name: str):
         """Read a bare global by name from this host's namespace, returning the
         RAW host value (None for absent). Subclass hook: the base is namespace-

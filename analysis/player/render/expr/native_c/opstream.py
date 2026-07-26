@@ -56,6 +56,8 @@ class Op:
     FALLBACK     = 29   # a=node-pool id; route this AST node to the interpreter
     TABLE_INSERT = 32   # pops table,value; append (arena) or frontier host table
     CALL_VALUE   = 33   # a=argc; pops fn,args -> call a computed callable
+    GET_PROP     = 34   # a=prop id; pops recv -> a live actor property read
+    SET_PROP     = 35   # a=setter id; pops recv,value -> a live actor write
 
 
 # native math fns the analytic/native path supports (compile-resolved).
@@ -106,6 +108,15 @@ class Compiler:
         # candidates to snapshot into the arena so nested v[i][j] indexing never
         # crosses back to Python. `writes` are excluded when compile() runs.
         self._symbol_reads: set[str] = set()
+        # Inlining state: the helpers available, the ones currently being
+        # inlined (a self-call falls back to a crossing rather than recursing
+        # forever), and a stack of [result_slot, exit_jump_sites] frames.
+        self._inline_fns: dict = {}
+        self._prop_gets: dict = {}
+        self._prop_sets: dict = {}
+        self._prop_verbs: tuple = ()
+        self._inlining: set = set()
+        self._inline_frames: list = []
 
     # -- pools --
     def _const(self, value):
@@ -145,8 +156,18 @@ class Compiler:
         return idx
 
     # ----------------------------------------------------------------
-    def compile(self, stmts, global_writes: set):
+    def compile(self, stmts, global_writes: set, receivers=None,
+                inline_fns=None, prop_gets=None, prop_sets=None):
         self._global_writes = global_writes
+        self._receivers = receivers
+        self._inline_fns = inline_fns or {}
+        self._prop_gets = prop_gets or {}
+        self._prop_sets = prop_sets or {}
+        # id -> verb, the inverse the frontier needs for a non-actor receiver.
+        self._prop_verbs = tuple(
+            v for v, _i in sorted(self._prop_gets.items(), key=lambda kv: kv[1]))
+        self._set_verbs = tuple(
+            v for v, _i in sorted(self._prop_sets.items(), key=lambda kv: kv[1]))
         root = _Scope()
         # slot 0 is reserved for `self` (rebound each tick)
         self._slot(root, 'self')
@@ -154,7 +175,8 @@ class Compiler:
             self._stmt(s, root)
         self._emit(Op.RETURN_HALT)
         return OpProgram(self.ops, self.consts, self.names, self.nodes,
-                         self.nslots, self._symbol_reads)
+                         self.nslots, self._symbol_reads, self._receivers,
+                         self._prop_verbs, self._set_verbs)
 
     # -- statements --
     def _stmt(self, node, scope):
@@ -170,10 +192,21 @@ class Compiler:
             # is a getter. Everything else: evaluate + discard.
             e = node.expr
             if type(e) is ast.Method:
-                self._expr(e.recv, scope)
-                for arg in e.args:
-                    self._expr(arg, scope)
-                self._emit(Op.POKE, self._name(e.name), len(e.args))
+                # A setter the host published as a plain property write lowers
+                # to SET_PROP with an integer id - the verb is a compile-time
+                # constant, so resolving it per tick is work that need not
+                # happen. One argument only: the multi-property verbs (zoom,
+                # align) write two properties from one call and keep crossing.
+                set_id = self._prop_sets.get(e.name)
+                if set_id is not None and len(e.args) == 1:
+                    self._expr(e.recv, scope)
+                    self._expr(e.args[0], scope)
+                    self._emit(Op.SET_PROP, set_id)
+                else:
+                    self._expr(e.recv, scope)
+                    for arg in e.args:
+                        self._expr(arg, scope)
+                    self._emit(Op.POKE, self._name(e.name), len(e.args))
             else:
                 self._expr(e, scope, want_value=True)
                 self._emit(Op.POP)
@@ -185,12 +218,71 @@ class Compiler:
             self._while(node, scope)
         elif t is ast.GenericFor:
             self._generic_for(node, scope)
+        elif t is ast.Return and self._inline_frames:
+            self._inline_return(node, scope)
         elif t is ast.Return and not node.values:
             self._emit(Op.RETURN_HALT)
         else:
             # FuncDef, Return-with-value, Unparsed, anything unmodeled ->
             # interpreter fallback (never a coverage regression).
             self._emit(Op.FALLBACK, self._node(node))
+
+    def _inline_return(self, node, scope):
+        """`return` inside an INLINED helper stores its value and jumps to the
+        inline's end. It must NOT emit RETURN_HALT - that ends the whole tick,
+        not the helper."""
+        frame = self._inline_frames[-1]
+        if node.values:
+            self._expr(node.values[0], scope)
+        else:
+            self._emit(Op.CONST, self._const(None))
+        self._emit(Op.STORE_SLOT, frame[0])
+        frame[1].append(self._emit(Op.JUMP))
+
+    def _inline_call(self, node, name, scope) -> bool:
+        """Compile `name(args)` as the helper's BODY in place of a crossing.
+
+        The helper's scope is a FRESH root, never a child of the call site: a
+        top-level Lua function sees globals and its own params, and must not
+        capture the caller's locals. Arguments evaluate left to right in the
+        CALLER's scope, then bind - extras are evaluated and discarded, missing
+        ones bind nil, both as Lua does."""
+        fn = self._inline_fns.get(name)
+        if fn is None or name in self._inlining \
+                or len(self._inline_frames) >= _INLINE_DEPTH:
+            return False
+
+        inner = _Scope()
+        result = self.nslots
+        self.nslots += 1
+        slots = [self._slot(inner, p) for p in fn.params]
+
+        for arg in node.args:
+            self._expr(arg, scope)
+        for _extra in range(len(node.args) - len(slots)):
+            self._emit(Op.POP)
+        for slot in reversed(slots[:len(node.args)]):
+            self._emit(Op.STORE_SLOT, slot)
+        for slot in slots[len(node.args):]:
+            self._emit(Op.CONST, self._const(None))
+            self._emit(Op.STORE_SLOT, slot)
+
+        # A body that falls off the end yields nil.
+        self._emit(Op.CONST, self._const(None))
+        self._emit(Op.STORE_SLOT, result)
+
+        frame = [result, []]
+        self._inline_frames.append(frame)
+        self._inlining.add(name)
+        for stmt in fn.body:
+            self._stmt(stmt, inner)
+        self._inlining.discard(name)
+        self._inline_frames.pop()
+
+        for site in frame[1]:
+            self._patch(site, a=len(self.ops))
+        self._emit(Op.LOAD_SLOT, result)
+        return True
 
     def _local(self, node, scope):
         # evaluate RHS values, then bind slots (Lua: RHS sees the OLD bindings)
@@ -399,6 +491,18 @@ class Compiler:
         # recv:verb(args). A getter (returns a value) vs a poke (effect) is
         # decided by whether the result is used - here in expr position it is a
         # GETTER read. Push recv, args, then GETTER.
+        #
+        # A verb the host published as a plain PROPERTY read lowers to GET_PROP
+        # carrying an integer id instead. The verb is a compile-time constant,
+        # so resolving it to a property has no business happening per tick: the
+        # generic GETTER crosses with a string the host must decode and then
+        # route through its verb tables, several thousand times a second, to
+        # reach an answer fixed at compile time.
+        prop_id = self._prop_gets.get(node.name)
+        if prop_id is not None and not node.args:
+            self._expr(node.recv, scope)
+            self._emit(Op.GET_PROP, prop_id)
+            return
         self._expr(node.recv, scope)
         for arg in node.args:
             self._expr(arg, scope)
@@ -443,6 +547,8 @@ class Compiler:
             return
         # a plain free call name(args) -> frontier / closure
         if type(fn) is ast.Sym and scope.resolve(fn.name) is None:
+            if self._inline_call(node, fn.name, scope):
+                return
             for arg in node.args:
                 self._expr(arg, scope)
             self._emit(Op.CALL_SYM, self._name(fn.name), len(node.args))
@@ -478,7 +584,8 @@ class OpProgram:
     """The compiled body: op records + pools + slot count. `serialize()` packs
     into the flat buffers the C executor consumes."""
 
-    def __init__(self, ops, consts, names, nodes, nslots, symbol_reads=None):
+    def __init__(self, ops, consts, names, nodes, nslots, symbol_reads=None,
+                 receivers=None, prop_verbs=(), set_verbs=()):
         self.ops = ops
         self.consts = consts
         self.names = names
@@ -486,6 +593,13 @@ class OpProgram:
         self.nslots = nslots
         # Bare-symbol reads never written by the body: arena-snapshot candidates.
         self.symbol_reads = symbol_reads or set()
+        # Which crossing-out sources can reach a method receiver - see
+        # ReceiverSources. None when the caller did not ask for the analysis.
+        self.receivers = receivers or ReceiverSources()
+        # GET_PROP id -> source verb, so a non-actor receiver can still be
+        # answered through the generic path.
+        self.prop_verbs = tuple(prop_verbs)
+        self.set_verbs = tuple(set_verbs)
 
     def summary(self):
         from collections import Counter
@@ -544,6 +658,342 @@ class OpProgram:
         }
 
 
+def _free_names(node, bound: set) -> set:
+    """Names `node` reads that `bound` does not supply - its free variables."""
+    free: set = set()
+    scoped = set(bound)
+
+    def scan(n):
+        t = type(n)
+        if t is ast.Sym:
+            if n.name not in scoped:
+                free.add(n.name)
+            return
+        if t is ast.Local:
+            for v in n.values:
+                scan(v)
+            scoped.update(n.names)
+            return
+        if t is ast.NumericFor:
+            scoped.add(n.var)
+        elif t is ast.GenericFor:
+            scoped.update(n.names)
+        elif t in (ast.FuncDef, ast.FuncExpr):
+            scoped.update(n.params)
+        if t is ast.Field:
+            scan(n.base)          # `.name` is a literal key, not a read
+            return
+        for child in _walk(n):
+            scan(child)
+
+    scan(node)
+    return free
+
+
+def _contains(node, kinds: tuple) -> bool:
+    if type(node) in kinds:
+        return True
+    return any(_contains(c, kinds) for c in _walk(node))
+
+
+def collect_runtime_written(load_sources, command_sources, parse) -> tuple:
+    """Global names something can rebind WHILE THE SWEEP RUNS, plus whether the
+    chart writes globals dynamically at all.
+
+    A symbol may only be cached across ticks if nothing can change what it
+    means mid-run. `STORE_GLOBAL` already evicts the names the compiled body
+    itself writes; this covers everyone ELSE sharing the namespace, and it is a
+    static question, so it is answered statically.
+
+    Runtime, in this sim, means:
+    - an assignment lexically inside ANY function body, load chunk or not. A
+      top-level `function f() X = 1 end` writes `X` whenever `f` is called, not
+      when the chunk ran.
+    - anything a COMMAND body assigns. Command bodies re-fire for the whole
+      song (an Idle chain re-queues itself), and one cached chunk is re-run
+      with `self` rebound per firing actor - so a shared `X = self` rebinds X
+      per fire.
+    A load chunk's TOP-LEVEL assignment is not runtime: chunks complete before
+    the sweep starts. That is what keeps `mod_firstSeenBeat` eligible.
+
+    Returns `(names, dynamic)`. `dynamic` is True when any chunk assigns through
+    a computed key (`_G[expr] = v`), which no name-keyed analysis can track -
+    the caller must then trust nothing. Chart Lua is arbitrary user content, so
+    this is the escape hatch that keeps the rule sound rather than merely
+    unfalsified on the charts to hand."""
+    names: set = set()
+    dynamic = False
+
+    def targets(node, inside_function):
+        nonlocal dynamic
+        kind = type(node)
+        if kind in (ast.FuncDef, ast.FuncExpr):
+            for child in _walk(node):
+                targets(child, True)
+            return
+        if kind is ast.Assign:
+            for target in node.targets:
+                if type(target) is ast.Sym:
+                    if inside_function:
+                        names.add(target.name)
+                elif type(target) is ast.Index:
+                    base = target.base
+                    if type(base) is ast.Sym and base.name == '_G':
+                        dynamic = True
+        for child in _walk(node):
+            targets(child, inside_function)
+
+    for source in load_sources:
+        try:
+            stmts, _sink = parse(source)
+        except Exception:
+            continue
+        for stmt in stmts:
+            targets(stmt, False)
+    for source in command_sources:
+        try:
+            stmts, _sink = parse(source)
+        except Exception:
+            continue
+        for stmt in stmts:
+            # Every level of a command body is runtime - it re-fires.
+            targets(stmt, True)
+    return names, dynamic
+
+
+def collect_inlinable_helpers(chunk_sources, parse) -> dict:
+    """Top-level `function NAME(params) ... end` definitions that may be INLINED
+    into another body at their call sites.
+
+    A chart's per-frame body calls small helpers that live in the chart's Lua
+    (`perframe(a, b)` is 35 calls per tick on gat, 82% of all free calls). Each
+    one is a full crossing out to the host just to run a few lines of
+    arithmetic. Inlining compiles those lines into the op stream instead, where
+    the clock the helper reads is already resolved.
+
+    The definition STAYS in the host, untouched: this mints a second, compiled
+    copy for the compiled body's own call sites. Two copies of a function are
+    only safe when the function has no identity and no private state, which is
+    what the screen below enforces:
+
+    - no `FuncDef`/`FuncExpr` in the body - a closure minted by the inlined copy
+      could be stored and later invoked by the host, and a closure created in
+      one interpreter cannot be called by another.
+    - no free name that is a LOCAL of the defining chunk. A top-level function
+      may close over a chunk-local (`local __C = ...` then `function f() __C[k]
+      end`); inlined, that name would compile to a global read and silently
+      resolve to nothing. This is the screen that matters most, and it is why
+      the chunk's own locals have to be collected rather than just the body's.
+    - no varargs, and no recursion into another inlinable helper (the inliner
+      refuses to nest, so a self-call falls back to the ordinary crossing).
+
+    Side effects are NOT screened out: an inlined body performs exactly the
+    operations the host copy would, in the same order, against the same shared
+    globals. It is state and identity that cannot be duplicated, not effects.
+
+    `chunk_sources` is an iterable of Lua source strings; `parse` turns one into
+    a statement tuple. A name defined more than once with differing bodies is
+    dropped - which definition wins at runtime is load-order, not ours to
+    guess."""
+    found: dict = {}
+    rejected: set = set()
+    for source in chunk_sources:
+        try:
+            stmts, _sink = parse(source)
+        except Exception:
+            continue
+        chunk_locals: set = set()
+        for stmt in stmts:
+            if type(stmt) is ast.Local:
+                chunk_locals.update(stmt.names)
+        for stmt in stmts:
+            if type(stmt) is not ast.FuncDef or stmt.is_local:
+                continue
+            name = stmt.name
+            if _contains_body(stmt, (ast.FuncDef, ast.FuncExpr)):
+                rejected.add(name)
+                continue
+            free = set()
+            for s in stmt.body:
+                free |= _free_names(s, set(stmt.params))
+            if free & chunk_locals:
+                rejected.add(name)
+                continue
+            if len(stmt.body) > _INLINE_MAX_STMTS \
+                    or _inline_crossing_cost(stmt) > _INLINE_MAX_CROSSINGS:
+                rejected.add(name)
+                continue
+            prior = found.get(name)
+            if prior is not None and prior != stmt:
+                rejected.add(name)
+                continue
+            found[name] = stmt
+    return {k: v for k, v in found.items() if k not in rejected}
+
+
+def _inline_crossing_cost(funcdef) -> int:
+    """Frontier crossings the helper would emit AT AN INLINED CALL SITE.
+
+    Inlining moves the helper's work out of the host and into the op stream,
+    where every host read becomes a crossing that cost nothing while it ran
+    inside the host. So a helper pays for itself only when its body crosses
+    less than the call it replaces. Decided once per definition at compile
+    time, never sampled per crossing.
+
+    Compiled through the REAL inline path, not the body in isolation: compiled
+    standalone, the parameters and locals are unbound and turn into global
+    reads and stores, and `return <value>` becomes a FALLBACK - which charged
+    gat's 3-crossing `perframe` at over twice that and rejected it.
+
+    gat's `perframe` costs 3 (two clock getters the executor answers itself,
+    plus one global read); `do back burn` ships a different `perframe` costing
+    far more, and inlining that one measured +3.4%."""
+    compiler = Compiler()
+    compiler._global_writes = collect_global_writes(funcdef.body)
+    compiler._inline_fns = {funcdef.name: funcdef}
+    scope = _Scope()
+    compiler._slot(scope, 'self')
+    call = ast.Call(fn=ast.Sym(name=funcdef.name),
+                    args=tuple(ast.Nil() for _ in funcdef.params))
+    try:
+        compiler._expr(call, scope)
+    except Exception:
+        return _INLINE_MAX_CROSSINGS + 1      # uncompilable: do not inline
+    cost = 0
+    for op, a, _b, _c in compiler.ops:
+        kind = _OP_NAMES.get(op)
+        if kind not in _CROSSING_OPS:
+            continue
+        if kind == 'GETTER' and a < len(compiler.names) \
+                and compiler.names[a] in _CLOCK_VERBS:
+            continue
+        cost += 1
+    return cost
+
+
+def _contains_body(funcdef, kinds: tuple) -> bool:
+    return any(_contains(s, kinds) for s in funcdef.body)
+
+
+# How deep helper inlining may nest before falling back to a crossing, and the
+# largest helper body worth duplicating at every call site.
+_INLINE_DEPTH = 4
+_INLINE_MAX_STMTS = 12
+
+# Ops that leave the executor for the host. Inlining a helper only pays if its
+# body emits FEWER of these than the single CALL_SYM it replaces costs - and a
+# crossing is worth several ops, hence a budget rather than one-for-one.
+_CROSSING_OPS = frozenset({
+    'GETTER', 'METHOD', 'POKE', 'CALL_SYM', 'CALL_VALUE', 'LOAD_SYMBOL',
+    'LOAD_GLOBAL', 'STORE_GLOBAL', 'INDEX', 'SET_INDEX', 'FALLBACK',
+    'TABLE_INSERT'})
+# The executor answers these from its own per-tick clock, so a getter on one
+# never reaches the host and must not be charged to the helper.
+_CLOCK_VERBS = frozenset({'GetSongBeat', 'GetSongTime'})
+_INLINE_MAX_CROSSINGS = 6
+
+
+# Opcode value -> name, for the crossing-cost accounting above.
+_OP_NAMES = {int(getattr(Op, a)): a for a in dir(Op) if a.isupper()}
+
+
+class ReceiverSources:
+    """Which crossing-OUT sources can reach a METHOD RECEIVER position.
+
+    The frontier can tag a value as a live actor on its way out, which makes a
+    later `recv:verb(...)` on it cheap. But the tag costs a probe on EVERY value
+    that site emits, while it only pays back on values that come BACK as a
+    receiver - and on a real chart that ratio ran about 2:1 against, which is
+    why sampling actor density at runtime measured net-zero.
+
+    Whether a value can ever be a receiver is a STATIC property of the body, so
+    it is decided here instead. `symbols` / `calls` / `getters` name the sources
+    whose result can flow into a receiver; `index` / `field` are whole-site
+    flags because those crossings carry no name to key on.
+
+    Flow is traced through variable bindings to a fixed point, so the common
+    `local p = Plr(1)  p:zoom(x)` idiom marks `Plr` even though the receiver is
+    a slot. Conservative in the direction of MORE probing: an unrecognised
+    receiver shape turns its site on rather than off, because a site wrongly on
+    only costs speed while a site wrongly off would tag nothing and lose the
+    identity the executor depends on."""
+
+    __slots__ = ('symbols', 'calls', 'getters', 'index', 'field')
+
+    def __init__(self):
+        self.symbols: set[str] = set()
+        self.calls: set[str] = set()
+        self.getters: set[str] = set()
+        self.index = False
+        self.field = False
+
+
+def _walk(node):
+    """Every child Node of `node`, through tuple fields."""
+    for f in getattr(node, '__dataclass_fields__', {}):
+        v = getattr(node, f)
+        if isinstance(v, ast.Node):
+            yield v
+        elif isinstance(v, tuple):
+            for item in v:
+                if isinstance(item, ast.Node):
+                    yield item
+
+
+def collect_receiver_sources(stmts) -> ReceiverSources:
+    """See `ReceiverSources`. Walks the body once to collect every receiver
+    expression and every name binding, then propagates receiver-ness backwards
+    through the bindings until it stops growing."""
+    found = ReceiverSources()
+    bindings: dict = {}
+    pending: list = []
+
+    def scan(node):
+        t = type(node)
+        if t is ast.Method:
+            pending.append(node.recv)
+        elif t is ast.Assign:
+            for target, value in zip(node.targets, node.values):
+                if type(target) is ast.Sym:
+                    bindings.setdefault(target.name, []).append(value)
+        elif t is ast.Local:
+            for name, value in zip(node.names, node.values):
+                bindings.setdefault(name, []).append(value)
+        for child in _walk(node):
+            scan(child)
+
+    for stmt in stmts:
+        scan(stmt)
+
+    seen_names: set = set()
+    while pending:
+        node = pending.pop()
+        t = type(node)
+        if t is ast.Sym:
+            # A receiver read by NAME: the symbol site must tag it, and so must
+            # whatever the name was bound from (one hop per iteration).
+            found.symbols.add(node.name)
+            if node.name not in seen_names:
+                seen_names.add(node.name)
+                pending.extend(bindings.get(node.name, ()))
+        elif t is ast.Call:
+            if type(node.fn) is ast.Sym:
+                found.calls.add(node.fn.name)
+            else:
+                pending.append(node.fn)
+        elif t is ast.Method:
+            found.getters.add(node.name)
+        elif t is ast.Index:
+            found.index = True
+        elif t is ast.Field:
+            found.field = True
+        elif t is not None:
+            # An unrecognised receiver shape (a parenthesised expression, a
+            # binary result): recurse rather than silently declining to tag.
+            pending.extend(_walk(node))
+    return found
+
+
 def collect_global_writes(stmts) -> set:
     """Names ASSIGNED anywhere in the body but never declared `local` / a loop
     var / param at that point - Lua implicit globals = the accumulator set.
@@ -591,7 +1041,10 @@ def collect_global_writes(stmts) -> set:
     return writes - locals_seen
 
 
-def compile_body_ops(stmts):
+def compile_body_ops(stmts, inline_fns=None, prop_gets=None,
+                     prop_sets=None):
     """Compile a parsed body to an OpProgram. Entry point."""
     writes = collect_global_writes(stmts)
-    return Compiler().compile(stmts, writes)
+    receivers = collect_receiver_sources(stmts)
+    return Compiler().compile(stmts, writes, receivers, inline_fns,
+                              prop_gets, prop_sets)

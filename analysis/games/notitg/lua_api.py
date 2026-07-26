@@ -684,6 +684,19 @@ local __GETTER = __GETTER_SET
 -- time. Both route to Python (__actor_command) with the recorder id so
 -- the dispatched body records onto the same recorder as `self`.
 local __COMMAND = __COMMAND_SET
+
+--- The recorder id behind a value, or nil when it is not a recorder.
+--- RAWGET, deliberately: every recorder carries an __index metamethod that
+--- answers ANY key with a closure, and the singleton/permissive tables answer
+--- with another permissive table - so a plain `t.__recorder_id` allocates on
+--- every miss and then has to be unwound Python-side. This is the classifier
+--- the op-stream frontier calls on values crossing OUT, so it runs on far more
+--- non-recorders than recorders and has to be flat for both.
+function __rec_id(t)
+    if type(t) ~= 'table' then return nil end
+    return rawget(t, '__recorder_id')
+end
+
 function __make_recorder(id)
     local t = {__recorder_id = id}
     setmetatable(t, {__index = function(_, key)

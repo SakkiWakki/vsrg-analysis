@@ -29,6 +29,40 @@ _SAFE_BUILTINS = (
 )
 _SAFE_MODULES = ('math', 'string', 'table')
 
+# The sandbox proxy: reads and writes forward to `store`, and every write is
+# reported. Values never live in the proxy itself, so an overwrite fires
+# __newindex exactly as a first write does.
+_PROXY_FACTORY = """
+function(store, notify)
+    local env = {}
+    setmetatable(env, {
+        __index = function(_, key) return store[key] end,
+        __newindex = function(_, key, value)
+            store[key] = value
+            notify(key, value)
+        end,
+    })
+    store['_G'] = env
+    return env
+end
+"""
+
+# `rawset(_G, k, v)` skips __newindex; this replacement keeps the raw semantics
+# for any other table while still reporting a write to the sandbox.
+_RAWSET_FACTORY = """
+function(store, notify, env)
+    return function(target, key, value)
+        if target == env then
+            store[key] = value
+            notify(key, value)
+            return target
+        end
+        rawset(target, key, value)
+        return target
+    end
+end
+"""
+
 _LOADER_FACTORY = """
 function(env)
     if setfenv then
@@ -74,7 +108,7 @@ class LuaScriptError(Exception):
 
 
 class LuaHost:
-    def __init__(self, dialect: str = 'lua54'):
+    def __init__(self, dialect: str = 'lua54', observe_globals: bool = False):
         runtime = getattr(lupa, dialect)
         # Each bundled dialect module carries its own LuaError class.
         self._lua_error = runtime.LuaError
@@ -83,11 +117,27 @@ class LuaHost:
             register_eval=False,
             register_builtins=False,
         )
+        # Global-write observation (opt-in). The sandbox becomes a PROXY whose
+        # values live in a separate store, so `__newindex` fires on every write
+        # rather than only the first - an existing key writes straight through
+        # a metatable, which is the usual way this technique is got wrong.
+        # Costs ~2ns per Lua global access, measured.
+        #
+        # Opt-in because it changes what RAW table operations see: `#env`,
+        # `next(env)` and Python-side `in`/`.items()` all read the proxy, which
+        # is empty. Use `has_global`/`global_items` instead of touching `env`
+        # directly. LuaHost is shared with games that do neither.
+        self._observed = bool(observe_globals)
+        self._store = None
+        self._mirror: dict = {}
+        self._on_global_write = None
         self._env = self._build_env()
         self._load_in_env = self._lua.eval(_LOADER_FACTORY)(self._env)
         self._compile_in_env = self._lua.eval(_COMPILER_FACTORY)(self._env)
 
     def _build_env(self):
+        if self._observed:
+            return self._build_observed_env()
         source = self._lua.globals()
         env = self._lua.table()
         for name in _SAFE_BUILTINS:
@@ -101,6 +151,71 @@ class LuaHost:
             env['unpack'] = source['table']['unpack']
         env['_G'] = env
         return env
+
+    def _build_observed_env(self):
+        """The sandbox as a store-backed proxy - see `__init__`."""
+        source = self._lua.globals()
+        store = self._lua.table()
+        for name in _SAFE_BUILTINS:
+            if source[name] is not None:
+                store[name] = source[name]
+        for name in _SAFE_MODULES:
+            store[name] = source[name]
+        if store['unpack'] is None:
+            store['unpack'] = source['table']['unpack']
+        env = self._lua.eval(_PROXY_FACTORY)(store, self._notify_global_write)
+        # `rawset` would bypass __newindex entirely, so the sandbox publishes a
+        # notifying one instead of the real builtin. The sandbox decides what
+        # its builtins ARE, which is what makes the observation complete rather
+        # than merely probable - chart Lua is arbitrary.
+        store['rawset'] = self._lua.eval(_RAWSET_FACTORY)(
+            store, self._notify_global_write, env)
+        self._store = store
+        # Seed from the store: the builtins/modules were written raw above, so
+        # they never fired __newindex.
+        self._mirror = {k: v for k, v in store.items() if isinstance(k, str)}
+        self._mirror['_G'] = env
+        return env
+
+    def _notify_global_write(self, name, value=None) -> None:
+        if not isinstance(name, str):
+            return
+        # The mirror is why the proxy earns its keep: a global read becomes a
+        # Python dict lookup instead of a metamethod call into Lua, and the
+        # write that would invalidate it hands us the new value directly.
+        self._mirror[name] = value
+        if self._on_global_write is not None:
+            self._on_global_write(name)
+
+    def observe_global_writes(self, callback) -> None:
+        """Call `callback(name)` on every global write. Requires the host to
+        have been built with `observe_globals=True`; otherwise there is nothing
+        watching and this raises rather than silently never firing."""
+        if not self._observed:
+            raise LuaScriptError(
+                'observe_global_writes needs LuaHost(observe_globals=True)')
+        self._on_global_write = callback
+
+    def global_value(self, name: str):
+        """A global's current value - a dict lookup when observed, since every
+        write reports itself. Falls back to indexing the env otherwise. Returns
+        None for an absent name, matching Lua's nil."""
+        if self._observed:
+            return self._mirror.get(name)
+        return self._env[name]
+
+    def has_global(self, name: str) -> bool:
+        """`name in env`, honouring the proxy. A raw `in` against an observed
+        env is always False - the values live in the store."""
+        if self._observed:
+            return self._mirror.get(name) is not None
+        return self._env[name] is not None
+
+    def global_items(self):
+        """(name, value) pairs, honouring the proxy. A raw `.items()` against
+        an observed env yields nothing."""
+        table = self._store if self._observed else self._env
+        return table.items()
 
     def expose(self, name: str, value) -> None:
         """Publish `value` under `name` in the sandbox. Python values

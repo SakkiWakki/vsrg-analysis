@@ -27,7 +27,7 @@
  *     by type-punning u64->f64.
  *   - Below the signature: a 3-bit tag [50..48] then a 48-bit payload [47..0].
  *
- * Payload ids (STR/TABLE/FUNC) index arenas the kernel owns (carena.c); HANDLE
+ * Payload ids (STR/TABLE) index arenas the kernel owns (carena.c); HANDLE
  * carries an opaque host id the frontier resolves. 48 bits is ample (the corpus
  * never approaches 2^48 strings/tables).
  *
@@ -56,7 +56,7 @@ typedef uint64_t CValue;
 #define CV_PAYLOAD_MASK 0x0000FFFFFFFFFFFFULL /* low 48 bits */
 
 /* Tags (3 bits). NIL/TRUE/FALSE/UNRESOLVED are singletons (payload 0);
- * STR/TABLE/FUNC/HANDLE carry a 48-bit id. That is 8 tags - exactly our set,
+ * STR/TABLE/ACTOR/HANDLE carry a 48-bit id. That is 8 tags - exactly our set,
  * folding Bool into two singleton tags so `truthy` is a pure bit test. */
 enum {
     CV_TAG_NIL        = 0,
@@ -65,7 +65,7 @@ enum {
     CV_TAG_UNRESOLVED = 3,
     CV_TAG_STR        = 4,
     CV_TAG_TABLE      = 5,
-    CV_TAG_FUNC       = 6,
+    CV_TAG_ACTOR      = 6,
     CV_TAG_HANDLE     = 7,
 };
 
@@ -86,7 +86,14 @@ static inline CValue cv_unresolved(void) { return cv_box(CV_TAG_UNRESOLVED, 0); 
 static inline CValue cv_bool(int b)      { return cv_box(b ? CV_TAG_TRUE : CV_TAG_FALSE, 0); }
 static inline CValue cv_str(uint64_t id)    { return cv_box(CV_TAG_STR, id); }
 static inline CValue cv_table(uint64_t id)  { return cv_box(CV_TAG_TABLE, id); }
-static inline CValue cv_func(uint64_t id)   { return cv_box(CV_TAG_FUNC, id); }
+/* A LIVE HOST ACTOR, payload = the host's stable actor id (NotITG's rec_id).
+ * Distinct from HANDLE because a handle's payload indexes a registry the host
+ * CLEARS every tick, so a handle may not outlive the run that minted it; an
+ * actor id is permanent within its environment. Occupies the slot the unused
+ * Func tag held - the C kernel never constructed a Func, so nothing lost a
+ * representation, but this DIVERGES from native/src/value.rs, whose Func
+ * variant is real. The two are independent implementations. */
+static inline CValue cv_actor(uint64_t id)  { return cv_box(CV_TAG_ACTOR, id); }
 static inline CValue cv_handle(uint64_t id) { return cv_box(CV_TAG_HANDLE, id); }
 
 /* --- predicates --------------------------------------------------------- */
@@ -118,7 +125,7 @@ static inline int cv_is_nil(CValue v)        { return !cv_is_num(v) && cv_tag(v)
 static inline int cv_is_unresolved(CValue v) { return !cv_is_num(v) && cv_tag(v) == CV_TAG_UNRESOLVED; }
 static inline int cv_is_str(CValue v)        { return !cv_is_num(v) && cv_tag(v) == CV_TAG_STR; }
 static inline int cv_is_table(CValue v)      { return !cv_is_num(v) && cv_tag(v) == CV_TAG_TABLE; }
-static inline int cv_is_func(CValue v)       { return !cv_is_num(v) && cv_tag(v) == CV_TAG_FUNC; }
+static inline int cv_is_actor(CValue v)      { return !cv_is_num(v) && cv_tag(v) == CV_TAG_ACTOR; }
 static inline int cv_is_handle(CValue v)     { return !cv_is_num(v) && cv_tag(v) == CV_TAG_HANDLE; }
 static inline int cv_is_bool(CValue v) {
     if (cv_is_num(v)) return 0;
