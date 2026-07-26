@@ -214,8 +214,6 @@ IGNORED: dict = {
     'ztest': 'depth test toggle - see zbuffer',
     'ztestmode': 'depth test mode string - see zbuffer',
     'zwrite': 'depth write toggle - see zbuffer',
-    'backfacecull': 'backface cull toggle - single-sided 2D sprites',
-    'cullmode': 'cull mode string - see backfacecull',
     'Reset': 'resets actor to its XML defaults - load-time only, no anim',
     'Draw': 'imperative re-draw into the current frame; the copy producer '
             'models re-draw through SetTarget binds, not this call',
@@ -403,6 +401,11 @@ HANDLED_BY_NAME: dict = {
     # mechanism 8: immediate bit / hint writes SimActor models
     'hidden': 'visibility', 'visible': 'visibility',
     'blend': 'blend', 'additiveblend': 'blend',
+    # Face culling (SetCullMode/SetBackfaceCull), recorded onto the `cull`
+    # step lane. The two-sided-card idiom needs it: front/back sprite pairs
+    # with the back at rotationx+180 and both `cullmode('front')`, so one
+    # face draws per frame (gat 2's chicken finale).
+    'cullmode': 'cull', 'backfacecull': 'cull',
     'setstate': 'sprite', 'animate': 'sprite', 'play': 'sprite',
     'pause': 'sprite',
     # Sprite:Load(path) - runtime texture swap (openitg Sprite.cpp:246:

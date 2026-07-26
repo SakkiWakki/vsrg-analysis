@@ -77,6 +77,9 @@ _LINK_RESTS = {
     # align by the leaf's local matrix.
     'crop_top': 0.0, 'crop_bottom': 0.0, 'crop_left': 0.0, 'crop_right': 0.0,
     'halign': 0.5, 'valign': 0.5,
+    # Face culling (SetCullMode): 0 none, 1 back, 2 front. Leaf-only, judged
+    # on the ENGINE winding - see TransformChannel.at.
+    'cull': 0.0,
 }
 
 _CROP_PROPS = ('crop_left', 'crop_top', 'crop_right', 'crop_bottom')
@@ -319,6 +322,19 @@ class TransformChannel:
         self._flip_base_y = flip_base_y
 
     def at(self, t):
+        sampled = self.project_at(t)
+        if sampled is None:
+            return None
+        H, alpha = sampled
+        if self._culled(H, t):
+            return None
+        return H, alpha
+
+    def project_at(self, t):
+        """`at` minus the face-culling gate: the composed `(H, alpha)` or
+        None on the visibility/degeneracy gates alone. The doc's cull-gate
+        synthesis samples this - it needs the H a culled frame WOULD have
+        drawn with, which `at` by design no longer returns."""
         if self._t0 is not None:
             t = max(float(t), self._t0)
         alpha = 1.0
@@ -350,6 +366,37 @@ class TransformChannel:
         if verdict == 'gone' or abs(np.linalg.det(H)) < _MIN_DET:
             return None
         return H, alpha
+
+    def _culled(self, H, t) -> bool:
+        """Whether face culling drops this draw at `t`: the leaf's SetCullMode
+        against the projected winding.
+
+        Winding is judged in ENGINE terms. The chart's `basezoomy(-1)` itself
+        reverses winding - an AFT sampler is deliberately BACK-facing at rest,
+        which is how it survives `cullmode('front')` - and `flip_base_y`
+        translates that sign away, so a flipped leaf's engine winding is the
+        NEGATED determinant of ours. The two-sided-card idiom is the consumer:
+        front/back sprite pairs, the back at rotationx+180, both cull 'front',
+        so the projected flip picks exactly one face per frame (gat 2's
+        chicken finale froze upside-down when both drew)."""
+        mode = self.cull_mode_at(t)
+        if mode < 0.5:
+            return False
+        det = H[0, 0] * H[1, 1] - H[0, 1] * H[1, 0]
+        if self._flip_base_y:
+            det = -det
+        return det > 0.0 if mode >= 1.5 else det < 0.0
+
+    def cull_mode_at(self, t) -> float:
+        """The leaf's cull mode at `t`: 0 none, 1 back, 2 front. A link set
+        built before the lane existed reads as none."""
+        timeline = self._links[-1].get('cull') if self._links else None
+        return timeline.sample(t)[0] if timeline is not None else 0.0
+
+    def culled_at(self, H, t) -> bool:
+        """Public face of the cull judgment for a caller that already holds
+        the projected H (`project_at`) - the doc's gate synthesis."""
+        return self._culled(H, t)
 
     def may_draw(self, t) -> bool:
         """True unless the chain's VISIBILITY gates already rule this

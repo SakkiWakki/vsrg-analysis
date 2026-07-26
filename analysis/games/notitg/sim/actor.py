@@ -101,7 +101,15 @@ _MAX_DRAIN_STEPS = 10000
 # invents values that were never written, and a fractional `hidden` reads as
 # hidden to every `>= 0.5` consumer. All are written via `_set_immediate`,
 # mirroring the engine fields that bypass SM's TweenState.
-_STEP_PROPS = frozenset({'hidden', 'awake', 'blend_add', 'frame'})
+_STEP_PROPS = frozenset({'hidden', 'awake', 'blend_add', 'frame', 'cull'})
+
+# Face-culling state (SetCullMode / SetBackfaceCull): which projected
+# winding the engine drops. The two-sided-card idiom depends on it: a pair
+# of sprites, the back one at rotationx+180, both `cullmode('front')`, so
+# exactly ONE face of the spinning card draws per frame (gat 2's chicken
+# rig ends on this - ignoring the verb drew BOTH and the backface painted
+# the final screen upside-down).
+_CULL_MODES = {'none': 0.0, 'back': 1.0, 'front': 2.0}
 
 _DEFAULT_EFFECT_CLOCK = 'bgm'
 
@@ -512,8 +520,11 @@ class SimActor:
         # fields (hidden, vanish, frame) live outside SM's TweenState
         # and must survive a completion.
         self._current.update(head.state)
+        for _p, _v in head.state.items():
+            self._mirror_prop(_p, _v)
         if self._tweens and self._tweens[0] is head:
             self._tweens.pop(0)
+        self._mirror_tweens()
 
     # -- reads -----------------------------------------------------------
 
@@ -717,6 +728,27 @@ class SimActor:
     # keys field copies off it instead of a name list.
     proxy_target: int | None = None
 
+    # A sink for the SETTLED property mirror the op-stream executor reads
+    # without crossing (exec.h CActorProps). None until something installs it,
+    # which is the whole cost on the paths that do not mirror.
+    #
+    # Two things must reach it or the mirror silently serves stale values: a
+    # settled write, and any change to whether the tween QUEUE is occupied - a
+    # running tween means `get` interpolates rather than reading `_current`, so
+    # those reads have to cross. `_write_dest` writes the queue TAIL rather
+    # than `_current` while a tween is queued, so the flag is what stops the
+    # mirror answering from a value that is no longer current.
+    prop_notify = None
+    tween_notify = None
+
+    def _mirror_prop(self, prop, value) -> None:
+        if self.prop_notify is not None:
+            self.prop_notify(prop, value)
+
+    def _mirror_tweens(self) -> None:
+        if self.tween_notify is not None:
+            self.tween_notify(bool(self._tweens))
+
     # -- poke dispatch ---------------------------------------------------
 
     def poke(self, verb: str, args: list) -> None:
@@ -756,6 +788,14 @@ class SimActor:
                 self._set_immediate(
                     'blend_add',
                     1.0 if str(arg0).strip() == 'add' else 0.0)
+            case 'cullmode':
+                self._set_immediate(
+                    'cull', _CULL_MODES.get(str(arg0).strip().lower(), 0.0))
+            case 'backfacecull':
+                self._set_immediate(
+                    'cull',
+                    _CULL_MODES['back'] if _arg_float(arg0, 1.0) != 0.0
+                    else 0.0)
             case 'additiveblend':
                 self._set_immediate(
                     'blend_add', 1.0 if _arg_float(arg0, 1.0) != 0.0
@@ -1123,6 +1163,7 @@ class SimActor:
         if not self._tweens and self.queue_notify is not None:
             self.queue_notify()
         self._tweens.append(_Tween(duration, ease_id, base))
+        self._mirror_tweens()
 
     def _sleep(self, duration) -> None:
         """Sleep(t) = a t-tween plus a zero-tween (Actor.cpp:1068)."""
@@ -1141,8 +1182,10 @@ class SimActor:
                 if dest != start:
                     frozen = self.get(prop)
                     self._current[prop] = frozen
+                    self._mirror_prop(prop, frozen)
                     self._emit_at(self._now, prop, frozen, 0.0, 0)
         self._tweens = []
+        self._mirror_tweens()
 
     def _hurry_tweening(self, factor) -> None:
         """Scale every queued tween's remaining and total time by
@@ -1166,7 +1209,10 @@ class SimActor:
             if dest != self._current.get(prop, _rest(prop)):
                 self._emit_at(self._now, prop, dest, 0.0, 0)
         self._current.update(final)
+        for _p, _v in final.items():
+            self._mirror_prop(_p, _v)
         self._tweens = []
+        self._mirror_tweens()
 
     def _write_dest(self, prop, value) -> None:
         """A setter write: onto the queue tail's state (SetX ->
@@ -1186,6 +1232,7 @@ class SimActor:
                               tail.ease, start=start)
         else:
             self._current[prop] = value
+            self._mirror_prop(prop, value)
             self._emit_at(self._now, prop, value, 0.0, 0)
 
     def _set_scalar(self, prop, value) -> None:
@@ -1201,6 +1248,7 @@ class SimActor:
         if value is None:
             return
         self._current[prop] = value
+        self._mirror_prop(prop, value)
         self._emit_at(self._now, prop, value, 0.0, 0)
 
     # -- non-queue channels ---------------------------------------------

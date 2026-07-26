@@ -355,3 +355,55 @@ def test_playfield_mods_compose_inside_the_field_chain():
         _mods('*-1 -160 x'), 1))
     H, _alpha = channel.at(2.0)
     assert _map_capture(H, 320.0, 240.0) == pytest.approx((160.0, 240.0))
+
+
+# -- face culling (SetCullMode) ----------------------------------------------
+#
+# The two-sided-card idiom: front/back sprite pairs, the back at
+# rotationx+180, both `cullmode('front')`, so the projected winding picks
+# exactly ONE face per frame. Winding is judged in ENGINE terms - the chart's
+# basezoomy(-1) reverses it, and flip_base_y translates that sign away, so a
+# flipped leaf's engine winding is the negated determinant of ours.
+
+def _culled_channel(pokes, flip=False):
+    return field_compose.TransformChannel(
+        [field_compose.link_timelines(
+            {'x': [_kf(0.0, 320.0)], 'y': [_kf(0.0, 240.0)], **pokes})],
+        flip_base_y=flip)
+
+
+def test_cull_front_drops_the_front_face_and_keeps_the_flipped_one():
+    front = _culled_channel({'cull': [_kf(0.0, 2.0)]})
+    assert front.at(1.0) is None, 'front-facing + cull front: dropped'
+    turned = _culled_channel({'cull': [_kf(0.0, 2.0)],
+                              'rotation_x': [_kf(0.0, 180.0)]})
+    assert turned.at(1.0) is not None, 'the 180-degree face survives'
+
+
+def test_cull_back_is_the_complement():
+    front = _culled_channel({'cull': [_kf(0.0, 1.0)]})
+    assert front.at(1.0) is not None
+    turned = _culled_channel({'cull': [_kf(0.0, 1.0)],
+                              'rotation_x': [_kf(0.0, 180.0)]})
+    assert turned.at(1.0) is None
+
+
+def test_cull_judges_engine_winding_for_flipped_leaves():
+    # A chart sampler pokes basezoomy(-1); flip_base_y negates that to +1,
+    # so OUR det is positive while the ENGINE winding is reversed. Culling
+    # must judge the ENGINE side: cull 'front' KEEPS the sampler (that is
+    # how every sampler in the chart survives its own cullmode) and drops
+    # its rotationx+180 backface twin - gat 2's chicken pairs exactly.
+    sampler = _culled_channel({'cull': [_kf(0.0, 2.0)],
+                               'base_scale_y': [_kf(0.0, -1.0)]}, flip=True)
+    assert sampler.at(1.0) is not None
+    backface = _culled_channel({'cull': [_kf(0.0, 2.0)],
+                                'base_scale_y': [_kf(0.0, -1.0)],
+                                'rotation_x': [_kf(0.0, 180.0)]}, flip=True)
+    assert backface.at(1.0) is None
+
+
+def test_uncalled_actors_never_pay_for_culling():
+    plain = _culled_channel({})
+    assert plain.at(1.0) is not None
+    assert plain.cull_mode_at(1.0) == 0.0

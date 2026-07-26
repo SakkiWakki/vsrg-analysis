@@ -69,7 +69,8 @@ from pathlib import Path
 import numpy as np
 
 from analysis.games.notitg import field_compose
-from analysis.player.render.effects.timeline import SIMPLIFY_EPS
+from analysis.player.render.effects.timeline import (EventTimeline, Keyframe,
+                                                     SIMPLIFY_EPS)
 from analysis.player.render.storyboard import record as _rec
 from analysis.player.render.storyboard.sprite_sheet import (
     frame_at_time, frame_steps)
@@ -1401,7 +1402,8 @@ class _Builder:
             case 'aft':
                 slot = self._slot_drawable(
                     _aft_slot_key(inst, self._captured_nodes))
-                self._emit_blit(sn.SRC_DRAWABLE, slot, inst)
+                self._emit_blit(sn.SRC_DRAWABLE, slot, inst,
+                                visible=self._cull_gate(inst))
             case 'player' | 'proxy':
                 scope = self._field_scope(inst)
                 # A 'player' instance IS the base field, so it disappears
@@ -1433,6 +1435,59 @@ class _Builder:
                                 visible=visible)
             case _:
                 return
+
+    # Cull-gate sampling cadence: the engine can only observe a winding flip
+    # once per frame, so 60Hz is exact in its own terms.
+    _CULL_GATE_HZ = 60.0
+
+    def _cull_gate(self, inst) -> tuple:
+        """(visible_id, visible_rest) dropping the instance's blit wherever
+        face culling would - the per-frame winding judgment the native fold
+        cannot make, precomputed into an ordinary visibility channel.
+
+        Zero-cost for the overwhelming case: an instance whose leaf never
+        pokes SetCullMode keeps the constant-visible default. For a culled
+        one (gat 2's chicken finale: two-sided cards, back faces at
+        rotationx+180, all cull 'front'), the gate samples the chain's
+        projected winding only inside the cull-active window, and only where
+        the chain's own visibility gates don't already hide it."""
+        transform = inst['transform']
+        cull_tl = (transform._links[-1].get('cull')
+                   if transform._links else None)
+        if cull_tl is None:
+            return -1, 1.0
+        ts, vals, _durs, rest, _eases = export_channel(
+            cull_tl, self._t0, self._t1)
+        if float(rest) < 0.5 and all(v < 0.5 for v in vals):
+            return -1, 1.0
+
+        active_from = self._t1 if float(rest) < 0.5 else self._t0
+        for bt, v in zip(ts, vals):
+            if v >= 0.5:
+                active_from = min(active_from, bt)
+                break
+        step = 1.0 / self._CULL_GATE_HZ
+        flips: list[Keyframe] = []
+        visible = True
+        t = active_from
+        while t <= self._t1:
+            culled = False
+            if transform.cull_mode_at(t) >= 0.5 and transform.may_draw(t):
+                sampled = transform.project_at(t)
+                culled = (sampled is not None
+                          and transform.culled_at(sampled[0], t))
+            if culled == visible:  # state change
+                visible = not culled
+                flips.append(Keyframe(t, (0.0 if culled else 1.0,), 0.0, 0))
+            t += step
+        if not flips:
+            return -1, 1.0
+        gate = EventTimeline(flips, rest=(1.0,))
+        gts, gvals, gdurs, grest, geases = export_channel(
+            gate, self._t0, self._t1)
+        chan_id = self._builder.channel(gts, gvals, gdurs, float(grest),
+                                        geases)
+        return chan_id, float(grest)
 
     def _base_hidden_gate(self):
         """(visible_id, visible_rest) that drops a 'player' instance while the
