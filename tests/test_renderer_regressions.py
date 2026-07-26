@@ -495,3 +495,23 @@ def test_without_the_doc_no_copies_still_means_no_capture(monkeypatch):
     empty = SimpleNamespace(fields=())
     assert renderer._begin_field_capture(empty, ctx, object()) is None
     assert renderer._capture.opened == []
+
+
+def test_the_field_group_is_skipped_when_the_doc_binds_no_capture(monkeypatch):
+    """Inline notes mean the doc feeds its notes as items and binds no field
+    capture, so rendering the field layer group draws the notes a second
+    time into a texture nothing ever reads. Pixel-neutral to skip - those
+    layers do not reach the screen either way."""
+    from analysis.player.render.storyboard import pipeline as pl
+
+    class _Doc:
+        _id_maps = {'fields': {}, 'note_feeds': {'field': 1}}
+        capture_scopes = pl.DrawablePipeline.capture_scopes
+
+    assert _Doc.capture_scopes(_Doc()) == frozenset()
+
+    class _Captured:
+        _id_maps = {'fields': {'field': 1, 'field2': 2}}
+        capture_scopes = pl.DrawablePipeline.capture_scopes
+
+    assert _Captured.capture_scopes(_Captured()) == {'field', 'field2'}

@@ -318,6 +318,21 @@ class DrawablePipeline:
         self._res_scale = scale
         self._executor.set_resolution_scale(scale)
 
+    def capture_scopes(self) -> frozenset:
+        """The field-capture scopes this doc BINDS - empty when it draws its
+        notes as inline items and reads no capture at all.
+
+        The renderer renders the whole field layer group into a capture for
+        these. With none of them, that render is work nobody reads: the
+        notes are fed as items, and the group's other members (judgments,
+        press marks, miss X, arrowpaths) go into a texture that is never
+        bound. Asking here rather than guessing keeps the two sides' scope
+        vocabularies in one place - they have disagreed silently before
+        (`_report_unfed_scopes`)."""
+        fields = (self._id_maps.get('fields')
+                  if isinstance(self._id_maps, dict) else None)
+        return frozenset(fields or ())
+
     def _ingest_field_captures(self, field_captures, overscan=None,
                                chart_rect=None) -> None:
         """Bind each live field capture into its mapped field drawable's

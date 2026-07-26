@@ -540,6 +540,10 @@ class QtPlayerRenderer:
         # backdrop). A 'full' copy then blits backdrop+field under its
         # transform; a 'field' copy blits only the field pixmap.
         full_capture = self._full_field_capture(effect_frame, ctx)
+        # Settled once: the answer cannot change mid-frame, and it decides
+        # whether the field layer group is drawn at all.
+        unread_field = (self._delegating(ctx)
+                        and not self._doc_reads_field_capture(ctx))
         chart_wrapped = False
         scene_wrapped = False
         below_drawn = False
@@ -603,6 +607,15 @@ class QtPlayerRenderer:
                           or chart_painter)
             else:
                 target = chart_painter
+            if in_field and unread_field:
+                # Nothing will read this group: the doc feeds its notes as
+                # items and binds no field capture, so drawing it renders
+                # the notes a second time into a texture that is never
+                # bound. Pixel-neutral - these layers do not reach the
+                # screen either way. Their non-note members (judgments,
+                # press marks, miss X, arrowpaths) belong ON TOP of the
+                # doc, which is a routing change this does not make.
+                continue
             if visibility.get(name, True):
                 if fn is not None:
                     self._draw_layer(fn, ctx, target, name, is_hud)
@@ -890,11 +903,33 @@ class QtPlayerRenderer:
         drawn, because nothing asked the doc to draw. That is not a rare
         shape: 150 of the library's 782 charts have no field instance at all.
         """
+        return self._delegate_target(ctx) is not None
+
+    @staticmethod
+    def _delegate_target(ctx):
+        """The pipeline drawing this player's chart region, or None."""
         player = getattr(ctx, 'player', None)
         if player is None or not _drawable_pipeline_enabled():
-            return False
+            return None
         from analysis.player.render.storyboard.pipeline import pipeline_for
-        return pipeline_for(player) is not None
+        return pipeline_for(player)
+
+    def _doc_reads_field_capture(self, ctx) -> bool:
+        """Whether the doc BINDS any field capture this frame.
+
+        It does not when it draws its notes as inline items: the notes are
+        fed as their own items and no field drawable exists to bind. The
+        field layer group is then rendered into a texture nothing reads -
+        the notes twice over, plus judgments, press marks, miss X and
+        arrowpaths that never reach the screen either way. Skipping it
+        changes no pixel and removes the frame's largest piece of dead
+        work.
+
+        A doc that DOES name a scope (`VSRG_DRAWABLE_NOTES=0`, and the
+        per-player `field{N}` re-renders) still gets the capture."""
+        pipeline = self._delegate_target(ctx)
+        scopes = pipeline.capture_scopes() if pipeline is not None else None
+        return bool(scopes)
 
     def _begin_field_capture(self, frame, ctx, painter):
         """Redirect the field layer group into the transparent field slot
