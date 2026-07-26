@@ -110,12 +110,12 @@ _GAT2 = Path('/mnt/Yucky/Rhythm Games/Players/NotITG/Songs/'
 def _update_body_of(sm_path: Path):
     pytest.importorskip('lupa')
     from analysis.games.notitg.modfile import (
-        _load_document, _resolve_lua_dir, _sm_background_name, parse_fgchanges)
+        _load_document, _resolve_entry_xml, _sm_background_name, parse_fgchanges)
     from analysis.games.notitg.update_integrator import _update_body
     entries = parse_fgchanges(sm_path)
-    lua_dir = _resolve_lua_dir(sm_path, entries)
+    entry = _resolve_entry_xml(sm_path, entries)
     root, _c, _cc = _load_document(
-        lua_dir, Path(_sm_background_name(sm_path)).stem.casefold())
+        entry, Path(_sm_background_name(sm_path)).stem.casefold())
     return _update_body(root)
 
 

@@ -105,7 +105,7 @@ def test_actorgen_self_include_loop_bounded(tmp_path):
         '<Quad InitCommand="%function(self) self:x(100 + gen.Take()) end"/>'
         '<Layer Condition="gen.HasNext()" File="item.xml"/>'
         '</children></ActorFrame>')
-    root, _chunks, _classic = modfile._load_document(lua)
+    root, _chunks, _classic = modfile._load_document(lua / 'default.xml')
     env = SimEnvironment(0.0, 0, to_seconds=lambda b: b * 0.5)
     env.load_actors(root)
     taken = sorted(kf.values[0] for kf in _recorded(env, 'x'))
@@ -209,3 +209,58 @@ def test_attrs_rewritten_only_for_lua_values():
     assert '485 then' in attrs['Condition']
     assert '485 then' in attrs['InitCommand']
     assert attrs['Texture'] == '485then.png'
+
+
+# -- FGCHANGES entry resolution -------------------------------------------
+
+def _sm_with(tmp_path, fgchanges: str):
+    sm = tmp_path / 'song.sm'
+    sm.write_text(f'#TITLE:t;\n#FGCHANGES:{fgchanges};\n')
+    return sm
+
+
+def _xml(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('<ActorFrame/>')
+    return path
+
+
+def test_the_tag_may_name_the_entry_xml_itself(tmp_path):
+    """`template/main.xml` is as valid a modfile reference as `lua`, and
+    accepting only the directory form dropped a fifth of the library
+    before anything downstream saw those charts."""
+    from analysis.games.notitg.modfile import (_resolve_entry_xml,
+                                               parse_fgchanges)
+    sm = _sm_with(tmp_path, '0.000=template/main.xml=1.000=0=0=1')
+    entry = _xml(tmp_path / 'template' / 'main.xml')
+    assert _resolve_entry_xml(sm, parse_fgchanges(sm)) == entry
+
+
+def test_the_tag_may_name_a_directory_holding_default_xml(tmp_path):
+    from analysis.games.notitg.modfile import (_resolve_entry_xml,
+                                               parse_fgchanges)
+    sm = _sm_with(tmp_path, '0.000=lua=1.000=0=0=1')
+    entry = _xml(tmp_path / 'lua' / 'default.xml')
+    assert _resolve_entry_xml(sm, parse_fgchanges(sm)) == entry
+
+
+def test_a_windows_separator_still_resolves(tmp_path):
+    from analysis.games.notitg.modfile import (_resolve_entry_xml,
+                                               parse_fgchanges)
+    sm = _sm_with(tmp_path, r'0.000=template\main.xml=1.000=0=0=1')
+    entry = _xml(tmp_path / 'template' / 'main.xml')
+    assert _resolve_entry_xml(sm, parse_fgchanges(sm)) == entry
+
+
+def test_a_named_image_is_not_an_entry(tmp_path):
+    """The same tag carries background images. Handing one to the actor
+    parser would turn 'this chart has no modfile' into 'this chart fails
+    to load'."""
+    from analysis.games.notitg.modfile import (_resolve_entry_xml,
+                                               parse_fgchanges)
+    sm = _sm_with(tmp_path, '0.000=backdrop.png=1.000=0=0=1')
+    (tmp_path / 'backdrop.png').write_bytes(b'')
+    assert _resolve_entry_xml(sm, parse_fgchanges(sm)) is None
+
+    fallback = _xml(tmp_path / 'lua' / 'default.xml')
+    assert _resolve_entry_xml(sm, parse_fgchanges(sm)) == fallback

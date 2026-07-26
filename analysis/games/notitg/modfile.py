@@ -146,21 +146,39 @@ def _iter_change_entries(text: str, tag: str):
                 continue
 
 
-def _resolve_lua_dir(sm_path, entries) -> Path | None:
-    """The FGCHANGES `name` for these charts is `lua`, a sibling dir
-    holding default.xml. Fall back to any `lua/` dir next to the sm."""
+def _resolve_entry_xml(sm_path, entries) -> Path | None:
+    """The actor XML an FGCHANGES entry names, or None when nothing under
+    the song dir answers.
+
+    The tag names a PATH RELATIVE TO THE SONG DIR, and the engine takes it
+    either way round: `lua` is a directory whose `default.xml` is the
+    entry, `template/main.xml` names the entry file itself. Accepting only
+    the directory form dropped 152 of an 782-chart library - a fifth of it
+    - before anything downstream saw the chart at all.
+
+    The fallback is `lua/default.xml`, for a chart whose tag is absent or
+    points at a background image. Only an `.xml` file is taken as an entry:
+    the same tag also names plain background images, and handing one to the
+    actor parser turns a chart with no modfile into a chart that fails to
+    load.
+    """
     song_dir = Path(sm_path).parent
     for _beat, name, kind in entries:
-        if kind == 'FGCHANGES' and name and name.lower() != 'bg':
-            candidate = song_dir / name
-            if (candidate / 'default.xml').exists():
-                return candidate
-    fallback = song_dir / 'lua'
-    return fallback if (fallback / 'default.xml').exists() else None
+        if kind != 'FGCHANGES' or not name or name.lower() == 'bg':
+            continue
+        # Authored on Windows, read on Linux: the separator is part of the
+        # chart's text, not of this filesystem.
+        candidate = song_dir.joinpath(*name.replace('\\', '/').split('/'))
+        if candidate.suffix.lower() == '.xml' and candidate.is_file():
+            return candidate
+        if (candidate / 'default.xml').is_file():
+            return candidate / 'default.xml'
+    fallback = song_dir / 'lua' / 'default.xml'
+    return fallback if fallback.is_file() else None
 
 
-def _load_document(lua_dir: Path, bg_stem=''):
-    """Parse default.xml, splicing in any `<Layer File=...>` includes so
+def _load_document(entry: Path, bg_stem=''):
+    """Parse the entry XML, splicing in any `<Layer File=...>` includes so
     included actors (modhelpers.xml helper definitions, the chara
     subtree) are present in document order. Every actor is annotated with
     the directory its XML came from (`_base_dir`) so a Sprite's `Texture=`
@@ -168,7 +186,7 @@ def _load_document(lua_dir: Path, bg_stem=''):
     lua dir (chara sprites reference `shame/idle.sprite` relative to
     `lua/chara`). `bg_stem` (the #BACKGROUND image stem) tags any include
     subtree that draws it as a background layer (behind the notes)."""
-    entry = lua_dir / 'default.xml'
+    lua_dir = entry.parent
     root_parsed = xml_actors.parse_actor_xml(
         entry.read_text(encoding='utf-8', errors='replace'))
 

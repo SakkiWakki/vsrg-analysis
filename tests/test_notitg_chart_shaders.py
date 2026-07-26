@@ -92,7 +92,7 @@ def _instances(lua_dir, xml):
     resolve against the chart directory)."""
     from analysis.games.notitg import modfile
     (lua_dir / 'default.xml').write_text(xml)
-    root, _c, _cl = modfile._load_document(lua_dir)
+    root, _c, _cl = modfile._load_document(lua_dir / 'default.xml')
     env = SimEnvironment(0.0, 0, to_seconds=lambda b: b * 0.5)
     env.load_actors(root)
     doc = type('Doc', (), {'root': root})()

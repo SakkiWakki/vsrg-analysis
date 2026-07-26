@@ -118,12 +118,16 @@ def load_chart(sm_path) -> ChartDocument | None:
     from analysis.games.notitg import modfile
 
     entries = modfile.parse_fgchanges(sm_path)
-    lua_dir = modfile._resolve_lua_dir(sm_path, entries)
-    if lua_dir is None:
+    entry = modfile._resolve_entry_xml(sm_path, entries)
+    if entry is None:
         return None
+    # Includes, asset references, fonts and the chart's RNG seeds are all
+    # keyed on the entry's OWN directory, so a chart whose entry is
+    # `template/main.xml` resolves against `template/`, not the song dir.
+    lua_dir = entry.parent
     sm_data = modfile.sm_chart.parse_sm(sm_path)
     bg_stem = modfile.Path(modfile._sm_background_name(sm_path)).stem.casefold()
-    root, _chunks, classic = modfile._load_document(lua_dir, bg_stem)
+    root, _chunks, classic = modfile._load_document(entry, bg_stem)
     _bpms, _offset, chart = modfile._timing(sm_data)
     to_seconds = modfile._beat_to_seconds(sm_data, chart)
     start_beat = min((b for b, _n, k in entries if k == 'FGCHANGES'),
