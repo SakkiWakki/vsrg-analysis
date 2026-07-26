@@ -977,6 +977,47 @@ class QtPlayerRenderer:
             note_mods.apply(ctx)
         _notes_layer.prepare(ctx)
 
+    def _per_player_notes(self, frame, ctx):
+        """A callable the pipeline drives to get ONE note emission per
+        player: `per_player(emit) -> {scope: emission}`, where `emit(ctx)`
+        is the pipeline's own emitter.
+
+        The doc draws every player's notes INLINE, so a copy of player N has
+        to be fed player N's notes. One emission broadcast to every slot fed
+        them all player 1's arrows - two independently-modded fields drawing
+        the same notes.
+
+        The swap is the one `_capture_second_field` makes for the captured
+        path: this player's consumer in, note views rebuilt, player 1
+        restored after. Inverted this way round because the renderer owns
+        which players exist and how a ctx is made to speak for one, while
+        the pipeline owns what an emission is - so neither has to reach into
+        the other's state (the feed used to read `ctx.note_views` and get
+        whatever the last swap left there)."""
+        spec = getattr(frame, 'second_field', None)
+        note_mods = getattr(spec, 'note_mods', None) or {}
+
+        def per_player(emit):
+            emissions = {_DEFAULT_FIELD_SCOPE: emit(ctx)}
+            player = getattr(ctx, 'player', None)
+            if player is None or not note_mods:
+                return emissions
+            primary = getattr(player, '_note_mods', None)
+            try:
+                for number, mods in note_mods.items():
+                    player._note_mods = mods
+                    self._rebuild_note_mods(ctx)
+                    # The same `field{N}` naming `_capture_second_field`
+                    # gives that player's capture slot: one scope vocabulary
+                    # whether the notes arrive as a capture or as items.
+                    emissions[f'field{number}'] = emit(ctx)
+            finally:
+                player._note_mods = primary
+                self._rebuild_note_mods(ctx)
+            return emissions
+
+        return per_player
+
     def _draw_field_layers(self, ctx, painter, visibility) -> None:
         """Draw only the captured field layers (everything but the
         background clear and the HUD) into `painter`, matching what the
@@ -1027,7 +1068,8 @@ class QtPlayerRenderer:
                         **self._player_field_src}
             if (_pipeline is not None
                     and _pipeline.delegate(frame, ctx, painter, captures,
-                                           dict(self._field_overscan))):
+                                           dict(self._field_overscan),
+                                           self._per_player_notes(frame, ctx))):
                 return
         from analysis.games.notitg.field_instances import design_box
         design = design_box(ctx.chart_rect)

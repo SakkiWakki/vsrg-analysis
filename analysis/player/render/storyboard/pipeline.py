@@ -237,7 +237,7 @@ class DrawablePipeline:
         return not self._disabled
 
     def delegate(self, frame, ctx, painter, field_captures=None,
-                 overscan=None) -> bool:
+                 overscan=None, per_player=None) -> bool:
         """Render the chart region through the Drawable core and blit it.
 
         ``field_captures`` maps a field scope ('field', 'field2', ...) to
@@ -247,6 +247,11 @@ class DrawablePipeline:
         SRC_DRAWABLE field blits draw real notes. None = no field content
         this frame (the composite still runs; field drawables read empty).
 
+        ``per_player`` drives the inline note feed: the pipeline hands it an
+        emitter and it calls that once per player, each time with a context
+        speaking that player's mods (see `_note_feed`). None emits once, for
+        the ctx as given - every single-player chart.
+
         Returns True when the frame was drawn (the caller must then skip
         the normal path); False when the pipeline is disabled or could
         not draw (the caller falls through unchanged). Never raises.
@@ -255,20 +260,21 @@ class DrawablePipeline:
             return False
         try:
             return self._delegate(frame, ctx, painter, field_captures,
-                                  overscan)
+                                  overscan, per_player)
         except Exception:
             self._disable("frame render failed")
             return False
 
     def _delegate(self, frame, ctx, painter, field_captures,
-                  overscan) -> bool:
+                  overscan, per_player=None) -> bool:
         if not self._ensure_built(painter):
             return False
         self._rebuild_if_stale(painter)
         self._apply_resolution(ctx, painter)
         self._ingest_field_captures(field_captures, overscan,
                                     ctx.chart_rect)
-        u, f, uf = self._schedule_with_feeds(float(ctx.t_now), ctx)
+        u, f, uf = self._schedule_with_feeds(float(ctx.t_now), ctx,
+                                             per_player)
         if u is None:
             return False
         # GL-ONLY present: composite onto the painter's GL target directly,
@@ -644,14 +650,20 @@ class DrawablePipeline:
         if self._settled(signature):
             self._start_prepare('the chart bound more proxies/AFTs')
 
-    def _note_feed(self, ctx):
+    def _note_feed(self, ctx, per_player=None):
         """This frame's note items for the inline note slots, as
-        `(slot_ids, count, u_bytes, f_bytes)`, or None when the doc has no
-        slots (the captured-notefield path) or nothing is visible.
+        `(slot_ids, counts, u_bytes, f_bytes)` with the items concatenated in
+        slot order - or None when the doc has no slots (the
+        captured-notefield path) or nothing is visible anywhere.
 
-        Every slot receives the same items (one emission, shared by the
-        base field and each proxy/player consumer - the consumer's Feed
-        composes its own chain over them natively).
+        ONE EMISSION PER PLAYER. `per_player` is the caller's driver (see
+        `qt_renderer._per_player_notes`): it calls the emitter once per
+        player, each time with a context speaking that player's mods, and
+        returns `{scope: emission}`. A scope with no emission of its own
+        falls back to the primary field's - a proxy of player 1, and every
+        single-player chart, is exactly that case. Without the split every
+        slot got player 1's arrows, so two independently-modded fields drew
+        the same notes.
 
         Reuses the render context the caller already built - the emitter is a
         pure read of the prepass, so no second pass over the notes."""
@@ -666,16 +678,30 @@ class DrawablePipeline:
         if image_map is None:
             return None
         from analysis.player.render.storyboard import note_feed
-        # The ctx's field geometry is in SCREEN px (the adapter already
-        # stretched its design grid onto the chart rect); this doc's screen is
-        # the design box the executor stretches at present time, so the feed
-        # must convert or the stretch lands twice.
-        u_soa, f_soa, count, _report = note_feed.feed_from_context(
-            ctx, image_map, design=(_SCREEN_W, _SCREEN_H))
-        if not count:
+
+        def emit(c):
+            # The ctx's field geometry is in SCREEN px (the adapter already
+            # stretched its design grid onto the chart rect); this doc's
+            # screen is the design box the executor stretches at present
+            # time, so the feed must convert or the stretch lands twice.
+            u_soa, f_soa, count, _report = note_feed.feed_from_context(
+                c, image_map, design=(_SCREEN_W, _SCREEN_H))
+            return int(count), u_soa.tobytes(), f_soa.tobytes()
+
+        emissions = per_player(emit) if per_player is not None \
+            else {_DEFAULT_SCOPE: emit(ctx)}
+        primary = emissions.get(_DEFAULT_SCOPE)
+        if not any(e[0] for e in emissions.values()):
             return None
-        slot_ids = sorted(int(s) for s in slots.values())
-        return slot_ids, int(count), u_soa.tobytes(), f_soa.tobytes()
+        slot_ids, counts, u_parts, f_parts = [], [], [], []
+        for scope, slot in sorted(slots.items(), key=lambda kv: int(kv[1])):
+            count, u_bytes, f_bytes = emissions.get(scope) or primary \
+                or (0, b'', b'')
+            slot_ids.append(int(slot))
+            counts.append(count)
+            u_parts.append(u_bytes)
+            f_parts.append(f_bytes)
+        return slot_ids, counts, b''.join(u_parts), b''.join(f_parts)
 
     # The note sprites the feed resolves, as (feed key, sprite-cache name).
     # The receptor is not a cache sprite - the field layer strokes a plain
@@ -760,7 +786,7 @@ class DrawablePipeline:
             if textures is not None:
                 textures.pop(entry[0], None)
 
-    def _schedule_with_feeds(self, t, ctx):
+    def _schedule_with_feeds(self, t, ctx, per_player=None):
         """`_schedule`, plus this frame's inline note feed when the doc has
         one.
 
@@ -774,7 +800,7 @@ class DrawablePipeline:
         `_blit_field_instances`, which draws real notes. A visibly older
         rendering beats a chart with no notes."""
         try:
-            fed = self._note_feed(ctx)
+            fed = self._note_feed(ctx, per_player)
         except Exception:
             self._log_note_feed_failure()
             fed = None
@@ -782,10 +808,9 @@ class DrawablePipeline:
             if self._has_note_slots():
                 return None, None, None
             return self._schedule(t)
-        slots, count, u_bytes, f_bytes = fed
+        slots, counts, u_bytes, f_bytes = fed
         u_raw, f_raw, uf_raw, n = self._evaluator.frame_with_feeds(
-            float(t), slots, [count] * len(slots),
-            u_bytes * len(slots), f_bytes * len(slots))
+            float(t), slots, counts, u_bytes, f_bytes)
         u = np.frombuffer(u_raw, dtype=np.uint32).reshape(
             n, self._evaluator.u_stride)
         f = np.frombuffer(f_raw, dtype=np.float32).reshape(
@@ -835,6 +860,10 @@ class DrawablePipeline:
 
 _SCREEN_W = 640
 _SCREEN_H = 480
+
+# The primary field's scope: player 1's notes, and the fallback emission for
+# any slot with none of its own.
+_DEFAULT_SCOPE = 'field'
 
 
 def _sprite_generation(ctx):

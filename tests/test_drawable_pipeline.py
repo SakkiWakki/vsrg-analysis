@@ -803,7 +803,7 @@ def test_an_empty_inline_feed_declines_the_frame_instead_of_drawing_no_notes(
 
     # Give it inline note slots, then starve the feed.
     pipe._id_maps = dict(pipe._id_maps or {}, note_feeds={'field': 1})
-    monkeypatch.setattr(pipe, '_note_feed', lambda ctx: None)
+    monkeypatch.setattr(pipe, '_note_feed', lambda ctx, pp=None: None)
     assert pipe._has_note_slots() is True
     assert pipe._schedule_with_feeds(1.0, ctx) == (None, None, None)
 
@@ -819,7 +819,71 @@ def test_a_captured_notefield_doc_still_folds_without_a_feed(gl, monkeypatch):
     player, pipe = _build_pipeline(monkeypatch, _fake_doc())
     ctx = _Ctx(t_now=1.0, player=player)
     _spin_present(pipe, ctx)
-    monkeypatch.setattr(pipe, '_note_feed', lambda ctx: None)
+    monkeypatch.setattr(pipe, '_note_feed', lambda ctx, pp=None: None)
     assert pipe._has_note_slots() is False
     u, _f, _uf = pipe._schedule_with_feeds(1.0, ctx)
     assert u is not None
+
+
+# --------------------------------------------------------------------------
+# Per-player note emission: a copy of player N is fed player N's notes
+# --------------------------------------------------------------------------
+
+def _feed_doc(scopes):
+    """A doc whose `note_feeds` map names one inline slot per scope."""
+
+    class Doc:
+        @staticmethod
+        def prepare_static_doc(compiled, screen_w=_SCREEN_W, screen_h=_SCREEN_H):
+            ops = [('feed_slot', (), {}) for _ in scopes]
+            id_maps = {'screen': 0, 'slots': {}, 'fields': {}, 'images': {},
+                       'note_feeds': {scope: index + 1
+                                      for index, scope in enumerate(scopes)}}
+            return ops, id_maps, _report()
+
+    return Doc()
+
+
+def _emissions_for(monkeypatch, scopes, per_player):
+    """`(slot_ids, counts, u_bytes, f_bytes)` the feed hands the evaluator,
+    with the emitter stubbed to one identifiable byte per scope."""
+    from types import SimpleNamespace
+    _player, pipe = _build_pipeline(monkeypatch, _feed_doc(scopes))
+    pipe._id_maps = {'note_feeds': {scope: index + 1
+                                    for index, scope in enumerate(scopes)}}
+    monkeypatch.setattr(pipe, '_ensure_note_images', lambda ctx: {'x': (0, 1, 1)})
+    monkeypatch.setattr(
+        'analysis.player.render.storyboard.note_feed.feed_from_context',
+        lambda c, image_map, design=None: (
+            np.frombuffer(bytes([c.tag]) * 4, dtype=np.uint8),
+            np.frombuffer(bytes([c.tag]) * 4, dtype=np.uint8), 1, {}))
+    return pipe._note_feed(SimpleNamespace(tag=1), per_player)
+
+
+def test_each_player_slot_is_fed_its_own_notes(monkeypatch):
+    """The doc draws every player's notes inline, so a copy of player 2 must
+    be fed player 2's arrows. One emission broadcast to every slot drew two
+    independently-modded fields with the same notes."""
+    from types import SimpleNamespace
+
+    def per_player(emit):
+        return {'field': emit(SimpleNamespace(tag=1)),
+                'field2': emit(SimpleNamespace(tag=2))}
+
+    slots, counts, u_bytes, _f = _emissions_for(
+        monkeypatch, ('field', 'field2'), per_player)
+    assert slots == [1, 2] and counts == [1, 1]
+    # Slot order, one emission each - player 1's bytes then player 2's.
+    assert u_bytes == bytes([1] * 4) + bytes([2] * 4)
+
+
+def test_a_slot_with_no_emission_of_its_own_falls_back_to_the_primary(
+        monkeypatch):
+    """A proxy of player 1 - and every single-player chart - has no
+    per-player emission, and shows the primary field's notes."""
+    from types import SimpleNamespace
+    slots, counts, u_bytes, _f = _emissions_for(
+        monkeypatch, ('field', 'field3'),
+        lambda emit: {'field': emit(SimpleNamespace(tag=7))})
+    assert slots == [1, 2] and counts == [1, 1]
+    assert u_bytes == bytes([7] * 8)
