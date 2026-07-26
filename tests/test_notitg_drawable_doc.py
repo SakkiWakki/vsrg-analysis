@@ -1500,3 +1500,29 @@ def test_the_screen_clear_is_declared_and_switchable(monkeypatch):
     assert dd.opaque_screen() is True
     monkeypatch.setenv('VSRG_DRAWABLE_OPAQUE_SCREEN', '0')
     assert dd.opaque_screen() is False
+
+
+def test_single_player_base_field_carries_its_playfield_mods(captured_notefield):
+    # Only the MULTI-player path builds instance chains, so a one-player
+    # chart's `x`/`zoom`/`rotation` mods reached nothing at all: its base
+    # field is a bare blit with no chain to compose them onto.
+    from analysis.games.notitg.mod_channels import compile_mod_channels
+
+    channels = compile_mod_channels(
+        [{'t_start': 1.0, 't_end': 5.0, 'player': 1,
+          'modstring': '*-1 -160 x, *-1 50 zoomx'}])
+    compiled = {**_compiled([]), 'mod_channels': channels}
+    evaluator, _id_maps, _report = dd.build_static_doc(compiled)
+
+    def base_mat(t):
+        u, f = _blit_lanes(evaluator, t)
+        blits = [i for i in range(len(u)) if u[i, 0] == sn.OP_BLIT]
+        assert len(blits) == 1, 'expected exactly the base field blit'
+        return f[blits[0], 0:9].reshape(3, 3)
+
+    assert np.allclose(base_mat(0.0), np.eye(3)), 'unmodded base is identity'
+    # x -160 shifts the whole field left; zoomx 50 halves it about the centre.
+    moved = np.array([320.0, 240.0, 1.0]) @ base_mat(3.0)
+    assert moved[:2] / moved[2] == pytest.approx((160.0, 240.0))
+    edge = np.array([640.0, 240.0, 1.0]) @ base_mat(3.0)
+    assert edge[:2] / edge[2] == pytest.approx((320.0, 240.0))

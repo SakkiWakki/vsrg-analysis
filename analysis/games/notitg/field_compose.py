@@ -572,6 +572,16 @@ def player_live_instance(sim, number, rec_id, osc_deltas=None, t0=None,
                     with_playfield_mods([link], channels, number), t0=t0)
 
 
+def screen_centered_link() -> dict:
+    """A link that lands a full-screen capture 1:1 on the design screen.
+
+    `TransformChannel` centres the content before folding the chain, so a
+    chain that never positions it draws half a screen up and left. This is
+    the link a consumer with no actor of its own composes against - the base
+    field, which is otherwise an identity blit."""
+    return link_timelines(None, rests={'x': _CENTER_X, 'y': _CENTER_Y})
+
+
 def with_playfield_mods(links, channels, number) -> list:
     """`links` with player `number`'s playfield mod link appended, when the
     chart drives any. Innermost, so the mods act in the field's own space

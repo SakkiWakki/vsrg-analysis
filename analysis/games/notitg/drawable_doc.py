@@ -68,6 +68,7 @@ from pathlib import Path
 
 import numpy as np
 
+from analysis.games.notitg import field_compose
 from analysis.player.render.effects.timeline import SIMPLIFY_EPS
 from analysis.player.render.storyboard import record as _rec
 from analysis.player.render.storyboard.sprite_sheet import (
@@ -1289,7 +1290,12 @@ class _Builder:
         prepending `(None, 1.0, 'field')`). Gated visible by `1 - base_hidden`,
         so when the chart hides the real field the item drops (matching the
         base-hidden placeholder). Suppressed on the dual-player path, where the
-        player instances ARE the originals and no base is prepended."""
+        player instances ARE the originals and no base is prepended.
+
+        The base carries player 1's playfield transform mods, which the
+        multi-player path gets from its instance chains - without this a
+        one-player chart's `x`/`zoom`/`rotation` mods would reach nothing at
+        all (`field_compose.playfield_mod_link`)."""
         spec = self._compiled.get('player_fields')
         if spec is not None and getattr(spec, 'note_mods', None):
             return
@@ -1304,10 +1310,26 @@ class _Builder:
             self._builder.feed_inline(_SCREEN_ID, self._notes_slot_for('field'),
                                       visible_id=visible_id,
                                       visible_rest=visible_rest)
-            return
-        field = self._field_drawable('field')
-        self._builder.item(_SCREEN_ID, self._sn.SRC_DRAWABLE, field,
-                           visible_id=visible_id, visible_rest=visible_rest)
+        else:
+            field = self._field_drawable('field')
+            self._builder.item(_SCREEN_ID, self._sn.SRC_DRAWABLE, field,
+                               visible_id=visible_id, visible_rest=visible_rest)
+        base = self._base_playfield_mods()
+        if base is not None:
+            self._emit_links(_SCREEN_ID, base)
+
+    def _base_playfield_mods(self):
+        """An instance carrying player 1's playfield transform mods over the
+        identity placement, or None when the chart drives none - the
+        zero-cost case, which is every chart that never moves its field as a
+        whole."""
+        link = field_compose.playfield_mod_link(
+            self._compiled.get('mod_channels'), 1)
+        if link is None:
+            return None
+        return field_compose.instance(
+            'base', 'player', 1,
+            [field_compose.screen_centered_link(), link])
 
     def _visible_from_hidden(self, hidden):
         """(visible_id, visible_rest) inverting a `base_field_hidden` timeline
