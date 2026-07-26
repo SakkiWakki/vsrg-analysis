@@ -416,6 +416,40 @@ def test_no_field_capture_composites_transparently_not_black(gl, monkeypatch):
     assert inside.red() > 100 and inside.green() < 70 and inside.blue() < 70
 
 
+def _opaque_screen_doc():
+    """`_field_doc` whose id_maps DECLARE an opaque screen clear - a doc that
+    holds the whole scene rather than overlaying someone else's."""
+    from analysis.player.render.storyboard.executor import CLEAR_OPAQUE
+
+    class Doc:
+        @staticmethod
+        def prepare_static_doc(compiled, screen_w=_SCREEN_W, screen_h=_SCREEN_H):
+            ops = [('drawable', (float(screen_w), float(screen_h), False,
+                                 False), {}),
+                   ('item', (0, sn.SRC_DRAWABLE, 1), {})]
+            id_maps = {'screen': 0, 'screen_clear': CLEAR_OPAQUE, 'slots': {},
+                       'images': {}, 'fields': {'field': 1}}
+            return ops, id_maps, _report(proxy=1, fields=1)
+
+    return Doc()
+
+
+def test_a_doc_that_declares_an_opaque_screen_gets_one(gl, monkeypatch):
+    """NotITG's doc IS the scene - the engine clears its framebuffer black,
+    and a screen-scope AFT capture of a transparent surface comes back a
+    cutout. A doc that says so covers the backdrop instead of overlaying it;
+    the default (the test above) is unchanged."""
+    player, pipe = _build_pipeline(monkeypatch, _opaque_screen_doc())
+    ctx = _Ctx(t_now=0.0, player=player)
+    drew, target = _spin_present(pipe, ctx,
+                                 backdrop=QColor(120, 40, 40, 255),
+                                 field_captures=None)
+    assert drew is True
+    x, y, w, h = CHART_RECT
+    inside = target.pixelColor(x + w // 2, y + h // 2)
+    assert (inside.red(), inside.green(), inside.blue()) == (0, 0, 0)
+
+
 # --------------------------------------------------------------------------
 # Element images (this wave): a static-doc SRC_IMAGE blit loads real art
 # --------------------------------------------------------------------------

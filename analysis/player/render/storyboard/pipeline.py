@@ -576,7 +576,15 @@ class DrawablePipeline:
                          if isinstance(id_maps, dict) else None),
             image_specs=(id_maps.get('image_specs')
                          if isinstance(id_maps, dict) else None))
-        self._executor.set_clear(SCREEN_ID, CLEAR_TRANSPARENT)
+        # The DOC says what its own screen surface is. A game whose doc holds
+        # the whole scene declares an opaque clear (NotITG: the engine clears
+        # its framebuffer black, and an AFT capture of a transparent screen
+        # comes back a cutout); a game whose doc is an overlay on a scene
+        # someone else paints stays transparent, which is the default.
+        self._executor.set_clear(
+            SCREEN_ID,
+            (id_maps.get('screen_clear', CLEAR_TRANSPARENT)
+             if isinstance(id_maps, dict) else CLEAR_TRANSPARENT))
         # Per-item `Frag=` programs, positional by the shader id the doc's
         # BLIT lanes carry. Without this the executor's table is empty, every
         # shader lane resolves to None, and a shaded sampler silently blits

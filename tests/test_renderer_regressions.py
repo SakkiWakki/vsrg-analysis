@@ -445,3 +445,53 @@ def test_culling_pad_missing_attr_defaults_to_zero():
     ctx = _cull_ctx(player, target_lo=0.5, target_hi=1.5)
 
     assert culling.select_note_candidates(ctx) == [1]
+
+
+# -- the doc draws the chart region, not only the field copies -------------
+
+class _Slot:
+    """A capture backend that records which slots opened."""
+
+    def __init__(self):
+        self.opened = []
+
+    def open(self, slot, painter, w, h):
+        self.opened.append(slot)
+        return SimpleNamespace(translate=lambda *a: None)
+
+    def close(self, slot):
+        return object()
+
+
+def _delegating_renderer(monkeypatch, delegating: bool):
+    from analysis.player.render import qt_renderer as qr
+    renderer = QtPlayerRenderer(SimpleNamespace(layers=None, sidebar=None,
+                                                draw=lambda *a: None))
+    renderer._capture = _Slot()
+    monkeypatch.setattr(QtPlayerRenderer, '_delegating',
+                        lambda self, ctx: delegating)
+    monkeypatch.setattr(qr, '_field_overscan_margins', lambda ctx: (0, 0))
+    ctx = SimpleNamespace(player=SimpleNamespace(W=800, H=600),
+                          chart_rect=(0, 0, 800, 600))
+    return renderer, ctx
+
+
+def test_the_field_captures_for_the_doc_even_with_no_copies(monkeypatch):
+    """The doc composes the whole chart region, so it needs the field layers
+    captured whether or not the chart has proxies. 150 of the library's 782
+    charts have no field instance at all, and gating the capture on one left
+    every one of them with its storyboard suppressed from legacy and never
+    drawn by the doc."""
+    renderer, ctx = _delegating_renderer(monkeypatch, delegating=True)
+    empty = SimpleNamespace(fields=())
+    assert renderer._begin_field_capture(empty, ctx, object()) is not None
+    assert renderer._capture.opened == ['field']
+
+
+def test_without_the_doc_no_copies_still_means_no_capture(monkeypatch):
+    """The legacy path paints the field layers straight to the target when
+    nothing will blit them - capturing would cost a slot for nothing."""
+    renderer, ctx = _delegating_renderer(monkeypatch, delegating=False)
+    empty = SimpleNamespace(fields=())
+    assert renderer._begin_field_capture(empty, ctx, object()) is None
+    assert renderer._capture.opened == []

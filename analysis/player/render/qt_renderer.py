@@ -617,6 +617,10 @@ class QtPlayerRenderer:
             self._end_field_capture()
             self._capture_second_field(effect_frame, ctx, chart_painter,
                                        visibility)
+        # Also when NO capture opened: the doc draws the whole chart region,
+        # so it has to be asked even on a frame with no field copies and no
+        # usable capture slot (see `_delegating`).
+        if field_painter is not None or self._delegating(ctx):
             self._blit_field_instances(effect_frame, ctx, chart_painter)
         self._draw_effect_above(effect_frame, ctx, chart_painter)
         if scene_wrapped:
@@ -874,14 +878,33 @@ class QtPlayerRenderer:
             self._backdrop_src = self._capture.close('backdrop')
             self._backdrop_painter = None
 
+    def _delegating(self, ctx) -> bool:
+        """Whether the Drawable pipeline draws this player's chart region.
+
+        When it does, the region is the DOC'S - background, storyboard
+        elements, field copies and notes composed as one tree - so the field
+        layers must capture for the doc to blit them, and the present must
+        happen, whether or not the chart has any field COPIES. Gating both on
+        `frame.fields` meant a chart with a storyboard and no proxies got its
+        elements suppressed from legacy (the doc owns them) and then never
+        drawn, because nothing asked the doc to draw. That is not a rare
+        shape: 150 of the library's 782 charts have no field instance at all.
+        """
+        player = getattr(ctx, 'player', None)
+        if player is None or not _drawable_pipeline_enabled():
+            return False
+        from analysis.player.render.storyboard.pipeline import pipeline_for
+        return pipeline_for(player) is not None
+
     def _begin_field_capture(self, frame, ctx, painter):
-        """Redirect the field layer group into the transparent field
-        slot when this frame carries field instances; returns the
-        capture painter or None (no fields, direct painting)."""
+        """Redirect the field layer group into the transparent field slot
+        when something will blit it - a field instance this frame, or the
+        doc; returns the capture painter or None (direct painting)."""
         self._field_src = None
         self._field_overscan = {}
-        if (frame is None or not frame.fields or painter is None
-                or getattr(ctx, 'player', None) is None):
+        if painter is None or getattr(ctx, 'player', None) is None:
+            return None
+        if (frame is None or not frame.fields) and not self._delegating(ctx):
             return None
         p = ctx.player
         mx, my = _field_overscan_margins(ctx)
@@ -990,7 +1013,7 @@ class QtPlayerRenderer:
         The backdrop pixmap, when present, was captured in place of the
         direct background/below-draws, so it is blitted here as the base
         backdrop exactly once."""
-        if _drawable_pipeline_enabled():
+        if self._delegating(ctx):
             from analysis.player.render.storyboard.pipeline import pipeline_for
             _pipeline = pipeline_for(ctx.player)
             # Hand this frame's live GL capture handles (the transparent
@@ -1010,10 +1033,16 @@ class QtPlayerRenderer:
         design = design_box(ctx.chart_rect)
         box = (design if (self._full_field_capture(frame, ctx)
                           or self._has_screen_copy(frame)) else None)
+        entries = frame.fields if frame is not None else ()
+        if not entries and self._field_src is not None:
+            # The field layers captured for the DOC, and the doc did not
+            # draw (not assembled yet, or it declined the frame). Put the
+            # capture back on screen 1:1 rather than losing the field.
+            entries = ((None, 1.0, _DEFAULT_FIELD_SCOPE),)
         with self._capture.blits(painter, QRectF(*ctx.chart_rect)) as batch:
             if self._backdrop_src is not None:
                 batch.blit(self._backdrop_src)
-            for entry in frame.fields:
+            for entry in entries:
                 self._blit_field_instance(batch, entry, box, design)
             if self._screen_open and self._screen_capture is None:
                 # No 'screen' sampler drew this frame, but the node
