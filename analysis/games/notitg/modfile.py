@@ -1300,8 +1300,7 @@ def _leaf_element(actor, start_time, named_keyframes, precomputed=None,
         kind=kind, z=0, z_index=0,
         t_start=start_time, t_end=float('inf'),
         anchor=(0.0, 0.0), origin=(0.5, 0.5),
-        timelines=_fill_size_timelines(
-            kind, _element_timelines(actor, drawable, sim)),
+        timelines=_element_timelines(actor, drawable, sim),
         asset=asset,
         text=str(text), font=font,
         additive=_is_additive(actor),
@@ -1642,32 +1641,6 @@ def _fill_size_as_wh(kind, drawable):
         if frames:
             drawable[wh_prop] = frames
     return drawable
-
-
-def _fill_size_timelines(kind, timelines):
-    """The same mirror, on the built TIMELINES rather than baked keyframes.
-
-    `_fill_size_as_wh` copies frames, and under the LAZY path there are no
-    frames to copy: the props come from live curves and `w` sits at its rest
-    of 0 while `size_x` reads the chart's `zoomto` value. `render
-    ._element_size` then answers None for the shape and the painter returns
-    without drawing, so every Quad sized by zoomto silently vanished - eight
-    of them in gat 1, nine in gat 2, including the fullscreen curtains.
-
-    A fill primitive HAS no natural box, so its w/h are its absolute size
-    however that size arrived. Aliasing the curve (rather than copying
-    values) keeps that true frame by frame."""
-    if kind not in _FILL_SIZE_KINDS:
-        return timelines
-    for size_prop, wh_prop in (('size_x', 'w'), ('size_y', 'h')):
-        # Subscript, not `.get`: both timeline families MAKE a curve on
-        # demand, so `.get` answers None for a prop that samples perfectly
-        # well and the mirror silently did nothing.
-        try:
-            timelines[wh_prop] = timelines[size_prop]
-        except KeyError:
-            continue
-    return timelines
 
 
 def _is_image_asset(asset) -> bool:

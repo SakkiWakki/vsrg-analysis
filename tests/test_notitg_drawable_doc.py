@@ -1284,12 +1284,28 @@ def test_real_chart_element_parity(chart_path, label, doc_elements):
         assert not r['diffs'], summary
 
 
-def test_a_rect_draws_as_a_tinted_fill_sized_by_its_own_box(doc_elements):
-    # A Quad's absolute size IS its whole size, and legacy picks size_x over
-    # w per frame. `_fill_size_as_wh` only mirrors size_x onto w when the size
-    # carries KEYFRAMES, so a quad sized by a plain rest has w=0 and a real
-    # size_x - freezing either choice at compile time gets that one wrong.
+def test_a_rect_is_gated_by_its_w_h_and_sized_by_its_zoomto(doc_elements):
+    # The legacy painter asks TWO questions and the doc mirrors both:
+    # `_element_size` refuses a shape whose own w/h are not positive - it is
+    # not drawable, whatever else is set - and only THEN does `_draw_size`
+    # prefer an absolute size_x/size_y over that box.
+    #
+    # Reading size_x alone drew a Quad that only ever set `zoomto`. gat 2
+    # closes on two full-screen black ones: they covered the background for
+    # the rest of the chart, where the reference video shows it bright.
+    zoomed_only = _element('rect', 0)
+    zoomed_only.timelines['size_x'] = EventTimeline([], rest=(640.0,))
+    zoomed_only.timelines['size_y'] = EventTimeline([], rest=(480.0,))
+    evaluator, _id_maps, _r = dd.build_static_doc(
+        _compiled([], tree=[zoomed_only]))
+    u, f = _blit_lanes(evaluator, 1.0)
+    row = next(i for i in range(len(u)) if u[i, 0] == sn.OP_BLIT)
+    assert tuple(f[row, 19:21]) == (0.0, 0.0), 'no w/h: not drawable'
+
+    # With a real box it draws, and the zoomto sizes it.
     el = _element('rect', 0)
+    el.timelines['w'] = EventTimeline([], rest=(8.0,))
+    el.timelines['h'] = EventTimeline([], rest=(8.0,))
     el.timelines['size_x'] = EventTimeline([], rest=(640.0,))
     el.timelines['size_y'] = EventTimeline([], rest=(480.0,))
     el.timelines['color'] = EventTimeline([], rest=(1.0, 0.0, 0.0))
@@ -1299,14 +1315,9 @@ def test_a_rect_draws_as_a_tinted_fill_sized_by_its_own_box(doc_elements):
     u, f = _blit_lanes(evaluator, 1.0)
     row = next(i for i in range(len(u)) if u[i, 0] == sn.OP_BLIT)
     assert int(u[row, 1]) == sn.SRC_FILL
-    assert tuple(f[row, 19:21]) == (640.0, 480.0), 'w=0 must not win over size_x'
+    assert tuple(f[row, 19:21]) == (640.0, 480.0), 'zoomto wins over w/h'
     assert tuple(f[row, 10:13]) == (1.0, 0.0, 0.0)
 
-    # `_fill_size_timelines` makes a fill's w/h BE its size, so the legacy
-    # painter sizes the same quad from the same curve - which is what the
-    # harness's reference reads.
-    el.timelines['w'] = el.timelines['size_x']
-    el.timelines['h'] = el.timelines['size_y']
     rep = dd.element_parity_report(
         evaluator, id_maps['element_order'],
         lambda el_: (el_.sample('w', 0.0)[0], el_.sample('h', 0.0)[0]),

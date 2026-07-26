@@ -447,15 +447,20 @@ class _FillSizeTimeline:
 
     @staticmethod
     def _pick(size: float, natural: float) -> float:
-        """The extent, or ZERO when neither source gives a real one.
+        """The extent, or ZERO when the shape is not drawable at all.
 
-        A shape has no natural box to fall back to, so "unset" has to mean
-        "draws nothing" - which is what legacy's `w > 0 and h > 0` decides.
-        Letting a negative through means "keep the natural box" to
-        `record.draw_box`, and a fill's natural box is its TARGET: an unsized
-        rect then covered the whole screen instead of drawing nothing."""
-        extent = size if size >= 0.0 else natural
-        return extent if extent >= 0.0 else 0.0
+        The legacy painter asks TWO questions and this mirrors both:
+        `_element_size` refuses a shape whose own `w`/`h` are not positive -
+        it is not drawable, whatever else is set - and only then does
+        `_draw_size` prefer an absolute `size_x`/`size_y` over that box.
+
+        So w/h GATE and size_x/size_y SIZE. Reading size_x alone drew a Quad
+        that only ever set `zoomto`, and gat 2 closes on two full-screen black
+        ones: they covered the background for the rest of the chart while the
+        reference video shows it bright."""
+        if natural <= 0.0:
+            return 0.0
+        return size if size >= 0.0 else natural
 
     def is_static(self) -> bool:
         return ((self._size is None or _is_static(self._size))
