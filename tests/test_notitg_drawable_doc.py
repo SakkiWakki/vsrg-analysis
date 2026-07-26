@@ -422,13 +422,13 @@ def test_unsupported_kinds_skipped_with_per_kind_counts(doc_elements):
         _element('rect', -50),
         _element('text', 10, text='hi'),
         _element('video', -100),
-        _sprite(-100, None),  # image kind, no asset -> 'no_asset'
+        _sprite(-100, None),  # a Sprite with no texture -> 'untextured'
     ]
     compiled = _compiled([], tree=tree)
     evaluator, id_maps, report = dd.build_static_doc(compiled)
 
     assert report['elements_below'] == 3 and report['elements_above'] == 1
-    assert report['element_skips'] == {'video': 1, 'no_asset': 1}
+    assert report['element_skips'] == {'video': 1, 'untextured': 1}
     assert report['images'] == 1
 
 

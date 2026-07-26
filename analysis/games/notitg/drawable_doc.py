@@ -1373,9 +1373,17 @@ class _Builder:
 
         Image-backed kinds (sprite / frames) with a resolvable asset draw as
         SRC_IMAGE; fill kinds draw as a solid tinted quad. Everything still
-        unsupported - text, bitmaptext, video, compound, an image kind with no
-        asset - is skipped and tallied by kind (an asset-less image kind counts
-        as 'no_asset')."""
+        unsupported - text, bitmaptext, video, compound - is skipped and
+        tallied by kind.
+
+        'untextured' is the one tally that is NOT a gap: a Sprite the chart
+        declared and never gave a texture. Legacy's renderer resolves it to no
+        pixmap and draws nothing, and so does the engine, so skipping it is
+        the agreement. It is counted because it is the biggest number a
+        coverage sweep sees - 3233 items over 35 charts, 2156 in one - and a
+        tally that reads like a missing feature will be chased again
+        otherwise. A runtime `Sprite:Load` is a different thing entirely: that
+        arrives as an `asset_swap` timeline, and none of these carry one."""
         if element.kind in _FILL_KINDS:
             self._sn_element_item(self._sn.SRC_FILL, 0, element, ancestors)
             return True
@@ -1394,7 +1402,7 @@ class _Builder:
             return False
         image_id = self._image_id(element)
         if image_id is None:
-            self._count_skip('no_asset')
+            self._count_skip('untextured')
             return False
         self._sn_element_item(self._sn.SRC_IMAGE, image_id, element, ancestors)
         return True
