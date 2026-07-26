@@ -796,10 +796,33 @@ def _current_instances(compiled) -> list:
     return list(provider() if callable(provider) else provider)
 
 
-def _aft_slot_key(inst) -> str:
-    """The freeze/slot key an aft sampler blits (field_instances._extra): its
-    isolated upstream capture_source, else its source node, else its own name."""
-    return (inst.get('capture_source') or inst.get('aft_node') or inst['name'])
+def _aft_slot_key(inst, captured=()) -> str:
+    """The slot an aft sampler blits: ITS OWN SOURCE NODE when that node has a
+    capture of its own, else the isolated upstream, else the sampler's name.
+    `captured` is the set of node names a `capture` instance fills.
+
+    The node comes FIRST because of what a doc slot holds. Legacy folds a
+    chain's upstream transforms into the consumer's quad and blits the chain
+    ROOT's snapshot, so `capture_source` is the right key there. The doc does
+    the opposite - each node renders into its own slot, composed - so the
+    consumer's own node already holds exactly what it should draw, and
+    reaching past it to the root reads a slot that node never fills.
+
+    gat 2's `gf2_monitor` is that case, and `field_instances._fold_stage_chain`
+    names the section ("the monitor sampler through the chickenstrips
+    ending"): its node `aft#514` is captured every frame it draws, its
+    upstream `aft#503` is not, and the doc blitted `aft#503` - an empty slot,
+    so the whole ending drew black. Over the chart's span the two sides chose
+    differently on every frame the sampler drew.
+
+    The `captured` guard keeps legacy's own precondition (`node in slots`):
+    a node with no capture of its own has no slot to read, so the chain root
+    is still the answer.
+    """
+    node = inst.get('aft_node')
+    if node and node in captured:
+        return node
+    return (inst.get('capture_source') or node or inst['name'])
 
 
 def _horizon(compiled, default: float = 600.0) -> float:
@@ -839,6 +862,8 @@ class _Builder:
         self._screen = (float(screen_w), float(screen_h))
         self._field_ids: dict[str, int] = {}
         self._slot_ids: dict[str, int] = {}
+        # Filled by `run` before any instance is emitted.
+        self._captured_nodes: frozenset = frozenset()
         # Storyboard image sources: an image id per DISTINCT absolute asset path
         # (loading is the consumer's job). id_maps carries the {id -> path} map.
         self._image_ids: dict[str, int] = {}
@@ -1162,6 +1187,10 @@ class _Builder:
         own order. Instances take band 0, the notefield's own band.
         """
         instances = self._current_instances_ensured()
+        # The nodes that fill a slot of their own, so an aft sampler can
+        # prefer its own source node over the chain root (`_aft_slot_key`).
+        self._captured_nodes = frozenset(
+            inst['name'] for inst in instances if inst['kind'] == 'capture')
         elements = (self._owned_elements(instances)
                     if elements_in_doc() else ())
 
@@ -1315,7 +1344,8 @@ class _Builder:
             case 'fill':
                 self._emit_blit(sn.SRC_FILL, 0, inst)
             case 'aft':
-                slot = self._slot_drawable(_aft_slot_key(inst))
+                slot = self._slot_drawable(
+                    _aft_slot_key(inst, self._captured_nodes))
                 self._emit_blit(sn.SRC_DRAWABLE, slot, inst)
             case 'player' | 'proxy':
                 scope = self._field_scope(inst)
