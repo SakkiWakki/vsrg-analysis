@@ -306,3 +306,52 @@ def test_instances_carry_crop_in_their_entries():
     base, first, second = frame.fields
     assert first[4] == pytest.approx((0.5, 0.0, 0.0, 0.0))
     assert second[4] is None
+
+
+# -- playfield transform mods -----------------------------------------------
+#
+# `x`/`y`/`z`/`rotation*`/`zoom*`/`skewx` move the whole notefield, so they
+# compose as one more link under the field's chain rather than displacing
+# each arrow (field_compose.playfield_mod_link).
+
+def _mods(modstring, player=1, t_start=1.0, t_end=3.0):
+    from analysis.games.notitg.mod_channels import compile_mod_channels
+    return compile_mod_channels([{'t_start': t_start, 't_end': t_end,
+                                  'modstring': modstring, 'player': player}])
+
+
+def test_playfield_mod_link_is_none_without_the_mods():
+    assert field_compose.playfield_mod_link(_mods('*-1 50 drunk'), 1) is None
+    assert field_compose.playfield_mod_link(None, 1) is None
+
+
+def test_playfield_mods_reach_their_link_units():
+    """Pixels and degrees are the raw percent; the scale family is the
+    fraction (`*-1 72 zoomx` is 0.72x, not 72x)."""
+    link = field_compose.playfield_mod_link(
+        _mods('*-1 -215 x, *-1 22 rotationz, *-1 72 zoomx'), 1)
+    assert link['x'].sample(2.0) == pytest.approx((-215.0,))
+    assert link['rotation'].sample(2.0) == pytest.approx((22.0,))
+    assert link['scale_x'].sample(2.0) == pytest.approx((0.72,))
+
+
+def test_zoom_mods_rest_at_full_size():
+    """`clearall` leaves the scale family at 100%, not 0 - the field keeps
+    its size before the chart's first zoom window and after its last, where
+    a 0 rest would collapse it to a point."""
+    link = field_compose.playfield_mod_link(_mods('*-1 40 zoomy'), 1)
+    assert link['scale_y'].sample(0.0) == pytest.approx((1.0,))
+    assert link['scale_y'].sample(2.0) == pytest.approx((0.4,))
+    # Reverting at clearall speed (1.0/sec) from 0.4 back to 1.0.
+    assert link['scale_y'].sample(9.0) == pytest.approx((1.0,))
+
+
+def test_playfield_mods_compose_inside_the_field_chain():
+    """The mod link is INNERMOST: its offset rides the actor chain above it
+    rather than replacing it, so a seated field moves BY the mod."""
+    channel = field_compose.TransformChannel(field_compose.with_playfield_mods(
+        [field_compose.link_timelines({'x': [_kf(0.0, 320.0)],
+                                       'y': [_kf(0.0, 240.0)]})],
+        _mods('*-1 -160 x'), 1))
+    H, _alpha = channel.at(2.0)
+    assert _map_capture(H, 320.0, 240.0) == pytest.approx((160.0, 240.0))

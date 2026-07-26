@@ -65,6 +65,30 @@ _PIPE_ARG_CHANNELS = ('red', 'green', 'blue')
 # Perspective/appearance controls with no consumer yet; hallway left
 # this set once arrow_effects gained its pinhole-recede kernel.
 _ENGINE_CONTROLS = {'clearall', 'overhead', 'incoming', 'space', 'distant'}
+
+# The playfield transform mods: the whole notefield - receptors and all -
+# moves, turns, scales and shears with these, so they compose as one more
+# actor-style link under the field's own chain rather than as per-arrow
+# displacement (the family arrow_effects owns). Each maps to a
+# `field_compose` link property and the factor turning the channel
+# fraction (raw percent / 100) into that property's unit: pixels and
+# degrees are raw, so they scale back up by 100; skew and the scale
+# family are already fractions (`*10000 72 zoomx` = 0.72x).
+PLAYFIELD_MODS = {
+    'x': ('x', 100.0), 'y': ('y', 100.0), 'z': ('z', 100.0),
+    'rotationx': ('rotation_x', 100.0), 'rotationy': ('rotation_y', 100.0),
+    'rotationz': ('rotation', 100.0),
+    'skewx': ('skew_x', 1.0),
+    'zoomx': ('scale_x', 1.0), 'zoomy': ('scale_y', 1.0),
+    'zoomz': ('scale_z', 1.0),
+}
+
+# What `clearall` (PlayerOptions::Init) leaves a mod at, where that is not
+# 0. The scale family rests at 100% - a field whose chart stops driving
+# zoomx keeps its size, and one that never drives it is never collapsed to
+# a point. The mirin template declares the same defaults for the same
+# reason (`setdefault { 100, 'zoomx', ... }`).
+MOD_INIT_DEFAULTS = {'zoomx': 1.0, 'zoomy': 1.0, 'zoomz': 1.0}
 _SPEED_MOD = re.compile(r'^(?:\d+(?:\.\d+)?x|c\d+|m\d+)$')
 
 # A speed token, optionally approach-prefixed: `*0.45 1.5x`, `2x`, `c400`,
@@ -353,9 +377,10 @@ def compile_mod_channels(mod_events) -> ModChannels:
 
     events = []
     for (name, player), chan_windows in windows.items():
-        for beat, value, speed in _resolve_windows(chan_windows):
+        rest = MOD_INIT_DEFAULTS.get(name, 0.0)
+        for beat, value, speed in _resolve_windows(chan_windows, rest):
             events.append(ModEvent(beat, value, speed, name, player))
-    return ModChannels.compile(events)
+    return ModChannels.compile(events, rests=MOD_INIT_DEFAULTS)
 
 
 @dataclass(frozen=True)
@@ -372,19 +397,17 @@ class _Window:
     order: int
 
 
-_REST_TARGET = (0.0, _CLEARALL_SPEED)
-
-
-def _resolve_windows(windows) -> list:
+def _resolve_windows(windows, rest: float = 0.0) -> list:
     """A channel's overlapping windows -> `[(time, value, speed), ...]`
     retarget events, one per change in the resolved target.
 
     At any instant the engine's target is the highest-order window
     covering it (each re-applies every frame; later table entries win), or
-    `(0, clearall speed)` where none is active. We build that step
+    `(rest, clearall speed)` where none is active - `rest` being what
+    `clearall` leaves this mod at (`MOD_INIT_DEFAULTS`). We build that step
     function over the intervals cut by every window boundary and emit a
     retarget wherever the target changes. Consequences: an end that a
-    still-active window overrides never dips to 0 (overlapped mods hold);
+    still-active window overrides never dips to rest (overlapped mods hold);
     an isolated window's end reverts at clearall speed -- the float -- not
     the window's own approach `*S`; a zero-length window (start == end)
     covers no interval, so it is a no-op just as the engine's next frame
@@ -407,8 +430,9 @@ def _resolve_windows(windows) -> list:
     # Ends sort before starts at the same instant (half-open intervals).
     marks.sort(key=lambda m: (m[0], m[1]))
 
+    rest_target = (rest, _CLEARALL_SPEED)
     events = []
-    prev = _REST_TARGET
+    prev = rest_target
     heap = []
     ended: set = set()
     # Unique heap tiebreak: two windows share an `order` when one row's
@@ -430,7 +454,7 @@ def _resolve_windows(windows) -> list:
         while heap and id(heap[0][2]) in ended:
             heapq.heappop(heap)
         target = ((heap[0][2].value, heap[0][2].speed) if heap
-                  else _REST_TARGET)
+                  else rest_target)
         if target != prev:
             events.append((t, *target))
             prev = target

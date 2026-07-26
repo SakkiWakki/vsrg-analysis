@@ -1162,11 +1162,12 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
             if live_sim is not None:
                 rec_id = env.named_actor_id(f'P{number}')
                 instances.append(field_compose.player_live_instance(
-                    live_sim, number, rec_id, oscillators.get(number), t0=t0))
+                    live_sim, number, rec_id, oscillators.get(number), t0=t0,
+                    channels=mod_channels))
             else:
                 instances.append(field_compose.player_instance(
                     number, named_keyframes.get(f'P{number}'),
-                    oscillators.get(number), t0=t0))
+                    oscillators.get(number), t0=t0, channels=mod_channels))
     for actor in _iter_xml(doc.root):
         rec_id = env.actor_id(actor)
         sim = env.actors.get(rec_id)
@@ -1266,6 +1267,10 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
                     player, named_keyframes.get(f'P{player}'),
                     (field_oscillators or {}).get(player),
                     ignore_hidden=True))
+            # The playfield transform mods ride the notefield either way:
+            # they are the field's own geometry, not the player frame's.
+            links = field_compose.with_playfield_mods(links, mod_channels,
+                                                      player)
         name = names.get(rec_id)
         if name is None:
             ancestor = next((names[env.actor_id(a)] for a in chain

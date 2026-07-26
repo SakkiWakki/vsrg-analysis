@@ -36,9 +36,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from analysis.games.notitg import field_projection
+from analysis.games.notitg import field_projection, mod_channels
 from analysis.player.render import transform3d
-from analysis.player.render.effects.timeline import EventTimeline
+from analysis.player.render.effects.timeline import EventTimeline, Keyframe
 
 _CENTER_X = field_projection.DESIGN_CX
 _CENTER_Y = field_projection.DESIGN_CY
@@ -516,16 +516,68 @@ def player_live_link(sim, number, rec_id, osc_deltas=None,
     return link
 
 
-def player_instance(number, keyframes, osc_deltas=None, t0=None) -> dict:
+def playfield_mod_link(channels, number) -> dict | None:
+    """Player `number`'s PLAYFIELD TRANSFORM MODS as one link, or None when
+    the chart drives none of them.
+
+    `x`/`y`/`z`/`rotation*`/`zoom*`/`skewx` move the whole notefield rather
+    than each arrow (`mod_channels.PLAYFIELD_MODS`), so they belong on the
+    field's own chain, innermost of it: the engine turns and scales the
+    field about its own middle and then the chart's actors carry it around
+    the screen, which is what an innermost link composes. Reusing the actor
+    link keeps them on one transform path - out-of-plane rotation gets the
+    chain's real perspective fold rather than a per-arrow approximation.
+
+    The mod curves are already piecewise linear, so they republish as
+    keyframes exactly (`EventTimeline` eases from the previous target),
+    which is also what lets the drawable doc export them breakpoint for
+    breakpoint instead of dense-sampling."""
+    if channels is None:
+        return None
+    keyframes = {}
+    for mod, (prop, unit) in mod_channels.PLAYFIELD_MODS.items():
+        times, values = channels.breakpoints(mod, number - 1)
+        if times:
+            keyframes[prop] = _mod_keyframes(times, values, unit)
+    return link_timelines(keyframes) if keyframes else None
+
+
+def _mod_keyframes(times, values, unit) -> list:
+    """One mod curve's `(times, values)` as `Keyframe`s in the property's
+    own unit. Each point tweens toward the NEXT point's value over the gap
+    between them; the last holds. Points sharing a time are the curve's
+    vertical steps (an instant retarget) - the later one wins the sample,
+    so emitting both is exact."""
+    last = len(times) - 1
+    return [Keyframe(t=times[i],
+                     values=(values[min(i + 1, last)] * unit,),
+                     duration=(times[i + 1] - times[i]) if i < last else 0.0,
+                     easing=_EASE_LINEAR)
+            for i in range(len(times))]
+
+
+def player_instance(number, keyframes, osc_deltas=None, t0=None,
+                    channels=None) -> dict:
     """A player-field instance drawn in place from its own link."""
     link = player_link(number, keyframes, osc_deltas)
-    return instance(f'P{number}', 'player', number, [link], t0=t0)
+    return instance(f'P{number}', 'player', number,
+                    with_playfield_mods([link], channels, number), t0=t0)
 
 
-def player_live_instance(sim, number, rec_id, osc_deltas=None, t0=None) -> dict:
+def player_live_instance(sim, number, rec_id, osc_deltas=None, t0=None,
+                         channels=None) -> dict:
     """LAZY player-field instance: LiveCurves over the live PlayerP{n} actor."""
     link = player_live_link(sim, number, rec_id, osc_deltas)
-    return instance(f'P{number}', 'player', number, [link], t0=t0)
+    return instance(f'P{number}', 'player', number,
+                    with_playfield_mods([link], channels, number), t0=t0)
+
+
+def with_playfield_mods(links, channels, number) -> list:
+    """`links` with player `number`'s playfield mod link appended, when the
+    chart drives any. Innermost, so the mods act in the field's own space
+    and everything above still carries the result (`playfield_mod_link`)."""
+    mods = playfield_mod_link(channels, number)
+    return [*links, mods] if mods is not None else list(links)
 
 
 # Proxy source tags -> the player whose notefield they re-render

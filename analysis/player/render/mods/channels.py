@@ -92,17 +92,22 @@ class ModEvent:
 @dataclass
 class _Segments:
     """Breakpoints of one channel: parallel `times`/`values`, sorted by
-    time, sampled as a piecewise-linear curve holding the last value."""
+    time, sampled as a piecewise-linear curve holding the last value.
+
+    `rest` is the value before the first breakpoint - the engine's own
+    default for this mod, which is 0 for nearly all of them and 1 (100%)
+    for the scale family, where 0 would collapse the field."""
     times: list = field(default_factory=list)
     values: list = field(default_factory=list)
+    rest: float = DEFAULT_REST
 
     def _sample(self, t: float) -> float:
         times = self.times
         if not times:
-            return DEFAULT_REST
+            return self.rest
         idx = bisect_right(times, t) - 1
         if idx < 0:
-            return self.values[0] if times[0] <= t else DEFAULT_REST
+            return self.values[0] if times[0] <= t else self.rest
         if idx + 1 >= len(times):
             return self.values[idx]
         t0, t1 = times[idx], times[idx + 1]
@@ -165,13 +170,13 @@ def _add_chase(seg: _Segments, t: float, target: float, speed: float,
         seg._append(until, reached)
 
 
-def _compile_channel(events: list) -> _Segments:
+def _compile_channel(events: list, rest: float = DEFAULT_REST) -> _Segments:
     ordered = sorted(events, key=lambda e: e.beat)
     # The clamp bound for each event is the next distinct event time; the
     # last event chases unbounded (nothing re-targets it).
     next_times = [ordered[j].beat for j in range(1, len(ordered))]
     next_times.append(float('inf'))
-    seg = _Segments()
+    seg = _Segments(rest=rest)
     for ev, until in zip(ordered, next_times):
         if ev.speed <= 0.0:
             _add_snap(seg, ev.beat, ev.value)
@@ -186,23 +191,31 @@ class ModChannels:
     Build with `ModChannels.compile(events, beat_to_time=...)`; the
     caller-supplied `beat_to_time` maps event beats to seconds (identity
     if events are already time-keyed). Query with `value(mod, t)` for one
-    channel or `values_at(t)` for every active mod at once."""
+    channel or `values_at(t)` for every active mod at once.
 
-    def __init__(self, channels: dict, players: tuple):
+    `rests` overrides the pre-first-event value per mod name for the mods
+    whose engine default is not 0 (the scale family)."""
+
+    def __init__(self, channels: dict, players: tuple, rests=None):
         self._channels = channels
         self._players = players
+        self._rests = dict(rests or {})
 
     @classmethod
-    def compile(cls, events, beat_to_time: Callable[[float], float] | None = None):
+    def compile(cls, events, beat_to_time: Callable[[float], float] | None = None,
+                rests=None):
         to_time = beat_to_time if beat_to_time is not None else (lambda b: b)
+        rests = dict(rests or {})
         grouped = defaultdict(list)
         players = set()
         for ev in events:
             players.add(ev.player)
             timed = ModEvent(to_time(ev.beat), ev.value, ev.speed, ev.mod, ev.player)
             grouped[(ev.mod, ev.player)].append(timed)
-        channels = {key: _compile_channel(evs) for key, evs in grouped.items()}
-        return cls(channels, tuple(sorted(players)))
+        channels = {(mod, pn): _compile_channel(evs,
+                                                rests.get(mod, DEFAULT_REST))
+                    for (mod, pn), evs in grouped.items()}
+        return cls(channels, tuple(sorted(players)), rests)
 
     @property
     def players(self) -> tuple:
@@ -213,9 +226,20 @@ class ModChannels:
 
     def value(self, mod: str, t: float, player: int = 0) -> float:
         """Current percentage of one (mod, player) at time `t` (seconds).
-        Returns the rest value (0) for a mod that has no events."""
+        Returns the mod's rest value for one that has no events."""
         seg = self._channels.get((mod, player))
-        return DEFAULT_REST if seg is None else seg._sample(float(t))
+        if seg is None:
+            return self._rests.get(mod, DEFAULT_REST)
+        return seg._sample(float(t))
+
+    def breakpoints(self, mod: str, player: int = 0):
+        """`(times, values)` of one (mod, player)'s piecewise-linear curve,
+        empty when the chart never drives it. The shape a caller needs to
+        republish the channel as an event stream of its own; `value` is the
+        way to read it."""
+        seg = self._channels.get((mod, player))
+        return ((), ()) if seg is None else (tuple(seg.times),
+                                             tuple(seg.values))
 
     def values_at(self, t: float, player: int = 0) -> dict:
         """Every mod's current percentage for `player` at time `t`, as
