@@ -411,18 +411,26 @@ class _FillSizeTimeline:
     def _pick(size: float, natural: float) -> float:
         """The extent, or ZERO when the shape is not drawable at all.
 
-        The legacy painter asks TWO questions and this mirrors both:
-        `_element_size` refuses a shape whose own `w`/`h` are not positive -
-        it is not drawable, whatever else is set - and only then does
-        `_draw_size` prefer an absolute `size_x`/`size_y` over that box.
+        An absolute size WINS when one is set: `zoomto` IS a Quad's drawn
+        size in the engine, whatever its `w`/`h` lanes hold - and on the
+        lazy path they hold their rest of 0 forever, because `zoomto`
+        records on `size_x`/`size_y` and nothing writes `w`. Gating on
+        `w > 0` first (the legacy painter's `_element_size` order) blanked
+        every lazily-compiled Quad: gat 2's AFT curtain quads masked
+        nothing, so the xtagon captures kept the whole bright scene and the
+        lumikey tunnel composited opaque backdrop copies instead of keyed
+        arrows. `w`/`h` still decide a shape that never set an absolute
+        size, and a non-positive extent still draws nothing.
 
-        So w/h GATE and size_x/size_y SIZE. Reading size_x alone drew a Quad
-        that only ever set `zoomto`, and gat 2 closes on two full-screen black
-        ones: they covered the background for the rest of the chart while the
-        reference video shows it bright."""
-        if natural <= 0.0:
-            return 0.0
-        return size if size >= 0.0 else natural
+        (An earlier reading blamed drawing zoomto-only Quads for gat 2's
+        black ending and gated on w/h first to suppress them; the rig
+        backdrops that ending actually needed handled are routed below the
+        field by `_is_aft_backdrop`. Note the RASTER backend cannot verify
+        any of this: its fills never alter the captured pixels, so every
+        before/after there reads as identical - judge fills on GL.)"""
+        if size >= 0.0:
+            return size
+        return natural if natural > 0.0 else 0.0
 
     def is_static(self) -> bool:
         return ((self._size is None or _is_static(self._size))

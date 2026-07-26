@@ -1266,7 +1266,13 @@ def _osc_beat_range(spans_by_id, to_seconds, start_beat, end_seconds=None):
 
 def _element_timelines(actor, keyframes, sim, rests=None):
     """The element's per-property timelines: LiveCurves reading the live sim in
-    lazy mode (keyed on the actor's recorder id), else the baked keyframes."""
+    lazy mode (keyed on the actor's recorder id), else the baked keyframes.
+
+    Do NOT alias lanes in the returned dict (a fill's `size_x` -> `w`, say):
+    the sweep-end freeze rebuilds entries BY PROP NAME from the recorder's
+    own change info, so an aliased entry is silently replaced with a constant
+    of its rest and the alias evaporates. Cross-lane rules live where the
+    lanes are read (`drawable_doc._FillSizeTimeline`)."""
     if sim is not None:
         rec_id = getattr(actor, '_recorder_id', None)
         if rec_id is None:

@@ -1284,15 +1284,12 @@ def test_real_chart_element_parity(chart_path, label, doc_elements):
         assert not r['diffs'], summary
 
 
-def test_a_rect_is_gated_by_its_w_h_and_sized_by_its_zoomto(doc_elements):
-    # The legacy painter asks TWO questions and the doc mirrors both:
-    # `_element_size` refuses a shape whose own w/h are not positive - it is
-    # not drawable, whatever else is set - and only THEN does `_draw_size`
-    # prefer an absolute size_x/size_y over that box.
-    #
-    # Reading size_x alone drew a Quad that only ever set `zoomto`. gat 2
-    # closes on two full-screen black ones: they covered the background for
-    # the rest of the chart, where the reference video shows it bright.
+def test_a_rect_is_sized_by_its_zoomto_even_without_w_h(doc_elements):
+    # `zoomto` IS a Quad's drawn size in the engine, and on the lazy path it
+    # records ONLY on size_x/size_y - nothing ever writes w/h, which sit at
+    # their rest of 0. Gating on `w > 0` first (the legacy painter's order)
+    # therefore blanked every lazily-compiled Quad: gat 2's AFT curtains
+    # masked nothing and the xtagon tunnel composited opaque backdrop copies.
     zoomed_only = _element('rect', 0)
     zoomed_only.timelines['size_x'] = EventTimeline([], rest=(640.0,))
     zoomed_only.timelines['size_y'] = EventTimeline([], rest=(480.0,))
@@ -1300,7 +1297,14 @@ def test_a_rect_is_gated_by_its_w_h_and_sized_by_its_zoomto(doc_elements):
         _compiled([], tree=[zoomed_only]))
     u, f = _blit_lanes(evaluator, 1.0)
     row = next(i for i in range(len(u)) if u[i, 0] == sn.OP_BLIT)
-    assert tuple(f[row, 19:21]) == (0.0, 0.0), 'no w/h: not drawable'
+    assert tuple(f[row, 19:21]) == (640.0, 480.0), 'zoomto alone sizes it'
+
+    # With neither an absolute size nor a w/h box there is no extent at all.
+    bare = _element('rect', 0)
+    evaluator, _id_maps, _r = dd.build_static_doc(_compiled([], tree=[bare]))
+    u, f = _blit_lanes(evaluator, 1.0)
+    row = next(i for i in range(len(u)) if u[i, 0] == sn.OP_BLIT)
+    assert tuple(f[row, 19:21]) == (0.0, 0.0), 'no size anywhere: nothing'
 
     # With a real box it draws, and the zoomto sizes it.
     el = _element('rect', 0)
