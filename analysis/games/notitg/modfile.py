@@ -1974,6 +1974,13 @@ _SPAN_PROPS = {
 _VIBRATE_CELL_HZ = 60.0
 _U64 = (1 << 64) - 1
 
+# A continuous oscillator has no exact breakpoint form (the consumer ramps
+# LINEARLY between breakpoints), so its export traces it at the cadence a
+# design-space oscillation reads smooth at - the same one SegmentTimeline
+# exports its own OSC segments at.
+_OSC_TRACE_HZ = 60.0
+_EASE_LINEAR = 0
+
 
 def _rand_unit(seed, axis, cell) -> float:
     """Deterministic uniform in [-1, 1) from a splitmix64-style hash of
@@ -2018,6 +2025,66 @@ class OscDeltaChannel:
                     and self._prop in _SPAN_PROPS.get(span.kind, ()):
                 total += self._span_delta(span, t)
         return (total,)
+
+    def breakpoints(self, t0: float, t1: float, index: int = 0):
+        """`(ts, vals, durs, eases)` reproducing `sample(t)[0]` over
+        `[t0, t1]` for a piecewise linear-ramp consumer, or None when
+        `index` names a value this channel does not carry.
+
+        The delta rests at zero outside every span, so only the spans are
+        walked. A VIBRATE becomes one HOLD per 60Hz cell: the step is the
+        effect, and a ramp between cells slides the receptors where the
+        engine teleports them. A continuous kind is traced as ramps at
+        `_OSC_TRACE_HZ`.
+
+        Without this an exporter can only dense-sample on its own grid, and
+        a grid that is not the cell grid aliases the teleport - LINARIA's
+        field came out 43px off its legacy placement that way.
+        """
+        if index != 0:
+            return None
+        times = sorted(self._change_times(t0, t1))
+        ts: list[float] = []
+        vals: list[float] = []
+        durs: list[float] = []
+        for i, bt in enumerate(times):
+            nxt = times[i + 1] if i + 1 < len(times) else None
+            steps = nxt is None or any(span.kind == 'vibrate'
+                                       for span in self._active(bt))
+            # A cell is read from INSIDE it: the roll is
+            # `int((t - span.start) * hz)`, so the boundary time itself comes
+            # back as either cell depending on the last bit of the subtraction.
+            ts.append(bt)
+            vals.append(self.sample((bt + nxt) * 0.5 if steps and nxt else bt)[0])
+            durs.append(0.0 if steps else nxt - bt)
+        return ts, vals, durs, [_EASE_LINEAR] * len(ts)
+
+    def _change_times(self, t0: float, t1: float) -> set:
+        """Every time within `[t0, t1]` at which some span alters the delta:
+        its own edges, and its sample grid in between. A vibrate's grid is
+        measured from the span's START (that is what `_span_delta` rolls
+        cells against), not from the window's."""
+        out = set()
+        for span in self._spans:
+            if self._prop not in _SPAN_PROPS.get(span.kind, ()):
+                continue
+            start = max(float(span.start), t0)
+            end = min(_effective_end(span, self._end), t1)
+            if end <= start:
+                continue
+            hz = _VIBRATE_CELL_HZ if span.kind == 'vibrate' else _OSC_TRACE_HZ
+            first = math.floor((start - span.start) * hz)
+            last = math.ceil((end - span.start) * hz)
+            out.update(min(max(span.start + k / hz, start), end)
+                       for k in range(first, last + 1))
+        return out
+
+    def _active(self, t: float) -> list:
+        """The spans driving this property at `t` (`sample`'s own test, for
+        the export path - which needs to know WHICH ones, not just the sum)."""
+        return [span for span in self._spans
+                if span.start <= t < _effective_end(span, self._end)
+                and self._prop in _SPAN_PROPS.get(span.kind, ())]
 
     def _span_delta(self, span, t) -> float:
         if span.kind == 'vibrate':

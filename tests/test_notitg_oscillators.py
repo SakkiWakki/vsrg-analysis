@@ -1,6 +1,7 @@
 """Live oscillator delta channels: seeded per-frame vibrate (the
 receptor mirage), analytic sines, open-span extension, no sample-cap
 freeze."""
+from bisect import bisect_right
 import math
 
 import pytest
@@ -166,3 +167,98 @@ def test_pulse_absent_from_the_additive_field_channel():
     assert modfile.oscillator_delta_channels(
         [_span('pulse', 0.0, 1.0, (0.5, 1.0, 0.0))], _context(),
         seed=7) is None
+
+
+# --------------------------------------------------------------------------
+# Channel export: what a piecewise linear-ramp consumer is handed
+# --------------------------------------------------------------------------
+
+def _replay(exported, rest, t):
+    """The consumer model `breakpoints` targets: rest before the first
+    breakpoint, then hold (dur <= 0) or ramp toward the next value. Ties in
+    time go to the LATER breakpoint, as the consumer's bisect does."""
+    ts, vals, durs, _eases = exported
+    index = bisect_right(ts, t) - 1
+    if index < 0:
+        return rest
+    if durs[index] <= 0.0 or index + 1 >= len(ts):
+        return vals[index]
+    return vals[index] + (vals[index + 1] - vals[index]) * min(
+        1.0, (t - ts[index]) / durs[index])
+
+
+def _probe_times(t0, t1, n=997):
+    """Times spread over the window, deliberately off any 60Hz grid."""
+    return [t0 + (t1 - t0) * (i + 0.31415) / n for i in range(n)]
+
+
+def test_vibrate_exports_as_one_hold_per_cell():
+    span = _span('vibrate', 1.0, 4.0, (10.0, 10.0, 10.0))
+    ch = _vibrate_channel(span)
+    exported = ch.breakpoints(0.0, 6.0)
+    ts, _vals, durs, _eases = exported
+    assert all(d == 0.0 for d in durs)          # steps, never ramps
+    assert ts == sorted(ts)
+    for t in _probe_times(0.0, 6.0):
+        assert _replay(exported, 0.0, t) == pytest.approx(ch.sample(t)[0])
+
+
+def test_a_continuous_kind_exports_as_ramps():
+    span = _span('bob', 0.0, 4.0, (20.0, 20.0, 20.0), period=1.0)
+    ch = modfile.OscDeltaChannel([span], 'y', _clock(), seed=99)
+    exported = ch.breakpoints(0.0, 6.0)
+    _ts, _vals, durs, _eases = exported
+    assert any(d > 0.0 for d in durs)
+    for t in _probe_times(0.0, 6.0):
+        assert _replay(exported, 0.0, t) == pytest.approx(ch.sample(t)[0],
+                                                          abs=0.05)
+
+
+def test_the_delta_sum_exports_the_teleport_the_grid_would_alias():
+    """A dense grid cannot see a 60Hz staircase - the field came out 43px
+    off LINARIA's legacy placement that way. The union export replays the
+    sum of the base and the delta exactly."""
+    from analysis.games.notitg.field_compose import _SumTimeline
+    from analysis.player.render.effects.timeline import EventTimeline, Keyframe
+
+    base = EventTimeline([Keyframe(0.0, (100.0,), 0.0, 0),
+                          Keyframe(2.0, (-40.0,), 0.0, 0)], rest=(0.0,))
+    delta = _vibrate_channel(_span('vibrate', 1.0, 4.0, (30.0, 30.0, 30.0)))
+    total = _SumTimeline((base, delta))
+
+    exported = total.breakpoints(0.0, 6.0)
+    assert exported is not None
+    ts, _vals, _durs, _eases = exported
+    assert ts == sorted(ts)
+    for t in _probe_times(0.0, 6.0):
+        assert _replay(exported, 0.0, t) == pytest.approx(total.sample(t)[0])
+
+
+def test_the_delta_sum_declines_rather_than_linearise_a_curved_ease():
+    """Two channels cannot be added breakpoint-wise; the union export reads
+    the sum back as straight lines between the parts' own breakpoints, which
+    a curved-eased span is not. Declining sends the caller to its sampling
+    fallback instead of publishing a silently flattened curve. (An
+    EventTimeline never triggers this - it traces its own curved eases into
+    linear ramps first - but a recorded segment lane carries its ease id.)"""
+    from analysis.games.notitg.field_compose import _SumTimeline
+
+    class _CurvedLane:
+        def sample(self, t):
+            return (t * t,)
+
+        def breakpoints(self, t0, t1, index=0):
+            return [t0], [t0 * t0], [t1 - t0], [3]
+
+    delta = _vibrate_channel(_span('vibrate', 1.0, 4.0, (30.0, 30.0, 30.0)))
+    assert _SumTimeline((_CurvedLane(), delta)).breakpoints(0.0, 6.0) is None
+
+
+def test_a_sum_of_ducks_with_no_shape_of_their_own_declines():
+    from analysis.games.notitg.field_compose import _SumTimeline
+
+    class _Duck:
+        def sample(self, t):
+            return (math.sin(t),)
+
+    assert _SumTimeline((_Duck(), _Duck())).breakpoints(0.0, 1.0) is None

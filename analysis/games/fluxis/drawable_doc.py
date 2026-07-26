@@ -29,10 +29,11 @@ a single RESERVED playfield drawable id (`id_maps['playfield']`) is minted and
 documented for a later wave to bind the notefield feed onto; the storyboard items
 straddle it by band exactly as they will once it draws.
 
-`export_channel` is DUPLICATED from `notitg.drawable_doc` deliberately: a sibling
-agent may be editing that file concurrently, so importing it would couple the two.
-The two copies are byte-identical in intent and MUST be de-duplicated into a shared
-`storyboard`-level helper once both waves land (noted for later dedup).
+`export_channel` stays local to each game: what a game's curves ARE differs (fluXis
+has no segment lanes and no oscillator deltas), so the dispatch differs. What both
+copies used to duplicate - translating an `EventTimeline`'s keyframes into
+breakpoints - now lives on `EventTimeline.breakpoints` itself, which is where the
+keyframes are.
 
 No Qt import at module load - importable headless.
 """
@@ -50,13 +51,6 @@ _SCREEN_ID = 0
 # they are densely sampled). 1/30s: the interim approximation the spec calls out
 # - an EventTimeline is exported exactly instead.
 _DENSE_DT = 1.0 / 30.0
-
-# Linear easing id (effects.easing): the ONLY easing the native channel's
-# breakpoint ramp reproduces exactly. Other eases within a keyframe span are
-# densified.
-_EASE_LINEAR = 0
-
-_REST_EPS = 1e-4
 
 # The channel export window end when the caller supplies no explicit horizon.
 # Generous, since channels hold their tail past it.
@@ -102,13 +96,10 @@ def export_channel(timeline, t0: float, t1: float, prop: int = 0):
     ramps LINEARLY toward the next breakpoint's value over `dur`. This helper
     emits breakpoints reproducing the timeline's own playback under that model:
 
-    - `EventTimeline`: EXACT. Its keyframes are translated directly - an instant
-      (duration 0) becomes one hold breakpoint; a linearly-eased ramp becomes a
-      (start-value, dur) breakpoint plus a (target, hold) breakpoint; a non-
-      linearly-eased ramp is densified across its own span at `_DENSE_DT` (the
-      native ramp is linear, so a curved ease cannot be one breakpoint). Rest
-      before the first keyframe is carried on the ChannelRef, no pre-roll
-      breakpoint is emitted.
+    - `EventTimeline`: EXACT, from the timeline's own `breakpoints` (the
+      keyframes ARE the shape). Rest before the first keyframe is carried on
+      the ChannelRef, so no pre-roll breakpoint is emitted. Its ease ids are
+      dropped: every breakpoint it emits is already a linear ramp.
     - anything else (`LiveCurve` / `SegCurve`, or any `.sample(t)` duck):
       dense-sampled at `_DENSE_DT` across `[t0, t1]` (the documented interim
       approximation - these lazy curves expose no keyframe structure).
@@ -118,7 +109,8 @@ def export_channel(timeline, t0: float, t1: float, prop: int = 0):
     args of `DocBuilder.channel` - as plain Python lists + a float rest.
     """
     if isinstance(timeline, EventTimeline):
-        return _export_event_timeline(timeline, prop)
+        ts, vals, durs, _eases = timeline.breakpoints(t0, t1, prop)
+        return ts, vals, durs, _rest_value(timeline, prop)
     return _export_dense(timeline, t0, t1, prop)
 
 
@@ -129,56 +121,6 @@ def _rest_value(timeline, prop: int) -> float:
     if rest is not None:
         return float(rest[prop])
     return float(timeline.sample(-1.0e18)[prop])
-
-
-def _export_event_timeline(timeline: EventTimeline, prop: int):
-    """Exact breakpoints for an EventTimeline (see `export_channel`)."""
-    keyframes = timeline._kf
-    rest = _rest_value(timeline, prop)
-    ts: list[float] = []
-    vals: list[float] = []
-    durs: list[float] = []
-
-    def emit(bt: float, value: float, dur: float) -> None:
-        # Collapse a redundant hold onto the previous breakpoint of equal value
-        # (keeps the channel minimal; the native sampler is unaffected).
-        if ts and durs[-1] <= 0.0 and abs(vals[-1] - value) <= _REST_EPS \
-                and dur <= 0.0:
-            return
-        ts.append(bt)
-        vals.append(value)
-        durs.append(dur)
-
-    prev = rest
-    for kf in keyframes:
-        target = float(kf.values[prop])
-        if kf.duration <= 0.0:
-            emit(kf.t, target, 0.0)
-            prev = target
-            continue
-        start = float(kf.start[prop]) if kf.start is not None else prev
-        if kf.easing == _EASE_LINEAR:
-            emit(kf.t, start, kf.duration)
-            emit(kf.t + kf.duration, target, 0.0)
-        else:
-            # A curved ease: the native ramp is linear, so densify the span.
-            _densify_span(timeline, prop, kf.t, kf.t + kf.duration, ts, vals, durs)
-            emit(kf.t + kf.duration, target, 0.0)
-        prev = target
-
-    return ts, vals, durs, rest
-
-
-def _densify_span(timeline, prop, a: float, b: float, ts, vals, durs) -> None:
-    """Append linear-ramp breakpoints tracing `timeline` across `[a, b)` at
-    `_DENSE_DT`, so the piecewise-linear reconstruction follows the curve."""
-    n = max(1, int(np.ceil((b - a) / _DENSE_DT)))
-    step = (b - a) / n
-    for k in range(n):
-        bt = a + k * step
-        ts.append(bt)
-        vals.append(float(timeline.sample(bt)[prop]))
-        durs.append(step)
 
 
 def _export_dense(timeline, t0: float, t1: float, prop: int):

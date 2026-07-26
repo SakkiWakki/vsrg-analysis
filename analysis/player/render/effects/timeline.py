@@ -8,6 +8,7 @@ sampled value(s) to a `QTransform`.
 """
 from __future__ import annotations
 
+import math
 from bisect import bisect_right
 from dataclasses import dataclass
 
@@ -49,6 +50,13 @@ class Keyframe:
 SIMPLIFY_EPS = 1e-3
 
 _EASE_LINEAR = 0
+
+# `breakpoints` emission bounds. `_REST_EPS` is how close two consecutive
+# holds must be before the second is dropped as redundant; `_TRACE_DT` is
+# how finely a CURVED ease is walked, since the consumer's ramp is linear
+# and cannot carry the curve itself.
+_REST_EPS = 1e-4
+_TRACE_DT = 1.0 / 30.0
 
 
 def simplify_instants(frames):
@@ -165,3 +173,61 @@ class EventTimeline:
             prev = self._kf[idx - 1].values if idx > 0 else self._rest
         f = ease(kf.easing, (t_now - kf.t) / kf.duration)
         return tuple(a + (b - a) * f for a, b in zip(prev, kf.values))
+
+    def breakpoints(self, t0: float, t1: float, index: int = 0):
+        """`(ts, vals, durs, eases)` reproducing `sample(t)[index]` for a
+        piecewise linear-ramp consumer: one that serves this timeline's rest
+        before `ts[0]`, then at breakpoint `i` holds `vals[i]` when
+        `durs[i] <= 0` and otherwise ramps `vals[i] -> vals[i+1]` over
+        `durs[i]`.
+
+        EXACT, and independent of `[t0, t1]` - the keyframes ARE the shape,
+        so the whole stream is translated whatever window is asked for. An
+        instant becomes one hold; a linearly-eased ramp becomes its two
+        endpoints; a CURVED ease is traced at `_TRACE_DT`, because one linear
+        ramp cannot carry a curve. Rest rides the consumer's channel, so no
+        pre-roll breakpoint is emitted.
+
+        Examples: the storyboard doc exporters call this through
+        `export_channel`, and `field_compose._SumTimeline` calls it to learn
+        where a link changes before re-reading the sum there.
+        """
+        ts: list[float] = []
+        vals: list[float] = []
+        durs: list[float] = []
+
+        def emit(bt: float, value: float, dur: float) -> None:
+            # Collapse a redundant hold onto the previous breakpoint of equal
+            # value (keeps the channel minimal; the sampler is unaffected).
+            if ts and durs[-1] <= 0.0 and abs(vals[-1] - value) <= _REST_EPS \
+                    and dur <= 0.0:
+                return
+            ts.append(bt)
+            vals.append(value)
+            durs.append(dur)
+
+        prev = float(self._rest[index])
+        for kf in self._kf:
+            target = float(kf.values[index])
+            if kf.duration <= 0.0:
+                emit(kf.t, target, 0.0)
+            elif kf.easing == _EASE_LINEAR:
+                start = float(kf.start[index]) if kf.start is not None else prev
+                emit(kf.t, start, kf.duration)
+                emit(kf.t + kf.duration, target, 0.0)
+            else:
+                self._trace(index, kf.t, kf.t + kf.duration, ts, vals, durs)
+                emit(kf.t + kf.duration, target, 0.0)
+            prev = target
+        return ts, vals, durs, [_EASE_LINEAR] * len(ts)
+
+    def _trace(self, index, a: float, b: float, ts, vals, durs) -> None:
+        """Append linear-ramp breakpoints following this timeline across
+        `[a, b)` at `_TRACE_DT`, so the reconstruction follows the curve."""
+        n = max(1, int(math.ceil((b - a) / _TRACE_DT)))
+        step = (b - a) / n
+        for k in range(n):
+            bt = a + k * step
+            ts.append(bt)
+            vals.append(float(self.sample(bt)[index]))
+            durs.append(step)

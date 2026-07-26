@@ -68,7 +68,7 @@ from pathlib import Path
 
 import numpy as np
 
-from analysis.player.render.effects.timeline import SIMPLIFY_EPS, EventTimeline
+from analysis.player.render.effects.timeline import SIMPLIFY_EPS
 from analysis.player.render.storyboard import record as _rec
 from analysis.player.render.storyboard.sprite_sheet import (
     frame_at_time, frame_steps)
@@ -184,16 +184,11 @@ def export_channel(timeline, t0: float, t1: float, prop: int = 0):
     breakpoint's ease id. This helper emits breakpoints reproducing the
     timeline's own playback under that model, most structural source first:
 
-    - a curve exposing `breakpoints(t0, t1, prop)` (`SegCurve` over the sim's
-      recorded segment lanes): EXACT and free - the closed-form segments are
-      translated straight across, at the sim's own resolution.
-    - `EventTimeline`: EXACT. Its keyframes are translated directly - an instant
-      (duration 0) becomes one hold breakpoint; a linearly-eased ramp becomes a
-      (start-value, dur) breakpoint plus a (target, hold) breakpoint, matching
-      EventTimeline's ease-from-previous playback; a non-linearly-eased ramp is
-      densified across its own span at `_DENSE_DT` (the native ramp is linear,
-      so a curved ease cannot be one breakpoint). Rest before the first keyframe
-      is carried on the ChannelRef, so no pre-roll breakpoint is emitted.
+    - a curve exposing `breakpoints(t0, t1, prop)`: EXACT and free - the shape
+      its writer already recorded is translated straight across, at that
+      writer's own resolution. `SegCurve` (the sim's segment lanes),
+      `EventTimeline` (its keyframes), `OscDeltaChannel` (its oscillator
+      spans), and `_SumTimeline` (the union of its parts') all answer.
     - anything else (any `.sample(t)` duck): dense-sampled at `_DENSE_DT`
       across `[t0, t1]` and collapsed to the breakpoints the reconstruction
       actually needs.
@@ -209,8 +204,6 @@ def export_channel(timeline, t0: float, t1: float, prop: int = 0):
     structural = _export_structural(timeline, t0, t1, prop)
     if structural is not None:
         return structural
-    if isinstance(timeline, EventTimeline):
-        return _export_event_timeline(timeline, prop)
     if _is_static(timeline):
         return [], [], [], _rest_value(timeline, prop), []
     return _export_dense(timeline, t0, t1, prop)
@@ -250,61 +243,6 @@ def _rest_value(timeline, prop: int) -> float:
     if rest is not None:
         return float(rest[prop])
     return float(timeline.sample(-1.0e18)[prop])
-
-
-def _export_event_timeline(timeline: EventTimeline, prop: int):
-    """Exact breakpoints for an EventTimeline (see `export_channel`)."""
-    keyframes = timeline._kf
-    rest = _rest_value(timeline, prop)
-    ts: list[float] = []
-    vals: list[float] = []
-    durs: list[float] = []
-    eases: list[int] = []
-
-    def emit(bt: float, value: float, dur: float) -> None:
-        # Collapse a redundant hold onto the previous breakpoint of equal value
-        # (keeps the channel minimal; the native sampler is unaffected).
-        if ts and durs[-1] <= 0.0 and abs(vals[-1] - value) <= _REST_EPS \
-                and dur <= 0.0:
-            return
-        ts.append(bt)
-        vals.append(value)
-        durs.append(dur)
-        eases.append(_EASE_LINEAR)
-
-    prev = rest
-    for idx, kf in enumerate(keyframes):
-        target = float(kf.values[prop])
-        if kf.duration <= 0.0:
-            emit(kf.t, target, 0.0)
-            prev = target
-            continue
-        start = float(kf.start[prop]) if kf.start is not None else prev
-        if kf.easing == _EASE_LINEAR:
-            emit(kf.t, start, kf.duration)
-            emit(kf.t + kf.duration, target, 0.0)
-        else:
-            # A curved ease: the native ramp is linear, so densify the span.
-            _densify_span(timeline, prop, kf.t, kf.t + kf.duration,
-                          ts, vals, durs, eases)
-            emit(kf.t + kf.duration, target, 0.0)
-        prev = target
-
-    return ts, vals, durs, rest, eases
-
-
-def _densify_span(timeline, prop, a: float, b: float, ts, vals, durs,
-                  eases) -> None:
-    """Append linear-ramp breakpoints tracing `timeline` across `[a, b)` at
-    `_DENSE_DT`, so the piecewise-linear reconstruction follows the curve."""
-    n = max(1, int(np.ceil((b - a) / _DENSE_DT)))
-    step = (b - a) / n
-    for k in range(n):
-        bt = a + k * step
-        ts.append(bt)
-        vals.append(float(timeline.sample(bt)[prop]))
-        durs.append(step)
-        eases.append(_EASE_LINEAR)
 
 
 def _export_dense(timeline, t0: float, t1: float, prop: int):

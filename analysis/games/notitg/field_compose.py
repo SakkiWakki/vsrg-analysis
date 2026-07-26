@@ -163,6 +163,13 @@ def link_live_timelines(sim, rec_id, rests=None) -> dict:
     return dict(timelines)
 
 
+_EASE_LINEAR = 0
+
+# How far apart two samples must be before the span between them counts as
+# motion rather than float noise, in design pixels / degrees.
+_FLAT_EPS = 1e-9
+
+
 class _SumTimeline:
     """Additive overlay: oscillator deltas riding on a recorded stream."""
 
@@ -171,6 +178,89 @@ class _SumTimeline:
 
     def sample(self, t):
         return (sum(tl.sample(t)[0] for tl in self._timelines),)
+
+    def breakpoints(self, t0: float, t1: float, index: int = 0):
+        """`(ts, vals, durs, eases)` reproducing `sample(t)[0]` over
+        `[t0, t1]` for a piecewise linear-ramp consumer, or None when a part
+        cannot describe its own shape.
+
+        BETWEEN two consecutive part breakpoints no part changes, so the sum
+        is one straight line there and reading it back describes that line
+        exactly. Which is what makes the sum exportable at all: two channels
+        cannot be added breakpoint-wise, but they can be re-read on the union
+        of their breakpoint times.
+
+        A part carrying a step is why a ramp's TARGET can need its own
+        breakpoint: the consumer ramps toward `vals[i+1]`, which is not the
+        value that must be served at that time. The two share the instant,
+        and the consumer's bisect takes the later.
+
+        Sampling the sum on a fixed grid instead - the exporter fallback -
+        aliases whatever the deltas do between grid points.
+        """
+        times = self._union_times(t0, t1, index)
+        if times is None:
+            return None
+        ts: list[float] = []
+        vals: list[float] = []
+        durs: list[float] = []
+
+        def emit(t, value, dur):
+            ts.append(float(t))
+            vals.append(float(value))
+            durs.append(float(dur))
+
+        target = None
+        for a, b in zip(times, times[1:]):
+            head, tail = self._straight(a, b)
+            if target is not None and abs(target - head) > _FLAT_EPS:
+                emit(a, target, 0.0)
+            moving = abs(tail - head) > _FLAT_EPS
+            emit(a, head, b - a if moving else 0.0)
+            target = tail if moving else None
+        last = self.sample(times[-1])[0]
+        if target is not None and abs(target - last) > _FLAT_EPS:
+            emit(times[-1], target, 0.0)
+        emit(times[-1], last, 0.0)
+        return ts, vals, durs, [_EASE_LINEAR] * len(ts)
+
+    def _straight(self, a: float, b: float) -> tuple:
+        """`(value just after a, value just before b)` for the straight line
+        the sum follows across `[a, b]`, read from two INTERIOR samples.
+
+        The ends themselves are not sampled. A step lands ON a union time,
+        and which side of it a float reads is not something the caller
+        controls: a vibrate rolls its cell as `int((t - start) * hz)`, so
+        `start + k / hz` comes back as cell k or cell k-1 depending on the
+        last bit, and one wrong cell is a whole random offset. Both quarter
+        points are unambiguously inside, and the line through them
+        extrapolates to both ends."""
+        lo = self.sample(a + (b - a) * 0.25)[0]
+        hi = self.sample(a + (b - a) * 0.75)[0]
+        if abs(hi - lo) <= _FLAT_EPS:
+            level = 0.5 * (lo + hi)
+            return level, level
+        return 1.5 * lo - 0.5 * hi, 1.5 * hi - 0.5 * lo
+
+    def _union_times(self, t0: float, t1: float, index: int):
+        """Every time any part changes shape, plus the window's own ends - or
+        None when a part declines, or carries a CURVED ease. A curve between
+        breakpoints breaks the straight-line reading `breakpoints` depends
+        on, and linearising one part's ease to publish another part's steps
+        would trade a known error for a silent one."""
+        times = {float(t0), float(t1)}
+        for part in self._timelines:
+            export = getattr(part, 'breakpoints', None)
+            if export is None:
+                return None
+            exported = export(t0, t1, index)
+            if exported is None:
+                return None
+            part_ts, _vals, _durs, eases = exported
+            if any(ease != _EASE_LINEAR for ease in eases):
+                return None
+            times.update(t for t in part_ts if t0 < t < t1)
+        return sorted(times)
 
 
 def overlay_deltas(link, deltas) -> dict:
