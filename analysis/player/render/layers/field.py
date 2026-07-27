@@ -124,6 +124,25 @@ def _field_span(ctx):
     return left, right - left
 
 
+def _receptors_moved(ctx) -> bool:
+    """Whether this frame's receptors sit anywhere but their resting
+    place - the lane center, on the hit line, unturned.
+
+    NOT `lane_path.displaces`: a lane can place its receptors somewhere
+    else without bending at all. NotITG's reverse family is the case that
+    matters - our native space IS engine reverse=1, so a chart with no
+    mods at all still mirrors every receptor to the top of the field.
+
+    The judgment coloring rides each receptor's own frame only when there
+    is a frame to ride; otherwise one full-width band across the field is
+    the same picture in one rect."""
+    marks = ctx.receptor_marks
+    centers = np.array([ctx.lane_center(col) for col in range(ctx.keycount)])
+    return bool(np.any(marks.x != centers)
+                or np.any(marks.y != float(ctx.judge_y))
+                or np.any(marks.rotation_deg) or np.any(marks.flat_zoom != 1.0))
+
+
 def _receptor_alpha(ctx, col):
     """How visible `col`'s receptor is, or None for fully visible.
 
@@ -242,7 +261,7 @@ def draw_judgment(ctx, painter):
         bands.append((_judge_brush(p.judge_colors[name]), half_top, half_bot))
 
     bars = p._adapter.receptor_style() != 'line'
-    per_column = bars and ctx.lane_path.displaces
+    per_column = bars and _receptors_moved(ctx)
     if not per_column:
         for brush, half_top, half_bot in bands:
             painter.setBrush(brush)
