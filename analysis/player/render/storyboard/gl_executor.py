@@ -72,7 +72,7 @@ from analysis.player.render.shaders.gl_pipeline import (
     GL_READ_FRAMEBUFFER, GL_RGBA, GL_SCISSOR_TEST, GL_STENCIL_BUFFER_BIT,
     GL_STENCIL_TEST, GL_TEXTURE0, GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
     GL_TEXTURE_MIN_FILTER, GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T,
-    GL_TRIANGLE_STRIP, GL_UNSIGNED_BYTE)
+    GL_TRIANGLE_STRIP, GL_TRIANGLES, GL_UNSIGNED_BYTE)
 from PySide6.QtOpenGL import QOpenGLPaintDevice
 
 from analysis.player.render.shaders.library import notitg_compat
@@ -196,6 +196,44 @@ uniform vec4 u_color;
 out vec4 fragColor;
 void main(void) { fragColor = u_color; }
 """
+
+# The BATCH pair. One draw for a whole run of plain textured quads sharing a
+# texture: the mat3 fold that `u_mat` does per quad is applied to every corner
+# of the run at once with numpy, so a vertex arrives already in clip space and
+# carries its own tint/opacity. Instancing would express this more compactly,
+# but glVertexAttribDivisor is GL 3.3 core and this context is 3.2 - six
+# vertices per quad costs bandwidth we have and no extension we do not.
+_BATCH_VERTEX_SRC = """#version 150
+in vec3 a_clip;
+in vec2 a_uv;
+in vec4 a_mod;
+out vec2 v_uv;
+out vec4 v_mod;
+void main(void) {
+    v_uv = a_uv;
+    v_mod = a_mod;
+    gl_Position = vec4(a_clip.xy, 0.0, a_clip.z);
+}
+"""
+
+_BATCH_FRAG_SRC = """#version 150
+uniform sampler2D u_tex;
+in vec2 v_uv;
+in vec4 v_mod;
+out vec4 fragColor;
+void main(void) {
+    vec4 c = texture(u_tex, v_uv);
+    fragColor = vec4(c.rgb * v_mod.rgb, c.a) * v_mod.a;
+}
+"""
+
+# Floats per batched vertex: clip xyw, uv, tint rgb + opacity.
+_BATCH_FLOATS = 9
+# Two triangles rather than a strip - strips cannot be concatenated without
+# degenerate joins, and the run is uploaded as ONE array.
+_BATCH_VERTS = 6
+# Below this a run's numpy setup costs more than the per-quad path it saves.
+_BATCH_MIN = 8
 
 
 def _clamp01(v: float) -> float:
@@ -377,6 +415,11 @@ def _build_program(frag_src, uniforms, vert_src=None, quiet=False):
                  _adapt_dialect(frag_src)))
     program.bindAttributeLocation('a_pos', 0)
     program.bindAttributeLocation('a_uv', 1)
+    # The batch program's own names, bound alongside: binding a name the
+    # shader does not declare is a no-op, so one call site serves both
+    # vertex formats.
+    program.bindAttributeLocation('a_clip', 0)
+    program.bindAttributeLocation('a_mod', 2)
     if not (built and program.link()):
         if not quiet:
             logger.warning('GLExecutor: quad program failed to build: %s',
@@ -497,6 +540,11 @@ class GLExecutor:
         # walk, because anything may have run between two of them.
         self._bound_program = None
         self._logical_boxes: dict[tuple, tuple] = {}
+        # Batch geometry: its own VAO/VBO, because the batched vertex format
+        # is not the quad one and reformatting per run would cost the saving.
+        self._batch_vao = None
+        self._batch_vbo = None
+        self._batch_bytes = 0
         self._skipped: set[str] = set()
         self.broken = False
 
@@ -671,17 +719,24 @@ class GLExecutor:
         self._vbo.bind()
         gf.glActiveTexture(GL_TEXTURE0)
 
-        for i in range(u.shape[0]):
+        i, total = 0, u.shape[0]
+        while i < total:
             kind = int(u[i, _U_KIND])
             match kind:
                 case n if n == _OP_BEGIN:
                     self._begin(gf, u[i], target_stack)
                 case n if n == _OP_BLIT:
+                    run = self._batch_run(u, f, i, total)
+                    if run > 1 and self._blit_batch(gf, u, f, i, run,
+                                                    target_stack):
+                        i += run
+                        continue
                     self._blit(gf, u[i], f[i], target_stack, uf)
                 case n if n == _OP_COPY:
                     self._copy(gf, u[i], target_stack)
                 case n if n == _OP_END:
                     self._end(gf, target_stack)
+            i += 1
 
         if self._bound_program is not None:
             self._bound_program.release()
@@ -690,6 +745,130 @@ class GLExecutor:
         self._vbo.release()
         self._vao.release()
         return gf
+
+    def _batch_run(self, u, f, start: int, total: int) -> int:
+        """How many BLITs from `start` are one batchable run.
+
+        A run is quads that a single draw can express: the same texture and
+        blend, no per-item shader, no clip, and none of the per-quad shaping
+        the batched vertex format does not carry (fade, crop, fit, a sized
+        box, a sheet cell). Fed notes are exactly that shape - a plain sprite
+        at a transform - which is why the copy-render fan-out batches at all.
+
+        Returns 1 for anything unbatchable, so the caller just draws it the
+        ordinary way. Cheap on purpose: it runs per op, and a wrong answer
+        here is a correctness bug, not a slow frame."""
+        if int(u[start, _U_A]) != _SRC_IMAGE:
+            return 1
+        image_id = int(u[start, _U_B])
+        grid = self._image_grids.get(image_id, (1, 1))
+        if grid[0] > 1 or grid[1] > 1:
+            return 1
+        blend = int(u[start, _U_BLEND])
+        end = start
+        while end < total and int(u[end, _U_KIND]) == _OP_BLIT:
+            urec, frec = u[end], f[end]
+            if (int(urec[_U_A]) != _SRC_IMAGE or int(urec[_U_B]) != image_id
+                    or int(urec[_U_BLEND]) != blend
+                    or int(urec[_U_SHADER]) != 0 or int(urec[_U_CLIP]) != 0):
+                break
+            if (frec[_F_FIT] >= _rec.FIT_OFF_BELOW
+                    or frec[_F_SIZE] >= 0.0 or frec[_F_SIZE + 1] >= 0.0
+                    or float(np.max(np.abs(frec[_F_CROP:_F_CROP + 4]))) > 0.0
+                    or float(np.max(np.abs(frec[_F_FADE:_F_FADE + 4]))) > 0.0):
+                break
+            end += 1
+        return end - start
+
+    def _blit_batch(self, gf, u, f, start: int, count: int,
+                    target_stack: list[int]) -> bool:
+        """Draw `count` plain textured quads in ONE call, or False to fall
+        back. The mat3 fold `_mat_source_to_ndc` does per quad is done for
+        every corner of the run at once."""
+        if count < _BATCH_MIN or not target_stack:
+            return False
+        entry = self._programs[3] if len(self._programs) > 3 else None
+        if entry is None or entry[0] is None:
+            return False
+        target_id = target_stack[-1]
+        if self._targets.get(target_id) is None:
+            return False
+        uploaded = self._image_texture(gf, int(u[start, _U_B]))
+        if uploaded is None:
+            return False
+        texture, sw, sh = uploaded[0], uploaded[1], uploaded[2]
+        natural = self._image_natural.get(int(u[start, _U_B]))
+        logical = natural if natural is not None \
+            else self._logical_of(int(u[start, _U_B]), sw, sh, 1, 1)
+        lw, lh = float(logical[0]), float(logical[1])
+        if lw <= 0.0 or lh <= 0.0 or sw <= 0 or sh <= 0:
+            return False
+
+        rows = f[start:start + count]
+        tw, th = self._sizes[target_id]
+        # Corners in source-logical units: the origin shifts the box before
+        # the transform, exactly as the per-quad path applies it.
+        ox = rows[:, _F_ORIGIN] * lw
+        oy = rows[:, _F_ORIGIN + 1] * lh
+        x0, y0 = -ox, -oy
+        x1, y1 = x0 + lw, y0 + lh
+        # mat3 (row-major, column-vector) folded with target-logical -> NDC,
+        # matching _mat_source_to_ndc term for term.
+        m = rows[:, 0:9].astype(np.float64)
+        sx, sy = 2.0 / float(tw), -2.0 / float(th)
+        a0, a1, a2 = sx * m[:, 0] - m[:, 6], sx * m[:, 1] - m[:, 7], \
+            sx * m[:, 2] - m[:, 8]
+        b0, b1, b2 = sy * m[:, 3] + m[:, 6], sy * m[:, 4] + m[:, 7], \
+            sy * m[:, 5] + m[:, 8]
+        c0, c1, c2 = m[:, 6], m[:, 7], m[:, 8]
+        corners = ((x0, y0), (x1, y0), (x0, y1), (x1, y1))
+        clip = [(a0 * cx + a1 * cy + a2, b0 * cx + b1 * cy + b2,
+                 c0 * cx + c1 * cy + c2) for cx, cy in corners]
+        u0, u1 = _inset_half_texel(0.0, 1.0, sw)
+        v0, v1 = _inset_half_texel(0.0, 1.0, sh)
+        uvs = ((u0, v0), (u1, v0), (u0, v1), (u1, v1))
+        tint = np.clip(rows[:, _F_TINT:_F_TINT + 3].astype(np.float64), 0.0, 1.0)
+        opacity = np.clip(rows[:, _F_OPACITY].astype(np.float64), 0.0, 1.0)
+
+        # Two triangles per quad, corner order (0,1,2) (2,1,3).
+        verts = np.empty((count, _BATCH_VERTS, _BATCH_FLOATS), dtype=np.float32)
+        for slot, corner in enumerate((0, 1, 2, 2, 1, 3)):
+            cx, cy, cw = clip[corner]
+            verts[:, slot, 0] = cx
+            verts[:, slot, 1] = cy
+            verts[:, slot, 2] = cw
+            verts[:, slot, 3] = uvs[corner][0]
+            verts[:, slot, 4] = uvs[corner][1]
+            verts[:, slot, 5:8] = tint
+            verts[:, slot, 8] = opacity
+
+        additive = int(u[start, _U_BLEND]) == _BLEND_ADDITIVE
+        if additive:
+            gf.glBlendFunc(GL_ONE, GL_ONE)
+        self._use(entry)
+        gf.glBindTexture(GL_TEXTURE_2D, texture)
+        self._draw_batch(gf, verts)
+        if additive:
+            gf.glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+        return True
+
+    def _draw_batch(self, gf, verts) -> None:
+        """Upload one run's vertices and draw them. The batch VAO is separate
+        from the quad one: its attribute layout differs, and rebinding two
+        formats onto one VAO per run would cost what the batch saves."""
+        data = verts.tobytes()
+        self._batch_vao.bind()
+        self._batch_vbo.bind()
+        if len(data) > self._batch_bytes:
+            self._batch_vbo.allocate(data, len(data))
+            self._batch_bytes = len(data)
+        else:
+            self._batch_vbo.write(0, data, len(data))
+        gf.glDrawArrays(GL_TRIANGLES, 0, verts.shape[0] * _BATCH_VERTS)
+        self._batch_vbo.release()
+        self._batch_vao.release()
+        self._vao.bind()
+        self._vbo.bind()
 
     def _use(self, entry) -> None:
         """Bind this program unless it already is. Sampler units live in
@@ -775,10 +954,15 @@ class GLExecutor:
                 self._mark_broken('quad program build failed')
                 return False
             # A fade build failure degrades to the unfaded program (hard
-            # edges), never to a black or skipped draw.
-            self._programs = (tex, fill, fade)
+            # edges), never to a black or skipped draw. A batch build failure
+            # degrades to the per-quad path, which draws the same pixels.
+            batch = _build_program(_BATCH_FRAG_SRC, ('u_tex',),
+                                   vert_src=_BATCH_VERTEX_SRC)
+            self._programs = (tex, fill, fade, batch)
         if self._vao is None:
             self._build_quad(gf)
+        if self._batch_vao is None and self._programs[3] is not None:
+            self._build_batch(gf)
         return True
 
     def _mark_broken(self, why: str) -> None:
@@ -803,6 +987,30 @@ class GLExecutor:
         vbo.release()
         self._vbo = vbo
         self._vao = vao
+
+    def _build_batch(self, gf) -> None:
+        """The batch VAO/VBO: clip xyw at 0, uv at 1, tint+opacity at 2. Sized
+        for one screen of fed notes and grown on demand by `_draw_batch`."""
+        vbo = QOpenGLBuffer(QOpenGLBuffer.Type.VertexBuffer)
+        vbo.create()
+        vbo.bind()
+        vbo.setUsagePattern(QOpenGLBuffer.UsagePattern.StreamDraw)
+        self._batch_bytes = 4096 * _BATCH_VERTS * _BATCH_FLOATS * 4
+        vbo.allocate(self._batch_bytes)
+        vao = QOpenGLVertexArrayObject()
+        vao.create()
+        vao.bind()
+        stride = _BATCH_FLOATS * 4
+        gf.glEnableVertexAttribArray(0)
+        gf.glVertexAttribPointer(0, 3, GL_FLOAT, 0, stride, VoidPtr(0))
+        gf.glEnableVertexAttribArray(1)
+        gf.glVertexAttribPointer(1, 2, GL_FLOAT, 0, stride, VoidPtr(12))
+        gf.glEnableVertexAttribArray(2)
+        gf.glVertexAttribPointer(2, 4, GL_FLOAT, 0, stride, VoidPtr(20))
+        vao.release()
+        vbo.release()
+        self._batch_vbo = vbo
+        self._batch_vao = vao
 
     def _set_pipeline_state(self, gf) -> None:
         gf.glDisable(GL_DEPTH_TEST)

@@ -39,6 +39,7 @@ from analysis.player.render.shaders import library
 GL_TEXTURE_2D = 0x0DE1
 GL_TEXTURE0 = 0x84C0
 GL_TRIANGLE_STRIP = 0x0005
+GL_TRIANGLES = 0x0004
 GL_FLOAT = 0x1406
 GL_BLEND = 0x0BE2
 GL_DEPTH_TEST = 0x0B71
