@@ -27,17 +27,26 @@ this curve with no displacement, so the general form lives here and a game
 with note mods supplies the bend. `straight` is that degenerate case and
 needs nothing from a game but its lane geometry.
 
-WHAT A SAMPLE CARRIES is where a thing is (x, y, z), how it is turned
-(rotation, zoom), and how visible the LANE makes it there (alpha - the
-hidden/sudden style gradients that are a function of position). Per-thing
-appearance is not on the curve: a note's own glow, a receptor's own
-visibility. NotITG's receptors are the sharp case - their visibility comes
-from the dark family alone and the stealth terms the y-offset-0 pipeline
-computes never apply to them (ReceptorArrowRow), even though their POSITION
-comes through the same GetXPos as an arrow's. So the receptor consumer takes
-x/y/rotation/zoom from here and ignores `alpha`, which is a consumer's call
-to make, not a reason to keep the term off the curve that a hold body's
-per-strip fade genuinely needs.
+WHAT A SAMPLE CARRIES is everything that is true of a POINT IN THE LANE:
+where it is (x, y, z), how a thing there is turned (rotation about each
+axis, zoom), and how visible the lane makes it (alpha - the hidden/sudden
+gradients that are functions of position). What varies per THING rather
+than per point stays with the thing: its sprite, its judgment colour, its
+own state.
+
+A consumer is free to ignore a term. NotITG's receptors are the sharp
+case: their visibility comes from the dark family alone and the stealth
+terms the y-offset-0 pipeline computes never apply to them
+(ReceptorArrowRow), even though their POSITION comes through the same
+GetXPos as an arrow's. So the receptor consumer takes x/y/rotation/zoom
+from here and ignores `alpha` - a consumer's call to make, not a reason to
+keep off the curve the term a hold body's per-strip fade needs.
+
+`zoom` and `flat_zoom` are that same split from the other side. A drawer
+that can render depth uses `zoom` and puts the sample at `z`; one that
+draws flat uses `flat_zoom`, which already carries the perspective the
+lane would have applied. Only the lane knows its own projection, so only
+the lane can collapse it.
 
 `y_offset` is the caller's own scroll space - whatever unit its notes are
 already positioned in - and only the game's hooks give it meaning.
@@ -50,6 +59,30 @@ from dataclasses import dataclass
 import numpy as np
 
 
+_SAMPLE_FIELDS = ('x', 'y', 'z', 'rotation_deg', 'rotation_x_deg',
+                  'rotation_y_deg', 'zoom', 'flat_zoom', 'alpha')
+
+
+@dataclass(frozen=True)
+class LaneDisplacement:
+    """What a game's hook bends the lane by, per sample.
+
+    Every term rests at the value that leaves the lane alone, so a game
+    names only what it moves. Scalars broadcast, so a uniform term needs no
+    array. `flat_zoom` defaults to `zoom` - a lane with no projection of
+    its own has nothing to collapse."""
+
+    dx: object = 0.0
+    dy: object = 0.0
+    z: object = 0.0
+    rotation_deg: object = 0.0
+    rotation_x_deg: object = 0.0
+    rotation_y_deg: object = 0.0
+    zoom: object = 1.0
+    flat_zoom: object = None
+    alpha: object = 1.0
+
+
 @dataclass(frozen=True)
 class LaneSample:
     """One point of the curve, in screen px / degrees / unitless."""
@@ -58,7 +91,10 @@ class LaneSample:
     y: float
     z: float
     rotation_deg: float
+    rotation_x_deg: float
+    rotation_y_deg: float
     zoom: float
+    flat_zoom: float
     alpha: float
 
 
@@ -75,17 +111,18 @@ class LaneSamples:
     y: np.ndarray
     z: np.ndarray
     rotation_deg: np.ndarray
+    rotation_x_deg: np.ndarray
+    rotation_y_deg: np.ndarray
     zoom: np.ndarray
+    flat_zoom: np.ndarray
     alpha: np.ndarray
 
     def __len__(self) -> int:
         return len(self.x)
 
     def at(self, index: int) -> LaneSample:
-        return LaneSample(float(self.x[index]), float(self.y[index]),
-                          float(self.z[index]),
-                          float(self.rotation_deg[index]),
-                          float(self.zoom[index]), float(self.alpha[index]))
+        return LaneSample(*(float(getattr(self, field)[index])
+                            for field in _SAMPLE_FIELDS))
 
     def tangent_deg(self, first: int, last: int) -> float:
         """The heading in degrees from sample `first` to sample `last`, for
@@ -101,10 +138,7 @@ class LaneSamples:
         return float(np.degrees(np.arctan2(dy, dx)))
 
     def rows(self, start: int, stop: int) -> 'LaneSamples':
-        return LaneSamples(self.x[start:stop], self.y[start:stop],
-                           self.z[start:stop],
-                           self.rotation_deg[start:stop],
-                           self.zoom[start:stop], self.alpha[start:stop])
+        return self._mapped(lambda values: values[start:stop])
 
     def box_filtered(self, taps: int) -> 'LaneSamples':
         """Every `taps` consecutive rows averaged into one.
@@ -117,13 +151,12 @@ class LaneSamples:
         if taps <= 1:
             return self
         count = len(self.x) // taps
+        return self._mapped(
+            lambda values: values.reshape(count, taps).mean(axis=1))
 
-        def fold(values):
-            return values.reshape(count, taps).mean(axis=1)
-
-        return LaneSamples(fold(self.x), fold(self.y), fold(self.z),
-                           fold(self.rotation_deg), fold(self.zoom),
-                           fold(self.alpha))
+    def _mapped(self, fn) -> 'LaneSamples':
+        return LaneSamples(*(fn(getattr(self, field))
+                             for field in _SAMPLE_FIELDS))
 
 
 class LanePath:
@@ -142,8 +175,8 @@ class LanePath:
       scroll axis itself (NotITG's accel family) applied BEFORE anything
       else, so `note_y` and `displace` cannot disagree about which offset
       they are answering for.
-    - `displace(cols, y_offsets, note_beats, cell) -> (dx, dy, rotation_deg,
-      zoom, z, alpha)`, the bend on top. None means a straight lane.
+    - `displace(cols, y_offsets, note_beats, cell) -> LaneDisplacement`, the
+      bend on top. None means a straight lane.
 
     `note_beats` is what is travelling, not just where: a displacement may
     depend on the thing's own beat (NotITG's dizzy spins a note by its
@@ -180,18 +213,16 @@ class LanePath:
                                  dtype=np.float64)
         x = self._centers(cols)
         y = np.asarray(self._note_y(cols, offsets), dtype=np.float64)
-        zeros = np.zeros(len(cols), dtype=np.float64)
-        ones = np.ones(len(cols), dtype=np.float64)
-        if self._displace is None:
-            return LaneSamples(x, y, zeros, zeros.copy(), ones, ones.copy())
-        dx, dy, rot, zoom, z, alpha = self._displace(
-            cols, offsets, note_beats, cell)
-        return LaneSamples(x + np.asarray(dx, dtype=np.float64),
-                           y + np.asarray(dy, dtype=np.float64),
-                           np.asarray(z, dtype=np.float64),
-                           np.asarray(rot, dtype=np.float64),
-                           np.asarray(zoom, dtype=np.float64),
-                           np.asarray(alpha, dtype=np.float64))
+        bend = (LaneDisplacement() if self._displace is None
+                else self._displace(cols, offsets, note_beats, cell))
+        n = len(cols)
+        zoom = _spread(bend.zoom, n)
+        return LaneSamples(
+            x + _spread(bend.dx, n), y + _spread(bend.dy, n),
+            _spread(bend.z, n), _spread(bend.rotation_deg, n),
+            _spread(bend.rotation_x_deg, n), _spread(bend.rotation_y_deg, n),
+            zoom, zoom if bend.flat_zoom is None else _spread(bend.flat_zoom, n),
+            _spread(bend.alpha, n))
 
     def at(self, col: int, y_offset: float, note_beat=None) -> LaneSample:
         """One point, for a caller that genuinely wants one (a receptor).
@@ -252,6 +283,13 @@ class LanePath:
         return table[cols]
 
 
+def _spread(value, n: int) -> np.ndarray:
+    """A displacement term as its own array of `n`, so a game may write a
+    uniform term as one number."""
+    return np.broadcast_to(np.asarray(value, dtype=np.float64),
+                           (n,)).astype(np.float64, copy=False)
+
+
 def _sub_sampled(count: int, taps: int) -> np.ndarray:
     """`count` evenly spaced fractions of a span, each replaced by `taps`
     sub-positions spread across its own cell.
@@ -266,6 +304,21 @@ def _sub_sampled(count: int, taps: int) -> np.ndarray:
     cell = 1.0 / max(count - 1, 1)
     jitter = (np.arange(taps) / taps - 0.5 + 0.5 / taps) * cell
     return (fractions[:, None] + jitter[None, :]).ravel()
+
+
+def flat_samples(x, y) -> LaneSamples:
+    """A span that has only a shape: points on the receptor plane, turned
+    and lit exactly as an undisplaced lane rests.
+
+    What a game produces when its scroll AXIS is what bends - an SV fold
+    doubles the axis back on itself without the column moving at all - so
+    the result still answers every question a consumer asks."""
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    zeros = np.zeros(len(y), dtype=np.float64)
+    ones = np.ones(len(y), dtype=np.float64)
+    return LaneSamples(x, y, zeros, zeros.copy(), zeros.copy(), zeros.copy(),
+                       ones, ones.copy(), ones.copy())
 
 
 def straight(lane_center, note_y) -> LanePath:

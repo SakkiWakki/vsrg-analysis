@@ -318,13 +318,12 @@ def _emit_ln_body(ctx, n, image_map, lane_w, rows, report):
     alpha = float(n.alpha)
     if alpha < _MIN_ALPHA:
         return
-    xs, ys = path[0], path[1]
+    xs, ys = path.x, path.y
     scale = getattr(n, 'body_scale', None)
-    half = lane_w / 2.0
     body_w, _body_h = _sprite_box(ctx, sprite, n.col, n.zoom)
     for i in range(len(ys) - 1):
-        x0, y0 = float(xs[i]) + half, float(ys[i])
-        x1, y1 = float(xs[i + 1]) + half, float(ys[i + 1])
+        x0, y0 = float(xs[i]), float(ys[i])
+        x1, y1 = float(xs[i + 1]), float(ys[i + 1])
         dx, dy = x1 - x0, y1 - y0
         length = math.hypot(dx, dy)
         if length <= 1e-6:
@@ -381,17 +380,12 @@ def _tail_end(n, lane_w):
     path = getattr(n, 'body_path', None)
     y_end = float(getattr(n, 'y_end', n.y))
     straight = (float(n.lx) + lane_w / 2.0, y_end, 0.0)
-    if path is None:
+    if path is None or len(path) < 2:
         return straight
-    xs, ys = path[0], path[1]
-    if len(ys) < 2:
+    end = path.at(-1)
+    if (end.x, end.y) == (float(path.x[-2]), float(path.y[-2])):
         return straight
-    dx = float(xs[-1]) - float(xs[-2])
-    dy = float(ys[-1]) - float(ys[-2])
-    if dx == 0.0 and dy == 0.0:
-        return straight
-    return (float(xs[-1]) + lane_w / 2.0, float(ys[-1]),
-            math.degrees(math.atan2(dy, dx)) - 90.0)
+    return (end.x, end.y, path.tangent_deg(-2, -1) - 90.0)
 
 
 def _head_mat(n, cx, cy, w, h):

@@ -20,7 +20,7 @@ Public API:
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import (QBrush, QColor, QPainter, QPainterPath,
+from PySide6.QtGui import (QColor, QPainter, QPainterPath,
                            QPainterPathStroker, QPixmap, QTransform)
 
 import math
@@ -32,13 +32,15 @@ import numpy as np
 
 from analysis.player.init import notes_model as _nm
 from analysis.player.notetypes import NT_TICK
+from analysis.player.render import lane_path
 from analysis.player.render.layers import chart_extras as _extras
 from analysis.player.render.layers.note_sprites import ln_body_width
-from analysis.player.render.mods.arrow_effects import display_alpha
+from analysis.player.render.mods.arrow_effects import (
+    display_alpha, perspective_z_scale)
 from analysis.player.render.primitives import _NO_PEN
 
 if TYPE_CHECKING:
-    from analysis.player.render.render_context import RenderContext
+    pass
 
 
 # Per-note 3D projection corners: a note-sized quad centered at the
@@ -100,15 +102,14 @@ class _NoteView:
     z: float = 0.0
     rot_x: float = 0.0
     rot_y: float = 0.0
-    # The hold's body as a path: `(xs, ys)` arrays where `xs` is the
-    # per-sample LEFT edge (lane_x + any per-note dx) and `ys` the screen
-    # y, running head -> tail. Every LN body is this path; the renderer
-    # strokes a constant-width ribbon along it and seats the head/tail
-    # caps on its endpoints oriented by the local tangent. Three
-    # producers feed it (`_build`): mod-bent samples (drunk/wave), SV
-    # folds (negative-SV holds bend back on themselves), or -- for a
-    # plain vertical unmodded hold -- `None`, which selects the rect
-    # fast-path (byte-identical to the historical straight blit).
+    # The hold's body as the lane curve's span between its head and tail
+    # offsets (`lane_path.LaneSamples`, running head -> tail, x at the
+    # lane center). The renderer strokes a ribbon along it and seats the
+    # caps on its endpoints oriented by the local tangent. Two producers
+    # feed it (`_build`): the lane curve itself, or an SV fold (a
+    # negative-SV hold bending back on itself). `None` is the plain
+    # vertical unmodded hold, which selects the rect fast-path
+    # (byte-identical to the historical straight blit).
     body_path: object = None
     # Per-sample depth foreshortening for the body ribbon (aligned with
     # body_path's samples), or None for an in-plane body. When present, the
@@ -120,7 +121,12 @@ class _NoteView:
 
 
 def _sv_fold_path(ctx, i, pos, p, head_y, tail_y):
-    """Body path `(xs, ys)` for an LN whose SV folds inside its span.
+    """The body span of an LN whose SV folds inside it.
+
+    This is the lane curve too, just one a straight-lane game bends
+    through TIME rather than through mods: the column stays put and the
+    scroll axis doubles back, so the samples come out in the same shape
+    and every consumer treats them the same way.
 
     Under negative / reversing SV the body is not a straight head->tail
     segment: it doubles back on itself. We trace it through the SAME
@@ -170,9 +176,9 @@ def _sv_fold_path(ctx, i, pos, p, head_y, tail_y):
         ys[0] = head_y
     ys[-1] = tail_y
 
-    lx = float(ctx.lane_x(p.notes.columns_list[i]))
-    xs = np.full(ys.shape, lx, dtype=np.float64)
-    return xs, ys
+    col = p.notes.columns_list[i]
+    center = float(ctx.lane_x(col)) + float(ctx.lane_width(col)) / 2.0
+    return lane_path.flat_samples(np.full(ys.shape, center), ys)
 
 
 def _classify(ctx, press_t, release_t, is_ln, miss) -> str:
@@ -252,8 +258,8 @@ def _build(ctx, i, pos) -> _NoteView | None:
         # The tail cap seats on the path's LAST sample (deepest point of a
         # fold, the bent end of a mod body); keep `y_end` in sync so the
         # on-screen / release-guide anchoring reads the same point.
-        y_end = float(body_path[1][-1])
-        body_scale = _ln_body_scale(ctx, pos, body_path)
+        y_end = float(body_path.y[-1])
+        body_scale = _ln_body_scale(body_path)
 
     mod_alpha = getattr(ctx, 'candidate_alpha', None)
     mod_rot = getattr(ctx, 'candidate_rot_deg', None)
@@ -494,33 +500,20 @@ def _note_projection(ctx, n, cx, cy):
     return to_center * t3d.qtransform_from_h(H) * from_center
 
 
-def _ln_body_scale(ctx, pos, body_path):
-    """Per-sample depth foreshortening for the hold body, aligned with
-    `body_path`'s samples, or None when the body is in-plane.
+def _ln_body_scale(body_path):
+    """Per-sample depth foreshortening for the hold body, or None when the
+    body is in-plane.
 
-    When the body carries a per-sample +z push (`ctx.hold_body_z[pos]`),
-    each cross-section's width scales by the head's d/(d-z)
-    (`perspective_z_scale`), so a bumpy body dives toward/away from the
+    Each cross-section's width scales by d/(d-z) (`perspective_z_scale`)
+    at that sample's own depth, so a bumpy body dives toward/away from the
     camera and its ribbon narrows. Returned as a raw array (not projected
     edges) so it rides the SAME clip machinery as the per-sample alphas;
     the stroke builds the perpendicular edges after clipping. None keeps
     the flat constant-width stroke exact for an in-plane body."""
-    z_by_pos = getattr(ctx, 'hold_body_z', None)
-    if z_by_pos is None:
+    z = np.asarray(body_path.z, dtype=np.float64)
+    if not np.any(z):
         return None
-    z = z_by_pos.get(pos)
-    if z is None:
-        return None
-    from analysis.player.render.mods.arrow_effects import perspective_z_scale
-
-    scale = np.asarray(perspective_z_scale(np.asarray(z, dtype=np.float64)),
-                       dtype=np.float64)
-    # Align defensively: body_path samples and z come from the same
-    # subdivision, but a mismatch (future SV-fold + z overlap) falls back
-    # to no foreshortening rather than misindexing.
-    if scale.shape[0] != len(body_path[1]):
-        return None
-    return scale
+    return np.asarray(perspective_z_scale(z), dtype=np.float64)
 
 
 @lru_cache(maxsize=1)
@@ -583,10 +576,12 @@ def draw_lns(ctx, painter) -> None:
 
 
 def _body_alphas(n):
-    """The hold body's per-sample visibility array, or None when its
-    path carries none (SV folds, straight bodies)."""
+    """The hold body's per-sample visibility array, or None when the body
+    has no fade of its own and every sample draws fully opaque."""
     path = n.body_path
-    return path[2] if path is not None and len(path) > 2 else None
+    if path is None or bool(np.all(path.alpha >= 1.0)):
+        return None
+    return path.alpha
 
 
 # ── chart-stream drawing (mines / lifts / fakes) ─────────────────
@@ -753,7 +748,7 @@ def _ln_body_span(ctx, n, hide) -> tuple | None:
             lo, hi = sorted((n.y, n.y_end))
             return lo, hi, 'miss_ln'
         case 'upcoming' | 'held' if n.body_path is not None:
-            ys = n.body_path[1]
+            ys = n.body_path.y
             return float(ys.min()), float(ys.max()), 'normal'
         case 'upcoming':
             lo, hi = sorted((n.y, n.y_end))
@@ -901,7 +896,7 @@ def _draw_ln_body_stroke(ctx, painter, n, top, bot, state):
         _draw_ln_body_ribbon(ctx, painter, n, top, bot, state)
         return
 
-    xs, ys = n.body_path[0], n.body_path[1]
+    xs, ys = n.body_path.x, n.body_path.y
     alphas = _body_alphas(n)
     clipped = _clip_body_samples(xs, ys, top, bot, alphas)
     if clipped is None:
@@ -930,15 +925,13 @@ def _draw_ln_body_stroke(ctx, painter, n, top, bot, state):
     if len(ys) < 2:
         return
 
-    # `xs` is the body's LEFT edge per sample (lane_x + dx), matching the
-    # rect path's `QRectF(n.lx, ...)` origin. Stroke the CENTER polyline
-    # so the ribbon stays perpendicular to the path everywhere: tracing
+    # The path IS the body's center line, so stroke it directly: tracing
     # axis-aligned left/right edges instead collapses into
     # self-intersecting bowties once a strong bend turns the body
     # near-horizontal. The stroke width is the sprite strip's visible
     # width, so a body flipping between this path and the rect tile
     # (producers skip constant-dx frames) keeps one thickness.
-    center = xs + w / 2.0
+    center = xs
     stroker = QPainterPathStroker()
     stroker.setWidth(float(ln_body_width(
         getattr(ctx.player, 'skin', 'bar'), w)))
@@ -986,11 +979,10 @@ def _draw_ln_body_ribbon(ctx, painter, n, top, bot, state):
     stroke; only the fill geometry differs."""
     from analysis.player.render.mods import body_sweep
 
-    xs, ys = n.body_path[0], n.body_path[1]
     w = ctx.lane_width(n.col)
     width = float(ln_body_width(getattr(ctx.player, 'skin', 'bar'), w))
-    center = np.stack([np.asarray(xs, dtype=np.float64) + w / 2.0,
-                       np.asarray(ys, dtype=np.float64)], axis=1)
+    center = np.stack([np.asarray(n.body_path.x, dtype=np.float64),
+                       np.asarray(n.body_path.y, dtype=np.float64)], axis=1)
     left, right = body_sweep.project_screen_ribbon(center, n.body_scale, width)
 
     alphas = _body_alphas(n)
@@ -1071,25 +1063,21 @@ def _draw_tail_on_curve(ctx, painter, n, pm) -> bool:
     segment runs opposite the head, so the tangent already flips the cap).
     Returns False when the path is degenerate (caller falls back to the
     straight blit)."""
-    xs, ys = n.body_path[0], n.body_path[1]
-    if len(ys) < 2:
+    path = n.body_path
+    if len(path) < 2:
         return False
 
-    w = ctx.lane_width(n.col)
-    end_x = float(xs[-1]) + w / 2.0
-    end_y = float(ys[-1])
-    # Tangent from the last segment; the sprite's natural orientation is
-    # "pointing down the scroll axis" (angle 90 deg in atan2 terms).
-    dx = (float(xs[-1]) - float(xs[-2]))
-    dy = (float(ys[-1]) - float(ys[-2]))
-    if dx == 0.0 and dy == 0.0:
+    end = path.at(-1)
+    if (end.x, end.y) == (float(path.x[-2]), float(path.y[-2])):
         return False
 
-    angle_deg = math.degrees(math.atan2(dy, dx)) - 90.0
+    # The sprite's natural orientation is "pointing down the scroll axis"
+    # (angle 90 deg in atan2 terms).
     painter.save()
-    painter.translate(end_x, end_y)
-    painter.rotate(angle_deg)
-    painter.drawPixmap(QPointF(-w / 2.0, -pm.height() / 2.0), pm)
+    painter.translate(end.x, end.y)
+    painter.rotate(path.tangent_deg(-2, -1) - 90.0)
+    painter.drawPixmap(
+        QPointF(-ctx.lane_width(n.col) / 2.0, -pm.height() / 2.0), pm)
     painter.restore()
     return True
 

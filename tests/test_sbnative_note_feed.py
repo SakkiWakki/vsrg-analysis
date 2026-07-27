@@ -16,7 +16,14 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from analysis.player.render import lane_path
 from analysis.player.render.storyboard import note_feed as nf
+
+
+def _lane_span(xs, ys):
+    """A hold body as the lane curve's span: the shape alone, which is
+    all the emitter reads from it."""
+    return lane_path.flat_samples(xs, ys)
 
 
 # ── synthetic ctx ────────────────────────────────────────────────────
@@ -152,7 +159,7 @@ def test_ln_tail_rides_the_body_path_tangent():
     # A folded noodle's end segment runs back UP the lane; the cap follows the
     # tangent, which is how the vertical flip emerges without a special case.
     import numpy as _np
-    path = (_np.array([64.0, 64.0]), _np.array([100.0, 140.0]))  # heading DOWN
+    path = _lane_span([64.0, 64.0], [100.0, 140.0])  # heading DOWN
     views = [_note_view(col=1, lx=64.0, y=150.0, is_ln=True, y_end=40.0,
                         body_path=path)]
     image_map = {'receptor': (100, 1.0, 1.0), 'tap': (200, _SPRITE_W, _SPRITE_H),
@@ -491,8 +498,7 @@ def test_press_hide_drops_a_pressed_head():
 def test_ln_body_emits_a_quad_per_path_segment():
     # A ribbon IS a quad strip: one item per segment, each rotated to that
     # segment's angle, so no separate Lines tier is needed.
-    import numpy as _np
-    path = (_np.array([64.0, 64.0, 64.0]), _np.array([40.0, 90.0, 150.0]))
+    path = _lane_span([64.0, 64.0, 64.0], [40.0, 90.0, 150.0])
     views = [_note_view(col=1, lx=64.0, y=150.0, is_ln=True, y_end=40.0,
                         body_path=path)]
     u, _f, _count, report = nf.feed_from_context(_ctx(views), _IMAGE_MAP)
@@ -506,7 +512,7 @@ def test_ln_body_narrows_where_it_dives_toward_the_camera():
     # body_scale is the per-sample depth foreshortening; a segment whose
     # sample scales down must emit a narrower quad.
     import numpy as _np
-    path = (_np.array([64.0, 64.0]), _np.array([40.0, 140.0]))
+    path = _lane_span([64.0, 64.0], [40.0, 140.0])
     views = [_note_view(col=1, lx=64.0, y=150.0, is_ln=True, y_end=40.0,
                         body_path=path, body_scale=_np.array([0.5, 0.5]))]
     _u, f, _count, report = nf.feed_from_context(_ctx(views), _IMAGE_MAP)

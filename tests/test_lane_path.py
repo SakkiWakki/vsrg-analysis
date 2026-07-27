@@ -30,19 +30,13 @@ def _straight():
     return lane_path.straight(_lane_center, _note_y)
 
 
-def _bend(dx=None, dy=None, rot=None, zoom=None, z=None, alpha=None):
-    """A displace hook from whichever terms the test cares about; the rest
-    rest at their identity."""
+def _bend(**terms):
+    """A displace hook from whichever terms the test cares about, each a
+    function of the sample; everything unnamed rests."""
     def displace(cols, offsets, note_beats, cell):
-        n = len(cols)
-
-        def term(fn, rest):
-            return (np.full(n, rest, dtype=np.float64) if fn is None
-                    else np.asarray(fn(cols, offsets, note_beats, cell),
-                                    dtype=np.float64))
-
-        return (term(dx, 0.0), term(dy, 0.0), term(rot, 0.0),
-                term(zoom, 1.0), term(z, 0.0), term(alpha, 1.0))
+        return lane_path.LaneDisplacement(
+            **{name: fn(cols, offsets, note_beats, cell)
+               for name, fn in terms.items()})
 
     return lane_path.LanePath(_lane_center, lambda cols, offs: _note_y(offs),
                               displace=displace)
@@ -74,12 +68,25 @@ def test_displacement_rides_on_top_of_the_lane():
     # dx bends the lane sideways by the offset; the turn terms REPLACE (the
     # lane itself has no turn of its own to compose with).
     path = _bend(dx=lambda cols, offs, beats, cell: offs * 0.5,
-                 rot=lambda cols, offs, beats, cell: np.full(len(cols), 30.0),
-                 zoom=lambda cols, offs, beats, cell: np.full(len(cols), 2.0))
+                 rotation_deg=lambda cols, offs, beats, cell: 30.0,
+                 zoom=lambda cols, offs, beats, cell: 2.0)
     sample = path.at(0, 100.0)
     assert sample.x == pytest.approx(_lane_center(0) + 50.0)
     assert sample.y == pytest.approx(_JUDGE_Y - 100.0)
     assert (sample.rotation_deg, sample.zoom) == (30.0, 2.0)
+
+
+def test_a_flat_drawer_gets_the_depth_folded_in():
+    """Only the lane knows its own projection, so a drawer that cannot put
+    a sample at `z` asks the lane what scale stands in for it. Unasked,
+    there is nothing to collapse and the two agree."""
+    plain = _bend(zoom=lambda cols, offs, beats, cell: 2.0).at(0, 0.0)
+    assert plain.flat_zoom == plain.zoom == 2.0
+
+    projected = _bend(z=lambda cols, offs, beats, cell: 100.0,
+                      zoom=lambda cols, offs, beats, cell: 2.0,
+                      flat_zoom=lambda cols, offs, beats, cell: 1.5).at(0, 0.0)
+    assert (projected.zoom, projected.flat_zoom) == (2.0, 1.5)
 
 
 def test_the_scroll_remap_reaches_both_hooks():
@@ -90,9 +97,7 @@ def test_the_scroll_remap_reaches_both_hooks():
 
     def displace(cols, offsets, note_beats, cell):
         seen.append(np.asarray(offsets, dtype=np.float64))
-        zeros = np.zeros(len(cols))
-        return (zeros, zeros, zeros, np.ones(len(cols)), zeros,
-                np.ones(len(cols)))
+        return lane_path.LaneDisplacement()
 
     path = lane_path.LanePath(_lane_center, lambda cols, offs: _note_y(offs),
                               displace=displace,
@@ -117,8 +122,8 @@ def test_a_column_can_place_the_axis_for_itself():
 def test_what_travels_reaches_the_hook():
     """A displacement may depend on the thing's own beat, not just where
     it is (dizzy spins a note by its beats-until-step)."""
-    path = _bend(rot=lambda cols, offs, beats, cell:
-                 np.zeros(len(cols)) if beats is None
+    path = _bend(rotation_deg=lambda cols, offs, beats, cell:
+                 0.0 if beats is None
                  else np.asarray(beats, dtype=np.float64) * 90.0)
     assert path.at(0, 0.0).rotation_deg == 0.0
     assert path.at(0, 0.0, note_beat=2.0).rotation_deg == pytest.approx(180.0)
@@ -148,9 +153,7 @@ def test_spans_are_one_displacement_call():
 
     def displace(cols, offsets, note_beats, cell):
         calls.append(len(cols))
-        zeros = np.zeros(len(cols))
-        return (zeros, zeros, zeros, np.ones(len(cols)), zeros,
-                np.ones(len(cols)))
+        return lane_path.LaneDisplacement()
 
     path = lane_path.LanePath(_lane_center, lambda cols, offs: _note_y(offs),
                               displace=displace)
@@ -184,9 +187,7 @@ def test_the_sample_spacing_reaches_the_hook():
 
     def displace(cols, offsets, note_beats, cell):
         cells.append(cell)
-        zeros = np.zeros(len(cols))
-        return (zeros, zeros, zeros, np.ones(len(cols)), zeros,
-                np.ones(len(cols)))
+        return lane_path.LaneDisplacement()
 
     path = lane_path.LanePath(_lane_center, lambda cols, offs: _note_y(offs),
                               displace=displace)

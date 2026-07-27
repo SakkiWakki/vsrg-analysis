@@ -1351,42 +1351,38 @@ def test_hold_body_passes_through_head_and_tail():
     ctx = _LnCtx(player, [50.0], [400.0], judge_y=300, chart_h=600)
     _mods([ModEvent(0.0, 1.0, -1, 'reverse'),
            ModEvent(0.0, 1.2, -1, 'drunk')]).apply(ctx)
-    xs, ys, _alpha = ctx.hold_body_samples[0]
-    assert ys[0] == pytest.approx(ctx.candidate_head_y[0])
-    assert ys[-1] == pytest.approx(ctx.candidate_tail_y[0])
-    # x at the endpoints matches the head's own displaced x (lane_x + dx)
-    # to within the box filter's smoothing (each sample is the mean over
-    # its ~8px cell; for drunk's ~300px period that is a sub-pixel shave).
-    head_x = ctx.lane_x(1) + ctx.candidate_dx[0]
-    assert xs[0] == pytest.approx(head_x, abs=0.1)
+    body = ctx.hold_body_samples[0]
+    assert body.y[0] == pytest.approx(ctx.candidate_head_y[0])
+    assert body.y[-1] == pytest.approx(ctx.candidate_tail_y[0])
+    # x at the endpoints matches the head's own displaced x (the lane
+    # center plus dx) to within the box filter's smoothing (each sample is
+    # the mean over its ~8px cell; for drunk's ~300px period that is a
+    # sub-pixel shave).
+    head_x = ctx.lane_x(1) + ctx.lane_w / 2.0 + ctx.candidate_dx[0]
+    assert body.x[0] == pytest.approx(head_x, abs=0.1)
 
 
 def test_hold_body_z_absent_for_in_plane_body():
-    # drunk bends the body in-plane (x only, no z push): hold_body_z stays
-    # absent, so the ribbon renderer never engages and the flat
+    # drunk bends the body in-plane (x only, no z push): the body's depth
+    # stays flat, so the ribbon renderer never engages and the flat
     # constant-width stroke fast-path (byte-identical) still runs.
     player = _LnPlayer([1], 4, [5.0])
     ctx = _LnCtx(player, [50.0], [400.0], judge_y=300, chart_h=600)
     _mods([ModEvent(0.0, 1.0, -1, 'reverse'),
            ModEvent(0.0, 1.2, -1, 'drunk')]).apply(ctx)
     assert ctx.hold_body_samples is not None  # body bends (drunk)
-    assert getattr(ctx, 'hold_body_z', None) is None  # but no depth push
+    assert not np.any(ctx.hold_body_samples[0].z)  # but no depth push
 
 
 def test_hold_body_z_present_and_varies_under_bumpy():
-    # bumpy pushes the body into +z along its length: hold_body_z carries a
-    # per-sample depth that VARIES (so the ribbon foreshortens), aligned
-    # 1:1 with the body_path samples.
+    # bumpy pushes the body into +z along its length: the body's samples
+    # carry a depth that VARIES, so the ribbon foreshortens.
     player = _LnPlayer([2], 4, [6.0])
     ctx = _LnCtx(player, [40.0], [500.0], judge_y=300, chart_h=600)
     _mods([ModEvent(0.0, 1.0, -1, 'reverse'),
            ModEvent(0.0, 1.5, -1, 'bumpy')]).apply(ctx)
-    zmap = getattr(ctx, 'hold_body_z', None)
-    assert zmap is not None and 0 in zmap
-    z = zmap[0]
-    assert np.ptp(z) > 1e-3  # depth varies along the body
-    xs, _ys, _alpha = ctx.hold_body_samples[0]
-    assert len(z) == len(xs)  # aligned with the spine samples
+    body = ctx.hold_body_samples[0]
+    assert np.ptp(body.z) > 1e-3  # depth varies along the body
 
 
 def test_hold_body_bends_under_drunk():
@@ -1396,7 +1392,7 @@ def test_hold_body_bends_under_drunk():
     ctx = _LnCtx(player, [40.0], [500.0], judge_y=300, chart_h=600)
     _mods([ModEvent(0.0, 1.0, -1, 'reverse'),
            ModEvent(0.0, 1.5, -1, 'drunk')]).apply(ctx)
-    xs, _ys, _alpha = ctx.hold_body_samples[0]
+    xs = ctx.hold_body_samples[0].x
     assert len(xs) >= 3
     assert not np.allclose(xs, xs[0])
 
@@ -1413,14 +1409,15 @@ def test_hold_body_sample_x_matches_direct_note_offsets():
                  lane_w=lane_w)
     _mods([ModEvent(0.0, 1.0, -1, 'reverse'),
            ModEvent(0.0, 1.3, -1, 'drunk')]).apply(ctx)
-    xs, ys, _alpha = ctx.hold_body_samples[0]
-    k = len(ys) // 2
-    y_off = (ctx.judge_y - ys[k]) / (lane_w / ae.ARROW_SIZE)
+    body = ctx.hold_body_samples[0]
+    k = len(body) // 2
+    y_off = (ctx.judge_y - body.y[k]) / (lane_w / ae.ARROW_SIZE)
     off = note_offsets({'drunk': 1.3}, np.array([0]), np.array([y_off]),
                        t_now=0.0, beat_now=0.0, keycount=4,
                        note_beats=np.array([0.0]))
-    expect_x = ctx.lane_x(0) + off.dx[0] * (lane_w / ae.ARROW_SIZE)
-    assert xs[k] == pytest.approx(expect_x, abs=0.5)
+    expect_x = (ctx.lane_x(0) + lane_w / 2.0
+                + off.dx[0] * (lane_w / ae.ARROW_SIZE))
+    assert body.x[k] == pytest.approx(expect_x, abs=0.5)
 
 
 def test_hold_body_box_filter_suppresses_subgrid_wavelengths():
@@ -1438,8 +1435,7 @@ def test_hold_body_box_filter_suppresses_subgrid_wavelengths():
     samples = getattr(ctx, 'hold_body_samples', None)
     if samples is None:
         return  # fully collapsed to constant dx: rect fast-path, ideal
-    xs, _ys = samples[0]
-    assert np.ptp(xs) < 8.0
+    assert np.ptp(samples[0].x) < 8.0
 
 
 def test_hold_body_batches_multiple_holds():
@@ -1452,9 +1448,9 @@ def test_hold_body_batches_multiple_holds():
            ModEvent(0.0, 1.2, -1, 'drunk')]).apply(ctx)
     assert set(ctx.hold_body_samples.keys()) == {0, 1}
     for pos in (0, 1):
-        xs, ys, _alpha = ctx.hold_body_samples[pos]
-        assert ys[0] == pytest.approx(ctx.candidate_head_y[pos])
-        assert ys[-1] == pytest.approx(ctx.candidate_tail_y[pos])
+        body = ctx.hold_body_samples[pos]
+        assert body.y[0] == pytest.approx(ctx.candidate_head_y[pos])
+        assert body.y[-1] == pytest.approx(ctx.candidate_tail_y[pos])
 
 
 # --- held-hold pinning (engine: hold heads sit AT the receptor) ------
@@ -1495,10 +1491,10 @@ def test_held_hold_body_samples_start_at_receptor():
     ctx = _LnCtx(player, [450.0], [100.0], judge_y=300, chart_h=600)
     _mods([ModEvent(0.0, 1.0, -1, 'reverse'),
            ModEvent(0.0, 1.5, -1, 'drunk')]).apply(ctx)
-    xs, ys, _alpha = ctx.hold_body_samples[0]
-    assert ys[0] == pytest.approx(300.0)
-    assert ys[-1] == pytest.approx(100.0)
-    assert float(ys.max()) <= 300.0 + 1e-9
+    body = ctx.hold_body_samples[0]
+    assert body.y[0] == pytest.approx(300.0)
+    assert body.y[-1] == pytest.approx(100.0)
+    assert float(body.y.max()) <= 300.0 + 1e-9
 
 
 def test_extreme_mini_does_not_crash():

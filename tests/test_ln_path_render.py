@@ -9,12 +9,12 @@ Draw primitives are recorded via fake painters (no real QPainter needed);
 `_build` / `_sv_fold_path` run against SimpleNamespace fakes shaped like the
 real player + render context.
 """
-import math
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+from analysis.player.render import lane_path
 from analysis.player.render.layers import notes as nl
 from analysis.player.render.qt_renderer import _NoteView
 
@@ -114,7 +114,7 @@ def test_bent_body_strokes_ribbon_not_rect():
     painter = _RecordPainter()
     xs = np.array([40.0, 60.0, 40.0])       # bows right then back
     ys = np.array([100.0, 200.0, 300.0])
-    n = _ln_view(body_path=(xs, ys), state='held')
+    n = _ln_view(body_path=lane_path.flat_samples(xs, ys), state='held')
     nl._draw_ln(ctx, painter, n)
     # Curve-native body: a stroked ribbon path, no rect fast-path.
     assert painter.tiled == []
@@ -152,10 +152,9 @@ def test_sv_fold_path_traces_projected_samples():
     ctx.t_now = -1.0        # upcoming: head sample pinned to head_y
     path = nl._sv_fold_path(ctx, i=0, pos=0, p=p, head_y=100.0, tail_y=260.0)
     assert path is not None
-    xs, ys = path
-    assert list(ys) == pytest.approx([100.0, 40.0, 260.0])
-    # x is the lane's left edge at every sample (SV never shifts x).
-    assert list(xs) == pytest.approx([40.0, 40.0, 40.0])
+    assert list(path.y) == pytest.approx([100.0, 40.0, 260.0])
+    # x is the lane's center at every sample (SV never shifts x).
+    assert list(path.x) == pytest.approx([40.0 + ctx.lane_w / 2.0] * 3)
 
 
 def test_sv_monotone_hold_has_no_fold_path():
@@ -195,7 +194,7 @@ def test_fold_tail_tangent_points_back_up_the_lane():
     painter = _RecordPainter()
     xs = np.array([40.0, 40.0, 40.0])
     ys = np.array([100.0, 300.0, 200.0])     # out to 300, folds up to 200
-    n = _ln_view(body_path=(xs, ys), y_end=200.0)
+    n = _ln_view(body_path=lane_path.flat_samples(xs, ys), y_end=200.0)
     ok = nl._draw_tail_on_curve(ctx, painter, n, ctx.sprite_cache.get())
     assert ok
     # dy = 200-300 = -100 (dx=0) => atan2(-100,0) = -90deg; -90 - 90 = -180.
@@ -208,7 +207,7 @@ def test_bent_tail_tangent_follows_last_segment():
     # last segment goes down-and-right at 45deg: dx=dy=+100.
     xs = np.array([40.0, 40.0, 140.0])
     ys = np.array([100.0, 200.0, 300.0])
-    n = _ln_view(body_path=(xs, ys), y_end=300.0)
+    n = _ln_view(body_path=lane_path.flat_samples(xs, ys), y_end=300.0)
     ok = nl._draw_tail_on_curve(ctx, painter, n, ctx.sprite_cache.get())
     assert ok
     # atan2(100,100)=45deg; 45 - 90 = -45.
@@ -221,7 +220,7 @@ def test_degenerate_path_falls_back_to_straight_blit():
     # duplicate last point => zero tangent => curve seat refuses.
     xs = np.array([40.0, 40.0])
     ys = np.array([300.0, 300.0])
-    n = _ln_view(body_path=(xs, ys), y_end=300.0)
+    n = _ln_view(body_path=lane_path.flat_samples(xs, ys), y_end=300.0)
     assert not nl._draw_tail_on_curve(ctx, painter, n, ctx.sprite_cache.get())
 
 
@@ -261,7 +260,7 @@ def test_body_span_window_is_path_extent_for_fold():
     ctx = _ctx()
     xs = np.array([40.0, 40.0, 40.0])
     ys = np.array([100.0, 420.0, 260.0])     # deepest point is the fold apex
-    n = _ln_view(body_path=(xs, ys), state='held')
+    n = _ln_view(body_path=lane_path.flat_samples(xs, ys), state='held')
     span = nl._ln_body_span(ctx, n, hide=False)
     assert span is not None
     top, bot, state = span
@@ -334,7 +333,7 @@ def test_ribbon_width_matches_body_sprite_strip():
     painter = _RecordPainter()
     xs = np.full(3, 40.0)
     ys = np.array([100.0, 200.0, 300.0])
-    n = _ln_view(body_path=(xs, ys), state='held')
+    n = _ln_view(body_path=lane_path.flat_samples(xs, ys), state='held')
     nl._draw_ln(ctx, painter, n)
     assert len(painter.paths) == 1
     assert painter.paths[0].boundingRect().width() == pytest.approx(

@@ -1,24 +1,31 @@
 """Per-frame consumer: compiled mod channels -> per-note offsets.
 
 `apply(ctx)` runs once per frame after the candidate y arrays exist
-(hooked from build_context): it samples the channels at t_now, runs
-the vectorized ArrowEffects pipeline over the visible candidates --
-replay taps/LNs first, then the chart-stream records (mines/lifts/
-fakes) the renderer appended to the same candidate axis, so one batch
-serves every note kind -- and
-- adds dy to the head/tail/press y arrays in place,
-- stashes per-candidate dx / alpha / rotation / zoom for the note views
-  (ctx.candidate_dx / _alpha / _rot_deg / _zoom; dx in our pixel space,
-  rotation in degrees, zoom a multiplier),
-- stashes ctx.hold_body_samples: candidate-position -> (xs, ys) polyline
-  arrays (OUR pixel space) tracing each visible hold's body BENT by the
-  per-note x-mods (drunk/wave/digital ...) instead of a straight rect;
-  the notes layer draws the body through these points. Present only when
-  a dx-producing mod is active and a hold is visible,
-- stashes ctx.receptor_offsets: a dict of numpy arrays keyed
-  'dx','dy','rotation_deg','zoom','alpha' (length keycount) in OUR pixel
-  space, so the receptor layer displaces the hit marks the same way the
-  engine displaces receptors (drunk/tornado shift, confusion spin, ...).
+(hooked from build_context) and builds THE LANE CURVE for that frame:
+`ctx.lane_path`, a `render.lane_path.LanePath` answering
+(column, scroll offset) -> where it is / how it is turned / how visible
+it is. Everything drawn in a lane is a sample of that one curve, so a
+renderer asks it rather than reading a stash shaped for itself
+(render/lane_path.py states the layering).
+
+What `apply` then does with it:
+- places this frame's candidates on the curve -- replay taps/LNs first,
+  then the chart-stream records (mines/lifts/fakes) the renderer appended
+  to the same candidate axis, so one batch serves every note kind. Head,
+  tail and press are each placed at THEIR OWN offset, and the per-note
+  dx / alpha / rotation / zoom / depth / glow land on
+  ctx.candidate_dx / _alpha / _rot_deg / _zoom / _z / _rot_x / _rot_y /
+  _glow (dx in our pixel space, rotation in degrees, zoom a multiplier),
+- stashes ctx.hold_body_samples: candidate-position -> the curve's span
+  between that hold's head and tail offsets, so the notes layer draws a
+  body BENT by the per-note mods (drunk/wave/digital ...) instead of a
+  straight rect. Present only when something varies along the body,
+- stashes ctx.receptor_offsets: the curve at y_offset 0 per column, as
+  offsets from the undisplaced lane center and judge line, so the
+  receptor layer displaces the hit marks exactly as the engine does
+  (drunk/tornado shift, confusion spin, ...),
+- stashes ctx.arrowpath_ribbons: the curve over the visible scroll range
+  per column, which is what the fork's arrowpath trail IS.
 
 The pipeline is name-agnostic: it consumes whatever channels values_at
 returns, so mods the integrator injects per-frame (confusionxoffset /
@@ -89,10 +96,10 @@ from __future__ import annotations
 import numpy as np
 
 from analysis.games.etterna.sm_chart import beat_to_time
+from analysis.player.render.lane_path import LaneDisplacement, LanePath
 from analysis.player.render.mods.arrow_effects import (
     ARROW_SIZE, accel_y_offset, column_offsets, note_offsets,
-    receptor_dark_alpha, receptor_offsets, reverse_fractions,
-    tiny_spacing)
+    receptor_dark_alpha, reverse_fractions, tiny_spacing, waveform_z_zoom)
 
 _ACTIVE_EPS = 1e-4
 
@@ -104,6 +111,21 @@ def _stream_candidates(ctx):
     if s_idx is None or not len(s_idx):
         return None
     return np.asarray(s_idx, dtype=np.int64)
+
+
+def _lane_center_of(ctx):
+    """The lane curve's undisplaced x per column. A render context knows
+    its own lane geometry; a narrow one carrying only a lane width still
+    gets a consistent axis, which is all the offsets derived from it
+    need."""
+    center = getattr(ctx, 'lane_center', None)
+    if center is not None:
+        return center
+    lane_x = getattr(ctx, 'lane_x', None)
+    half = float(ctx.lane_w) / 2.0
+    if lane_x is not None:
+        return lambda col: lane_x(col) + half
+    return lambda col: col * float(ctx.lane_w) + half
 
 
 def _stream_count(ctx) -> int:
@@ -136,9 +158,9 @@ _BODY_WINDOW_PAD = 0.6
 # visual converges to the local mean band - which is what the filter
 # yields.
 _BODY_BOX_FILTER = 4
-# Below this spatial wavelength (engine px) a waveform kernel is zeroed
-# for body evaluation: 3x the sample spacing, safely above Nyquist.
-_BODY_MIN_WAVELENGTH = 3.0 * _BODY_SAMPLE_SPACING
+# A waveform kernel is zeroed for span evaluation below this many sample
+# spacings of wavelength - safely above Nyquist.
+_MIN_RESOLVED_WAVELENGTHS = 3.0
 # Arrowpath trail sampling (ReceptorArrowRow::DrawArrowPath @0x53b390:
 # the fork draws each column's future note path when the `arrowpath`
 # mod is on). Spacing along the scroll axis in engine px, per-column
@@ -242,17 +264,94 @@ class NotitgNoteMods:
         ctx.note_path_spline = spline
 
         ppe = self._px_per_engine(ctx, t, scale)
+        active = (spline is not None
+                  or any(abs(v) >= _ACTIVE_EPS for v in percents.values()))
+        path = self._lane_path(ctx, percents, scale, ppe, judge_y, t, spline,
+                               active)
+        ctx.lane_path = path
         if len(ctx.candidates) or _stream_count(ctx):
-            self._apply_to_notes(ctx, percents, scale, ppe, judge_y, t,
-                                 spline)
+            self._apply_to_notes(ctx, path, percents, scale, ppe, judge_y, t,
+                                 spline, active)
         # Receptors carry the scroll orientation even on empty frames.
-        ctx.receptor_offsets = self._receptor_offsets(
-            ctx, percents, ctx.player.keycount, scale, t, judge_y, spline)
-        self._stash_arrowpath(ctx, percents, scale, ppe, judge_y, t, spline)
+        ctx.receptor_offsets = self._receptor_offsets(ctx, path, percents,
+                                                      judge_y)
+        self._stash_arrowpath(ctx, path, percents, scale, ppe, t)
+
+    def _lane_path(self, ctx, percents, scale, ppe, judge_y, t, spline,
+                   active) -> LanePath:
+        """This frame's lane curve - the one place where
+        (column, scroll offset) -> where it is / how it is turned / how
+        visible it is gets answered, for receptors, heads, hold bodies,
+        tail caps and travel paths alike.
+
+        An inert frame builds the same object with NO displacement hook, so
+        every consumer's straight-lane fast path (a hold body as one rect
+        rather than a ribbon) stays on, and the kernels never run."""
+        keycount = int(ctx.player.keycount)
+        beat_now = self._beat_at(t)
+
+        def displace(cols, offsets, note_beats, cell) -> LaneDisplacement:
+            offs = self._evaluate(percents, cols, offsets, note_beats, cell,
+                                  spline, t, beat_now, keycount)
+            return self._displacement(percents, cols, offs, scale, keycount)
+
+        return LanePath(
+            _lane_center_of(ctx),
+            lambda cols, offsets: self._axis_y(ctx, percents, judge_y, ppe,
+                                               cols, offsets),
+            displace if active else None,
+            lambda offsets: accel_y_offset(percents, offsets))
+
+    def _evaluate(self, percents, cols, offsets, note_beats, cell, spline,
+                  t, beat_now, keycount):
+        """The engine's per-note pipeline at (column, ENGINE y_offset,
+        beat). Every consumer's answer comes from this one call, including
+        the terms the lane curve does not carry (a note's own glow)."""
+        offs = note_offsets(self._band_limited(percents, cell), cols, offsets,
+                            t_now=t, beat_now=beat_now, keycount=keycount,
+                            note_beats=note_beats, project_3d=True)
+        # The note-path spline (SetXSpline family) adds onto the summed
+        # mods in engine px, BEFORE tiny's whole-offset compression
+        # (GetXPos adds spline and mods into one x the multiplier scales).
+        if spline is not None:
+            np.add(offs.dx, spline.offsets('x', cols, offsets), out=offs.dx)
+            np.add(offs.z, spline.offsets('z', cols, offsets), out=offs.z)
+        return offs
+
+    def _displacement(self, percents, cols, offs, scale,
+                      keycount) -> LaneDisplacement:
+        """The evaluated pipeline as the lane's bend, in OUR pixel space.
+
+        `z` stays in ENGINE px - the field projection's design space, and
+        its camera divide is scale-free. A drawer that cannot place a
+        sample at a depth takes `flat_zoom`, which is that same push
+        reprojected to the center-plane scale the 2D path used to fake."""
+        return LaneDisplacement(
+            dx=self._tiny_compressed_dx(percents, cols, offs.dx, keycount,
+                                        scale),
+            dy=offs.dy * scale,
+            z=offs.z,
+            rotation_deg=offs.rotation_deg,
+            rotation_x_deg=offs.rot_x,
+            rotation_y_deg=offs.rot_y,
+            zoom=offs.zoom,
+            flat_zoom=offs.zoom * waveform_z_zoom(offs.z),
+            alpha=offs.alpha_mult)
+
+    def _axis_y(self, ctx, percents, judge_y, ppe, cols, offsets):
+        """Screen y of the UNDISPLACED scroll axis at accel-remapped
+        `offsets`, per column: `ppe` converts engine offset px to screen
+        px (see `_px_per_engine`), then the reverse family places each
+        column's own receptor line."""
+        reverse = self._effective_reverse(percents, cols, ctx.player.keycount)
+        return self._reverse_ys(ctx, judge_y - offsets * ppe, reverse,
+                                float(percents.get('centered', 0.0)), judge_y)
 
     def _reverse_ys(self, ctx, ys, r, centered, judge_y):
-        """The reverse-family remap of a single y array (see
-        `_reverse_arrays`, which applies the same map to head/tail/press)."""
+        """The reverse-family remap: y' places the receptor at
+        lerp(judge_y, mirror_y, r) and flips the note's distance below it
+        by (1 - 2r). `centered` slides that receptor toward field center
+        (mid-screen) by its percent."""
         mirror_y = self._reverse_geom(ctx, judge_y)
         _rx, ry, _w, h = ctx.chart_rect
         center_y = ry + h / 2.0
@@ -260,76 +359,71 @@ class NotitgNoteMods:
         receptor_y = receptor_y + centered * (center_y - receptor_y)
         return receptor_y + (1.0 - 2.0 * r) * (np.asarray(ys) - judge_y)
 
-    def _apply_to_notes(self, ctx, percents, scale, ppe, judge_y, t,
-                        spline=None) -> None:
+    def _apply_to_notes(self, ctx, path, percents, scale, ppe, judge_y, t,
+                        spline, active) -> None:
+        """Place this frame's candidates on the lane curve.
+
+        Head, tail and press are three positions on the same axis, so each
+        is placed at ITS OWN offset - the tail bends by the displacement
+        where the tail is, not by the head's, which is what keeps a hold's
+        cap attached to the body span the curve draws between them.
+
+        The whole candidate set goes through ONE evaluation: the pipeline's
+        cost is per call, not per row, and the note pipeline needs terms
+        the curve does not carry (a note's own glow)."""
         p = ctx.player
         idx = np.asarray(ctx.candidates, dtype=np.int64)
         cols, note_rows = self._candidate_cols_rows(ctx, p, idx)
         self._pin_held_holds(ctx, idx, judge_y, t)
-        active = (spline is not None
-                  or any(abs(v) >= _ACTIVE_EPS for v in percents.values()))
 
-        # ACCEL FAMILY (boost/brake/wave/expand): reshape the raw scroll
-        # y_offset -> position mapping BEFORE any dy contribution. Each of
-        # head/tail/press is a position on the same scroll axis, so all
-        # three are remapped by the same function; positions rebuild as
-        # y = judge_y - y_offset' * ppe (native downscroll space; `ppe`
-        # converts ENGINE offset px to screen px, see _px_per_engine).
-        offs = None
-        if active:
-            head_off = self._remap_accel(percents, ctx.candidate_head_y, judge_y, ppe)
-            tail_off = self._remap_accel(percents, ctx.candidate_tail_y, judge_y, ppe)
-            press_off = self._remap_accel(percents, ctx.candidate_press_y, judge_y, ppe)
-            ctx.candidate_head_y = judge_y - head_off * ppe
-            ctx.candidate_tail_y = judge_y - tail_off * ppe
-            ctx.candidate_press_y = judge_y - press_off * ppe
-
-            offs = note_offsets(
-                percents, cols, head_off,
-                t_now=t, beat_now=self._beat_at(t), keycount=p.keycount,
-                note_beats=note_rows / 48.0, project_3d=True)
-            # The note-path spline adds onto the summed mods in engine
-            # px, BEFORE tiny's whole-offset compression (GetXPos adds
-            # spline and mods into one x the spacing multiplier scales).
-            if spline is not None:
-                np.add(offs.dx, spline.offsets('x', cols, head_off),
-                       out=offs.dx)
-                np.add(offs.z, spline.offsets('z', cols, head_off),
-                       out=offs.z)
-
-        # REVERSE FAMILY (reverse/split/alternate/cross/centered): per
-        # column, the receptor slides toward the mirrored judge line by
-        # r_col and the note's distance from it flips sign, over the
-        # (already accel-remapped) candidate y arrays. Runs every frame:
+        # ACCEL FAMILY (boost/brake/wave/expand) reshapes the raw scroll
+        # y_offset -> position mapping BEFORE any displacement; the REVERSE
+        # family then places each column's own receptor line and flips the
+        # note's distance from it (`_axis_y`). Reverse runs every frame:
         # the zero-channel baseline is a full mirror to engine-default
         # upscroll (see module doc).
-        self._apply_reverse(ctx, percents, cols, judge_y)
-
-        if offs is None:
+        raw = [self._raw_offsets(getattr(ctx, name), judge_y, ppe)
+               for name in ('candidate_head_y', 'candidate_tail_y',
+                            'candidate_press_y')]
+        offsets = [accel_y_offset(percents, part) for part in raw]
+        axis = [self._axis_y(ctx, percents, judge_y, ppe, cols, part)
+                for part in offsets]
+        if not active:
+            (ctx.candidate_head_y, ctx.candidate_tail_y,
+             ctx.candidate_press_y) = axis
             return
-        dy = offs.dy * scale
-        ctx.candidate_head_y += dy
-        ctx.candidate_tail_y += dy
-        ctx.candidate_press_y += dy
-        ctx.candidate_dx = self._tiny_compressed_dx(
-            percents, cols, offs.dx, p.keycount, scale)
-        ctx.candidate_alpha = offs.alpha_mult
-        ctx.candidate_rot_deg = offs.rotation_deg
-        ctx.candidate_zoom = offs.zoom
+
+        n = len(cols)
+        rows = np.tile(cols, 3)
+        offs = self._evaluate(percents, rows, np.concatenate(offsets),
+                              np.tile(note_rows / 48.0, 3), 0.0, spline, t,
+                              self._beat_at(t), p.keycount)
+        bend = self._displacement(percents, rows, offs, scale, p.keycount)
+        head, tail, press = (slice(0, n), slice(n, 2 * n), slice(2 * n, 3 * n))
+        ctx.candidate_head_y = axis[0] + bend.dy[head]
+        ctx.candidate_tail_y = axis[1] + bend.dy[tail]
+        ctx.candidate_press_y = axis[2] + bend.dy[press]
+        ctx.candidate_dx = bend.dx[head]
+        ctx.candidate_alpha = offs.alpha_mult[head]
+        ctx.candidate_rot_deg = offs.rotation_deg[head]
+        ctx.candidate_zoom = offs.zoom[head]
         # Per-note 3D: real depth (engine px) + out-of-plane tilt (deg).
         # The note draw projects the quad through the field camera; when
-        # every note rests flat (z=0, no tilt) the draw keeps its 2D
-        # path. dy/dx already scaled to our pixels; z stays in engine px
-        # (the projection's design space) - the camera divide is scale-
-        # free, so no lane_w conversion.
-        ctx.candidate_z = offs.z
-        ctx.candidate_rot_x = offs.rot_x
-        ctx.candidate_rot_y = offs.rot_y
-        ctx.candidate_glow = offs.glow
-        ctx.candidate_glow_rgb = offs.glow_rgb
+        # every note rests flat (z=0, no tilt) the draw keeps its 2D path.
+        ctx.candidate_z = offs.z[head]
+        ctx.candidate_rot_x = offs.rot_x[head]
+        ctx.candidate_rot_y = offs.rot_y[head]
+        ctx.candidate_glow = None if offs.glow is None else offs.glow[head]
+        ctx.candidate_glow_rgb = (None if offs.glow_rgb is None
+                                  else offs.glow_rgb[head])
 
-        self._stash_hold_body_samples(ctx, percents, cols, idx, head_off,
-                                      tail_off, scale, ppe, t, spline)
+        self._stash_hold_body_samples(ctx, path, idx, cols, raw[0], raw[1])
+
+    @staticmethod
+    def _raw_offsets(ys, judge_y, ppe):
+        """The pre-accel scroll offset (engine px) a candidate y array sits
+        at - the scroll space the lane curve is asked in."""
+        return (judge_y - np.asarray(ys, dtype=np.float64)) / ppe
 
     def _candidate_cols_rows(self, ctx, p, idx):
         """Columns + beat rows over the FULL candidate axis: replay
@@ -400,31 +494,28 @@ class NotitgNoteMods:
         column = column_offsets(keycount)[cols] * scale
         return spacing * dx + (spacing - 1.0) * column
 
-    def _stash_hold_body_samples(self, ctx, percents, cols, idx, head_off,
-                                 tail_off, scale, ppe, t,
-                                 spline=None) -> None:
-        """Sample each visible hold's body so the notes layer can draw it
-        as a polyline that BENDS under the per-note x/y mods, instead of a
-        straight head-to-tail rect (drunk/wave/digital etc. displace every
-        strip of an engine-rendered hold body, not just the head).
+    def _stash_hold_body_samples(self, ctx, path, idx, cols, head_off,
+                                 tail_off) -> None:
+        """Sample each visible hold's body as the span of the lane curve
+        between its head and tail offsets, so the notes layer draws a
+        BENT polyline instead of a straight head-to-tail rect (drunk /
+        wave / digital etc. displace every strip of an engine-rendered
+        hold body, not just the head).
 
-        A hold's body is subdivided in engine y_offset space between its
-        (accel-remapped) head and tail offsets. The x of each sample is
-        lane_x(col) + note_offsets(...).dx at that offset; the y is the
-        linear interpolation between the FINAL head_y and tail_y (post
-        accel + dy + reverse). Both endpoints coincide with the head and
-        tail by construction (sample 0 = head_off/head_y, sample -1 =
-        tail_off/tail_y), so the bent body stays attached.
+        Every hold's samples go through ONE `spans` call - each sample is
+        just another row of the same evaluation - and the endpoints land
+        exactly on the head and tail the candidate pass placed, because
+        both are the same curve asked at the same offsets.
 
-        All samples of all visible holds are batched into ONE note_offsets
-        call (each sample is just another row: same column, varying
-        y_offset, same note_beat), then split back per hold. The result is
-        stashed as ctx.hold_body_samples: candidate-position -> (xs, ys)
-        arrays in OUR pixel space, consumed by layers/notes.py."""
+        A body only needs its own polyline when something actually VARIES
+        along it: a bending x, a per-strip visibility gradient (the engine
+        evaluates visibility per drawn part, so a hold's body stays up
+        while its head blanks), or a depth push that tilts it out of the
+        receptor plane. Anything flat, opaque and in-plane stays on the
+        straight rect fast path."""
         p = ctx.player
-        lane_x_fn = getattr(ctx, 'lane_x', None)
         ln_tail_times = getattr(p.notes, 'ln_tail_times', None)
-        if lane_x_fn is None or ln_tail_times is None:
+        if ln_tail_times is None:
             return
         tail_off = np.asarray(tail_off, dtype=np.float64)
         # Restrict to the replay prefix of the candidate axis: only
@@ -440,123 +531,51 @@ class NotitgNoteMods:
         note_beats = np.asarray(p.notes.noterows_list, dtype=np.float64)[idx] / 48.0
         _rx, ry, _w, h = ctx.chart_rect
         window = (ry - h * _BODY_WINDOW_PAD, ry + h * (1.0 + _BODY_WINDOW_PAD))
-        segments = self._build_body_segments(
-            np.nonzero(is_ln)[0], cols, head_off, tail_off, head_y, tail_y,
-            note_beats, ppe, window)
-        if not segments['holds']:
+        spans = self._body_spans(np.nonzero(is_ln)[0], cols, head_off,
+                                 tail_off, head_y, tail_y, note_beats, window)
+        if not spans['positions']:
             return
 
-        sample = note_offsets(
-            self._band_limited(percents), segments['cols'],
-            segments['offs'], t_now=t, beat_now=self._beat_at(t),
-            keycount=p.keycount, note_beats=segments['beats'],
-            project_3d=True)
-        # Body strips ride the same note-path spline as heads: each
-        # sample is displaced at ITS OWN y_offset, so a hold's body
-        # bends along the helix instead of hanging straight off it.
-        if spline is not None:
-            np.add(sample.dx,
-                   spline.offsets('x', segments['cols'], segments['offs']),
-                   out=sample.dx)
-            np.add(sample.z,
-                   spline.offsets('z', segments['cols'], segments['offs']),
-                   out=sample.z)
-
-        # A body only needs the polyline when something actually VARIES
-        # along it: a bending dx (drunk/wave/digital ...) or a per-strip
-        # visibility gradient (hidden/sudden fade the body's strips at
-        # their own y - the engine evaluates ArrowGetPercentVisible per
-        # drawn part, so a hold's body stays up while its head blanks).
-        # A constant-dx fully-visible body stays on the straight rect
-        # fast-path.
-        spacing = tiny_spacing(float(percents.get('tiny', 0.0)))
-        column_px = column_offsets(p.keycount) * scale
-        samples = {}
-        z_all = sample.z if sample.z is not None else np.zeros_like(sample.dx)
-        body_z = {}
-        for pos, screen_ys, start, count in segments['holds']:
-            window = slice(start, start + count * _BODY_BOX_FILTER)
-            dx = sample.dx[window].reshape(count, _BODY_BOX_FILTER).mean(axis=1)
-            alpha = sample.alpha_mult[window].reshape(
-                count, _BODY_BOX_FILTER).mean(axis=1)
-            z = z_all[window].reshape(count, _BODY_BOX_FILTER).mean(axis=1)
-            # The body needs its own polyline only when something VARIES
-            # along it: a bending dx, a per-strip visibility gradient, or a
-            # depth push (z) that tilts the body out of the receptor plane.
-            # A flat-dx, fully-visible, in-plane body stays on the straight
-            # rect fast-path (byte-identical blit).
-            if (np.ptp(dx) < _ACTIVE_EPS and np.ptp(alpha) < _ACTIVE_EPS
-                    and np.ptp(z) < _ACTIVE_EPS):
-                continue
-            body_x = (lane_x_fn(int(cols[pos])) + spacing * dx * scale
-                      + (spacing - 1.0) * column_px[int(cols[pos])])
-            samples[pos] = (body_x, screen_ys, alpha)
-            # z rides a parallel dict, NOT the body_path tuple, so every
-            # existing (xs, ys[, alpha]) consumer is untouched; the ribbon
-            # renderer opts in by reading hold_body_z[pos].
-            if np.ptp(z) >= _ACTIVE_EPS:
-                body_z[pos] = z
+        bodies = path.spans(spans['cols'], spans['starts'], spans['ends'],
+                            spans['counts'], spans['beats'],
+                            cell=_BODY_SAMPLE_SPACING, taps=_BODY_BOX_FILTER)
+        samples = {pos: body for pos, body in zip(spans['positions'], bodies)
+                   if not (np.ptp(body.x) < _ACTIVE_EPS
+                           and np.ptp(body.alpha) < _ACTIVE_EPS
+                           and np.ptp(body.z) < _ACTIVE_EPS)}
         if samples:
             ctx.hold_body_samples = samples
-        if body_z:
-            ctx.hold_body_z = body_z
 
-    def _build_body_segments(self, ln_positions, cols, head_off, tail_off,
-                             head_y, tail_y, note_beats, ppe,
-                             window) -> dict:
-        """Subdivide each hold's body into y samples and pack them into the
-        flat arrays one batched `note_offsets` call consumes. Returns the
-        concatenated per-sample `cols` / `offs` (engine y_offset) / `beats`
-        plus `holds`: (pos, screen_ys, start, count) so the caller can
-        split the batched result back per hold.
+    def _body_spans(self, ln_positions, cols, head_off, tail_off, head_y,
+                    tail_y, note_beats, window) -> dict:
+        """The visible stretch of each hold's body, as the arrays
+        `LanePath.spans` consumes.
 
-        The sampled span is the hold's intersection with the padded
-        visible `window`: a long hold's body can run many screens, and
-        spreading a capped sample count over all of it leaves segments
-        longer than the waveform period (a smooth helix aliases into
-        zigzag). Fractions interpolate the FULL head..tail range for both
-        the engine offset and the FINAL screen y, so clamped samples stay
-        exactly on the body's line; a hold entirely outside the window is
-        skipped (its rect fallback is clipped away regardless)."""
+        A long hold's body can run many screens, and spreading a capped
+        sample count over all of it leaves segments longer than the
+        waveform period (a smooth helix aliases into zigzag), so the span
+        is clipped to the padded visible window first. The clip is done on
+        the head..tail FRACTION, which carries straight back to the engine
+        offsets the curve is asked in; a hold entirely outside the window
+        is skipped (its rect fallback is clipped away regardless)."""
         win_lo, win_hi = window
-        cols_parts, offs_parts, beats_parts, holds = [], [], [], []
-        cursor = 0
+        spans = {key: [] for key in
+                 ('positions', 'cols', 'starts', 'ends', 'counts', 'beats')}
         for pos in ln_positions:
-            span = self._visible_frac_span(head_y[pos], tail_y[pos],
-                                           win_lo, win_hi)
-            if span is None:
+            visible = self._visible_frac_span(head_y[pos], tail_y[pos],
+                                              win_lo, win_hi)
+            if visible is None:
                 continue
-            f0, f1 = span
-            count = self._body_sample_count(
-                abs(tail_y[pos] - head_y[pos]) * (f1 - f0), ppe)
-            frac = np.linspace(f0, f1, count)
-            # Box filter: each body point is the mean of _BODY_BOX_FILTER
-            # sub-positions spread across its sample cell, so waveform
-            # frequencies below the sampling grid average out instead of
-            # aliasing (see the constant's comment).
-            cell = (f1 - f0) / max(count - 1, 1)
-            jitter = (np.arange(_BODY_BOX_FILTER) / _BODY_BOX_FILTER
-                      - 0.5 + 0.5 / _BODY_BOX_FILTER) * cell
-            # Deliberately unclamped: an endpoint cell samples a hair past
-            # the window so its mean stays centered on the endpoint (the
-            # offset kernels are pure functions of y_offset, defined
-            # everywhere), keeping cap attachment exact.
-            fine = (frac[:, None] + jitter[None, :]).ravel()
-            n_fine = count * _BODY_BOX_FILTER
-            cols_parts.append(np.full(n_fine, cols[pos], dtype=np.int64))
-            offs_parts.append(head_off[pos] + fine * (tail_off[pos] - head_off[pos]))
-            beats_parts.append(np.full(n_fine, note_beats[pos]))
-            screen_ys = head_y[pos] + frac * (tail_y[pos] - head_y[pos])
-            holds.append((int(pos), screen_ys, cursor, count))
-            cursor += n_fine
-        if not holds:
-            return {'cols': None, 'offs': None, 'beats': None, 'holds': []}
-        return {
-            'cols': np.concatenate(cols_parts),
-            'offs': np.concatenate(offs_parts),
-            'beats': np.concatenate(beats_parts),
-            'holds': holds,
-        }
+            f0, f1 = visible
+            span = tail_off[pos] - head_off[pos]
+            spans['positions'].append(int(pos))
+            spans['cols'].append(int(cols[pos]))
+            spans['starts'].append(head_off[pos] + f0 * span)
+            spans['ends'].append(head_off[pos] + f1 * span)
+            spans['counts'].append(self._body_sample_count(
+                abs(tail_off[pos] - head_off[pos]) * (f1 - f0)))
+            spans['beats'].append(note_beats[pos])
+        return spans
 
     @staticmethod
     def _visible_frac_span(head_y, tail_y, win_lo, win_hi):
@@ -574,41 +593,40 @@ class NotitgNoteMods:
             return None
         return f0, f1
 
-    def _body_sample_count(self, visible_span_px, ppe) -> int:
-        """Samples for the VISIBLE part of a hold's body, at
-        `_BODY_SAMPLE_SPACING` engine px (converted to screen px by
-        `ppe`), clamped per hold. At least 2 (the span endpoints) so
-        every polyline is valid."""
-        spacing = _BODY_SAMPLE_SPACING * ppe
-        return int(np.clip(round(float(visible_span_px) / spacing) + 1,
-                           2, _MAX_BODY_SAMPLES))
+    @staticmethod
+    def _body_sample_count(visible_span) -> int:
+        """Samples for the VISIBLE part of a hold's body, one per
+        `_BODY_SAMPLE_SPACING` engine px, clamped per hold. At least 2
+        (the span endpoints) so every polyline is valid."""
+        return int(np.clip(
+            round(float(visible_span) / _BODY_SAMPLE_SPACING) + 1,
+            2, _MAX_BODY_SAMPLES))
 
-    def _band_limited(self, percents):
-        """Body-evaluation percents with unresolvable waveform kernels
-        zeroed. A waveform's spatial wavelength is ~2*AS*(1+period); when
-        a negative period companion pushes it under the sampling cutoff,
-        point sampling aliases (near-resonance leaves low-frequency ghost
-        curves no smoothing can remove), while the engine's per-strip
-        rendering of it converges to the straight mean band - which is
-        exactly what a zeroed kernel draws. Heads keep the full percents:
-        a single point sample cannot alias."""
+    def _band_limited(self, percents, cell):
+        """The percents to evaluate at a sample spacing of `cell` engine
+        px, with waveform kernels that spacing cannot resolve zeroed.
+
+        A waveform's spatial wavelength is ~2*AS*(1+period); when a
+        negative period companion pushes it under the cutoff, point
+        sampling aliases (near-resonance leaves low-frequency ghost curves
+        no smoothing can remove), while the engine's per-strip rendering
+        converges to the straight mean band - exactly what a zeroed kernel
+        draws. `cell` 0 is a point query (a head, a receptor), which
+        cannot alias and keeps the full percents."""
+        if cell <= 0.0:
+            return percents
         limited = None
         for mod, period_mod in _WAVEFORM_PERIODS.items():
             if abs(percents.get(mod, 0.0)) < _ACTIVE_EPS:
                 continue
             wavelength = 2.0 * ARROW_SIZE * (
                 1.0 + percents.get(period_mod, 0.0))
-            if wavelength >= _BODY_MIN_WAVELENGTH:
+            if wavelength >= _MIN_RESOLVED_WAVELENGTHS * cell:
                 continue
             if limited is None:
                 limited = dict(percents)
             limited[mod] = 0.0
         return percents if limited is None else limited
-
-    def _remap_accel(self, percents, ys, judge_y, scale):
-        """Accel-remapped y_offset (engine px) for a candidate y array."""
-        y_offset = (judge_y - np.asarray(ys, dtype=np.float64)) / scale
-        return accel_y_offset(percents, y_offset)
 
     def _defer_field_tilt(self, percents, t):
         """Zero the X/Y-tilt confusion channels while the real 3D field
@@ -651,114 +669,62 @@ class NotitgNoteMods:
         reverse=1, so engine-default columns (r_engine 0) mirror fully."""
         return 1.0 - reverse_fractions(percents, cols, keycount)
 
-    def _apply_reverse(self, ctx, percents, cols, judge_y):
-        centered = float(percents.get('centered', 0.0))
-        r = self._effective_reverse(percents, cols, ctx.player.keycount)
-        self._reverse_arrays(ctx, r, centered, judge_y)
-
-    def _reverse_arrays(self, ctx, r, centered, judge_y):
-        """y' places the receptor at lerp(judge_y, mirror_y, r) and flips
-        the note's distance below the receptor by (1 - 2r). centered slides
-        the receptor toward field center (mid-screen) by its percent."""
-        ctx.candidate_head_y = self._reverse_ys(
-            ctx, ctx.candidate_head_y, r, centered, judge_y)
-        ctx.candidate_tail_y = self._reverse_ys(
-            ctx, ctx.candidate_tail_y, r, centered, judge_y)
-        ctx.candidate_press_y = self._reverse_ys(
-            ctx, ctx.candidate_press_y, r, centered, judge_y)
-
-    def _stash_arrowpath(self, ctx, percents, scale, ppe, judge_y, t,
-                         spline) -> None:
+    def _stash_arrowpath(self, ctx, path, percents, scale, ppe,
+                         t) -> None:
         """The fork's arrowpath trails: while the `arrowpath` mod is on,
         one polyline per column tracing where that column's notes will
-        travel, sampled through the SAME pipeline the notes use (accel
-        remap, reverse family, dy/dx kernels, note-path spline, tiny
-        compression) so the trail sits exactly under the arrows. Stashed
-        as ctx.arrowpath_ribbons: (xs, ys, gradient stops, width px,
-        alpha) per column, in OUR pixel space; the field layer strokes
-        them under the receptors. The trail stays a 2D stroke (the
-        spline's z is ignored here - the x displacement carries the
-        visible helix; notes and bodies keep the real depth)."""
+        travel. It is the lane curve over the visible scroll range and
+        nothing else, so the trail sits exactly under the arrows by
+        construction. Stashed as ctx.arrowpath_ribbons: (xs, ys, gradient
+        stops, width px, alpha) per column, in OUR pixel space; the field
+        layer strokes them under the receptors. The trail stays a 2D
+        stroke - the x displacement carries the visible helix, and notes
+        and bodies keep the real depth."""
         amount = min(1.0, abs(float(percents.get('arrowpath', 0.0))))
-        lane_x_fn = getattr(ctx, 'lane_x', None)
-        if amount < _ACTIVE_EPS or lane_x_fn is None:
+        if amount < _ACTIVE_EPS:
             ctx.arrowpath_ribbons = None
             return
-        kc = ctx.player.keycount
+        keycount = ctx.player.keycount
         _rx, _ry, _w, h = ctx.chart_rect
         max_off = h * (1.0 + 2.0 * _BODY_WINDOW_PAD) / max(ppe, 1e-6)
         count = int(np.clip(round(max_off / _ARROWPATH_SAMPLE_SPACING) + 1,
                             2, _ARROWPATH_MAX_SAMPLES))
-        raw = np.linspace(0.0, max_off, count)
-        off = accel_y_offset(percents, raw)
-
-        cols = np.repeat(np.arange(kc, dtype=np.int64), count)
-        off_all = np.tile(off, kc)
-        offs = note_offsets(self._band_limited(percents), cols, off_all,
-                            t_now=t, beat_now=self._beat_at(t), keycount=kc)
-        dx_all = offs.dx
-        if spline is not None:
-            dx_all = dx_all + spline.offsets('x', cols, off_all)
-        dx_all = self._tiny_compressed_dx(percents, cols, dx_all, kc, scale)
-
-        ys_base = judge_y - off * ppe
-        r = self._effective_reverse(percents, np.arange(kc), kc)
-        centered = float(percents.get('centered', 0.0))
-        path = (self._note_path.player(self._player)
-                if self._note_path is not None else None)
-        width = _ARROWPATH_WIDTH * scale
-        ribbons = []
-        for col in range(kc):
-            window = slice(col * count, (col + 1) * count)
-            ys = (self._reverse_ys(ctx, ys_base, float(r[col]), centered,
-                                   judge_y) + offs.dy[window] * scale)
-            xs = lane_x_fn(col) + ctx.lane_w / 2.0 + dx_all[window]
-            stops = (path.gradient_at(t, col) if path is not None
-                     else [(1.0, 1.0, 1.0, 1.0)])
-            ribbons.append((xs, ys, stops, width, amount))
-        ctx.arrowpath_ribbons = ribbons
-
-    def _receptor_offsets(self, ctx, percents, keycount, scale, t, judge_y,
-                          spline=None) -> dict:
-        """Per-column receptor mods in OUR pixel space. `receptor_offsets`
-        evaluates the pipeline at y_offset = 0 over one note per column;
-        dx/dy convert from engine px by `scale`, rotation/zoom are
-        unitless. The reverse family adds a per-column vertical shift (the
-        receptor slides to its mirrored/centered position). Visibility is
-        the dark family ALONE (`receptor_dark_alpha`, engine-exact per the
-        ReceptorArrowRow decompile): the stealth/glow appearance terms the
-        y=0 pipeline computes never apply to receptors, so a stealthed
-        field keeps its receptor marks. The note-path spline displaces
-        receptors at its y-offset-0 value (the engine draws receptors
-        through the same GetXPos)."""
         cols = np.arange(keycount, dtype=np.int64)
-        offs = receptor_offsets(percents, cols, t_now=t,
-                                beat_now=self._beat_at(t), keycount=keycount)
-        dy = offs.dy * scale + self._receptor_reverse_dy(ctx, percents, cols, judge_y)
-        alpha = receptor_dark_alpha(percents, cols)
-        dx_engine = offs.dx
-        if spline is not None:
-            dx_engine = dx_engine + spline.offsets(
-                'x', cols, np.zeros(keycount))
-        dx = self._tiny_compressed_dx(percents, cols, dx_engine, keycount,
-                                      scale)
-        return {
-            'dx': dx, 'dy': dy,
-            'rotation_deg': offs.rotation_deg, 'zoom': offs.zoom,
-            'alpha': alpha,
-        }
+        trails = path.spans(cols, np.zeros(keycount),
+                            np.full(keycount, max_off),
+                            np.full(keycount, count),
+                            cell=_ARROWPATH_SAMPLE_SPACING)
+        note_path = (self._note_path.player(self._player)
+                     if self._note_path is not None else None)
+        width = _ARROWPATH_WIDTH * scale
+        ctx.arrowpath_ribbons = [
+            (trail.x, trail.y,
+             note_path.gradient_at(t, col) if note_path is not None
+             else [(1.0, 1.0, 1.0, 1.0)],
+             width, amount)
+            for col, trail in enumerate(trails)]
 
-    def _receptor_reverse_dy(self, ctx, percents, cols, judge_y):
-        """Per-column receptor vertical shift from the reverse family: the
-        receptor slides from judge_y to lerp(judge_y, mirror_y, r_col),
-        then toward field center by `centered`. Receptors are at y_offset 0
-        so their shift is exactly (receptor_y - judge_y). Runs every frame
-        (the zero-channel baseline puts receptors at the mirrored line)."""
-        centered = float(percents.get('centered', 0.0))
-        r = self._effective_reverse(percents, cols, ctx.player.keycount)
-        mirror_y = self._reverse_geom(ctx, judge_y)
-        _rx, ry, _w, h = ctx.chart_rect
-        center_y = ry + h / 2.0
-        receptor_y = judge_y + r * (mirror_y - judge_y)
-        receptor_y = receptor_y + centered * (center_y - receptor_y)
-        return receptor_y - judge_y
+    def _receptor_offsets(self, ctx, path, percents, judge_y) -> dict:
+        """Per-column receptor mods in OUR pixel space: the lane curve at
+        y_offset 0, expressed as offsets from the undisplaced lane center
+        and judge line.
+
+        The engine draws receptors through the same GetXPos an arrow takes,
+        so their POSITION is that sample and nothing else - the reverse
+        family's per-column slide is already in it, because that is where
+        the curve puts offset 0. Their VISIBILITY is not: it is the dark
+        family ALONE (`receptor_dark_alpha`, engine-exact per the
+        ReceptorArrowRow decompile), so the stealth terms the curve carries
+        never apply and a stealthed field keeps its receptor marks. The
+        receptor draw is flat, so it takes `flat_zoom` rather than a depth
+        it cannot render."""
+        keycount = int(ctx.player.keycount)
+        cols = np.arange(keycount, dtype=np.int64)
+        marks = path.sample(cols, np.zeros(keycount))
+        centers = np.array([_lane_center_of(ctx)(col) for col in cols],
+                           dtype=np.float64)
+        return {
+            'dx': marks.x - centers, 'dy': marks.y - judge_y,
+            'rotation_deg': marks.rotation_deg, 'zoom': marks.flat_zoom,
+            'alpha': receptor_dark_alpha(percents, cols),
+        }
