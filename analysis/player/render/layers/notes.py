@@ -715,14 +715,11 @@ def _draw_ln(ctx, painter, n):
 
 
 def _display_judge_y(ctx, col) -> float:
-    """The judge line where `col`'s notes visually land. `ctx.judge_y` is
-    the native downscroll anchor; a mod consumer that reorients columns
-    (NotITG's reverse family mirrors the field to upscroll) stashes each
-    receptor's shift from that anchor in `ctx.receptor_offsets['dy']`."""
-    offs = getattr(ctx, 'receptor_offsets', None)
-    if offs is None:
-        return float(ctx.judge_y)
-    return float(ctx.judge_y) + float(offs['dy'][col])
+    """The judge line where `col`'s notes visually land: the lane curve at
+    scroll offset 0, which is where the column's receptor is. A mod
+    consumer that reorients columns (NotITG's reverse family mirrors the
+    field to upscroll) moves that point, and this follows it."""
+    return float(ctx.receptor_marks.y[col])
 
 
 def _ln_body_span(ctx, n, hide) -> tuple | None:

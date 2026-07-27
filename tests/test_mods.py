@@ -646,6 +646,19 @@ class _FakeCtx:
         self.candidate_press_y = np.asarray(heads, dtype=np.float64)
 
 
+def _receptor_offsets(ctx):
+    """The receptor row of this frame's lane curve, read back as the
+    offsets from the undisplaced lane center and judge line these tests
+    reason in. The renderer asks the curve directly."""
+    from analysis.games.notitg.note_mods import _lane_center_of
+
+    cols = np.arange(ctx.player.keycount)
+    marks = ctx.lane_path.sample(cols, np.zeros(len(cols)))
+    centers = np.array([_lane_center_of(ctx)(int(c)) for c in cols])
+    return {'dx': marks.x - centers, 'dy': marks.y - ctx.judge_y,
+            'rotation_deg': marks.rotation_deg, 'zoom': marks.flat_zoom}
+
+
 def _mods(events, field_tilt_active=None):
     from analysis.games.notitg.note_mods import NotitgNoteMods
     mc = ModChannels.compile(events)
@@ -685,7 +698,7 @@ def test_field_tilt_leaves_zspin_confusion_alone():
     events = [ModEvent(0.0, 1.0, -1, 'confusionoffset')]
     ctx = _FakeCtx(player, [100.0] * 4, judge_y=100, chart_h=400)
     _mods(events, field_tilt_active=lambda t: True).apply(ctx)
-    assert np.abs(np.asarray(ctx.receptor_offsets['rotation_deg'])).max() > 1e-6
+    assert np.abs(np.asarray(_receptor_offsets(ctx)['rotation_deg'])).max() > 1e-6
 
 
 def test_reverse_100_reads_as_native_downscroll():
@@ -695,7 +708,7 @@ def test_reverse_100_reads_as_native_downscroll():
     ctx = _FakeCtx(player, [40.0, 40.0, 40.0, 40.0], judge_y=100, chart_h=400)
     _mods([ModEvent(0.0, 1.0, -1, 'reverse')]).apply(ctx)
     np.testing.assert_allclose(ctx.candidate_head_y, [40.0] * 4)
-    np.testing.assert_allclose(ctx.receptor_offsets['dy'], [0.0] * 4)
+    np.testing.assert_allclose(_receptor_offsets(ctx)['dy'], [0.0] * 4)
 
 
 def test_zero_channels_flip_to_engine_default_upscroll():
@@ -707,7 +720,7 @@ def test_zero_channels_flip_to_engine_default_upscroll():
     ctx = _FakeCtx(player, [40.0, 40.0, 40.0, 40.0], judge_y=100, chart_h=400)
     _mods([]).apply(ctx)
     np.testing.assert_allclose(ctx.candidate_head_y, [360.0] * 4)
-    np.testing.assert_allclose(ctx.receptor_offsets['dy'], [200.0] * 4)
+    np.testing.assert_allclose(_receptor_offsets(ctx)['dy'], [200.0] * 4)
 
 
 def test_centered_converges_receptor_to_midscreen():
@@ -719,7 +732,7 @@ def test_centered_converges_receptor_to_midscreen():
     ctx = _FakeCtx(player, [100.0] * 4, judge_y=100, chart_h=400)
     _mods([ModEvent(0.0, 0.5, -1, 'centered')]).apply(ctx)
     np.testing.assert_allclose(ctx.candidate_head_y, [250.0] * 4)
-    np.testing.assert_allclose(ctx.receptor_offsets['dy'], [150.0] * 4)
+    np.testing.assert_allclose(_receptor_offsets(ctx)['dy'], [150.0] * 4)
 
 
 def test_tiny_spacing_compresses_columns():
@@ -732,7 +745,7 @@ def test_tiny_spacing_compresses_columns():
     _mods([ModEvent(0.0, 1.0, -1, 'tiny')]).apply(ctx)
     np.testing.assert_allclose(ctx.candidate_dx, [48.0, 16.0, -16.0, -48.0])
     # Receptors compress the same way (evaluated per column).
-    np.testing.assert_allclose(ctx.receptor_offsets['dx'],
+    np.testing.assert_allclose(_receptor_offsets(ctx)['dx'],
                                [48.0, 16.0, -16.0, -48.0])
 
 

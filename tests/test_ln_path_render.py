@@ -84,12 +84,17 @@ def _ctx(judge_y=500, lane_w=80, H=600, press_hide=False, sprite=None):
         pm.fill(Qt.transparent)
     sprite_cache = SimpleNamespace(get=lambda *a, **k: pm)
     player = SimpleNamespace(press_hide=press_hide, H=H)
-    return SimpleNamespace(
+    ctx = SimpleNamespace(
         player=player, judge_y=judge_y, lane_w=lane_w, screen_margin=100,
         sprite_cache=sprite_cache,
         lane_x=lambda col: 40.0 + col * lane_w,
         lane_width=lambda col: lane_w,
     )
+    # A straight lane: its receptors sit on the hit line.
+    ctx.receptor_marks = lane_path.flat_samples(
+        [40.0 + col * lane_w + lane_w / 2.0 for col in range(4)],
+        [judge_y] * 4)
+    return ctx
 
 
 # --- (a) straight body => rect fast-path ----------------------------
@@ -299,10 +304,13 @@ def test_held_hide_clamps_at_judge_without_crossing_tail():
     assert top == bot
 
 
-def test_display_judge_follows_receptor_dy():
+def test_display_judge_follows_the_receptor():
+    # The display judge line IS where the lane curve puts scroll offset 0,
+    # so a mod that slides a column's receptor carries it along.
     ctx = _ctx(judge_y=500)
+    ctx.receptor_marks = lane_path.flat_samples([0.0, 0.0], [500.0, 500.0])
     assert nl._display_judge_y(ctx, 0) == 500.0
-    ctx.receptor_offsets = {'dy': np.array([-385.0, 0.0])}
+    ctx.receptor_marks = lane_path.flat_samples([0.0, 0.0], [115.0, 500.0])
     assert nl._display_judge_y(ctx, 0) == 115.0
 
 

@@ -31,7 +31,8 @@ _NO_PEN         = QPen(QColor(0, 0, 0, 0))
 # Per-column receptor notch: a thin white bar filling most of the lane
 # width, centered on the lane center at the hit line. Height and the
 # fraction of the lane it spans are the only geometry knobs; the mark
-# picks up its position/rotation/zoom/alpha from ctx.receptor_offsets.
+# picks up its position/rotation/zoom from the lane curve at scroll
+# offset 0, and its visibility from ctx.receptor_alpha.
 _RECEPTOR_H          = 4.0
 _RECEPTOR_LANE_FRAC  = 0.82
 _RECEPTOR_BRUSH      = QBrush(_WHITE)
@@ -123,21 +124,14 @@ def _field_span(ctx):
     return left, right - left
 
 
-def _receptor_offsets(ctx, keycount):
-    """Per-column receptor mod arrays in OUR pixel space, defaulting to
-    the identity when the producer hasn't stashed anything on the ctx.
+def _receptor_alpha(ctx, col):
+    """How visible `col`'s receptor is, or None for fully visible.
 
-    Returns `(dx, dy, rotation_deg, zoom, alpha)`, each length keycount.
-    The producer (games/*/note_mods) sets `ctx.receptor_offsets` to a
-    dict of numpy arrays; we consume via getattr so an unmodded chart --
-    every game by default -- pays only the zeros allocation."""
-    offs = getattr(ctx, 'receptor_offsets', None)
-    zeros = np.zeros(keycount, dtype=np.float64)
-    if offs is None:
-        return zeros, zeros, zeros, None, None
-    return (offs.get('dx', zeros), offs.get('dy', zeros),
-            offs.get('rotation_deg', zeros),
-            offs.get('zoom', None), offs.get('alpha', None))
+    NOT the lane curve's alpha at that point: an arrow there would pick
+    up the stealth/hidden gradients, and a receptor never does (see
+    lane_path). The producer stashes the receptor's own rule."""
+    alpha = getattr(ctx, 'receptor_alpha', None)
+    return None if alpha is None else float(alpha[col])
 
 
 def _draw_receptor_mark(painter, cx, cy, lane_w, rotation_deg, zoom, alpha):
@@ -248,7 +242,7 @@ def draw_judgment(ctx, painter):
         bands.append((_judge_brush(p.judge_colors[name]), half_top, half_bot))
 
     bars = p._adapter.receptor_style() != 'line'
-    per_column = bars and getattr(ctx, 'receptor_offsets', None) is not None
+    per_column = bars and ctx.lane_path.displaces
     if not per_column:
         for brush, half_top, half_bot in bands:
             painter.setBrush(brush)
@@ -264,9 +258,9 @@ def draw_judgment(ctx, painter):
         # Receptors are displaced per column, so the window coloring
         # adheres to each receptor's own frame instead of staying behind
         # as a full-width band at the untransformed judge line.
-        _draw_column_judgments(ctx, painter, judge_y, bands)
+        _draw_column_judgments(ctx, painter, bands)
     else:
-        _draw_receptors(ctx, painter, judge_y)
+        _draw_receptors(ctx, painter)
 
     # Death line
     death_t = p.replay.get('death_time')
@@ -276,32 +270,29 @@ def draw_judgment(ctx, painter):
         painter.drawLine(QPointF(x0, y), QPointF(x_end, y))
 
 
-def _draw_column_judgments(ctx, painter, judge_y, bands):
+def _draw_column_judgments(ctx, painter, bands):
     """Window coloring + receptor notch per column, drawn together in the
     receptor's local frame (its lane center + mod displacement, rotation
     and zoom about its own center) so the judgment coloring rides every
     receptor transform. Band widths span the lane; each column's bands
     draw under its own notch."""
-    kc = ctx.keycount
-    dx, dy, rot, zoom, alpha = _receptor_offsets(ctx, kc)
+    marks = ctx.receptor_marks
     painter.setPen(_NO_PEN)
-    for col in range(kc):
+    for col in range(ctx.keycount):
         lane_w = ctx.lane_width(col)
         if lane_w <= 0.5:
             continue
-        cx = ctx.lane_center(col) + float(dx[col])
-        cy = judge_y + float(dy[col])
-        col_alpha = None if alpha is None else float(alpha[col])
-        col_zoom = None if zoom is None else float(zoom[col])
+        mark = marks.at(col)
+        col_alpha = _receptor_alpha(ctx, col)
 
         painter.save()
         if col_alpha is not None and col_alpha < 1.0:
             painter.setOpacity(painter.opacity() * max(0.0, col_alpha))
-        painter.translate(cx, cy)
-        if rot[col]:
-            painter.rotate(float(rot[col]))
-        if col_zoom is not None and col_zoom != 1.0:
-            painter.scale(col_zoom, col_zoom)
+        painter.translate(mark.x, mark.y)
+        if mark.rotation_deg:
+            painter.rotate(mark.rotation_deg)
+        if mark.flat_zoom != 1.0:
+            painter.scale(mark.flat_zoom, mark.flat_zoom)
         for brush, half_top, half_bot in bands:
             painter.setBrush(brush)
             painter.drawRect(QRectF(-lane_w / 2.0, -half_top, lane_w,
@@ -312,21 +303,19 @@ def _draw_column_judgments(ctx, painter, judge_y, bands):
         painter.restore()
 
 
-def _draw_receptors(ctx, painter, judge_y):
-    """Per-column receptor notches. Each rides its lane center
-    (`ctx.lane_x` + width, so lane switches and animated widths track
-    for free) plus the per-column receptor mod displacement, and lives
-    inside the effect transform bracket so every field transform carries
-    it too. Fill-only, no pen state."""
-    kc = ctx.keycount
-    dx, dy, rot, zoom, alpha = _receptor_offsets(ctx, kc)
+def _draw_receptors(ctx, painter):
+    """Per-column receptor notches. A receptor is the lane curve at scroll
+    offset 0, so lane switches, animated widths and every note mod that
+    moves a column all track for free. Lives inside the effect transform
+    bracket so every field transform carries it too. Fill-only, no pen
+    state."""
+    marks = ctx.receptor_marks
     painter.setPen(_NO_PEN)
-    for col in range(kc):
+    for col in range(ctx.keycount):
         lane_w = ctx.lane_width(col)
         if lane_w <= 0.5:
             continue
-        cx = ctx.lane_center(col) + float(dx[col])
-        cy = judge_y + float(dy[col])
-        _draw_receptor_mark(painter, cx, cy, lane_w, float(rot[col]),
-                            None if zoom is None else float(zoom[col]),
-                            None if alpha is None else float(alpha[col]))
+        mark = marks.at(col)
+        _draw_receptor_mark(painter, mark.x, mark.y, lane_w,
+                            mark.rotation_deg, mark.flat_zoom,
+                            _receptor_alpha(ctx, col))

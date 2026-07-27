@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from analysis.games.notitg import note_path
-from analysis.games.notitg.note_mods import NotitgNoteMods
+from analysis.games.notitg.note_mods import NotitgNoteMods, _lane_center_of
 from analysis.games.notitg.mod_channels import ModChannels
 from analysis.games.notitg.sim.actor import SimActor
 from analysis.player.render.effects.timeline import Keyframe
@@ -181,8 +181,10 @@ def test_spline_displaces_receptors_at_domain_zero():
     player = _FakePlayer([0], 2)
     ctx = _FakeCtx(player, [100.0], judge_y=100, chart_h=400)
     _note_mods(_handle()).apply(ctx)
-    assert ctx.receptor_offsets['dx'][0] == pytest.approx(10.0)
-    assert ctx.receptor_offsets['dx'][1] == pytest.approx(0.0)
+    marks = ctx.lane_path.sample(np.arange(2), np.zeros(2))
+    centers = np.array([_lane_center_of(ctx)(col) for col in range(2)])
+    assert (marks.x - centers)[0] == pytest.approx(10.0)
+    assert (marks.x - centers)[1] == pytest.approx(0.0)
 
 
 def test_no_note_path_keeps_the_inert_fast_path():

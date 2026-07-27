@@ -20,10 +20,12 @@ What `apply` then does with it:
   between that hold's head and tail offsets, so the notes layer draws a
   body BENT by the per-note mods (drunk/wave/digital ...) instead of a
   straight rect. Present only when something varies along the body,
-- stashes ctx.receptor_offsets: the curve at y_offset 0 per column, as
-  offsets from the undisplaced lane center and judge line, so the
-  receptor layer displaces the hit marks exactly as the engine does
-  (drunk/tornado shift, confusion spin, ...),
+- stashes ctx.receptor_alpha, the receptors' OWN visibility. Their
+  position is not stashed at all: a receptor is the curve at offset 0,
+  and the engine draws it through the same GetXPos an arrow takes, so the
+  drunk/tornado shift and confusion spin come out of the curve. Their
+  visibility does not - it is the dark family alone, and the stealth
+  gradients an arrow at that point picks up never apply to a receptor,
 - stashes ctx.arrowpath_ribbons: the curve over the visible scroll range
   per column, which is what the fork's arrowpath trail IS.
 
@@ -103,7 +105,6 @@ from analysis.player.render.mods.arrow_effects import (
 
 _ACTIVE_EPS = 1e-4
 
-
 def _stream_candidates(ctx):
     """This frame's chart-stream candidate indices, or None when the
     frame carries none (narrow test ctxs never set the attribute)."""
@@ -111,7 +112,6 @@ def _stream_candidates(ctx):
     if s_idx is None or not len(s_idx):
         return None
     return np.asarray(s_idx, dtype=np.int64)
-
 
 def _lane_center_of(ctx):
     """The lane curve's undisplaced x per column. A render context knows
@@ -127,11 +127,9 @@ def _lane_center_of(ctx):
         return lambda col: lane_x(col) + half
     return lambda col: col * float(ctx.lane_w) + half
 
-
 def _stream_count(ctx) -> int:
     s_idx = _stream_candidates(ctx)
     return 0 if s_idx is None else len(s_idx)
-
 
 # The 2D per-note foreshortening approximations of an out-of-plane FIELD
 # tilt (X/Y rotation). Deferred to the real 3D projection while it drives
@@ -181,7 +179,6 @@ _WAVEFORM_PERIODS = {
     'tandigital': 'tandigitalperiod',
 }
 
-
 def beat_segments(bpms) -> list:
     """(t_start, beat_start, bps) rows for the positive-bpm segments,
     seconds-keyed; an empty/degenerate table falls back to one 120bpm
@@ -190,7 +187,6 @@ def beat_segments(bpms) -> list:
     segments = [(beat_to_time(beat, bpms, 0.0), beat, bpm / 60.0)
                 for beat, bpm in sorted(bpms) if bpm > 0]
     return segments or [(0.0, 0.0, 2.0)]
-
 
 def beat_segment_at(segments, t: float) -> tuple:
     """The (t_start, beat_start, bps) segment governing time `t`."""
@@ -201,12 +197,10 @@ def beat_segment_at(segments, t: float) -> tuple:
         lo = seg
     return lo
 
-
 def beat_at(segments, t: float) -> float:
     """Song beat at time `t` under `beat_segments(bpms)`."""
     t0, beat0, bps = beat_segment_at(segments, t)
     return beat0 + max(0.0, t - t0) * bps
-
 
 class NotitgNoteMods:
     def __init__(self, channels, bpms, field_tilt_active=None, player=0,
@@ -272,9 +266,11 @@ class NotitgNoteMods:
         if len(ctx.candidates) or _stream_count(ctx):
             self._apply_to_notes(ctx, path, percents, scale, ppe, judge_y, t,
                                  spline, active)
-        # Receptors carry the scroll orientation even on empty frames.
-        ctx.receptor_offsets = self._receptor_offsets(ctx, path, percents,
-                                                      judge_y)
+        # A receptor is the curve at offset 0, so the consumers read it
+        # straight off `ctx.lane_path` and only its VISIBILITY - which is
+        # not the lane's, see `receptor_dark_alpha` - is stashed here.
+        ctx.receptor_alpha = receptor_dark_alpha(
+            percents, np.arange(int(ctx.player.keycount), dtype=np.int64))
         self._stash_arrowpath(ctx, path, percents, scale, ppe, t)
 
     def _lane_path(self, ctx, percents, scale, ppe, judge_y, t, spline,
@@ -704,27 +700,3 @@ class NotitgNoteMods:
              width, amount)
             for col, trail in enumerate(trails)]
 
-    def _receptor_offsets(self, ctx, path, percents, judge_y) -> dict:
-        """Per-column receptor mods in OUR pixel space: the lane curve at
-        y_offset 0, expressed as offsets from the undisplaced lane center
-        and judge line.
-
-        The engine draws receptors through the same GetXPos an arrow takes,
-        so their POSITION is that sample and nothing else - the reverse
-        family's per-column slide is already in it, because that is where
-        the curve puts offset 0. Their VISIBILITY is not: it is the dark
-        family ALONE (`receptor_dark_alpha`, engine-exact per the
-        ReceptorArrowRow decompile), so the stealth terms the curve carries
-        never apply and a stealthed field keeps its receptor marks. The
-        receptor draw is flat, so it takes `flat_zoom` rather than a depth
-        it cannot render."""
-        keycount = int(ctx.player.keycount)
-        cols = np.arange(keycount, dtype=np.int64)
-        marks = path.sample(cols, np.zeros(keycount))
-        centers = np.array([_lane_center_of(ctx)(col) for col in cols],
-                           dtype=np.float64)
-        return {
-            'dx': marks.x - centers, 'dy': marks.y - judge_y,
-            'rotation_deg': marks.rotation_deg, 'zoom': marks.flat_zoom,
-            'alpha': receptor_dark_alpha(percents, cols),
-        }

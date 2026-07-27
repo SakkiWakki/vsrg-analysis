@@ -180,15 +180,15 @@ def feed_from_context(ctx, image_map, design=None):
 # ── receptors ────────────────────────────────────────────────────────
 
 def _emit_receptors(ctx, image_map, rows, report):
-    """One item per visible column receptor, at the hit line plus the
-    per-column receptor mod displacement (mirrors field._draw_receptors).
-    The notch is a lane-width * _RECEPTOR_LANE_FRAC bar, _RECEPTOR_H tall,
-    centered on the lane center."""
-    keycount = int(ctx.keycount)
-    dx, dy, rot, zoom, alpha = _receptor_offsets(ctx, keycount)
-    judge_y = float(ctx.judge_y)
+    """One item per visible column receptor: the lane curve at scroll
+    offset 0 (mirrors field._draw_receptors). The notch is a
+    lane-width * _RECEPTOR_LANE_FRAC bar, _RECEPTOR_H tall, centered on
+    that point, drawn flat - so it takes the curve's `flat_zoom` rather
+    than a depth this item cannot carry."""
+    marks = ctx.receptor_marks
+    alpha = getattr(ctx, 'receptor_alpha', None)
 
-    for col in range(keycount):
+    for col in range(int(ctx.keycount)):
         lane_w = float(ctx.lane_width(col))
         if lane_w <= 0.5:
             continue
@@ -196,30 +196,16 @@ def _emit_receptors(ctx, image_map, rows, report):
         if sprite is None:
             report['skipped'] += 1
             continue
-        image_id = sprite[0]
-        cx = float(ctx.lane_center(col)) + float(dx[col])
-        cy = judge_y + float(dy[col])
-        w = lane_w * _RECEPTOR_LANE_FRAC
-        col_zoom = 1.0 if zoom is None else float(zoom[col])
+        mark = marks.at(col)
+        # A receptor's visibility is its own, never the curve's: an arrow
+        # at the same point takes the stealth gradients and a receptor
+        # never does (see lane_path).
         col_alpha = 1.0 if alpha is None else max(0.0, float(alpha[col]))
-        mat = _place(cx, cy, w * col_zoom, _RECEPTOR_H * col_zoom,
-                     float(rot[col]))
-        rows.add(image_id, mat, col_alpha,
+        mat = _place(mark.x, mark.y, lane_w * _RECEPTOR_LANE_FRAC * mark.flat_zoom,
+                     _RECEPTOR_H * mark.flat_zoom, mark.rotation_deg)
+        rows.add(sprite[0], mat, col_alpha,
                  stage=_STAGE_RECEPTOR, col=col)
         report['receptors'] += 1
-
-
-def _receptor_offsets(ctx, keycount):
-    """`(dx, dy, rotation_deg, zoom, alpha)` per column, identity when the
-    ctx carries none - the same read field._receptor_offsets does, kept
-    local so this module doesn't import the Qt field layer."""
-    offs = getattr(ctx, 'receptor_offsets', None)
-    zeros = np.zeros(keycount, dtype=np.float64)
-    if offs is None:
-        return zeros, zeros, zeros, None, None
-    return (offs.get('dx', zeros), offs.get('dy', zeros),
-            offs.get('rotation_deg', zeros),
-            offs.get('zoom', None), offs.get('alpha', None))
 
 
 # ── note heads (taps) ────────────────────────────────────────────────
@@ -552,7 +538,7 @@ def _sprite_box(ctx, sprite, col, zoom=1.0):
 def _head_state(ctx, n):
     """`(visible, sprite_state, y)` for a note head - mirrors
     `notes._head_vis` (kept local so this module never imports the Qt note
-    layer, exactly as `_receptor_offsets` mirrors the field layer).
+    layer, exactly as `_emit_receptors` mirrors the field layer).
 
     `press_hide` charts hide a head once it is pressed, so visibility is not
     just the stealth alpha; the held-LN head also RIDES the judge line rather

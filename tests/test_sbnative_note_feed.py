@@ -18,6 +18,7 @@ import pytest
 
 from analysis.player.render import lane_path
 from analysis.player.render.storyboard import note_feed as nf
+from tests.conftest import receptor_lane
 
 
 def _lane_span(xs, ys):
@@ -50,13 +51,15 @@ def _stream_view(**kw):
 
 
 def _ctx(note_views, keycount=4, lane_w=64.0, judge_y=400.0, note_h=14.0,
-         receptor_offsets=None, stream_views=None, lane_widths=None):
+         receptor_alpha=None, stream_views=None, lane_widths=None,
+         **lane_terms):
     """A stub with the RenderContext reads the emitter uses: keycount,
     lane geometry (lane_w/lane_x/lane_width/lane_center), judge_y, note_h,
-    note_views, and optional receptor_offsets / stream_views.
+    note_views, the frame's lane curve, and optional stream_views.
 
     `lane_widths` overrides the per-column width while `lane_w` stays the base,
-    which is how a lane switch presents (the sprite squeezes by their ratio)."""
+    which is how a lane switch presents (the sprite squeezes by their ratio).
+    `lane_terms` bends the curve (see conftest.receptor_lane)."""
     ctx = SimpleNamespace(
         keycount=keycount,
         judge_y=judge_y,
@@ -64,12 +67,18 @@ def _ctx(note_views, keycount=4, lane_w=64.0, judge_y=400.0, note_h=14.0,
         note_h=note_h,
         note_views=note_views,
         stream_views=stream_views or [],
-        receptor_offsets=receptor_offsets,
+        receptor_alpha=receptor_alpha,
     )
     ctx.lane_width = (lambda col: lane_w) if lane_widths is None \
         else (lambda col: lane_widths[col])
     ctx.lane_x = lambda col: col * lane_w
     ctx.lane_center = lambda col: col * lane_w + lane_w / 2.0
+    ctx.lane_path = (receptor_lane(ctx.lane_center, judge_y, **lane_terms)
+                     if lane_terms
+                     else lane_path.straight(ctx.lane_center,
+                                             lambda offs: judge_y - offs))
+    ctx.receptor_marks = ctx.lane_path.sample(np.arange(keycount),
+                                              np.zeros(keycount))
     return ctx
 
 
@@ -359,14 +368,10 @@ def test_receptor_at_hit_line_center():
         assert cy == pytest.approx(400.0)
 
 
-def test_receptor_offsets_displace_and_fade():
-    offs = {
-        'dx': np.array([10.0, 0.0]),
-        'dy': np.array([0.0, -5.0]),
-        'rotation_deg': np.zeros(2),
-        'alpha': np.array([0.3, 1.0]),
-    }
-    ctx = _ctx([], keycount=2, receptor_offsets=offs)
+def test_a_bent_lane_displaces_and_fades_its_receptors():
+    ctx = _ctx([], keycount=2, dx=np.array([10.0, 0.0]),
+               dy=np.array([0.0, -5.0]),
+               receptor_alpha=np.array([0.3, 1.0]))
     _, f, count, _ = nf.feed_from_context(ctx, _IMAGE_MAP)
     rows = f.reshape(count, nf.FEED_F_STRIDE)
     cx0, cy0 = _apply_mat(rows[0][nf._F_MAT:nf._F_MAT + 9], 0.5, 0.5)
@@ -539,6 +544,11 @@ def _notitg_ctx(note_views=(), chart_rect=(100.0, 40.0, 1750.0, 900.0)):
     ctx.chart_rect = chart_rect
     ctx.lane_x = lambda col: x0 + col * lane_w
     ctx.lane_center = lambda col: x0 + col * lane_w + lane_w / 2.0
+    # The curve answers for the lane geometry it was handed, so rebuild it
+    # once the engine grid has replaced the default columns.
+    ctx.lane_path = lane_path.straight(ctx.lane_center,
+                                       lambda offs: ctx.judge_y - offs)
+    ctx.receptor_marks = ctx.lane_path.sample(np.arange(4), np.zeros(4))
     return ctx
 
 

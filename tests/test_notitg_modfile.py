@@ -385,7 +385,7 @@ def test_compile_mod_channels_still_drops_speed_mods():
 
 # -- producer stashes -----------------------------------------------------
 
-def test_note_mods_stashes_rotation_zoom_and_receptor_offsets():
+def test_note_mods_stashes_rotation_zoom_and_bends_the_lane():
     import types
 
     import numpy as np
@@ -413,12 +413,11 @@ def test_note_mods_stashes_rotation_zoom_and_receptor_offsets():
 
     assert ctx.candidate_rot_deg.shape == (4,)
     assert ctx.candidate_zoom.shape == (4,)
-    receptors = ctx.receptor_offsets
-    assert set(receptors) == {'dx', 'dy', 'rotation_deg', 'zoom', 'alpha'}
-    for key in receptors:
-        assert receptors[key].shape == (keycount,)
-    # confusion is a whole-field spin => nonzero receptor rotation.
-    assert np.any(receptors['rotation_deg'] != 0.0)
+    assert ctx.receptor_alpha.shape == (keycount,)
+    # confusion is a whole-field spin, so the curve turns the receptors
+    # (offset 0) as well as the notes.
+    marks = ctx.lane_path.sample(np.arange(keycount), np.zeros(keycount))
+    assert np.any(marks.rotation_deg != 0.0)
 
 
 def _receptor_alpha_for(modstring):
@@ -442,7 +441,7 @@ def _receptor_alpha_for(modstring):
         candidate_head_y=np.zeros(0), candidate_tail_y=np.zeros(0),
         candidate_press_y=np.zeros(0))
     mods.apply(ctx)
-    return ctx.receptor_offsets['alpha']
+    return ctx.receptor_alpha
 
 
 def test_receptor_alpha_ignores_stealth_family():

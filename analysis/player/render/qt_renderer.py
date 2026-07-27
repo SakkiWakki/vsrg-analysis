@@ -197,15 +197,16 @@ def _field_overscan_margins(ctx):
     base_x = max(1, int(p.W * _FIELD_OVERSCAN_FRAC))
     base_y = max(1, int(p.H * _FIELD_OVERSCAN_FRAC))
     pad = float(getattr(ctx, 'lane_w', 0.0))
-    receptors = getattr(ctx, 'receptor_offsets', None) or {}
-
-    receptor_ys = None
-    if receptors.get('dy') is not None:
-        receptor_ys = float(getattr(ctx, 'judge_y', 0.0)) + receptors['dy']
+    # Receptors move too (a mod can slide a column's whole hit line), so
+    # the curve's own offset-0 row bounds them. A straight lane's sit on
+    # the hit line, which is inside the window by construction, so only a
+    # bent one is worth sampling.
+    path = getattr(ctx, 'lane_path', None)
+    marks = ctx.receptor_marks if path is not None and path.displaces else None
     y_bounds = _finite_bounds(getattr(ctx, 'candidate_head_y', None),
                               getattr(ctx, 'candidate_tail_y', None),
                               getattr(ctx, 'candidate_press_y', None),
-                              receptor_ys)
+                              None if marks is None else marks.y)
     need_y = 0
     if y_bounds is not None:
         y_lo, y_hi = y_bounds
@@ -213,8 +214,11 @@ def _field_overscan_margins(ctx):
 
     # x positions are lane_x(col) + dx; bounding the lane extent by the
     # global dx range over-covers per column, in the safe direction.
+    receptor_dx = None if marks is None else (
+        marks.x - np.array([ctx.lane_center(col)
+                            for col in range(ctx.keycount)]))
     dx_bounds = _finite_bounds(getattr(ctx, 'candidate_dx', None),
-                               receptors.get('dx'))
+                               receptor_dx)
     need_x = 0
     if dx_bounds is not None:
         left, width = _field_layer._field_span(ctx)

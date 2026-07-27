@@ -94,3 +94,25 @@ def pytest_collection_modifyitems(items):
     for item in items:
         if 'tests/local/' in item.nodeid.replace('\\', '/'):
             item.add_marker('slow')
+
+
+def receptor_lane(lane_center, judge_y, **terms):
+    """A lane whose receptors sit where `terms` put them.
+
+    Tests that used to hand a consumer a `receptor_offsets` dict now hand
+    it the curve those offsets described: the same numbers, expressed as
+    the thing the renderer actually asks. Each term is a per-column array
+    of `lane_path.LaneDisplacement` fields.
+    """
+    import numpy as np
+
+    from analysis.player.render import lane_path
+
+    def displace(cols, offsets, note_beats, cell):
+        return lane_path.LaneDisplacement(
+            **{name: np.asarray(value, dtype=np.float64)[cols]
+               for name, value in terms.items()})
+
+    return lane_path.LanePath(lane_center,
+                              lambda cols, offsets: judge_y - offsets,
+                              displace=displace)

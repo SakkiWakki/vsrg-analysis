@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from analysis.player.render import lane_path
+
 
 @dataclass
 class RenderContext:
@@ -49,6 +51,46 @@ class RenderContext:
     # Composited effect frame for this paint (transform + z-ordered
     # overlay draws); None when no effect is active. Set by the renderer.
     effect_frame: object | None = None
+    # Per-column receptor visibility, or None for fully visible. Its own
+    # field rather than a term of the lane curve because a receptor's
+    # visibility is not the lane's: NotITG's comes from the dark family
+    # alone, and the stealth gradients an arrow at the same point picks up
+    # never apply to it (see lane_path).
+    receptor_alpha: object | None = None
+    _lane_path: object | None = None
+    _receptor_marks: object | None = None
+
+    @property
+    def lane_path(self):
+        """This frame's lane curve (render/lane_path.py): the one answer
+        to what a column is like, for receptors, heads, hold bodies, tail
+        caps and travel paths alike.
+
+        Defaults to the straight lane every game without note mods has -
+        a scroll offset is pixels up the lane from the hit line - so a
+        consumer may always ask. A game whose lane bends replaces it
+        (NotITG's `note_mods.apply`)."""
+        if self._lane_path is None:
+            self._lane_path = lane_path.straight(
+                self.lane_center, lambda offsets: self.judge_y - offsets)
+        return self._lane_path
+
+    @lane_path.setter
+    def lane_path(self, path):
+        self._lane_path = path
+        self._receptor_marks = None
+
+    @property
+    def receptor_marks(self):
+        """The lane curve at offset 0 for every column, sampled once per
+        frame. Consumers ask for this rather than sampling themselves
+        because receptors are read PER NOTE - a hold clamps its body at
+        its own column's receptor line - and the curve costs per call."""
+        if self._receptor_marks is None:
+            columns = np.arange(self.keycount, dtype=np.int64)
+            self._receptor_marks = self.lane_path.sample(
+                columns, np.zeros(len(columns)))
+        return self._receptor_marks
 
     @property
     def width(self):

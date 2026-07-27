@@ -2,7 +2,7 @@
 
 The receptor marks must ride each lane's center (so lane_xs / animated
 widths / field transforms carry them for free), pick up the per-column
-`ctx.receptor_offsets` mods, and fall back to the legacy full-width line
+the lane curve's own bend, and fall back to the legacy full-width line
 under `receptor_style() == 'line'`. The note-draw path must apply
 `ctx.candidate_rot_deg` / `candidate_zoom` about the note center only
 when the arrays are present and non-identity.
@@ -17,7 +17,9 @@ import math
 
 import numpy as np
 
+from analysis.player.render import lane_path
 from analysis.player.render.layers import field as _field
+from tests.conftest import receptor_lane
 from analysis.player.render.layers import notes as _notes
 
 
@@ -102,7 +104,8 @@ class FakePainter:
 # ── ctx / player fixtures ────────────────────────────────────────────
 
 def _ctx(*, keycount=4, lane_w=80.0, x0=100.0, judge_y=400,
-         style='bars', lane_xs=None, lane_ws=None, receptor_offsets=None):
+         style='bars', lane_xs=None, lane_ws=None, receptor_alpha=None,
+         **lane_terms):
     adapter = SimpleNamespace(
         receptor_style=lambda: style,
         transparent_field=lambda: False,
@@ -135,8 +138,13 @@ def _ctx(*, keycount=4, lane_w=80.0, x0=100.0, judge_y=400,
     ctx.lane_width = lambda col: (lane_ws[col] if lane_ws is not None
                                   else lane_w)
     ctx.lane_center = lambda col: ctx.lane_x(col) + ctx.lane_width(col) / 2.0
-    if receptor_offsets is not None:
-        ctx.receptor_offsets = receptor_offsets
+    ctx.receptor_alpha = receptor_alpha
+    ctx.lane_path = (receptor_lane(ctx.lane_center, judge_y, **lane_terms)
+                     if lane_terms
+                     else lane_path.straight(ctx.lane_center,
+                                             lambda offs: judge_y - offs))
+    ctx.receptor_marks = ctx.lane_path.sample(np.arange(keycount),
+                                              np.zeros(keycount))
     return ctx
 
 
@@ -175,15 +183,14 @@ def test_collapsed_lane_draws_no_mark():
     assert len(p.fill_rects) == 3
 
 
-# ── receptor_offsets displace / rotate / fade ───────────────────────
+# ── a bent lane displaces / rotates / fades its receptors ───────────
 
-def test_receptor_offsets_displace():
+def test_a_bent_lane_moves_its_receptors():
     dx = np.array([10.0, 0.0, -5.0, 0.0])
     dy = np.array([0.0, 12.0, 0.0, -3.0])
-    ctx = _ctx(keycount=4, receptor_offsets={'dx': dx, 'dy': dy})
+    ctx = _ctx(keycount=4, dx=dx, dy=dy)
     p = FakePainter()
     _field.draw_judgment(ctx, p)
-    by_x = {round(cx): (cx, cy) for cx, cy, _ in p.fill_rects}
     base = [ctx.lane_center(c) for c in range(4)]
     # col 0 shifted +10 x, col 1 shifted +12 y, col 2 shifted -5 x.
     got = sorted((cx, cy) for cx, cy, _ in p.fill_rects)
@@ -192,13 +199,12 @@ def test_receptor_offsets_displace():
     assert (base[2] - 5.0, 400) in got
 
 
-def test_receptor_offsets_rotate_and_zoom_use_transform():
+def test_a_turned_receptor_goes_through_the_painter_transform():
     # A 90deg rotation about the mark center leaves the center fixed;
     # the transform path (save/restore) is exercised without moving it.
     rot = np.array([90.0, 0.0, 0.0, 0.0])
     zoom = np.array([2.0, 1.0, 1.0, 1.0])
-    ctx = _ctx(keycount=4,
-               receptor_offsets={'rotation_deg': rot, 'zoom': zoom})
+    ctx = _ctx(keycount=4, rotation_deg=rot, zoom=zoom)
     p = FakePainter()
     _field.draw_judgment(ctx, p)
     # Center is invariant under rotation+uniform scale about itself.
@@ -207,9 +213,10 @@ def test_receptor_offsets_rotate_and_zoom_use_transform():
     assert got == want
 
 
-def test_receptor_offsets_alpha_multiplies_opacity():
-    alpha = np.array([0.25, 1.0, 1.0, 1.0])
-    ctx = _ctx(keycount=4, receptor_offsets={'alpha': alpha})
+def test_receptor_alpha_multiplies_opacity():
+    # A receptor's visibility is its OWN, never the lane's alpha at that
+    # point (an arrow there would take the stealth gradients).
+    ctx = _ctx(keycount=4, receptor_alpha=np.array([0.25, 1.0, 1.0, 1.0]))
     p = FakePainter()
     _field.draw_judgment(ctx, p)
     ops = sorted(op for _, _, op in p.fill_rects)

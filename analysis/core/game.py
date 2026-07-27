@@ -186,7 +186,8 @@ class GameAdapter:
         - 'bars' (default): one per-column receptor notch at each lane's
           center, sized to that lane's width. Rides lane switches,
           animated widths, and every field transform, and picks up the
-          per-column receptor mods (`ctx.receptor_offsets`).
+          per-column receptor mods (the lane curve at scroll
+          offset 0; see render/lane_path.py).
         - 'line': the legacy single full-width line across the field.
 
         This is a base default only; do not override per game in
