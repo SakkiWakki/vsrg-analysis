@@ -225,9 +225,12 @@ class CompiledBodyC:
         self._name_id = {nm: i for i, nm in enumerate(ser['names'])}
         self._clock_wired = False
 
-        # Abort flag the executor LOADS (never calls). Cleared per run;
-        # set by a raising crossing when the surface models aborting.
+        # Abort flag the executor LOADS (never calls). Cleared per run; set by
+        # a raising crossing when the surface models aborting, and by any host
+        # crossing that RAISES - ctypes cannot carry an exception out of a
+        # callback, so `_pending_exc` holds it until `run` can re-raise it.
         self._abort = ctypes.c_int(0)
+        self._pending_exc: BaseException | None = None
 
         # handle registry: id -> python object (non-scalar values crossing out)
         self._handles: dict[int, object] = {}
@@ -803,6 +806,32 @@ class CompiledBodyC:
             getter, poke = reporting(getter), reporting(poke)
             call, call_value = reporting(call), reporting(call_value)
 
+        def catching(fn):
+            """Wrap a raising crossing so a host exception ABORTS THE TICK
+            rather than escaping into ctypes.
+
+            An exception raised inside a ctypes callback does not propagate to
+            whoever called `run` - ctypes prints "Exception ignored" and hands
+            C a default return, so the body kept executing on a value the Lua
+            path never produced, and `_record_fault` never saw it. The Lua
+            path abandons the whole body when a host call raises; the Rust
+            core learned the same lesson as its `aborted` flag. Holding the
+            exception and re-raising after `cbody_run` returns puts it back on
+            the caller's `except`, and the abort flag stops the tick where Lua
+            stops it."""
+            def wrapped(*args):
+                try:
+                    return fn(*args)
+                except BaseException as exc:      # noqa: BLE001 - re-raised
+                    if self._pending_exc is None:
+                        self._pending_exc = exc
+                    self._abort.value = 1
+                    return nil_cv
+            return wrapped
+
+        getter, poke = catching(getter), catching(poke)
+        call, call_value = catching(call), catching(call_value)
+
         # keep alive
         self._cb = (
             _SYMBOL(symbol), _GGET(gget), _GSET(gset), _GETTER(getter),
@@ -840,11 +869,16 @@ class CompiledBodyC:
         self._handles = dict(self._pinned)
         self._obj_to_handle.clear()
         self._abort.value = 0
+        self._pending_exc = None
         # `self` is ALWAYS an actor and the caller already knows which, so it
         # never needs the classifier - it boxes straight from the id.
         me = (self._to_cv(self_table) if self_rec_id is None
               else _CV_ACTOR_BASE | self_rec_id)
-        return self._lib.cbody_run(self._b, me)
+        result = self._lib.cbody_run(self._b, me)
+        pending, self._pending_exc = self._pending_exc, None
+        if pending is not None:
+            raise pending
+        return result
 
     def __del__(self):
         try:
