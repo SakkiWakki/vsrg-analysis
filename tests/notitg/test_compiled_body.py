@@ -116,7 +116,7 @@ def test_lua_env_store_shares_globals_with_the_host():
     # A global the interpreter writes is visible in the Lua env (one
     # namespace), so a guard or another body reads what the body wrote.
     env = SimEnvironment(0.0, 0, to_seconds=lambda b: b * 0.5)
-    store = _LuaEnvStore(env._host.env)
+    store = _LuaEnvStore(env._host)
     interp = Interpreter(NotitgGuardSurface(env), store=store)
     interp.run(parse_body('counter = 0')[0])
     step, _ = parse_body('counter = counter + 1')

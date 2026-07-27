@@ -132,6 +132,8 @@ def _load_lib():
     lib.cbody_mark_stable.argtypes = [ctypes.c_void_p, ctypes.c_int]
     lib.cbody_clear_stable.argtypes = [ctypes.c_void_p]
     lib.cbody_set_stable.argtypes = [ctypes.c_void_p, ctypes.c_int, u64]
+    lib.cbody_drop_global.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    lib.cbody_enable_globals.argtypes = [ctypes.c_void_p]
     lib.cbody_actor_capacity.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
     lib.cbody_set_actor_prop.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_double]
     lib.cbody_set_actor_tweening.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
@@ -283,8 +285,13 @@ class CompiledBodyC:
             self._actor_cap = 0
             install(self._on_prop_write, self._on_tween_change)
 
+        # A surface that reports its global writes gets both name caches: the
+        # cross-tick symbol one it was built for, and the executor's global
+        # cache, which is armed HERE because the report is its only
+        # invalidation. A surface without it keeps crossing for every read.
         observe = getattr(surface, 'observe_global_writes', None)
-        if observe is not None and self._stable_names:
+        if observe is not None:
+            self._lib.cbody_enable_globals(self._b)
             observe(self._on_global_write)
 
         self._install_frontier()
@@ -391,14 +398,18 @@ class CompiledBodyC:
         self._lib.cbody_set_actor_tweening(self._b, rec_id, 1 if busy else 0)
 
     def _on_global_write(self, name) -> None:
-        """The host rebound `name`: refresh its cached value immediately.
+        """The host rebound `name`: drop what the executor cached for it, and
+        refresh the cross-tick symbol cache immediately.
 
         Immediately, not at the next tick, because the write can land MID-tick
         - a command body fired from a poke's queue drain runs arbitrary chart
         Lua. Re-resolving here is a store read, not Lua execution, so it cannot
         re-enter. Writes are far rarer than the reads this saves."""
         name_id = self._name_id.get(name)
-        if name_id is None or name not in self._stable_names:
+        if name_id is None:
+            return
+        self._lib.cbody_drop_global(self._b, name_id)
+        if name not in self._stable_names:
             return
         surf = self._surface
         recv = self._receivers.symbols if self._receivers else ()

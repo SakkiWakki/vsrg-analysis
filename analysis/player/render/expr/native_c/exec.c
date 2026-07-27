@@ -112,12 +112,29 @@ int cexec_run(CExecState *st, CValue self_val) {
         st->frame[ops[pc].a] = POP(); pc++; NEXT();
     }
     OP(LOAD_GLOBAL) {
-        PUSH(fe->global_get(fe->ctx, st->names[ops[pc].a])); pc++; NEXT();
+        int gid = ops[pc].a;
+        CTrim *gtr = st->trim;
+        uint8_t *gok = gtr ? gtr->gok : 0;      /* NULL: host cannot invalidate */
+        if (gok && gok[gid]) { PUSH(gtr->gval[gid]); pc++; NEXT(); }
+        CValue gv = fe->global_get(fe->ctx, st->names[gid]);
+        /* An aborted crossing did not answer with the global's value, so the
+         * default it left behind must not become the cached one. */
+        if (gok && !*fe->abort_flag) { gtr->gval[gid] = gv; gok[gid] = 1; }
+        PUSH(gv); pc++; NEXT();
     }
     OP(STORE_GLOBAL) {
-        fe->global_set(fe->ctx, st->names[ops[pc].a], POP());
+        CValue stored = POP();
+        fe->global_set(fe->ctx, st->names[ops[pc].a], stored);
         if (st->trim) {
             st->trim->memo_epoch++;
+            /* The store reports itself back through the host's write observer,
+             * which drops this entry - so the cache is refilled AFTER the
+             * crossing, and with the value the store just wrote rather than a
+             * read that would have to cross again to learn it. */
+            if (st->trim->gok) {
+                st->trim->gval[ops[pc].a] = stored;
+                st->trim->gok[ops[pc].a] = (uint8_t)(*fe->abort_flag ? 0 : 1);
+            }
             /* A name this body STORES is by definition not process-stable, so
              * drop it out of the stable cache permanently (0, not back to 1 -
              * the host probes a name for snapshotting only once, and a name

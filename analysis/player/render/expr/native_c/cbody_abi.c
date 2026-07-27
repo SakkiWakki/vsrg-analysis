@@ -55,6 +55,8 @@ void cbody_free(CBody *b) {
     free(b->trim.memo_val);
     free(b->trim.memo_gen);
     free(b->trim.stable);
+    free(b->trim.gval);
+    free(b->trim.gok);
     free(b->props.value);
     free(b->props.present);
     free(b->props.tweening);
@@ -219,6 +221,22 @@ void cbody_set_stable(CBody *b, int name_id, uint64_t cv) {
 void cbody_mark_stable(CBody *b, int name_id) {
     if (b->trim.stable && name_id >= 0 && name_id < b->nnames)
         b->trim.stable[name_id] = 1;
+}
+/* Arm the global cache. Only a host that REPORTS its global writes may: without
+ * the observer nothing would ever drop a stale entry, so the absent buffers are
+ * what keep such a host crossing for every read. */
+void cbody_enable_globals(CBody *b) {
+    if (b->trim.gval || b->nnames <= 0)
+        return;
+    b->trim.gval = calloc((size_t)b->nnames, sizeof(CValue));
+    b->trim.gok = calloc((size_t)b->nnames, sizeof(uint8_t));
+}
+/* Drop a cached global. The host calls this from the sandbox's write observer,
+ * which is what makes the cache sound: the entry dies the moment the value it
+ * holds can have changed, whoever wrote it and whatever name they computed. */
+void cbody_drop_global(CBody *b, int name_id) {
+    if (b->trim.gok && name_id >= 0 && name_id < b->nnames)
+        b->trim.gok[name_id] = 0;
 }
 void cbody_set_clock_ids(CBody *b, int beat_id, int time_id) {
     b->trim.clock_beat_id = beat_id;

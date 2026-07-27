@@ -89,6 +89,14 @@ typedef struct {
     uint32_t *memo_gen;
     uint32_t  memo_epoch;
     uint8_t  *stable;               /* 0 no, 1 wanted, 2 cached */
+    /* The accumulator globals, cached by name id. Sound for a different reason
+     * than `stable`: the sandbox REPORTS every write by name (a proxied
+     * __newindex, rawset included), so the host drops an entry the moment its
+     * value can change - and STORE_GLOBAL writes its own value straight in,
+     * since the store IS the new value. A global read then costs a load rather
+     * than a crossing that walks back into the Lua namespace. */
+    CValue   *gval;                 /* [nnames] */
+    uint8_t  *gok;
     int clock_beat_id, clock_time_id;   /* name-pool verb ids, -1 unset */
     CValue clock_recv;  int clock_recv_set;
     CValue clock_beat, clock_time;

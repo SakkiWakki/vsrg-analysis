@@ -35,7 +35,7 @@ class NativeHost:
     def __init__(self, env):
         self._env = env
         self._surface = NotitgGuardSurface(env)
-        self._store = _LuaEnvStore(env._host.env)
+        self._store = _LuaEnvStore(env._host)
         self._interp = Interpreter(self._surface, store=self._store)
         # Parsed-AST cache keyed by source text - a body/expr parses once even
         # when re-run (per-tick Update, re-expanded includes).

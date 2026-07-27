@@ -24,25 +24,32 @@ from analysis.games.notitg.guard_surface import (
 from analysis.player.render.expr.frame_eval import (
     GlobalStore, Interpreter, Scope)
 from analysis.player.render.expr.parser import parse_body
+from analysis.player.render.expr.surface import UNRESOLVED
 
 
 class _LuaEnvStore(GlobalStore):
     """A GlobalStore backed by the running Lua env, so the interpreter's
-    globals and the load-populated Lua globals are ONE namespace. Reads and
-    writes go straight to `host.env`; an absent name reads as UNRESOLVED via
-    the base `get` contract (host.env returns None, which we map)."""
+    globals and the load-populated Lua globals are ONE namespace. An absent
+    name reads as UNRESOLVED via the base `get` contract (the host answers
+    None, which we map).
 
-    __slots__ = ('_env',)
+    Reads come off the host's write-observed MIRROR, a dict lookup, where
+    indexing the sandbox env is a `__index` metamethod call into Lua and back
+    for the single hottest read on the frontier. Writes still go through the
+    env so `__newindex` fires and every observer - the mirror itself, and the
+    executor's global cache - learns about them."""
 
-    def __init__(self, host_env):
-        self._env = host_env
+    __slots__ = ('_env', '_read')
+
+    def __init__(self, host):
+        self._env = host.env
+        self._read = host.global_value
 
     def has(self, name: str) -> bool:
-        return self._env[name] is not None
+        return self._read(name) is not None
 
     def get(self, name: str):
-        from analysis.player.render.expr.surface import UNRESOLVED
-        value = self._env[name]
+        value = self._read(name)
         return UNRESOLVED if value is None else value
 
     def set(self, name: str, value) -> None:
@@ -134,7 +141,7 @@ class CompiledBody:
         self._name = name
         self._surface = NotitgGuardSurface(env)
         self._interp = Interpreter(
-            self._surface, store=_LuaEnvStore(env._host.env))
+            self._surface, store=_LuaEnvStore(env._host))
         try:
             self._stmts, self._sink = parse_body(body)
             # Compile the AST to nested closures ONCE (frame_compile_exec): the
@@ -280,7 +287,7 @@ class OpStreamCompiledBody:
             env._warnings.append(f'{name}: opstream compile: {exc}')
             return
         surface = NotitgGuardSurface(env)
-        store = _LuaEnvStore(env._host.env)
+        store = _LuaEnvStore(env._host)
         interp = Interpreter(surface, store=store)
         self._interp = interp
 
