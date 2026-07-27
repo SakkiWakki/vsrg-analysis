@@ -141,7 +141,9 @@ def test_ln_head_and_tail_draw_with_their_own_sprites():
     assert (report['taps'], report['ln_tails']) == (1, 1)
     assert count == 4 + 2
     drawn = [int(u[i * nf.FEED_U_STRIDE + 1]) for i in (4, 5)]
-    assert drawn == [220, 230], 'the ln_head sprite, then the ln_tail cap'
+    # The cap goes UNDER its head: a tail is part of the hold, and the engine
+    # draws a column's holds before its taps.
+    assert drawn == [230, 220]
     # No body path on this view, so no ribbon segments.
     assert report['ln_body_segments'] == 0
 
@@ -158,7 +160,9 @@ def test_ln_tail_rides_the_body_path_tangent():
                  'ln_tail': (230, _SPRITE_W, _SPRITE_H)}
     _u, f, _count, report = nf.feed_from_context(_ctx(views), image_map)
     assert report['ln_tails'] == 1
-    row = f[5 * nf.FEED_F_STRIDE:6 * nf.FEED_F_STRIDE]
+    # Rows 0..3 are the receptors; this image_map has no ln_body, so the
+    # column's own rows are the tail (a hold layer) then the head.
+    row = f[4 * nf.FEED_F_STRIDE:5 * nf.FEED_F_STRIDE]
     mat = _np.asarray(row[nf._F_MAT:nf._F_MAT + 9], dtype=float).reshape(3, 3)
     # The cap sits at the path END (y=140), not the raw y_end (40).
     centre = mat @ _np.array([0.5, 0.5, 1.0])
@@ -384,7 +388,8 @@ def test_per_column_tap_override():
     rows = u.reshape(count, nf.FEED_U_STRIDE)
     # col 1 tap -> 201 (override), col 0 tap -> 200 (fallback).
     taps = rows[4:]
-    assert list(taps[:, 1]) == [201, 200]
+    # Column order, not the order the views were listed.
+    assert list(taps[:, 1]) == [200, 201]
 
 
 def test_missing_tap_sprite_counts_skip():
@@ -462,7 +467,8 @@ def test_head_sprite_resolves_by_column_and_state():
     u, _f, count, report = nf.feed_from_context(ctx, image_map)
     assert report['taps'] == 4
     drawn = [int(u[i * nf.FEED_U_STRIDE + 1]) for i in range(4, count)]
-    assert drawn == [200, 201, 210, 211]
+    # Column order, not the order the views were listed: col 0, 1, 2, 3.
+    assert drawn == [200, 201, 211, 210]
 
 
 def test_press_hide_drops_a_pressed_head():
@@ -491,7 +497,8 @@ def test_ln_body_emits_a_quad_per_path_segment():
                         body_path=path)]
     u, _f, _count, report = nf.feed_from_context(_ctx(views), _IMAGE_MAP)
     assert report['ln_body_segments'] == 2, 'three samples -> two segments'
-    body = [int(u[i * nf.FEED_U_STRIDE + 1]) for i in (5, 6)]
+    # The body is the column's FIRST layer (under tail, then head).
+    body = [int(u[i * nf.FEED_U_STRIDE + 1]) for i in (4, 5)]
     assert body == [240, 240]
 
 
@@ -504,7 +511,7 @@ def test_ln_body_narrows_where_it_dives_toward_the_camera():
                         body_path=path, body_scale=_np.array([0.5, 0.5]))]
     _u, f, _count, report = nf.feed_from_context(_ctx(views), _IMAGE_MAP)
     assert report['ln_body_segments'] == 1
-    row = f[5 * nf.FEED_F_STRIDE:6 * nf.FEED_F_STRIDE]
+    row = f[4 * nf.FEED_F_STRIDE:5 * nf.FEED_F_STRIDE]
     mat = _np.asarray(row[nf._F_MAT:nf._F_MAT + 9], dtype=float).reshape(3, 3)
     # The segment runs straight down, rotated -90+90=0... width rides m01/m11.
     width = _np.hypot(mat[0, 0], mat[1, 0])

@@ -111,6 +111,20 @@ _FEED_FLAG_ADDITIVE = 1
 _MIN_ALPHA = 1.0 / 255.0
 
 _WHITE = (1.0, 1.0, 1.0)
+
+# The draw-order SORT KEY, packed into one int: stage, then COLUMN, then the
+# layer within that column. Monotone in that order, so ordering the buckets is
+# ordering their keys. Stages: receptors sit under every note, and the
+# chart-stream records (mine / lift / fake) keep their own pass after the taps
+# rather than joining the engine's per-column tap loop. Layers are the engine's
+# order within a column - an LN body and tail go down first "so that they
+# appear under the tap notes", then the head, then its additive glow.
+_STAGE_RECEPTOR, _STAGE_NOTE, _STAGE_STREAM = 0, 1, 2
+_LAYER_LN_BODY, _LAYER_LN_TAIL, _LAYER_HEAD, _LAYER_GLOW = 0, 1, 2, 3
+
+
+def _sort_key(stage: int, col: int, layer: int) -> int:
+    return (stage << 12) | ((col & 0xFF) << 4) | layer
 _NO_CROP = (0.0, 0.0, 0.0, 0.0)
 
 
@@ -182,7 +196,8 @@ def _emit_receptors(ctx, image_map, rows, report):
         col_alpha = 1.0 if alpha is None else max(0.0, float(alpha[col]))
         mat = _place(cx, cy, w * col_zoom, _RECEPTOR_H * col_zoom,
                      float(rot[col]))
-        rows.add(image_id, mat, col_alpha)
+        rows.add(image_id, mat, col_alpha,
+                 stage=_STAGE_RECEPTOR, col=col)
         report['receptors'] += 1
 
 
@@ -229,7 +244,8 @@ def _emit_note_heads(ctx, image_map, rows, report):
             continue
         image_id = sprite[0]
         if float(n.alpha) >= _MIN_ALPHA:
-            rows.add(image_id, mat, float(n.alpha))
+            rows.add(image_id, mat, float(n.alpha),
+                     col=n.col, layer=_LAYER_HEAD)
             report['taps'] += 1
         _emit_glow(n, image_id, mat, rows, report)
         _emit_ln_body(ctx, n, image_map, lane_w, rows, report)
@@ -266,7 +282,8 @@ def _emit_streams(ctx, image_map, rows, report):
             report['skipped'] += 1
             continue
         if float(v.alpha) >= _MIN_ALPHA:
-            rows.add(sprite[0], mat, float(v.alpha))
+            rows.add(sprite[0], mat, float(v.alpha),
+                     stage=_STAGE_STREAM, col=v.col)
             report['streams'] += 1
         _emit_glow(v, sprite[0], mat, rows, report)
 
@@ -309,7 +326,8 @@ def _emit_ln_body(ctx, n, image_map, lane_w, rows, report):
             width *= float(scale[i])
         mat = _place((x0 + x1) / 2.0, (y0 + y1) / 2.0, width, length,
                      math.degrees(math.atan2(dy, dx)) - 90.0)
-        rows.add(sprite[0], mat, alpha)
+        rows.add(sprite[0], mat, alpha,
+                 col=n.col, layer=_LAYER_LN_BODY)
         report['ln_body_segments'] += 1
 
 
@@ -333,7 +351,8 @@ def _emit_ln_tail(ctx, n, image_map, lane_w, rows, report):
     cx, cy, angle = end
     mat = _place(cx, cy, *_sprite_box(ctx, sprite, n.col, n.zoom), angle)
     if float(n.alpha) >= _MIN_ALPHA:
-        rows.add(sprite[0], mat, float(n.alpha))
+        rows.add(sprite[0], mat, float(n.alpha),
+                 col=n.col, layer=_LAYER_LN_TAIL)
         report['ln_tails'] = report.get('ln_tails', 0) + 1
     _emit_glow(n, sprite[0], mat, rows, report)
 
@@ -462,7 +481,8 @@ def _emit_glow(n, image_id, mat, rows, report):
     if glow <= 0.0:
         return
     tint = getattr(n, 'glow_rgb', None) or _WHITE
-    rows.add(image_id, mat, glow, tint=tint, additive=True)
+    rows.add(image_id, mat, glow, tint=tint, additive=True,
+             col=n.col, layer=_LAYER_GLOW)
     report['glows'] = report.get('glows', 0) + 1
 
 
@@ -617,8 +637,9 @@ class _EmitBuffer:
     item passes through, rather than threaded into each placement."""
 
     def __init__(self, to_design=None):
-        self._u = []
-        self._f = []
+        # Rows land in the bucket they will be DRAWN from; `finish` just
+        # concatenates the buckets in key order.
+        self._buckets: dict[int, tuple[list, list]] = {}
         self._to_design = to_design
         self.count = 0
 
@@ -627,18 +648,45 @@ class _EmitBuffer:
     _TAIL = (*_NO_CROP, 0.0)
 
     def add(self, image_id, mat, opacity, tint=_WHITE, additive=False,
-            frame=0):
-        self._u.extend((SRC_IMAGE, image_id, frame,
-                        _FEED_FLAG_ADDITIVE if additive else 0))
-        self._f.extend(mat if self._to_design is None else
-                       _to_design_mat(self._to_design, mat))
-        self._f.extend((opacity, tint[0], tint[1], tint[2], *self._TAIL))
+            frame=0, stage=_STAGE_NOTE, col=0, layer=0):
+        key = _sort_key(stage, col, layer)
+        bucket = self._buckets.get(key)
+        if bucket is None:
+            bucket = self._buckets[key] = ([], [])
+        u, f = bucket
+        u.extend((SRC_IMAGE, image_id, frame,
+                  _FEED_FLAG_ADDITIVE if additive else 0))
+        f.extend(mat if self._to_design is None else
+                 _to_design_mat(self._to_design, mat))
+        f.extend((opacity, tint[0], tint[1], tint[2], *self._TAIL))
         self.count += 1
 
     def finish(self):
-        u_soa = np.asarray(self._u, dtype=np.uint32)
-        f_soa = np.asarray(self._f, dtype=np.float32)
-        return u_soa, f_soa
+        """The SoA in DRAW order: stage, then COLUMN, then layer, and within
+        one bucket the order the rows were added.
+
+        Column-major is the ENGINE's order, for the engine's own reason.
+        `NoteField::DrawPrimitives` loops `for each arrow column` with holds
+        before taps: "Draw the arrows in order of column. This minimize
+        texture switches and let us draw in big batches." Emitting in
+        candidate (time) order interleaves columns instead, and a column IS a
+        texture (a head sprite varies by column and state), so every
+        consecutive pair differed and the executor batched runs of one.
+
+        BUCKETED ON APPEND, not sorted at the end. The key domain is small
+        and known up front, so this needs no comparison sort - and no
+        PERMUTATION GATHER, which is the part that would stream 18-float rows
+        through cache in random order. Appends are sequential per bucket and
+        the concatenation is one sequential pass: O(n) in address order, with
+        nothing tuned to a cache size."""
+        u_out: list = []
+        f_out: list = []
+        for key in sorted(self._buckets):
+            u, f = self._buckets[key]
+            u_out.extend(u)
+            f_out.extend(f)
+        return (np.asarray(u_out, dtype=np.uint32),
+                np.asarray(f_out, dtype=np.float32))
 
 
 # ── context resolution ───────────────────────────────────────────────
