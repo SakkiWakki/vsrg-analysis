@@ -50,9 +50,19 @@ def _stream_view(**kw):
     return SimpleNamespace(**base)
 
 
+def _field_player(**kw):
+    """The player state the replay OVERLAYS read - how a note was played,
+    not where it is: the judgment palette, who actually pressed, and the
+    press-hide rule."""
+    base = dict(H=900.0, press_hide=False, miss_pressed=[True] * 8,
+                judge_colors={'miss': (255, 0, 0), 'great': (0, 200, 255)})
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
 def _ctx(note_views, keycount=4, lane_w=64.0, judge_y=400.0, note_h=14.0,
          receptor_alpha=None, stream_views=None, lane_widths=None,
-         **lane_terms):
+         player=None, **lane_terms):
     """A stub with the RenderContext reads the emitter uses: keycount,
     lane geometry (lane_w/lane_x/lane_width/lane_center), judge_y, note_h,
     note_views, the frame's lane curve, and optional stream_views.
@@ -69,6 +79,10 @@ def _ctx(note_views, keycount=4, lane_w=64.0, judge_y=400.0, note_h=14.0,
         stream_views=stream_views or [],
         receptor_alpha=receptor_alpha,
     )
+    player = _field_player() if player is None else player
+    ctx.screen_margin = 80.0
+    ctx.time_to_y = lambda t: float(t)
+    ctx.player = player
     ctx.lane_width = (lambda col: lane_w) if lane_widths is None \
         else (lambda col: lane_widths[col])
     ctx.lane_x = lambda col: col * lane_w
@@ -89,6 +103,9 @@ def _ctx(note_views, keycount=4, lane_w=64.0, judge_y=400.0, note_h=14.0,
 _SPRITE_W, _SPRITE_H = 64.0, 26.0
 
 _IMAGE_MAP = {'receptor': (100, 1.0, 1.0),
+              'solid': (101, 1.0, 1.0),
+              'miss_x_great': (110, _SPRITE_W, _SPRITE_H),
+              'ghost_tap': (120, 12.0, 12.0),
               'tap': (200, _SPRITE_W, _SPRITE_H),
               'mine': (300, _SPRITE_W, _SPRITE_H),
               'lift': (301, _SPRITE_W, _SPRITE_H),
@@ -594,3 +611,87 @@ def test_design_conversion_preserves_a_projective_placement():
                   converted[3] + converted[4] + converted[5],
                   converted[6] + converted[7] + converted[8])
     assert (gx / gw, gy / gw) == pytest.approx(want)
+
+
+# ── replay overlays: how the note was PLAYED ─────────────────────────
+
+def _rows_of(f, count):
+    return [f[i * nf.FEED_F_STRIDE:(i + 1) * nf.FEED_F_STRIDE]
+            for i in range(count)]
+
+
+def _ids_of(u, count):
+    return [int(u[i * nf.FEED_U_STRIDE + 1]) for i in range(count)]
+
+
+def test_a_press_mark_strokes_from_the_head_to_where_it_was_pressed():
+    # The overlay is a lane stroke plus a tick at the press, both the
+    # tinted solid - a line needs no stroke tier the executors lack.
+    views = [_note_view(col=1, lx=64.0, y=300.0, press_y=200.0, i=0,
+                        miss=False, state='tap', jcolor=(0, 200, 255),
+                        judgment='great')]
+    u, f, count, report = nf.feed_from_context(_ctx(views), _IMAGE_MAP)
+    assert report['strokes'] == 2, 'the line and its tick'
+    solids = [i for i, image in enumerate(_ids_of(u, count)) if image == 101]
+    assert len(solids) == 2
+    line = _rows_of(f, count)[solids[0]]
+    mat = np.asarray(line[nf._F_MAT:nf._F_MAT + 9], dtype=float).reshape(3, 3)
+    cx, cy = (mat @ np.array([0.5, 0.5, 1.0]))[:2]
+    assert (cx, cy) == pytest.approx((96.0, 250.0)), 'lane centre, mid-stroke'
+    assert (mat @ np.array([0.5, 1.0, 1.0]))[1] - cy == pytest.approx(50.0)
+    assert tuple(line[nf._F_TINT:nf._F_TINT + 3]) == pytest.approx(
+        (0.0, 200 / 255, 1.0))
+
+
+def test_a_press_mark_says_nothing_when_the_error_is_invisible():
+    views = [_note_view(col=1, lx=64.0, y=300.0, press_y=301.0, i=0,
+                        miss=False, state='tap', jcolor=(0, 200, 255))]
+    _u, _f, _c, report = nf.feed_from_context(_ctx(views), _IMAGE_MAP)
+    assert report['strokes'] == 0
+
+
+def test_a_miss_the_player_never_pressed_has_no_press_mark():
+    views = [_note_view(col=0, lx=0.0, y=300.0, press_y=100.0, i=0,
+                        miss=True, state='missed_note', jcolor=(255, 0, 0))]
+    player = _field_player(miss_pressed=[False])
+    _u, _f, _c, report = nf.feed_from_context(
+        _ctx(views, player=player), _IMAGE_MAP)
+    assert report['strokes'] == 0
+
+
+def test_a_missed_head_carries_its_judgment_overlay():
+    # The X is rasterised IN the judgment colour, so the variant is named
+    # by the judgment rather than tinted to it.
+    views = [_note_view(col=0, lx=0.0, y=300.0, press_y=300.0, i=0,
+                        miss=True, state='missed_note', jcolor=(0, 200, 255),
+                        judgment='great')]
+    u, _f, count, report = nf.feed_from_context(_ctx(views), _IMAGE_MAP)
+    assert report['miss_marks'] == 1
+    assert 110 in _ids_of(u, count)
+
+
+def test_a_hold_released_early_guides_to_where_it_was_let_go():
+    views = [_note_view(col=2, lx=128.0, y=300.0, y_end=200.0, press_y=300.0,
+                        i=0, is_ln=True, rel_off=0.05, release_t=150.0,
+                        state='held', miss=False, jcolor=(0, 200, 255))]
+    _u, _f, _c, report = nf.feed_from_context(_ctx(views), _IMAGE_MAP)
+    assert report['strokes'] == 2, 'the guide and its tick'
+
+
+def test_a_bent_hold_draws_no_guide_across_its_own_body():
+    # A straight vertical guide would slash across a curved noodle; the
+    # tail cap already marks the release end.
+    views = [_note_view(col=2, lx=128.0, y=300.0, y_end=200.0, press_y=300.0,
+                        i=0, is_ln=True, rel_off=0.05, release_t=150.0,
+                        state='held', miss=False, jcolor=(0, 200, 255),
+                        body_path=_lane_span([160.0, 160.0], [300.0, 200.0]))]
+    _u, _f, _c, report = nf.feed_from_context(_ctx(views), _IMAGE_MAP)
+    assert report['strokes'] == 0
+
+
+def test_a_hold_mine_arms_a_span_with_a_glyph_at_its_end():
+    streams = [_stream_view(kind=0, col=1, lx=64.0, y=300.0, y_end=180.0)]
+    u, _f, count, report = nf.feed_from_context(
+        _ctx([], stream_views=streams), _IMAGE_MAP)
+    assert report['mine_spans'] == 2, 'the span stroke and its end glyph'
+    assert _ids_of(u, count).count(300) == 2, 'head glyph + end glyph'

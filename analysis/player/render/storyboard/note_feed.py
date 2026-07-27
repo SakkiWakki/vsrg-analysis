@@ -48,39 +48,52 @@ is `note_h + 2 * HEAD_PAD` tall) and an adapter may replace the specs outright,
 so nothing but the rasterised sprite knows it. The emitter looks up:
 
 - 'receptor'         : the per-column receptor notch
+- 'solid'            : a 1x1 white square, stretched and tinted into every
+                       stroke and tick (a line is a quad like anything else)
 - 'tap'              : a tap / note head (all columns)
 - 'tap_<col>'        : optional per-column tap override (falls back to
                        'tap' when absent)
 - 'receptor_<col>'   : optional per-column receptor override
 - 'mine' / 'lift' / 'fake' : chart-stream record sprites (with the same
                        optional '<key>_<col>' per-column override)
+- 'miss_x_<judgment>': the miss overlay, one per judgment - it is drawn IN
+                       the judgment colour (over a fixed red outline), so
+                       no single tinted sprite serves them all
+- 'ghost_tap'        : a press with no note under it
 
 Per-column keys are consulted first so a caller MAY vary the sprite by
 column; the plain keys are the required fallback. A missing required key
 raises (fail fast at this build boundary); a note whose column has no
 sprite is counted in `report['skipped']`.
 
-## Scope (honest)
+## One vocabulary, not a list of note kinds
 
-Emitted: receptors, taps, LN heads, LN BODIES and LN TAILS, and the stream
-records (mines / lifts / fakes).
+Nothing here decides HOW a thing draws from WHAT it is. Every producer
+answers where something sits and which sprite it wears, and `_emit_at` (a
+sprite on a rect) or `_add` (a sprite on a mat3 it built itself, which only a
+head with an out-of-plane tilt needs) is the only way anything reaches the
+buffer. Adding a thing to the field is adding a producer.
 
-An LN body needs NO Lines/Path tier, which is what an earlier draft of this
-docstring said it was waiting for. A ribbon IS a quad strip: every segment is
-an ordinary image item placed by its own mat3, and `body_scale` narrows the
-cross-sections that dive toward the camera.
+That is why strokes need no Lines tier and ribbons need no Mesh tier: a lane
+line is the white solid stretched down the lane and tinted, and a hold body is
+a strip of quads. The only tier that would genuinely add expressiveness here
+is one for a travelpath's own art, and `_note_seams` records that gap as
+`travelpath_as_lines_source`.
 
-TRAVELPATHS are the one thing here that genuinely wants a Lines source, and
-`storyboard_native.DocBuilder` has no way to mint one - `_note_seams` records
-that as `travelpath_as_lines_source`.
+Emitted: receptors; taps, LN heads, LN bodies, LN tails and their glows; the
+stream records (mines / lifts / fakes) and a hold mine's armed span; and the
+replay overlays that say how a note was PLAYED - press marks, release guides
+and miss overlays.
 
-`report` records `receptors`, `taps`, `streams`, `glows`, `ln_tails`,
-`ln_body_segments`, `skipped`, and the `seams` list.
+`report` counts `receptors`, `taps`, `streams`, `glows`, `ln_tails`,
+`ln_body_segments`, `strokes`, `miss_marks`, `mine_spans`, `ghosts`,
+`miss_holds` and `skipped`, plus the `seams` list.
 """
 from __future__ import annotations
 
 import math
 from functools import lru_cache
+from typing import NamedTuple
 
 import numpy as np
 
@@ -111,6 +124,7 @@ _RECEPTOR_LANE_FRAC = 0.82
 # palette-independent glyphs; lifts/fakes key on the column like note heads,
 # so both consult the per-column override first (see _lookup_sprite).
 _STREAM_KEYS = {0: 'mine', 1: 'lift', 2: 'fake'}
+_MINE_KIND = 0
 
 # Feed flags (evaluate.rs FEED_FLAG_*): bit 0 = additive blend.
 _FEED_FLAG_ADDITIVE = 1
@@ -127,8 +141,24 @@ _WHITE = (1.0, 1.0, 1.0)
 # rather than joining the engine's per-column tap loop. Layers are the engine's
 # order within a column - an LN body and tail go down first "so that they
 # appear under the tap notes", then the head, then its additive glow.
-_STAGE_RECEPTOR, _STAGE_NOTE, _STAGE_STREAM = 0, 1, 2
-_LAYER_LN_BODY, _LAYER_LN_TAIL, _LAYER_HEAD, _LAYER_GLOW = 0, 1, 2, 3
+_STAGE_RECEPTOR, _STAGE_NOTE, _STAGE_STREAM, _STAGE_OVERLAY = 0, 1, 2, 3
+(_LAYER_LN_BODY, _LAYER_LN_TAIL, _LAYER_GUIDE, _LAYER_HEAD, _LAYER_PRESS,
+ _LAYER_MISS, _LAYER_GLOW) = range(7)
+
+# Tick marker geometry (chart_extras.draw_tick): a horizontal bar inset
+# from both lane edges, centred on the marked y.
+_TICK_INSET = 8.0
+_TICK_H = 4.0
+# Vertical stroke widths: chart_extras.draw_lane_line's default for a
+# press mark or release guide, and the heavier miss-hold / hold-mine
+# spans (notes._MINE_BODY_WIDTH).
+_STROKE_W = 1.0
+_MISS_HOLD_STROKE_W = 2.0
+_MINE_SPAN_STROKE_W = 3.0
+_MINE_SPAN_COLOR = (170, 60, 60)
+# A press mark whose tick lands this close to its head says nothing the
+# head does not (notes._draw_press_mark).
+_PRESS_MARK_MIN_ERROR = 2.0
 
 
 def _sort_key(stage: int, col: int, layer: int) -> int:
@@ -163,28 +193,86 @@ def feed_from_context(ctx, image_map, design=None):
     `design` is the consuming document's screen size, e.g. `(640, 480)`; pass
     it whenever that document is NOT the ctx's own screen. See
     `_screen_to_design` for why the fed mat3s must be converted."""
-    rows = _EmitBuffer(_screen_to_design(ctx, design))
-    report = {'receptors': 0, 'taps': 0, 'streams': 0, 'glows': 0,
-              'ln_tails': 0, 'ln_body_segments': 0,
-              'skipped': 0, 'seams': []}
+    feed = _Feed(ctx, image_map, _EmitBuffer(_screen_to_design(ctx, design)),
+                 {'receptors': 0, 'taps': 0, 'streams': 0, 'glows': 0,
+                  'ln_tails': 0, 'ln_body_segments': 0, 'strokes': 0,
+                  'miss_marks': 0, 'mine_spans': 0, 'ghosts': 0,
+                  'miss_holds': 0, 'skipped': 0, 'seams': []})
 
-    _emit_receptors(ctx, image_map, rows, report)
-    _emit_note_heads(ctx, image_map, rows, report)
-    _emit_streams(ctx, image_map, rows, report)
-    _note_seams(ctx, report)
+    _emit_receptors(feed)
+    _emit_note_heads(feed)
+    _emit_streams(feed)
+    _note_seams(ctx, feed.report)
 
-    u_soa, f_soa = rows.finish()
-    return u_soa, f_soa, rows.count, report
+    u_soa, f_soa = feed.rows.finish()
+    return u_soa, f_soa, feed.rows.count, feed.report
+
+
+class _Feed(NamedTuple):
+    """What every emitter needs and nothing else: where the field is,
+    what art exists, where rows go, and what to count.
+
+    Bundled so a new thing to draw is a new producer of PLACEMENTS, with
+    no say in how a placement becomes a row - `_emit_at` and `_add` are
+    the only two ways anything reaches the buffer."""
+
+    ctx: object
+    image_map: dict
+    rows: object
+    report: dict
+
+
+def _sprite_of(feed, key, col, state=None):
+    """The sprite `key` resolves to for this column and state, or None
+    (counted as skipped) when the caller registered no art for it."""
+    sprite = _lookup_sprite(feed.image_map, key, col, state) if key else None
+    if sprite is None:
+        feed.report['skipped'] += 1
+    return sprite
+
+
+def _add(feed, sprite, col, mat, opacity, counter, stage=_STAGE_NOTE,
+         layer=_LAYER_HEAD, tint=None, additive=False) -> bool:
+    """Put one already-placed sprite in the buffer. Below `_MIN_ALPHA`
+    the item draws nothing, so it is dropped rather than fed."""
+    if mat is None or opacity < _MIN_ALPHA:
+        return False
+    feed.rows.add(sprite[0], mat, opacity, tint=tint or _WHITE,
+                  additive=additive, stage=stage, col=col, layer=layer)
+    feed.report[counter] = feed.report.get(counter, 0) + 1
+    return True
+
+
+def _emit_at(feed, key, col, cx, cy, w=None, h=None, rotation_deg=0.0,
+             opacity=1.0, state=None, counter='skipped', stage=_STAGE_NOTE,
+             layer=_LAYER_HEAD, tint=None, additive=False) -> bool:
+    """Put `key`'s sprite on a `w` x `h` rect centred at `(cx, cy)`.
+
+    The ONE way anything flat reaches the field - a receptor notch, a
+    body segment, a press-mark stroke, a tick, a miss overlay. `w`/`h`
+    default to the sprite's own design box, which is what a thing drawn
+    at its natural size wants."""
+    sprite = _sprite_of(feed, key, col, state)
+    if sprite is None:
+        return False
+    if w is None or h is None:
+        box = _sprite_box(feed.ctx, sprite, col)
+        w = box[0] if w is None else w
+        h = box[1] if h is None else h
+    return _add(feed, sprite, col, _place(cx, cy, w, h, rotation_deg),
+                opacity, counter, stage=stage, layer=layer, tint=tint,
+                additive=additive)
 
 
 # ── receptors ────────────────────────────────────────────────────────
 
-def _emit_receptors(ctx, image_map, rows, report):
+def _emit_receptors(feed):
     """One item per visible column receptor: the lane curve at scroll
     offset 0 (mirrors field._draw_receptors). The notch is a
     lane-width * _RECEPTOR_LANE_FRAC bar, _RECEPTOR_H tall, centered on
     that point, drawn flat - so it takes the curve's `flat_zoom` rather
     than a depth this item cannot carry."""
+    ctx = feed.ctx
     marks = ctx.receptor_marks
     alpha = getattr(ctx, 'receptor_alpha', None)
 
@@ -192,61 +280,61 @@ def _emit_receptors(ctx, image_map, rows, report):
         lane_w = float(ctx.lane_width(col))
         if lane_w <= 0.5:
             continue
-        sprite = _lookup_sprite(image_map, 'receptor', col)
-        if sprite is None:
-            report['skipped'] += 1
-            continue
         mark = marks.at(col)
         # A receptor's visibility is its own, never the curve's: an arrow
         # at the same point takes the stealth gradients and a receptor
         # never does (see lane_path).
-        col_alpha = 1.0 if alpha is None else max(0.0, float(alpha[col]))
-        mat = _place(mark.x, mark.y, lane_w * _RECEPTOR_LANE_FRAC * mark.flat_zoom,
-                     _RECEPTOR_H * mark.flat_zoom, mark.rotation_deg)
-        rows.add(sprite[0], mat, col_alpha,
-                 stage=_STAGE_RECEPTOR, col=col)
-        report['receptors'] += 1
+        _emit_at(feed, 'receptor', col, mark.x, mark.y,
+                 lane_w * _RECEPTOR_LANE_FRAC * mark.flat_zoom,
+                 _RECEPTOR_H * mark.flat_zoom,
+                 rotation_deg=mark.rotation_deg,
+                 opacity=1.0 if alpha is None else max(0.0, float(alpha[col])),
+                 counter='receptors', stage=_STAGE_RECEPTOR)
 
 
 # ── note heads (taps) ────────────────────────────────────────────────
 
-def _emit_note_heads(ctx, image_map, rows, report):
-    """One item per visible tap head, in `ctx.note_views` order (the
-    renderer's cull + back-to-front prepass order). LN heads/bodies,
-    stream records, and 3D-projected heads are counted in
-    `report['skipped']` - this wave emits flat taps only."""
+def _emit_note_heads(feed):
+    """Everything a replay note puts on the field, in `ctx.note_views`
+    order (the renderer's cull + back-to-front prepass order): the head
+    sprite, its glow, and for a hold its body, tail and release guide,
+    plus the press mark and miss overlay that record how it was played.
+
+    A head is the one placement that is not flat - a z push or an
+    out-of-plane tilt puts it through the field's perspective homography
+    - so it builds its own mat and hands it to `_add`."""
+    ctx = feed.ctx
     for n in getattr(ctx, 'note_views', ()):
         if n is None:
             continue
+        lane_w = float(ctx.lane_width(n.col))
+        _emit_ln_body(feed, n)
+        _emit_ln_tail(feed, n, lane_w)
+        _emit_release_guide(feed, n, lane_w)
+        _emit_press_mark(feed, n, lane_w)
         if not _head_visible(n):
-            report['skipped'] += 1
+            feed.report['skipped'] += 1
             continue
         drawable, state, cy = _sprite_state(ctx, n)
         if not drawable:
-            report['skipped'] += 1
+            feed.report['skipped'] += 1
             continue
-        kind = 'ln_head' if n.is_ln else 'tap'
-        sprite = _lookup_sprite(image_map, kind, n.col, state)
+        sprite = _sprite_of(feed, 'ln_head' if n.is_ln else 'tap', n.col, state)
         if sprite is None:
-            report['skipped'] += 1
             continue
-        lane_w = float(ctx.lane_width(n.col))
         cx = float(n.lx) + lane_w / 2.0
         mat = _head_mat(n, cx, cy, *_sprite_box(ctx, sprite, n.col))
         if mat is None:
-            report['skipped'] += 1
+            feed.report['skipped'] += 1
             continue
-        image_id = sprite[0]
-        if float(n.alpha) >= _MIN_ALPHA:
-            rows.add(image_id, mat, float(n.alpha),
-                     col=n.col, layer=_LAYER_HEAD)
-            report['taps'] += 1
-        _emit_glow(n, image_id, mat, rows, report)
-        _emit_ln_body(ctx, n, image_map, lane_w, rows, report)
-        _emit_ln_tail(ctx, n, image_map, lane_w, rows, report)
+        drawn = _add(feed, sprite, n.col, mat, float(n.alpha), 'taps',
+                     layer=_LAYER_HEAD)
+        _emit_glow(feed, n, sprite, mat)
+        if drawn:
+            _emit_miss_x(feed, n, cx, cy)
 
 
-def _emit_streams(ctx, image_map, rows, report):
+def _emit_streams(feed):
     """One item per visible chart-stream record (mine / lift / fake), in
     `ctx.stream_views` order.
 
@@ -255,34 +343,31 @@ def _emit_streams(ctx, image_map, rows, report):
     `_place`; `kind` selects only the sprite. Span records whose head fell
     outside the cull window (`head_in_window` false) are pulled in for their
     body stroke alone and draw no head, exactly as the raster layer does."""
+    ctx = feed.ctx
     for v in getattr(ctx, 'stream_views', ()) or ():
         if v is None:
             continue
+        _emit_hold_mine_span(feed, v)
         if not getattr(v, 'head_in_window', True):
-            report['skipped'] += 1
+            feed.report['skipped'] += 1
             continue
         if not _head_visible(v):
-            report['skipped'] += 1
+            feed.report['skipped'] += 1
             continue
-        key = _STREAM_KEYS.get(v.kind)
-        sprite = _lookup_sprite(image_map, key, v.col) if key else None
+        sprite = _sprite_of(feed, _STREAM_KEYS.get(v.kind), v.col)
         if sprite is None:
-            report['skipped'] += 1
             continue
-        lane_w = float(ctx.lane_width(v.col))
-        cx = float(v.lx) + lane_w / 2.0
+        cx = float(v.lx) + float(ctx.lane_width(v.col)) / 2.0
         mat = _head_mat(v, cx, float(v.y), *_sprite_box(ctx, sprite, v.col))
         if mat is None:
-            report['skipped'] += 1
+            feed.report['skipped'] += 1
             continue
-        if float(v.alpha) >= _MIN_ALPHA:
-            rows.add(sprite[0], mat, float(v.alpha),
-                     stage=_STAGE_STREAM, col=v.col)
-            report['streams'] += 1
-        _emit_glow(v, sprite[0], mat, rows, report)
+        _add(feed, sprite, v.col, mat, float(v.alpha), 'streams',
+             stage=_STAGE_STREAM)
+        _emit_glow(feed, v, sprite, mat, stage=_STAGE_STREAM)
 
 
-def _emit_ln_body(ctx, n, image_map, lane_w, rows, report):
+def _emit_ln_body(feed, n):
     """The hold BODY as a strip of quads along its path - one item per path
     segment, each rotated to that segment's angle.
 
@@ -292,21 +377,15 @@ def _emit_ln_body(ctx, n, image_map, lane_w, rows, report):
     camera (per-sample depth foreshortening), so the width is sampled per
     segment rather than held constant. The body sprite is a one-row tile whose
     length comes from the path, so only its WIDTH is the sprite's."""
-    if not n.is_ln:
+    path = getattr(n, 'body_path', None) if n.is_ln else None
+    if path is None or float(n.alpha) < _MIN_ALPHA:
         return
-    path = getattr(n, 'body_path', None)
-    if path is None:
-        return
-    sprite = _lookup_sprite(image_map, 'ln_body', n.col, _tail_state(n))
+    sprite = _sprite_of(feed, 'ln_body', n.col, _tail_state(n))
     if sprite is None:
-        report['skipped'] += 1
-        return
-    alpha = float(n.alpha)
-    if alpha < _MIN_ALPHA:
         return
     xs, ys = path.x, path.y
     scale = getattr(n, 'body_scale', None)
-    body_w, _body_h = _sprite_box(ctx, sprite, n.col, n.zoom)
+    body_w, _body_h = _sprite_box(feed.ctx, sprite, n.col, n.zoom)
     for i in range(len(ys) - 1):
         x0, y0 = float(xs[i]), float(ys[i])
         x1, y1 = float(xs[i + 1]), float(ys[i + 1])
@@ -317,14 +396,13 @@ def _emit_ln_body(ctx, n, image_map, lane_w, rows, report):
         width = body_w
         if scale is not None and i < len(scale):
             width *= float(scale[i])
-        mat = _place((x0 + x1) / 2.0, (y0 + y1) / 2.0, width, length,
-                     math.degrees(math.atan2(dy, dx)) - 90.0)
-        rows.add(sprite[0], mat, alpha,
-                 col=n.col, layer=_LAYER_LN_BODY)
-        report['ln_body_segments'] += 1
+        _add(feed, sprite, n.col,
+             _place((x0 + x1) / 2.0, (y0 + y1) / 2.0, width, length,
+                    math.degrees(math.atan2(dy, dx)) - 90.0),
+             float(n.alpha), 'ln_body_segments', layer=_LAYER_LN_BODY)
 
 
-def _emit_ln_tail(ctx, n, image_map, lane_w, rows, report):
+def _emit_ln_tail(feed, n, lane_w):
     """The hold's TAIL cap, seated on the end of its body path and rotated to
     the local tangent (mirrors `notes._draw_tail_on_curve`), or at the plain
     `y_end` when the path is absent/degenerate.
@@ -334,20 +412,130 @@ def _emit_ln_tail(ctx, n, image_map, lane_w, rows, report):
     explicit vertical mirror."""
     if not n.is_ln:
         return
-    sprite = _lookup_sprite(image_map, 'ln_tail', n.col, _tail_state(n))
+    sprite = _sprite_of(feed, 'ln_tail', n.col, _tail_state(n))
     if sprite is None:
-        report['skipped'] += 1
         return
     end = _tail_end(n, lane_w)
     if end is None:
         return
     cx, cy, angle = end
-    mat = _place(cx, cy, *_sprite_box(ctx, sprite, n.col, n.zoom), angle)
-    if float(n.alpha) >= _MIN_ALPHA:
-        rows.add(sprite[0], mat, float(n.alpha),
-                 col=n.col, layer=_LAYER_LN_TAIL)
-        report['ln_tails'] = report.get('ln_tails', 0) + 1
-    _emit_glow(n, sprite[0], mat, rows, report)
+    mat = _place(cx, cy, *_sprite_box(feed.ctx, sprite, n.col, n.zoom), angle)
+    _add(feed, sprite, n.col, mat, float(n.alpha), 'ln_tails',
+         layer=_LAYER_LN_TAIL)
+    _emit_glow(feed, n, sprite, mat)
+
+
+def _emit_press_mark(feed, n, lane_w):
+    """How the note was actually played: a stroke from the head to the
+    press position, ticked at the press (mirrors `notes._draw_press_mark`).
+
+    Skipped where it would say nothing - a miss the player never pressed,
+    a held hold under press_hide, a stroke entirely off-screen on one
+    side, or a press error too small to see."""
+    player = getattr(feed.ctx, 'player', None)
+    press_y = getattr(n, 'press_y', None)
+    if player is None or press_y is None:
+        return
+    if n.miss and (n.is_ln or not player.miss_pressed[n.i]):
+        return
+    if n.is_ln and n.state == 'held' and player.press_hide:
+        return
+    margin = float(getattr(feed.ctx, 'screen_margin', 0.0))
+    lo, hi = -margin, float(getattr(player, 'H', 0.0)) + margin
+    y = float(n.y)
+    press_y = float(press_y)
+    if (y < lo and press_y < lo) or (y > hi and press_y > hi):
+        return
+    if abs(press_y - y) < _PRESS_MARK_MIN_ERROR:
+        return
+    color = player.judge_colors['miss'] if n.miss else n.jcolor
+    _emit_stroke(feed, n.col, lane_w, float(n.lx), y, press_y, color,
+                 _LAYER_PRESS)
+
+
+def _emit_release_guide(feed, n, lane_w):
+    """The stroke from a hold's tail to where it was released.
+
+    A bent body would be slashed across by a straight vertical guide, so
+    a hold with its own path draws none - the tail cap already marks the
+    release end (mirrors `notes._draw_ln`)."""
+    if not n.is_ln or getattr(n, 'rel_off', None) is None:
+        return
+    if getattr(n, 'body_path', None) is not None:
+        return
+    if n.state in ('released', 'missed'):
+        return
+    time_to_y = getattr(feed.ctx, 'time_to_y', None)
+    if time_to_y is None:
+        return
+    _emit_stroke(feed, n.col, lane_w, float(n.lx), float(n.y_end),
+                 float(time_to_y(float(n.release_t))), n.jcolor,
+                 _LAYER_GUIDE)
+
+
+def _emit_miss_x(feed, n, cx, cy):
+    """The miss overlay over a missed head. The sprite is rasterised per
+    judgment colour, so the judgment NAME is its variant."""
+    if not getattr(n, 'miss', False):
+        return
+    _emit_at(feed, 'miss_x', n.col, cx, cy,
+             state=getattr(n, 'judgment', None), counter='miss_marks',
+             layer=_LAYER_MISS)
+
+
+def _emit_hold_mine_span(feed, v):
+    """A hold mine's armed span: the stroke connecting its head to its
+    end, plus the mine glyph at that end (mirrors
+    `notes._draw_hold_mine_spans`)."""
+    y_end = getattr(v, 'y_end', float('nan'))
+    if v.kind != _MINE_KIND or not math.isfinite(y_end):
+        return
+    margin = float(getattr(feed.ctx, 'screen_margin', 0.0))
+    player = getattr(feed.ctx, 'player', None)
+    lo, hi = -margin, float(getattr(player, 'H', 0.0)) + margin
+    y, y_end = float(v.y), float(y_end)
+    if (y < lo and y_end < lo) or (y > hi and y_end > hi):
+        return
+    lane_w = float(feed.ctx.lane_width(v.col))
+    _emit_line(feed, v.col, float(v.lx) + lane_w / 2.0, y, y_end,
+               _MINE_SPAN_STROKE_W, _MINE_SPAN_COLOR, _STAGE_STREAM,
+               _LAYER_LN_BODY, 'mine_spans')
+    _emit_at(feed, 'mine', v.col, float(v.lx) + lane_w / 2.0, y_end,
+             counter='mine_spans', stage=_STAGE_STREAM,
+             layer=_LAYER_LN_TAIL)
+
+
+def _emit_stroke(feed, col, lane_w, lx, y_from, y_to, color, layer,
+                 stage=_STAGE_NOTE, width=_STROKE_W):
+    """A vertical lane stroke with a tick at its far end - the shape every
+    replay overlay is drawn as (`notes._draw_stroke_with_tick`)."""
+    cx = lx + lane_w / 2.0
+    _emit_line(feed, col, cx, y_from, y_to, width, color, stage, layer,
+               'strokes')
+    _emit_at(feed, 'solid', col, cx, y_to, max(0.0, lane_w - 2 * _TICK_INSET),
+             _TICK_H, opacity=_opacity_of(color), tint=_tint_of(color),
+             counter='strokes', stage=stage, layer=layer)
+
+
+def _emit_line(feed, col, cx, y_from, y_to, width, color, stage, layer,
+               counter):
+    """One vertical run of colour down a lane. A line is a quad like
+    everything else - the solid sprite tinted and stretched - so nothing
+    here needs a stroke tier the executors do not have."""
+    _emit_at(feed, 'solid', col, cx, (y_from + y_to) / 2.0, width,
+             abs(y_to - y_from), opacity=_opacity_of(color),
+             tint=_tint_of(color), counter=counter, stage=stage, layer=layer)
+
+
+def _tint_of(color) -> tuple:
+    """An 0-255 draw colour as the feed's 0-1 tint."""
+    return (float(color[0]) / 255.0, float(color[1]) / 255.0,
+            float(color[2]) / 255.0)
+
+
+def _opacity_of(color) -> float:
+    """A draw colour's own alpha, for the colours that carry one."""
+    return float(color[3]) / 255.0 if len(color) > 3 else 1.0
 
 
 def _tail_state(n) -> str:
@@ -458,7 +646,7 @@ def _glow_of(n) -> float:
     return float(getattr(n, 'glow', 0.0) or 0.0)
 
 
-def _emit_glow(n, image_id, mat, rows, report):
+def _emit_glow(feed, n, sprite, mat, stage=_STAGE_NOTE):
     """The stealthglow pass: a SECOND blit of the same sprite at the same
     placement, composited ADDITIVELY at `glow` strength.
 
@@ -468,10 +656,9 @@ def _emit_glow(n, image_id, mat, rows, report):
     glow = _glow_of(n)
     if glow <= 0.0:
         return
-    tint = getattr(n, 'glow_rgb', None) or _WHITE
-    rows.add(image_id, mat, glow, tint=tint, additive=True,
-             col=n.col, layer=_LAYER_GLOW)
-    report['glows'] = report.get('glows', 0) + 1
+    _add(feed, sprite, n.col, mat, glow, 'glows', stage=stage,
+         layer=_LAYER_GLOW, tint=getattr(n, 'glow_rgb', None) or _WHITE,
+         additive=True)
 
 
 # ── mat3 construction ────────────────────────────────────────────────

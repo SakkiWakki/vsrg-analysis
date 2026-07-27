@@ -791,11 +791,14 @@ class DrawablePipeline:
             image_map[key] = (next_id, *(size or (image.width(), image.height())))
             next_id += 1
 
-        # The receptor is not a cache sprite - the field layer strokes a plain
-        # notch - so it registers as a solid whose box the emitter names.
+        # Neither the receptor notch nor a stroke is a cache sprite - the
+        # raster field draws them with a brush - so both are the same white
+        # solid, stretched to the rect the emitter names and tinted to the
+        # colour it wants.
         solid = QImage(1, 1, QImage.Format.Format_ARGB32_Premultiplied)
         solid.fill(QColor(255, 255, 255, 255))
         register('receptor', solid, size=(1.0, 1.0))
+        register('solid', solid, size=(1.0, 1.0))
 
         keycount = int(getattr(ctx, 'keycount', 0) or 0)
         for key, sprite in self._NOTE_SPRITES:
@@ -804,6 +807,10 @@ class DrawablePipeline:
                 pixmap = _sprite_image(cache, sprite, ctx, kwargs)
                 if pixmap is not None:
                     register(name, pixmap)
+        for name, kwargs in _judgment_variants(ctx):
+            pixmap = _sprite_image(cache, 'miss_x', ctx, kwargs)
+            if pixmap is not None:
+                register(name, pixmap)
         self._note_images = image_map
         self._note_generation = generation
         return image_map
@@ -909,6 +916,19 @@ def _sprite_generation(ctx):
     variants get registered at all."""
     cache = getattr(ctx, 'sprite_cache', None)
     return (getattr(cache, 'generation', 0), getattr(ctx, 'keycount', None))
+
+
+def _judgment_variants(ctx):
+    """The `(image_map name, cache kwargs)` pairs for the overlays that
+    rasterise IN a judgment's colour rather than tinting to it.
+
+    The miss X is a red outline plus an X in the judgment colour - two
+    colours, so one tinted sprite cannot serve every judgment. The set is
+    small and fixed (one per judgment window), and the emitter names the
+    variant by the judgment's own name."""
+    colors = getattr(getattr(ctx, 'player', None), 'judge_colors', None) or {}
+    for judgment, color in colors.items():
+        yield f'miss_x_{judgment}', {'jcolor': color}
 
 
 def _sprite_variants(cache, key, sprite, keycount, states):

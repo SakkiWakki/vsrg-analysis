@@ -77,6 +77,12 @@ class _NoteView:
     state: str       # upcoming | tap | held | released | missed | missed_note
     note_color: tuple
     jcolor: tuple
+    # The judgment's NAME, alongside its colour. The raster path only ever
+    # needs the colour, but a fed overlay is a rasterised sprite VARIANT
+    # (the miss X is drawn in the judgment colour, not tinted to it), and a
+    # variant is chosen by name. Empty means no variant is known, which
+    # is what a synthetic view carries; the overlay then finds no sprite.
+    judgment: str = ''
     # fluXis tick notes; drawn bright yellow via the 'tick' sprite state.
     is_tick: bool = False
     # Per-note mod alpha (NotITG stealth/hidden family); 1 = opaque.
@@ -296,6 +302,7 @@ def _build(ctx, i, pos) -> _NoteView | None:
         state=_classify(ctx, press_t, release_t, is_ln, p.misses[i]),
         note_color=p.palette[col],
         jcolor=p.judge_colors[p.note_judges[i]],
+        judgment=p.note_judges[i],
         body_path=body_path,
         body_scale=body_scale,
     )
