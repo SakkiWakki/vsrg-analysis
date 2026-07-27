@@ -8,6 +8,20 @@ separately - `ctx.receptor_offsets`, a `_NoteView`'s `lx`/`y`,
 `ctx.hold_body_samples`, a tangent recomputed from that polyline - which is
 four spellings of one question.
 
+THE LAYERING THIS EXISTS FOR: this answers "what is this column like?" and
+nothing else. A renderer depends on this interface and on no other renderer -
+the receptor drawer does not need to know a hold body exists, and the ribbon
+does not need to know where the cap ended up, because both ask the same
+question and get consistent answers by construction.
+
+That inverts what the pipeline does today. Right now the geometry producer
+PUSHES: `note_mods` computes each consumer's answer in the consumer's own
+shape and stashes it on the ctx under a name only that consumer reads
+(`receptor_offsets` a dict of arrays, `hold_body_samples` a candidate
+position -> polyline), so the producer has to know the full list of who is
+asking and every new drawn thing means a new stash. Here a consumer PULLS,
+and the producer supplies one hook it can answer for any (column, offset).
+
 GAME-AGNOSTIC ON PURPOSE. Most games' lanes are a straight line, which is
 this curve with no displacement, so the general form lives here and a game
 with note mods supplies the bend. `straight` is that degenerate case and
