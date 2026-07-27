@@ -77,6 +77,7 @@ from PySide6.QtOpenGL import QOpenGLPaintDevice
 
 from analysis.player.render.shaders.library import notitg_compat
 from analysis.player.render.storyboard import record as _rec
+from analysis.player.render.storyboard.asset_size import AssetSizeSpec, resolve
 
 logger = logging.getLogger(__name__)
 
@@ -294,8 +295,9 @@ def _mat_source_to_ndc(mat3, w: int, h: int) -> QMatrix3x3:
     Multiplied out rather than assembled: this runs once per BLIT, and
     building two 3x3 arrays for a matmul that only ever scales the first two
     rows and folds the third into them is the composite loop's largest
-    per-op cost."""
-    m0, m1, m2, m3, m4, m5, m6, m7, m8 = (float(v) for v in mat3)
+    per-op cost. `tolist` for the same reason - one call off the record's
+    float32 slice, where a genexpr over it is nine."""
+    m0, m1, m2, m3, m4, m5, m6, m7, m8 = mat3.tolist()
     sx, sy = 2.0 / w, -2.0 / h
     return QMatrix3x3([sx * m0 - m6, sx * m1 - m7, sx * m2 - m8,
                        sy * m3 + m6, sy * m4 + m7, sy * m5 + m8,
@@ -488,6 +490,13 @@ class GLExecutor:
         self._res_scale = 1.0
         self._vao = None
         self._vbo = None
+        # The program currently bound WITHIN one compose walk. Redundant
+        # binds are the walk's own overhead: the copy-render rule has every
+        # live consumer re-emit the whole note stream, so a dense frame is
+        # thousands of consecutive draws through the same program. Reset per
+        # walk, because anything may have run between two of them.
+        self._bound_program = None
+        self._logical_boxes: dict[tuple, tuple] = {}
         self._skipped: set[str] = set()
         self.broken = False
 
@@ -654,6 +663,13 @@ class GLExecutor:
 
         self._set_pipeline_state(gf)
         target_stack: list[int] = []
+        # The quad geometry is one shared VAO/VBO every draw rewrites, so it
+        # is bound for the whole walk rather than around each quad, and the
+        # sampler unit never changes.
+        self._bound_program = None
+        self._vao.bind()
+        self._vbo.bind()
+        gf.glActiveTexture(GL_TEXTURE0)
 
         for i in range(u.shape[0]):
             kind = int(u[i, _U_KIND])
@@ -666,7 +682,26 @@ class GLExecutor:
                     self._copy(gf, u[i], target_stack)
                 case n if n == _OP_END:
                     self._end(gf, target_stack)
+
+        if self._bound_program is not None:
+            self._bound_program.release()
+            self._bound_program = None
+        gf.glBindTexture(GL_TEXTURE_2D, 0)
+        self._vbo.release()
+        self._vao.release()
         return gf
+
+    def _use(self, entry) -> None:
+        """Bind this program unless it already is. Sampler units live in
+        program state, so `u_tex` is set on the bind that changes it rather
+        than on every draw."""
+        program, locs = entry[0], entry[1]
+        if program is self._bound_program:
+            return
+        program.bind()
+        self._bound_program = program
+        if 'u_tex' in locs:
+            program.setUniformValue(locs['u_tex'], 0)
 
     def _present_screen(self, gf, painter, screen, chart_rect, host_fbo) -> None:
         """Draw the screen FBO's texture onto ``host_fbo`` (the caller's GL
@@ -706,8 +741,15 @@ class GLExecutor:
         gf.glUniform1f(locs['u_opacity'], 1.0)
         gf.glUniform3f(locs['u_tint'], 1.0, 1.0, 1.0)
         program.setUniformValue(locs['u_mat'], _device_to_ndc(pw, ph))
+        # This runs AFTER the compose walk, which releases the shared quad
+        # geometry it held for its own duration - so bind it again here or
+        # the present draws with no vertex array at all.
+        self._vao.bind()
+        self._vbo.bind()
         # uv = (u0, v0, u1, v1): top corner v0=1, bottom v1=0 (the flip).
         self._draw_quad(gf, dx0, dy0, dx1, dy1, uv=(0.0, 1.0, 1.0, 0.0))
+        self._vbo.release()
+        self._vao.release()
         gf.glBindTexture(GL_TEXTURE_2D, 0)
         program.release()
 
@@ -840,13 +882,12 @@ class GLExecutor:
         if entry is None:
             return
         program, locs = entry
-        program.bind()
+        self._use(entry)
         gf.glBlendColor(0.0, 0.0, 0.0, factor)
         gf.glBlendFunc(GL_ZERO, GL_CONSTANT_ALPHA)
         gf.glUniform4f(locs['u_color'], 0.0, 0.0, 0.0, 1.0)
         program.setUniformValue(locs['u_mat'], _identity_ndc())
         self._draw_quad(gf, -1.0, -1.0, 1.0, 1.0, uv=None)
-        program.release()
         gf.glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
 
     def _end(self, gf, target_stack: list[int]) -> None:
@@ -966,16 +1007,25 @@ class GLExecutor:
         The funnel, not a grid divide, because a `(doubleres)` page is half
         its pixel size - and dividing by the grid alone drew every doubleres
         asset at DOUBLE size, most visibly a bitmap font whose text then ran
-        off the screen."""
+        off the screen.
+
+        Memoized: this is a pure function of an image and the size it
+        uploaded at, and the compose walk asks it once per BLIT - the same
+        note sprite, thousands of times a frame."""
+        key = (image_id, px_w, px_h, cols, rows)
+        box = self._logical_boxes.get(key)
+        if box is not None:
+            return box
         spec = self._image_specs.get(image_id)
         if spec is None:
-            return (px_w / cols, px_h / rows)
-        from analysis.player.render.storyboard.asset_size import (
-            AssetSizeSpec, resolve)
-        spec_cols, spec_rows, doubleres, logical, res = spec
-        return resolve(px_w, px_h, AssetSizeSpec(
-            cols=spec_cols, rows=spec_rows, doubleres=doubleres,
-            logical=logical, res=res)).natural
+            box = (px_w / cols, px_h / rows)
+        else:
+            spec_cols, spec_rows, doubleres, logical, res = spec
+            box = resolve(px_w, px_h, AssetSizeSpec(
+                cols=spec_cols, rows=spec_rows, doubleres=doubleres,
+                logical=logical, res=res)).natural
+        self._logical_boxes[key] = box
+        return box
 
     def _image_texture(self, gf, image_id: int):
         """(texture, w, h) for an ImageId, uploaded once; None (logged
@@ -1047,7 +1097,7 @@ class GLExecutor:
         if x1 <= x0 or y1 <= y0:
             return
         program, locs = entry
-        program.bind()
+        self._use(entry)
         a = opacity
         r, g, b = _clamp01(tint[0]), _clamp01(tint[1]), _clamp01(tint[2])
         # Premultiplied: color carries tint * opacity, alpha carries opacity.
@@ -1056,7 +1106,6 @@ class GLExecutor:
         # A unit quad in source space (0,0)-(1,1), matching the raster
         # backend's fillRect(0,0,1,1), inset by the crop fractions.
         self._draw_quad(gf, x0, y0, x1, y1, uv=None)
-        program.release()
 
     def _draw_texture(self, gf, mat3, tw, th, frec, tint, opacity, uploaded,
                       logical, shaded=None, flip_v=True, cell=None) -> None:
@@ -1155,13 +1204,11 @@ class GLExecutor:
         program, locs = entry
         if program is None:
             return
-        program.bind()
+        self._use(entry)
         if 'u_fade' in locs:
             gf.glUniform4f(locs['u_fade'], *(float(v) for v in fade))
             gf.glUniform4f(locs['u_quad'], *(float(v) for v in quad))
-        gf.glActiveTexture(GL_TEXTURE0)
         gf.glBindTexture(GL_TEXTURE_2D, texture)
-        program.setUniformValue(locs['u_tex'], 0)
         gf.glUniform1f(locs['u_opacity'], opacity)
         # The default textured program tints/dims in-shader; a per-item frag
         # program (uv_source='varying') has no u_tint and folds opacity into
@@ -1174,8 +1221,6 @@ class GLExecutor:
         program.setUniformValue(locs['u_mat'], _mat_source_to_ndc(mat3, tw, th))
         x0, y0, x1, y1 = quad
         self._draw_quad(gf, x0, y0, x1, y1, uv=uv)
-        gf.glBindTexture(GL_TEXTURE_2D, 0)
-        program.release()
 
     def _fade_or_default(self, fade):
         """The fade program when this blit actually fades, else the default
@@ -1188,7 +1233,10 @@ class GLExecutor:
 
     def _draw_quad(self, gf, x0, y0, x1, y1, uv) -> None:
         """Upload and draw one quad: positions in source logical coords,
-        optional uv (fill quads carry none)."""
+        optional uv (fill quads carry none).
+
+        The VAO/VBO are bound for the whole compose walk, not around each
+        quad - a dense note frame draws thousands of these back to back."""
         if uv is None:
             u0 = v0 = u1 = v1 = 0.0
         else:
@@ -1199,12 +1247,8 @@ class GLExecutor:
             x1, y0, u1, v0,
             x0, y1, u0, v1,
             x1, y1, u1, v1)
-        self._vao.bind()
-        self._vbo.bind()
         self._vbo.write(0, data, len(data))
         gf.glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
-        self._vao.release()
-        self._vbo.release()
 
     # -- shader uniforms (parity: bound + introspectable, drawn unshaded) --
 
@@ -1240,13 +1284,12 @@ class GLExecutor:
                            f'GLExecutor: shader {shader_id} unavailable, drawn unshaded')
             return None
         program, locs, names = entry
-        program.bind()
+        self._use(entry)
         values = self.shader_uniforms.get(shader_id, [])
         for name, value in zip(names, values):
             loc = locs.get(name, -1)
             if loc != -1:
                 gf.glUniform1f(loc, float(value))
-        program.release()
         return program, locs
 
     def _shader_program(self, gf, shader_id: int):
