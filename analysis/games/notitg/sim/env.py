@@ -366,7 +366,19 @@ class SimEnvironment:
             else:
                 self._compiled_body = CompiledBody(self, body, rec_id, name)
         self._host.env['mod_time'] = self._now
-        self._compiled_body.run()
+        # `self` binds to the Update actor's table for the run, exactly as the
+        # Lua path binds it. The BODY is ours, but the chart helpers it calls
+        # are still Lua, and one of those reading the global `self` must see
+        # its own actor rather than whatever the last load body left behind:
+        # gat 2's gf2_update_mdrqnxtagon read a stale table that way and
+        # `self:GetSecsIntoEffect()*55` faulted on every tick of two sections.
+        saved = self._host.env['self']
+        if rec_id is not None:
+            self._host.env['self'] = self._tables.get(rec_id, saved)
+        try:
+            self._compiled_body.run()
+        finally:
+            self._host.env['self'] = saved
 
     def replay_mod_actions(self):
         """Fire every `mod_actions` entry once in beat order, each at its
