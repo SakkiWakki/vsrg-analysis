@@ -60,14 +60,22 @@ column; the plain keys are the required fallback. A missing required key
 raises (fail fast at this build boundary); a note whose column has no
 sprite is counted in `report['skipped']`.
 
-## Scope (this wave, honest)
+## Scope (honest)
 
-Taps, receptors and stream records (mines/lifts/fakes) are emitted. LN
-bodies/tails and travelpaths are counted in `report['skipped']`, not
-drawn - they need the Lines/Path source and per-sample ribbon geometry a
-later wave carries. `report` records `receptors`, `taps`, `streams` and
-the `seams` list: the note-pipeline reads a clean per-note emission
-still wants.
+Emitted: receptors, taps, LN heads, LN BODIES and LN TAILS, and the stream
+records (mines / lifts / fakes).
+
+An LN body needs NO Lines/Path tier, which is what an earlier draft of this
+docstring said it was waiting for. A ribbon IS a quad strip: every segment is
+an ordinary image item placed by its own mat3, and `body_scale` narrows the
+cross-sections that dive toward the camera.
+
+TRAVELPATHS are the one thing here that genuinely wants a Lines source, and
+`storyboard_native.DocBuilder` has no way to mint one - `_note_seams` records
+that as `travelpath_as_lines_source`.
+
+`report` records `receptors`, `taps`, `streams`, `glows`, `ln_tails`,
+`ln_body_segments`, `skipped`, and the `seams` list.
 """
 from __future__ import annotations
 
