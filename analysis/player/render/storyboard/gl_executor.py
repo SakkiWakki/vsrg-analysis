@@ -233,6 +233,21 @@ _BATCH_FLOATS = 9
 # degenerate joins, and the run is uploaded as ONE array.
 _BATCH_VERTS = 6
 # Below this a run's numpy setup costs more than the per-quad path it saves.
+#
+# MEASURED LIMITATION: a run breaks on the TEXTURE, and a real noteskin
+# registers a head per column and judgment state (`pipeline._sprite_variants`)
+# while `note_feed._emit_note_heads` walks `note_views` in depth order - so
+# consecutive notes carry DIFFERENT image ids and every run is length 1.
+# Cycling 2/4/8 sprite ids through the bench: longest run 1, and batched
+# equals unbatched (14.1 vs 14.2ms). The 1200-long run that makes this pay
+# only appears when every note shares one sprite.
+#
+# What unlocks it is a note-sprite ATLAS: one texture for every head/mine/
+# lift/tail so the image id stops varying and only the uv does. This vertex
+# format already carries per-vertex uv, so the atlas is additive - no change
+# here. Reordering a span by texture instead would be wrong: NotITG mods move
+# notes freely, so items from different columns can overlap and their draw
+# order is their compositing order.
 _BATCH_MIN = 8
 
 
