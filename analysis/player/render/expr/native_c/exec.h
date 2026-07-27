@@ -51,6 +51,11 @@ typedef struct CFrontier {
     CValue (*call)(void *ctx, const char *name, const CValue *args, int argc);
     /* call a COMPUTED callable value (a[3](x) / a local closure). */
     CValue (*call_value)(void *ctx, CValue fn, const CValue *args, int argc);
+    /* base.name(args) - the field read and the call it feeds, together. Split
+     * across `index` + `call_value` this was TWO crossings for one call site,
+     * and the intermediate never existed for any other purpose. */
+    CValue (*call_field)(void *ctx, CValue base, const char *name,
+                         const CValue *args, int argc);
     /* host_table[key] read (recv is a HANDLE the frontier owns). */
     CValue (*index)(void *ctx, CValue base, CValue key);
     /* host_table[key] = v. */

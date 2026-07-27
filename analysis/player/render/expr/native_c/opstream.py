@@ -58,6 +58,7 @@ class Op:
     CALL_VALUE   = 33   # a=argc; pops fn,args -> call a computed callable
     GET_PROP     = 34   # a=prop id; pops recv -> a live actor property read
     SET_PROP     = 35   # a=setter id; pops recv,value -> a live actor write
+    CALL_FIELD   = 36   # a=name id, b=argc; pops recv,args -> base.name(args)
 
 
 # native math fns the analytic/native path supports (compile-resolved).
@@ -553,10 +554,21 @@ class Compiler:
                 self._expr(arg, scope)
             self._emit(Op.CALL_SYM, self._name(fn.name), len(node.args))
             return
-        # A COMPUTED callee: `a[3](beat)` (Index/Field fn), or a local slot
-        # holding a closure. Evaluate the fn VALUE, push args, CALL_VALUE invokes
-        # whatever it resolves to (a host closure crosses as a handle). This is
-        # the mod-perframe painter idiom (mod_perframes[i][3](beat)).
+        # `t.f(args)`: the field read and the call are ONE crossing. Split, the
+        # host answered the field, boxed a callable it would never be asked
+        # anything else about, and was handed it straight back to invoke - and
+        # a chart that dispatches through a table of functions
+        # (`mod_readers.mods(beat, 1)`) pays that twice per call site per tick.
+        if type(fn) is ast.Field:
+            self._expr(fn.base, scope)
+            for arg in node.args:
+                self._expr(arg, scope)
+            self._emit(Op.CALL_FIELD, self._name(fn.name), len(node.args))
+            return
+        # A COMPUTED callee: `a[3](beat)` (Index fn), or a local slot holding a
+        # closure. Evaluate the fn VALUE, push args, CALL_VALUE invokes whatever
+        # it resolves to (a host closure crosses as a handle). This is the
+        # mod-perframe painter idiom (mod_perframes[i][3](beat)).
         self._expr(fn, scope)
         for arg in node.args:
             self._expr(arg, scope)
@@ -884,9 +896,9 @@ _INLINE_MAX_STMTS = 12
 # body emits FEWER of these than the single CALL_SYM it replaces costs - and a
 # crossing is worth several ops, hence a budget rather than one-for-one.
 _CROSSING_OPS = frozenset({
-    'GETTER', 'METHOD', 'POKE', 'CALL_SYM', 'CALL_VALUE', 'LOAD_SYMBOL',
-    'LOAD_GLOBAL', 'STORE_GLOBAL', 'INDEX', 'SET_INDEX', 'FALLBACK',
-    'TABLE_INSERT'})
+    'GETTER', 'METHOD', 'POKE', 'CALL_SYM', 'CALL_VALUE', 'CALL_FIELD',
+    'LOAD_SYMBOL', 'LOAD_GLOBAL', 'STORE_GLOBAL', 'INDEX', 'SET_INDEX',
+    'FALLBACK', 'TABLE_INSERT'})
 # The executor answers these from its own per-tick clock, so a getter on one
 # never reaches the host and must not be charged to the helper.
 _CLOCK_VERBS = frozenset({'GetSongBeat', 'GetSongTime'})

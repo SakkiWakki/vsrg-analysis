@@ -122,7 +122,7 @@ def _load_lib():
     lib.cbody_set_const_str.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
     lib.cbody_set_names.argtypes = [ctypes.c_void_p, ctypes.c_int]
     lib.cbody_set_name.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
-    lib.cbody_set_frontier.argtypes = [ctypes.c_void_p] + [ctypes.c_void_p] * 18
+    lib.cbody_set_frontier.argtypes = [ctypes.c_void_p] + [ctypes.c_void_p] * 19
     lib.cbody_run.restype = ctypes.c_int
     lib.cbody_run.argtypes = [ctypes.c_void_p, u64]
     lib.cbody_str.restype = ctypes.c_char_p
@@ -183,6 +183,7 @@ _ITERNEXT = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, U64, ctypes.POINTER(
 _FALLBACK = ctypes.CFUNCTYPE(U64, ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(U64), ctypes.c_int)
 _GETPROP  = ctypes.CFUNCTYPE(U64, ctypes.c_void_p, U64, ctypes.c_int)
 _SETPROP  = ctypes.CFUNCTYPE(None, ctypes.c_void_p, U64, ctypes.c_int, U64)
+_CALLFLD  = ctypes.CFUNCTYPE(U64, ctypes.c_void_p, U64, ctypes.c_char_p, ctypes.POINTER(U64), ctypes.c_int)
 
 
 class CompiledBodyC:
@@ -744,6 +745,15 @@ class CompiledBodyC:
                 return self._to_cv(UNRESOLVED)
             r = self._call_host(f, arg_vs)
             return out_call_value(_res(r))
+        def call_field(ctx, base, name, args, argc):
+            # `base.name(args)`: the field read that resolves the callable and
+            # the call itself. Composed of exactly what `index` then
+            # `call_value` did, minus boxing an intermediate whose only use was
+            # to be handed straight back.
+            fn = _res(surf.index(self._from_cv(base), name.decode()))
+            if fn is UNRESOLVED or not callable(fn):
+                return _CV_UNRESOLVED
+            return out_call_value(_res(self._call_host(fn, self._args(args, argc))))
         def index(ctx, base, key):
             # base/key unbox unchanged: surf.index must keep firing the
             # recorder metatable (`P1.zoom` resolves to a closure).
@@ -816,6 +826,7 @@ class CompiledBodyC:
         if surf_aborted is not None:
             getter, poke = reporting(getter), reporting(poke)
             call, call_value = reporting(call), reporting(call_value)
+            call_field = reporting(call_field)
 
         def catching(fn):
             """Wrap a raising crossing so a host exception ABORTS THE TICK
@@ -842,6 +853,7 @@ class CompiledBodyC:
 
         getter, poke = catching(getter), catching(poke)
         call, call_value = catching(call), catching(call_value)
+        call_field = catching(call_field)
 
         # keep alive
         self._cb = (
@@ -850,7 +862,7 @@ class CompiledBodyC:
             _INDEX(index), _SETINDEX(set_index),
             _LENGTH(length), _TINSERT(table_insert),
             _ITERSET(iter_setup), _ITERNEXT(iter_next), _FALLBACK(fallback),
-            _GETPROP(get_prop), _SETPROP(set_prop),
+            _GETPROP(get_prop), _SETPROP(set_prop), _CALLFLD(call_field),
         )
         ptrs = [ctypes.cast(c, ctypes.c_void_p) for c in self._cb]
         self._lib.cbody_set_frontier(

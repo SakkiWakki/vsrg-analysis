@@ -15,7 +15,7 @@ enum {
     OP_JUMP_IF_FALSE, OP_JIF_FALSE_KEEP, OP_JIF_TRUE_KEEP, OP_DUP,
     OP_RETURN_HALT, OP_ITER_SETUP, OP_ITER_NEXT, OP_FALLBACK,
     OP_NUMFOR_TEST, OP_NUMFOR_STEP, OP_TABLE_INSERT, OP_CALL_VALUE,
-    OP_GET_PROP, OP_SET_PROP,
+    OP_GET_PROP, OP_SET_PROP, OP_CALL_FIELD,
     OP__COUNT
 };
 
@@ -84,7 +84,7 @@ int cexec_run(CExecState *st, CValue self_val) {
         &&L_JUMP_IF_FALSE, &&L_JIF_FALSE_KEEP, &&L_JIF_TRUE_KEEP, &&L_DUP,
         &&L_RETURN_HALT, &&L_ITER_SETUP, &&L_ITER_NEXT, &&L_FALLBACK,
         &&L_NUMFOR_TEST, &&L_NUMFOR_STEP, &&L_TABLE_INSERT, &&L_CALL_VALUE,
-        &&L_GET_PROP, &&L_SET_PROP
+        &&L_GET_PROP, &&L_SET_PROP, &&L_CALL_FIELD
     };
     /* NEXT does NOT poll abort - only a frontier call can raise, so CHECK_ABORT
      * is invoked only by the ops that cross (getter/poke/call/index/global/
@@ -436,6 +436,31 @@ int cexec_run(CExecState *st, CValue self_val) {
             if (st->trim) st->trim->memo_epoch++;
         }
         pc++; NEXT();
+    }
+    OP(CALL_FIELD) {  /* stack: recv, args...  - `t.f(a)` in ONE crossing */
+        int argc = ops[pc].b;
+        CValue *args = &st->regs[sp - argc];
+        CValue recv = st->regs[sp - argc - 1];
+        CValue r;
+        if (cv_is_unresolved(recv)) {
+            r = cv_unresolved();
+        } else if (cv_is_table(recv)) {
+            /* An ARENA table resolves its own field, exactly as FIELD did. A
+             * snapshot never holds a function, but a table the BODY built can
+             * (`t.f = some_host_fn`), and only a handle is callable at all. */
+            const char *fld = st->names[ops[pc].a];
+            CValue v = carena_table_get(
+                st->arena, cv_payload(recv),
+                cv_str(carena_intern(st->arena, fld, strlen(fld))));
+            r = cv_is_handle(v) ? fe->call_value(fe->ctx, v, args, argc)
+                                : cv_unresolved();
+        } else {
+            r = fe->call_field(fe->ctx, recv, st->names[ops[pc].a], args, argc);
+        }
+        if (st->trim) st->trim->memo_epoch++;
+        sp -= argc + 1;
+        CHECK_ABORT();
+        PUSH(r); pc++; NEXT();
     }
     OP(CALL_VALUE) {  /* stack: fn, args... */
         int argc = ops[pc].a;
