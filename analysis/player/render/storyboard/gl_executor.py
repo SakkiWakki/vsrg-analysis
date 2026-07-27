@@ -802,8 +802,15 @@ class GLExecutor:
         every corner of the run at once."""
         if count < _BATCH_MIN or not target_stack:
             return False
-        entry = self._programs[3] if len(self._programs) > 3 else None
-        if entry is None or entry[0] is None:
+        # Every precondition is a FALL BACK, never a raise: `_compose` runs
+        # inside `render_and_present`'s try, so anything thrown here costs the
+        # whole frame its present ("present failed (...), skipped") rather
+        # than costing this run its batch. The per-quad path draws the same
+        # pixels, so declining is always safe.
+        programs = self._programs
+        entry = programs[3] if programs is not None and len(programs) > 3 \
+            else None
+        if entry is None or entry[0] is None or self._batch_vao is None:
             return False
         target_id = target_stack[-1]
         if self._targets.get(target_id) is None:
