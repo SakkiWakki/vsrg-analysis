@@ -268,20 +268,26 @@ def test_the_delta_sum_subdivides_a_part_that_curves():
     parts' own breakpoints, which a CURVED span is not - so the curve
     subdivides its own span into the union. A recorded segment lane carries
     its ease id this way (disperagioia's field was 16px off when the export
-    gave up on one instead)."""
+    gave up on one instead), and the sum has to replay that ease: its own
+    output carries linear ids only."""
     from analysis.games.notitg.field_compose import _SumTimeline
+    from analysis.player.render.effects.easing import ease
 
     class _CurvedLane:
+        """A recorded RAMP: its two endpoints carrying its own ease id
+        (ease 3 is u squared), with `sample` following that ease."""
+
         def sample(self, t):
-            return (float(t) ** 2,)
+            return (100.0 * ease(3, (float(t) - 1.0) / 4.0),)
 
         def breakpoints(self, t0, t1, index=0):
-            return [t0], [t0 * t0], [t1 - t0], [3]
+            return [1.0, 5.0], [0.0, 100.0], [4.0, 0.0], [3, 0]
 
     delta = _vibrate_channel(_span('vibrate', 1.0, 4.0, (30.0, 30.0, 30.0)))
     total = _SumTimeline((_CurvedLane(), delta))
     exported = total.breakpoints(0.0, 6.0)
     assert exported is not None
+    assert all(e == 0 for e in exported[3])
     for t in _probe_times(0.0, 6.0):
         assert _replay(exported, 0.0, t) == pytest.approx(total.sample(t)[0],
                                                           abs=1e-3)

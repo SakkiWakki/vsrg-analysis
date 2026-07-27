@@ -70,7 +70,8 @@ import numpy as np
 
 from analysis.games.notitg import field_compose
 from analysis.player.render.effects.timeline import (EventTimeline, Keyframe,
-                                                     SIMPLIFY_EPS)
+                                                     SIMPLIFY_EPS,
+                                                     rest_value as _rest_value)
 from analysis.player.render.storyboard import record as _rec
 from analysis.player.render.storyboard.sprite_sheet import (
     frame_at_time, frame_steps)
@@ -259,15 +260,6 @@ def _is_static(timeline) -> bool:
     wrongly-skipped export would silently freeze real motion."""
     probe = getattr(timeline, 'is_static', None)
     return probe is not None and probe()
-
-
-def _rest_value(timeline, prop: int) -> float:
-    """The timeline's pre-first-keyframe rest value for `prop`. EventTimeline
-    exposes it directly; a duck-typed curve is sampled far in the past."""
-    rest = getattr(timeline, '_rest', None)
-    if rest is not None:
-        return float(rest[prop])
-    return float(timeline.sample(-1.0e18)[prop])
 
 
 def _export_dense(timeline, t0: float, t1: float, prop: int):

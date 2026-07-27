@@ -38,7 +38,9 @@ import numpy as np
 
 from analysis.games.notitg import field_projection, mod_channels
 from analysis.player.render import transform3d
-from analysis.player.render.effects.timeline import EventTimeline, Keyframe
+from analysis.player.render.effects.easing import ease
+from analysis.player.render.effects.timeline import (EventTimeline, Keyframe,
+                                                     rest_value)
 
 _CENTER_X = field_projection.DESIGN_CX
 _CENTER_Y = field_projection.DESIGN_CY
@@ -194,6 +196,47 @@ def _add_part_times(times: set, exported, t0: float, t1: float) -> None:
                 times.add(traced)
 
 
+def _replay_channel(exported, rest: float, at):
+    """The values a piecewise linear-ramp consumer serves for `exported` at
+    every time in `at`, as an array.
+
+    THE model `breakpoints` targets, and the one `storyboard_native`'s
+    channels implement: `rest` before `ts[0]`, then at breakpoint `i` hold
+    `vals[i]` when `durs[i] <= 0` and otherwise ease `vals[i] -> vals[i+1]`
+    over `durs[i]` under `eases[i]`. Ties in time go to the LATER breakpoint,
+    as the consumer's bisect does."""
+    ts, vals, durs, eases = exported
+    out = np.full(len(at), float(rest), dtype=np.float64)
+    if not ts:
+        return out
+    times = np.asarray(ts, dtype=np.float64)
+    values = np.asarray(vals, dtype=np.float64)
+    spans = np.asarray(durs, dtype=np.float64)
+    live = np.searchsorted(times, at, side='right') - 1
+    seen = live >= 0
+    idx = live[seen]
+    ramping = (spans[idx] > 0.0) & (idx + 1 < len(times))
+    progress = np.zeros(len(idx), dtype=np.float64)
+    np.divide(at[seen] - times[idx], spans[idx], out=progress, where=ramping)
+    np.clip(progress, 0.0, 1.0, out=progress)
+    _apply_eases(progress, np.asarray(eases, dtype=np.int64)[idx], ramping)
+    held = values[idx]
+    out[seen] = held + (values[np.minimum(idx + 1, len(times) - 1)]
+                        - held) * progress
+    return out
+
+
+def _apply_eases(progress, ease_ids, ramping) -> None:
+    """Curve each ramp's raw progress under its own ease, in place.
+
+    Linear is the identity and is nearly all of them - an EventTimeline
+    traces a curved ease into linear pieces rather than exporting the curve -
+    so the scalar call is paid only by the few that are not."""
+    curved = np.nonzero(ramping & (ease_ids != _EASE_LINEAR))[0]
+    for k in curved:
+        progress[k] = ease(int(ease_ids[k]), float(progress[k]))
+
+
 class _SumTimeline:
     """Additive overlay: oscillator deltas riding on a recorded stream."""
 
@@ -224,9 +267,14 @@ class _SumTimeline:
         Sampling the sum on a fixed grid instead - the exporter fallback -
         aliases whatever the deltas do between grid points.
         """
-        times = self._union_times(t0, t1, index)
-        if times is None:
+        exports = self._part_exports(t0, t1, index)
+        if exports is None:
             return None
+        times = {float(t0), float(t1)}
+        for exported in exports:
+            _add_part_times(times, exported, t0, t1)
+        times = sorted(times)
+        heads, tails = self._straights(times, exports, index)
         ts: list[float] = []
         vals: list[float] = []
         durs: list[float] = []
@@ -237,8 +285,8 @@ class _SumTimeline:
             durs.append(float(dur))
 
         target = None
-        for a, b in zip(times, times[1:]):
-            head, tail = self._straight(a, b)
+        for i, (a, b) in enumerate(zip(times, times[1:])):
+            head, tail = heads[i], tails[i]
             if target is not None and abs(target - head) > _FLAT_EPS:
                 emit(a, target, 0.0)
             moving = abs(tail - head) > _FLAT_EPS
@@ -250,37 +298,54 @@ class _SumTimeline:
         emit(times[-1], last, 0.0)
         return ts, vals, durs, [_EASE_LINEAR] * len(ts)
 
-    def _straight(self, a: float, b: float) -> tuple:
-        """`(value just after a, value just before b)` for the straight line
-        the sum follows across `[a, b]`, read from two INTERIOR samples.
+    def _straights(self, times, exports, index: int):
+        """`(heads, tails)` for every interval between consecutive `times`:
+        the value just after each one and just before the next, as the
+        straight line the sum follows across it.
 
-        The ends themselves are not sampled. A step lands ON a union time,
-        and which side of it a float reads is not something the caller
-        controls: a vibrate rolls its cell as `int((t - start) * hz)`, so
+        The ends themselves are not read. A step lands ON a union time, and
+        which side of it a float reads is not something the caller controls:
+        a vibrate rolls its cell as `int((t - start) * hz)`, so
         `start + k / hz` comes back as cell k or cell k-1 depending on the
         last bit, and one wrong cell is a whole random offset. Both quarter
         points are unambiguously inside, and the line through them
-        extrapolates to both ends."""
-        lo = self.sample(a + (b - a) * 0.25)[0]
-        hi = self.sample(a + (b - a) * 0.75)[0]
-        if abs(hi - lo) <= _FLAT_EPS:
-            level = 0.5 * (lo + hi)
-            return level, level
-        return 1.5 * lo - 0.5 * hi, 1.5 * hi - 0.5 * lo
+        extrapolates to both ends.
 
-    def _union_times(self, t0: float, t1: float, index: int):
-        """Every time any part changes shape, plus the window's own ends -
-        or None when a part cannot describe its own shape at all."""
-        times = {float(t0), float(t1)}
+        The parts are REPLAYED from the breakpoints they just exported
+        rather than re-sampled. Both give the same value - reproducing
+        `sample` under this consumer model is what `breakpoints` promises -
+        but `sample` recomputes an oscillator's waveform and re-hashes its
+        vibrate cell on every call, and there are two calls per interval per
+        part."""
+        a = np.asarray(times[:-1], dtype=np.float64)
+        b = np.asarray(times[1:], dtype=np.float64)
+        span = b - a
+        lo = self._replay(a + span * 0.25, exports, index)
+        hi = self._replay(a + span * 0.75, exports, index)
+        flat = np.abs(hi - lo) <= _FLAT_EPS
+        level = 0.5 * (lo + hi)
+        return (np.where(flat, level, 1.5 * lo - 0.5 * hi),
+                np.where(flat, level, 1.5 * hi - 0.5 * lo))
+
+    def _replay(self, at, exports, index: int):
+        """The sum of the parts at every time in `at`."""
+        total = np.zeros(len(at), dtype=np.float64)
+        for part, exported in zip(self._timelines, exports):
+            total += _replay_channel(exported, rest_value(part, index), at)
+        return total
+
+    def _part_exports(self, t0: float, t1: float, index: int):
+        """Each part's own breakpoints, or None when one of them cannot
+        describe its shape - the sum then declines too and its caller falls
+        back to dense sampling."""
+        out = []
         for part in self._timelines:
             export = getattr(part, 'breakpoints', None)
-            if export is None:
-                return None
-            exported = export(t0, t1, index)
+            exported = None if export is None else export(t0, t1, index)
             if exported is None:
                 return None
-            _add_part_times(times, exported, t0, t1)
-        return sorted(times)
+            out.append(exported)
+        return out
 
 
 def overlay_deltas(link, deltas) -> dict:

@@ -146,6 +146,16 @@ def keyframes_from_events(events, value_keys, rest) -> list:
     return out
 
 
+def rest_value(timeline, prop: int) -> float:
+    """The value a consumer serves before a timeline's first breakpoint.
+    `EventTimeline` and the recorded lanes expose it directly; a duck-typed
+    curve is sampled far in the past."""
+    rest = getattr(timeline, '_rest', None)
+    if rest is not None:
+        return float(rest[prop])
+    return float(timeline.sample(-1.0e18)[prop])
+
+
 class EventTimeline:
     """Piecewise-eased sampler. Before the first keyframe returns
     `rest`; between keyframes eases from the previous target (or the
