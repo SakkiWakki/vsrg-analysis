@@ -6,12 +6,14 @@ layers/notes.py (one candidate axis, one mod kernel, one draw bracket
 shared with taps); the `draw_mines`/`draw_lifts`/`draw_fakes` functions
 here are thin wrappers kept for plugins that registered against this
 module. Ghost taps and miss-holds are replay overlays, not note
-records, and keep their own vectorized culls here.
+records; their vectorized culls live here, and the note prepass turns
+them into views (`ghost_views` / `miss_hold_views`) so the raster layer
+and the drawable feed draw the same list rather than each culling.
 """
 from __future__ import annotations
 
 import bisect
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 
@@ -83,73 +85,105 @@ def draw(ctx: RenderContext, painter) -> None:
 
 
 def draw_ghost_taps(ctx: RenderContext, painter) -> None:
-    p = ctx.player
-    ghost_times = p.notes.ghost_times
-    if not ghost_times.size:
-        ctx.visible_ghost_taps = []
-        return
-
-    search = p.notes.ghost_sv_times if ctx.use_sv_space else ghost_times
-    indices = _cull_indices(search, ctx.target_lo, ctx.target_hi)
-    indices = indices[p.notes.ghost_cols[indices] < p.keycount]
-
     pm = ctx.sprite_cache.get('ghost_tap', ctx)
-
-    lane_x = ctx.lane_x
-    lane_w = ctx.lane_w
-    time_to_y = ctx.time_to_y
-
+    lane_center = ctx.lane_center
     visible = []
-    for k in indices:
-        col = int(p.notes.ghost_cols[k])
-        y = time_to_y(float(ghost_times[k]))
-
-        cx = lane_x(col) + lane_w / 2
+    for view in getattr(ctx, 'ghost_views', ()):
+        cx = lane_center(view.col)
         painter.drawPixmap(
             QPointF(float(cx - pm.width() / 2),
-                    float(y - pm.height() / 2)),
+                    float(view.y - pm.height() / 2)),
             pm,
         )
-        visible.append(k)
-
+        visible.append(view.k)
     ctx.visible_ghost_taps = visible
 
 
 def draw_miss_holds(ctx: RenderContext, painter) -> None:
     p = ctx.player
-    if not p.notes.miss_hold_press.size:
-        ctx.visible_miss_holds = []
-        return
-
-    indices = _visible_miss_hold_indices(ctx)
-    indices = indices[p.notes.miss_hold_cols[indices] < p.keycount]
-
     red = p.judge_colors['miss']
-    lane_x, lane_w = ctx.lane_x, ctx.lane_w
-    time_to_y = ctx.time_to_y
-    H = p.H
     tick_pm = ctx.sprite_cache.get('tick', ctx, color=red)
 
     visible = []
-    for k in indices:
-        col = int(p.notes.miss_hold_cols[k])
-        y_press = time_to_y(float(p.notes.miss_hold_press[k]))
-        y_release = time_to_y(float(p.notes.miss_hold_release[k]))
-
-        top, bot = min(y_press, y_release), max(y_press, y_release)
-        if bot < 0 or top > H:
-            continue
-        top = max(0.0, top)
-        bot = min(float(H), bot)
-
-        lx = int(lane_x(col))
+    for view in getattr(ctx, 'miss_hold_views', ()):
+        lx = int(ctx.lane_x(view.col))
         # Vertical stroke (vector, per-note endpoints) + two cached
         # ticks at press and release times.
-        draw_lane_line(painter, red, lx, lane_w, top, bot, width=2)
-        painter.drawPixmap(QPointF(float(lx), float(y_press - 2)), tick_pm)
-        painter.drawPixmap(QPointF(float(lx), float(y_release - 2)), tick_pm)
-        visible.append(k)
+        draw_lane_line(painter, red, lx, ctx.lane_w, view.top, view.bot,
+                       width=2)
+        painter.drawPixmap(QPointF(float(lx), float(view.y_press - 2)),
+                           tick_pm)
+        painter.drawPixmap(QPointF(float(lx), float(view.y_release - 2)),
+                           tick_pm)
+        visible.append(view.k)
     ctx.visible_miss_holds = visible
+
+
+class GhostView(NamedTuple):
+    """A press with no note under it: a point on a lane, and the record
+    it came from."""
+
+    k: int
+    col: int
+    y: float
+
+
+class MissHoldView(NamedTuple):
+    """A hold the player never held: the stretch between where it should
+    have been pressed and released.
+
+    `top`/`bot` are that stretch clamped to the screen. It rides the view
+    rather than each drawer reworking it, because a missed hold can run
+    many screens and both backends have coordinate limits - a rule two
+    drawers must not be able to disagree about."""
+
+    k: int
+    col: int
+    y_press: float
+    y_release: float
+    top: float
+    bot: float
+
+
+def ghost_views(ctx) -> list:
+    """This frame's visible ghost taps, culled and placed.
+
+    Built by the note prepass so every drawer - the raster layer and the
+    drawable feed alike - reads the same list instead of each running the
+    cull itself."""
+    p = ctx.player
+    ghost_times = p.notes.ghost_times
+    if not ghost_times.size:
+        return []
+    search = p.notes.ghost_sv_times if ctx.use_sv_space else ghost_times
+    indices = _cull_indices(search, ctx.target_lo, ctx.target_hi)
+    indices = indices[p.notes.ghost_cols[indices] < p.keycount]
+    return [GhostView(int(k), int(p.notes.ghost_cols[k]),
+                      float(ctx.time_to_y(float(ghost_times[k]))))
+            for k in indices]
+
+
+def miss_hold_views(ctx) -> list:
+    """This frame's visible miss-hold spans, culled and placed (see
+    `ghost_views` for why the prepass owns it)."""
+    p = ctx.player
+    if not p.notes.miss_hold_press.size:
+        return []
+    indices = _visible_miss_hold_indices(ctx)
+    indices = indices[p.notes.miss_hold_cols[indices] < p.keycount]
+    time_to_y = ctx.time_to_y
+    height = float(p.H)
+    views = []
+    for k in indices:
+        y_press = float(time_to_y(float(p.notes.miss_hold_press[k])))
+        y_release = float(time_to_y(float(p.notes.miss_hold_release[k])))
+        top, bot = min(y_press, y_release), max(y_press, y_release)
+        if bot < 0 or top > height:
+            continue
+        views.append(MissHoldView(int(k), int(p.notes.miss_hold_cols[k]),
+                                  y_press, y_release,
+                                  max(0.0, top), min(height, bot)))
+    return views
 
 
 # ── drawing helpers ──────────────────────────────────────────────────

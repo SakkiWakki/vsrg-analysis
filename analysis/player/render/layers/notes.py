@@ -412,12 +412,19 @@ def prepare(ctx) -> None:
     The `taps` / `lns` / stream layer drawers read from
     `ctx.note_views` / `ctx.stream_views` ; splitting the previous
     combined loop into per-layer passes would otherwise rebuild each
-    view several times."""
+    view several times. `ctx.ghost_views` / `ctx.miss_hold_views` carry
+    the replay overlays that belong to no note record."""
     views: list[_NoteView | None] = []
     for pos, i in enumerate(ctx.candidates):
         views.append(_build(ctx, i, pos))
     ctx.note_views = views
     ctx.stream_views = _build_stream_views(ctx)
+    # The replay overlays that belong to no note record. Culled here so
+    # every drawer reads one list: they are as much a part of the frame
+    # as the notes are, and a backend should not have to know they exist
+    # to draw them.
+    ctx.ghost_views = _extras.ghost_views(ctx)
+    ctx.miss_hold_views = _extras.miss_hold_views(ctx)
 
 
 def _draw_view(ctx, painter, n, draw_fn) -> None:

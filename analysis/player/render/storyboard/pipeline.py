@@ -740,7 +740,7 @@ class DrawablePipeline:
     _NOTE_SPRITES = (
         ('tap', 'tap_head'), ('ln_head', 'ln_head'), ('ln_tail', 'ln_tail'),
         ('ln_body', 'ln_body'), ('mine', 'mine'), ('lift', 'lift'),
-        ('fake', 'fake'),
+        ('fake', 'fake'), ('ghost_tap', 'ghost_tap'),
     )
     _SPRITE_STATES = ('normal', 'tick', 'miss_tap', 'miss_ln', 'roll',
                       'released')

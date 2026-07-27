@@ -695,3 +695,39 @@ def test_a_hold_mine_arms_a_span_with_a_glyph_at_its_end():
         _ctx([], stream_views=streams), _IMAGE_MAP)
     assert report['mine_spans'] == 2, 'the span stroke and its end glyph'
     assert _ids_of(u, count).count(300) == 2, 'head glyph + end glyph'
+
+
+def test_a_ghost_tap_is_a_glyph_where_nothing_was_due():
+    ctx = _ctx([])
+    ctx.ghost_views = [SimpleNamespace(k=0, col=2, y=250.0)]
+    u, f, count, report = nf.feed_from_context(ctx, _IMAGE_MAP)
+    assert report['ghosts'] == 1
+    row = _rows_of(f, count)[_ids_of(u, count).index(120)]
+    mat = np.asarray(row[nf._F_MAT:nf._F_MAT + 9], dtype=float).reshape(3, 3)
+    assert tuple((mat @ np.array([0.5, 0.5, 1.0]))[:2]) == pytest.approx(
+        (160.0, 250.0))
+
+
+def test_a_missed_hold_strokes_the_stretch_it_was_never_held_for():
+    ctx = _ctx([])
+    ctx.miss_hold_views = [SimpleNamespace(k=0, col=1, y_press=400.0,
+                                           y_release=200.0, top=200.0,
+                                           bot=400.0)]
+    _u, _f, _c, report = nf.feed_from_context(ctx, _IMAGE_MAP)
+    assert report['miss_holds'] == 3, 'the stroke and a tick at each end'
+
+
+def test_the_screen_clamp_is_the_views_and_not_each_drawers():
+    # A missed hold can run many screens; both backends have coordinate
+    # limits, so the clamped span rides the view where they cannot
+    # disagree about it.
+    ctx = _ctx([])
+    ctx.miss_hold_views = [SimpleNamespace(k=0, col=1, y_press=5000.0,
+                                           y_release=-5000.0, top=0.0,
+                                           bot=900.0)]
+    _u, f, count, _r = nf.feed_from_context(ctx, _IMAGE_MAP)
+    strokes = [row for row in _rows_of(f, count)]
+    heights = [abs(np.asarray(r[nf._F_MAT:nf._F_MAT + 9],
+                              dtype=float).reshape(3, 3)[1, 1])
+               for r in strokes]
+    assert max(heights) == pytest.approx(900.0)

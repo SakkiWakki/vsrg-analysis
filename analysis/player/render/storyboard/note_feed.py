@@ -81,9 +81,13 @@ is one for a travelpath's own art, and `_note_seams` records that gap as
 `travelpath_as_lines_source`.
 
 Emitted: receptors; taps, LN heads, LN bodies, LN tails and their glows; the
-stream records (mines / lifts / fakes) and a hold mine's armed span; and the
-replay overlays that say how a note was PLAYED - press marks, release guides
-and miss overlays.
+stream records (mines / lifts / fakes) and a hold mine's armed span; and every
+replay overlay - press marks, release guides, miss overlays, ghost taps and
+miss-hold spans. That is the whole field.
+
+The overlays that belong to no note record (ghosts, miss holds) are culled by
+the note prepass into `ctx.ghost_views` / `ctx.miss_hold_views`, so this module
+and the raster layer draw one list rather than each running the cull.
 
 `report` counts `receptors`, `taps`, `streams`, `glows`, `ln_tails`,
 `ln_body_segments`, `strokes`, `miss_marks`, `mine_spans`, `ghosts`,
@@ -202,6 +206,8 @@ def feed_from_context(ctx, image_map, design=None):
     _emit_receptors(feed)
     _emit_note_heads(feed)
     _emit_streams(feed)
+    _emit_ghosts(feed)
+    _emit_miss_holds(feed)
     _note_seams(ctx, feed.report)
 
     u_soa, f_soa = feed.rows.finish()
@@ -503,6 +509,37 @@ def _emit_hold_mine_span(feed, v):
     _emit_at(feed, 'mine', v.col, float(v.lx) + lane_w / 2.0, y_end,
              counter='mine_spans', stage=_STAGE_STREAM,
              layer=_LAYER_LN_TAIL)
+
+
+def _emit_ghosts(feed):
+    """A press with no note under it, one glyph each. The prepass culled
+    and placed them (`chart_extras.ghost_views`)."""
+    for view in getattr(feed.ctx, 'ghost_views', ()) or ():
+        _emit_at(feed, 'ghost_tap', view.col,
+                 float(feed.ctx.lane_center(view.col)), float(view.y),
+                 counter='ghosts', stage=_STAGE_OVERLAY)
+
+
+def _emit_miss_holds(feed):
+    """A hold the player never held: the stretch it should have been held
+    for, ticked at both ends (mirrors `chart_extras.draw_miss_holds`)."""
+    ctx = feed.ctx
+    views = getattr(ctx, 'miss_hold_views', ()) or ()
+    if not views:
+        return
+    color = ctx.player.judge_colors['miss']
+    for view in views:
+        lane_w = float(ctx.lane_width(view.col))
+        cx = float(ctx.lane_center(view.col))
+        _emit_line(feed, view.col, cx, view.top, view.bot,
+                   _MISS_HOLD_STROKE_W, color, _STAGE_OVERLAY,
+                   _LAYER_LN_BODY, 'miss_holds')
+        for y in (view.y_press, view.y_release):
+            _emit_at(feed, 'solid', view.col, cx, float(y),
+                     max(0.0, lane_w - 2 * _TICK_INSET), _TICK_H,
+                     opacity=_opacity_of(color), tint=_tint_of(color),
+                     counter='miss_holds', stage=_STAGE_OVERLAY,
+                     layer=_LAYER_LN_TAIL)
 
 
 def _emit_stroke(feed, col, lane_w, lx, y_from, y_to, color, layer,
