@@ -1992,6 +1992,11 @@ _SPAN_PROPS = {
     'wag': ('rotation',), 'spin': ('rotation',),
 }
 
+# Which component of an effectmagnitude scales each of those properties.
+# Every kind above multiplies its waveform by exactly one of them, so a zero
+# there is a delta pinned at zero however the waveform moves.
+_MAGNITUDE_AXIS = {'x': 0, 'y': 1, 'rotation': 2}
+
 # The engine re-rolls vibrate's random offset once per rendered frame;
 # 60Hz cells reproduce that cadence deterministically at any render rate
 # (a faster display holds each cell, a slower one skips cells).
@@ -2101,21 +2106,46 @@ class OscDeltaChannel:
 
     def _change_times(self, t0: float, t1: float) -> set:
         """Every time within `[t0, t1]` at which some span alters the delta:
-        its own edges, and its sample grid in between. A vibrate's grid is
-        measured from the span's START (that is what `_span_delta` rolls
-        cells against), not from the window's."""
+        the edges of each stretch it is actually moving over, and its sample
+        grid in between. A vibrate's grid is measured from the span's START
+        (that is what `_span_delta` rolls cells against), not from the
+        window's."""
         out = set()
         for span in self._driven:
-            start = max(float(span.start), t0)
-            end = min(_effective_end(span, self._end), t1)
-            if end <= start:
-                continue
             hz = _VIBRATE_CELL_HZ if span.kind == 'vibrate' else _OSC_TRACE_HZ
-            first = math.floor((start - span.start) * hz)
-            last = math.ceil((end - span.start) * hz)
-            out.update(min(max(span.start + k / hz, start), end)
-                       for k in range(first, last + 1))
+            for start, end in self._moving_windows(span, t0, t1):
+                first = math.floor((start - span.start) * hz)
+                last = math.ceil((end - span.start) * hz)
+                out.update(min(max(span.start + k / hz, start), end)
+                           for k in range(first, last + 1))
         return out
+
+    def _moving_windows(self, span, t0: float, t1: float):
+        """The stretches of `[t0, t1]` where `span`'s magnitude on this
+        channel's axis is non-zero, in order - the only places the delta can
+        move, and so the only places the sample grid says anything.
+
+        A magnitude is a piecewise-constant envelope the chart pokes, and at
+        zero the delta is exactly zero whatever the waveform is doing. Laying
+        the grid down over the rest describes a flat line at rest one
+        breakpoint per frame: gat 2 vibrates a field, never stops it (so it
+        runs to the compile end) and holds the magnitude at zero for most of
+        it - 29K breakpoints of which 3K move."""
+        axis = _MAGNITUDE_AXIS[self._prop]
+        start = max(float(span.start), t0)
+        end = min(_effective_end(span, self._end), t1)
+        if end <= start:
+            return
+        edges = [start]
+        live = [span.magnitude_at(start)[axis] != 0.0]
+        for sample in span.magnitude_samples:
+            if start < sample[0] < end:
+                edges.append(float(sample[0]))
+                live.append(sample[1 + axis] != 0.0)
+        edges.append(end)
+        for moving, a, b in zip(live, edges, edges[1:]):
+            if moving:
+                yield a, b
 
     def _active(self, t: float) -> list:
         """The spans driving this property at `t` (`sample`'s own test, for
@@ -2125,7 +2155,7 @@ class OscDeltaChannel:
 
     def _span_delta(self, span, t) -> float:
         if span.kind == 'vibrate':
-            axis = 0 if self._prop == 'x' else 1
+            axis = _MAGNITUDE_AXIS[self._prop]
             magnitude = span.magnitude_at(t)[axis]
             if magnitude == 0.0:
                 return 0.0

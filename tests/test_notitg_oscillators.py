@@ -203,6 +203,35 @@ def test_vibrate_exports_as_one_hold_per_cell():
         assert _replay(exported, 0.0, t) == pytest.approx(ch.sample(t)[0])
 
 
+def test_no_cells_where_the_magnitude_envelope_is_zero():
+    """An effect the chart never stops runs to the compile end, and gat 2
+    holds the magnitude at zero for most of that - 29K breakpoints of which
+    3K moved. A cell at zero magnitude describes a flat line at rest."""
+    span = _span('vibrate', 0.0, 30.0, (10.0, 10.0, 10.0))
+    span.set_magnitude(5.0, (0.0, 0.0, 0.0))
+    span.set_magnitude(25.0, (10.0, 10.0, 10.0))
+    ch = _vibrate_channel(span)
+
+    exported = ch.breakpoints(0.0, 30.0)
+    ts = exported[0]
+    assert not [t for t in ts if 5.0 < t < 25.0]
+    assert len([t for t in ts if t < 5.0]) > 250        # 60Hz over 5s
+    assert len([t for t in ts if t > 25.0]) > 250
+    for t in _probe_times(0.0, 30.0):
+        assert _replay(exported, 0.0, t) == pytest.approx(ch.sample(t)[0])
+
+
+def test_a_zeroed_axis_lays_no_cells_while_the_other_still_shakes():
+    """effectmagnitude is per axis: a vibrate driving y alone must not put a
+    grid on x, which multiplies the same waveform by zero."""
+    span = _span('vibrate', 0.0, 10.0, (0.0, 10.0, 10.0))
+    on_x = modfile.OscDeltaChannel([span], 'x', _clock(), seed=7)
+    on_y = modfile.OscDeltaChannel([span], 'y', _clock(), seed=7)
+
+    assert on_x.breakpoints(0.0, 10.0)[0] == []
+    assert len(on_y.breakpoints(0.0, 10.0)[0]) > 500
+
+
 def test_a_continuous_kind_exports_as_ramps():
     span = _span('bob', 0.0, 4.0, (20.0, 20.0, 20.0), period=1.0)
     ch = modfile.OscDeltaChannel([span], 'y', _clock(), seed=99)
