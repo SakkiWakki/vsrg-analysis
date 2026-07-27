@@ -99,6 +99,22 @@ def test_timeline_eases_then_holds():
     assert tl.sample(99.0) == pytest.approx((10.0,))  # holds
 
 
+def test_timeline_is_static_only_when_it_never_leaves_its_rest():
+    """Exporters skip discovering the shape of a static curve. Without the
+    probe a composite over two empty streams (a fit rect's edges, a fill's
+    size vs its natural w/h) has to assume it moves and dense-samples the
+    whole chart to rediscover one constant."""
+    assert EventTimeline([], rest=(4.0,)).is_static()
+    # A keyframe that only restates the rest still holds it.
+    assert EventTimeline([Keyframe(5.0, (4.0,), 2.0, 0)],
+                         rest=(4.0,)).is_static()
+    assert not EventTimeline([Keyframe(5.0, (9.0,), 0.0, 0)],
+                             rest=(4.0,)).is_static()
+    # ... unless it eases FROM somewhere else, which `start` can do.
+    assert not EventTimeline([Keyframe(5.0, (4.0,), 2.0, 0, start=(9.0,))],
+                             rest=(4.0,)).is_static()
+
+
 # ── playfield transform ----------------------------------------------
 
 def _ctx_win(t=0.0, W=1366, H=768):

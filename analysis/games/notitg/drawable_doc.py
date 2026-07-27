@@ -1095,9 +1095,9 @@ class _Builder:
             timeline = link.get('fov')
             if timeline is None:
                 continue
-            chan_id, rest = self._channel(timeline)
+            rest = _rest_value(timeline, 0)
             if abs(rest - _DEFAULT_FOV) > _FOV_EPS or not _is_static(timeline):
-                return chan_id, rest
+                return self._channel(timeline)
         return -1, _DEFAULT_FOV
 
     # -- instance emission ------------------------------------------------

@@ -160,6 +160,24 @@ class EventTimeline:
     def __bool__(self):
         return bool(self._kf)
 
+    def is_static(self) -> bool:
+        """True when `sample` provably returns `rest` at every t, so an
+        exporter can skip discovering the shape (mirrors
+        `seg_read.SegCurve.is_static`).
+
+        Almost always this is a stream with no keyframes at all - a property
+        the chart never wrote. Without the probe, a composite over two of
+        them (a fit rect's edges, a fill's absolute size versus its natural
+        w/h) has to assume it moves and dense-samples the whole chart to
+        rediscover one constant: 806 of gat 2's 845 dense exports were that.
+
+        A keyframe that only restates the rest still holds it, ease and all -
+        but only if it does not ease FROM somewhere else, which a `start`
+        override can do."""
+        return all(kf.values == self._rest
+                   and (kf.start is None or kf.start == self._rest)
+                   for kf in self._kf)
+
     def sample(self, t_now: float) -> tuple:
         idx = bisect_right(self._starts, float(t_now)) - 1
         if idx < 0:
