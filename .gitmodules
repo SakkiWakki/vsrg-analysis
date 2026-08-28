@@ -1,3 +1,6 @@
 [submodule "third_party/minhook"]
 	path = third_party/minhook
 	url = https://github.com/TsudaKageyu/minhook
+[submodule "third_party/vsrg-format"]
+	path = third_party/vsrg-format
+	url = https://github.com/SakkiWakki/vsrg-format.git
