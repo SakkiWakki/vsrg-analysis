@@ -13,8 +13,20 @@ closure.
 item_count, report)` for the notefield drawable at time `t`:
 
 - u32 stride 4 : [source_kind, source_id, frame, flags]
-- f32 stride 18: [m00..m22 (row-major mat3), opacity, r, g, b,
-                  crop_l, crop_t, crop_r, crop_b, z]
+- f32 stride 22: [m00..m22 (row-major mat3), opacity, r, g, b,
+                  crop_l, crop_t, crop_r, crop_b, z,
+                  model_z, rot_x, rot_y, rot_z]
+
+`z` is the local SORT key; lanes 18..22 are the item's 3D MODEL
+(field-space depth + engine-ordered rotations in degrees), flagged by
+`_FEED_FLAG_HAS_MODEL`. They are different things: a mat3 can carry
+neither depth nor the sign of a tilt, so an out-of-plane note used to be
+projected about its OWN centre and flattened before the consuming field
+chain ever saw it - which meant a chart could not cancel a field's
+rotation with a per-note counter-rotation (see
+.claude/plans/notitg-note-model-z.md). A modeled item's mat3 carries
+scale and field position only; the evaluator composes its rotations with
+the chain in 4D and projects once.
 
 matching `storyboard_native.Evaluator.feed_{u,f}_stride`. The items are
 emitted in DRAW ORDER: receptors first, then note heads back-to-front in
@@ -96,7 +108,6 @@ and the raster layer draw one list rather than each running the cull.
 from __future__ import annotations
 
 import math
-from functools import lru_cache
 from typing import NamedTuple
 
 import numpy as np
@@ -104,19 +115,32 @@ import numpy as np
 # Frozen feed v2 strides (drawable-ir.md; storyboard_native.Evaluator
 # .feed_u_stride / .feed_f_stride). Named here so the SoA writer and the
 # tests share one source of truth.
-FEED_U_STRIDE = 4
-FEED_F_STRIDE = 18
+FEED_U_STRIDE = 7
+FEED_F_STRIDE = 22
+
+# Per-note shader builtins (feed v3, lanes [4..6] of the u32 row: the
+# active shader+1 and this item's window into the x32 uniform buffer).
+# The engine's NoteDisplay feeds its per-note programs these uniforms
+# alongside the chart's own pokes (note-drop.vert reads iCol/isHold/
+# beat; note-suzumebachi picks a single target note by fNoteBeat), so a
+# stamped item's value block is the chart uniforms (name-sorted, the
+# desc's order) followed by these six, in THIS order. The executor
+# derives the remaining engine inputs (modelMatrix, noteSize,
+# textureSize) from the record itself.
+NOTE_SHADER_BUILTIN_NAMES = ('iCol', 'isHold', 'isReceptor', 'fNoteBeat',
+                             'beat', 'time')
 
 # u32 source kinds (storyboard_native.SRC_*): note heads and receptors
 # are image blits.
 SRC_IMAGE = 0
 
-# f32 lane offsets into a fed item's 18-wide row.
+# f32 lane offsets into a fed item's 22-wide row.
 _F_MAT = 0        # m00..m22, lanes 0..8 (row-major)
 _F_OPACITY = 9
 _F_TINT = 10      # r, g, b, lanes 10..12
 _F_CROP = 13      # l, t, r, b, lanes 13..16
 _F_Z = 17
+_F_MODEL = 18     # model_z, rot_x, rot_y, rot_z, lanes 18..21
 
 # Receptor notch geometry, mirrored from layers/field.py so a fed
 # receptor covers the same lane rect the raster field draws. The notch
@@ -130,8 +154,11 @@ _RECEPTOR_LANE_FRAC = 0.82
 _STREAM_KEYS = {0: 'mine', 1: 'lift', 2: 'fake'}
 _MINE_KIND = 0
 
-# Feed flags (evaluate.rs FEED_FLAG_*): bit 0 = additive blend.
+# Feed flags (evaluate.rs FEED_FLAG_*): bit 0 = additive blend,
+# bit 3 = the item carries a 3D model on the [model_z, rot_x, rot_y,
+# rot_z] lanes.
 _FEED_FLAG_ADDITIVE = 1
+_FEED_FLAG_HAS_MODEL = 1 << 3
 
 # The note layer's stealth early-out: below this the fill draws nothing.
 _MIN_ALPHA = 1.0 / 255.0
@@ -188,7 +215,7 @@ def feed_notes(player, t, image_map, design=None):
     return feed_from_context(ctx, image_map, design=design)
 
 
-def feed_from_context(ctx, image_map, design=None):
+def feed_from_context(ctx, image_map, design=None, note_shader=None):
     """The pure emitter: build the SoA from an already-prepared render
     context (its `note_views` + receptor state). Split out from
     `feed_notes` so tests drive it with a synthetic ctx and the real
@@ -196,12 +223,20 @@ def feed_from_context(ctx, image_map, design=None):
 
     `design` is the consuming document's screen size, e.g. `(640, 480)`; pass
     it whenever that document is NOT the ctx's own screen. See
-    `_screen_to_design` for why the fed mat3s must be converted."""
+    `_screen_to_design` for why the fed mat3s must be converted.
+
+    `note_shader` activates the per-note shader tier for this frame:
+    {'arrow'|'hold'|'receptor': (shader_plus_one, chart_values), 'beat':
+    float, 'time': float, 'to_beat': callable|None}. Engine-drawn items
+    (receptors, taps, mines, hold bodies/tails and their glows) stamp
+    the category's program; replay overlays (press marks, miss X,
+    ghosts) never do - they are ours, not the engine's."""
     feed = _Feed(ctx, image_map, _EmitBuffer(_screen_to_design(ctx, design)),
                  {'receptors': 0, 'taps': 0, 'streams': 0, 'glows': 0,
                   'ln_tails': 0, 'ln_body_segments': 0, 'strokes': 0,
                   'miss_marks': 0, 'mine_spans': 0, 'ghosts': 0,
-                  'miss_holds': 0, 'skipped': 0, 'seams': []})
+                  'miss_holds': 0, 'skipped': 0, 'seams': []},
+                 note_shader or {})
 
     _emit_receptors(feed)
     _emit_note_heads(feed)
@@ -210,8 +245,8 @@ def feed_from_context(ctx, image_map, design=None):
     _emit_miss_holds(feed)
     _note_seams(ctx, feed.report)
 
-    u_soa, f_soa = feed.rows.finish()
-    return u_soa, f_soa, feed.rows.count, feed.report
+    u_soa, f_soa, x_soa = feed.rows.finish()
+    return u_soa, f_soa, x_soa, feed.rows.count, feed.report
 
 
 class _Feed(NamedTuple):
@@ -226,6 +261,37 @@ class _Feed(NamedTuple):
     image_map: dict
     rows: object
     report: dict
+    shader: dict = {}
+
+
+def _shader_stamp(feed, category, col, note_beat=0.0):
+    """(shader_plus_one, value block) for an item of `category`, or
+    (0, None) when no program is bound to it this frame. The block is
+    the chart uniform values followed by NOTE_SHADER_BUILTIN_NAMES's
+    six, in that frozen order."""
+    entry = feed.shader.get(category)
+    if entry is None:
+        return 0, None
+    shader_plus_one, chart_values = entry
+    return shader_plus_one, [
+        *chart_values, float(col),
+        1.0 if category == 'hold' else 0.0,
+        1.0 if category == 'receptor' else 0.0,
+        float(note_beat),
+        feed.shader.get('beat', 0.0), feed.shader.get('time', 0.0)]
+
+
+def _note_beat_of(feed, n):
+    """The note's chart beat, snapped to the 1/48 row grid (the engine's
+    fNoteBeat is NoteRowToBeat's exact rational - suzumebachi compares
+    it with == against a literal). Derived from press_t - off (the
+    note's chart time); 0.0 when the ctx offers no beat conversion."""
+    to_beat = feed.shader.get('to_beat')
+    press_t = getattr(n, 'press_t', None)
+    off = getattr(n, 'off', None)
+    if to_beat is None or press_t is None or off is None:
+        return 0.0
+    return round(to_beat(float(press_t) - float(off)) * 48.0) / 48.0
 
 
 def _sprite_of(feed, key, col, state=None):
@@ -238,20 +304,32 @@ def _sprite_of(feed, key, col, state=None):
 
 
 def _add(feed, sprite, col, mat, opacity, counter, stage=_STAGE_NOTE,
-         layer=_LAYER_HEAD, tint=None, additive=False) -> bool:
+         layer=_LAYER_HEAD, tint=None, additive=False,
+         model=None, shader_cat=None, note_beat=0.0) -> bool:
     """Put one already-placed sprite in the buffer. Below `_MIN_ALPHA`
-    the item draws nothing, so it is dropped rather than fed."""
+    the item draws nothing, so it is dropped rather than fed.
+
+    `model` is the item's `(z, rot_x, rot_y, rot_z)` 3D model, or None
+    for a flat item (the hot path - the evaluator folds a flag-free feed
+    once instead of projecting per item). `shader_cat` names the note
+    element this item draws as ('arrow'/'hold'/'receptor'); when a
+    program is bound to that category this frame the item is stamped
+    with it (None = a replay overlay, never shaded)."""
     if mat is None or opacity < _MIN_ALPHA:
         return False
+    shader, xvals = (_shader_stamp(feed, shader_cat, col, note_beat)
+                     if shader_cat is not None else (0, None))
     feed.rows.add(sprite[0], mat, opacity, tint=tint or _WHITE,
-                  additive=additive, stage=stage, col=col, layer=layer)
+                  additive=additive, stage=stage, col=col, layer=layer,
+                  model=model, shader=shader, xvals=xvals)
     feed.report[counter] = feed.report.get(counter, 0) + 1
     return True
 
 
 def _emit_at(feed, key, col, cx, cy, w=None, h=None, rotation_deg=0.0,
              opacity=1.0, state=None, counter='skipped', stage=_STAGE_NOTE,
-             layer=_LAYER_HEAD, tint=None, additive=False) -> bool:
+             layer=_LAYER_HEAD, tint=None, additive=False,
+             shader_cat=None, note_beat=0.0) -> bool:
     """Put `key`'s sprite on a `w` x `h` rect centred at `(cx, cy)`.
 
     The ONE way anything flat reaches the field - a receptor notch, a
@@ -267,7 +345,8 @@ def _emit_at(feed, key, col, cx, cy, w=None, h=None, rotation_deg=0.0,
         h = box[1] if h is None else h
     return _add(feed, sprite, col, _place(cx, cy, w, h, rotation_deg),
                 opacity, counter, stage=stage, layer=layer, tint=tint,
-                additive=additive)
+                additive=additive, shader_cat=shader_cat,
+                note_beat=note_beat)
 
 
 # ── receptors ────────────────────────────────────────────────────────
@@ -295,7 +374,8 @@ def _emit_receptors(feed):
                  _RECEPTOR_H * mark.flat_zoom,
                  rotation_deg=mark.rotation_deg,
                  opacity=1.0 if alpha is None else max(0.0, float(alpha[col])),
-                 counter='receptors', stage=_STAGE_RECEPTOR)
+                 counter='receptors', stage=_STAGE_RECEPTOR,
+                 shader_cat='receptor')
 
 
 # ── note heads (taps) ────────────────────────────────────────────────
@@ -329,13 +409,15 @@ def _emit_note_heads(feed):
         if sprite is None:
             continue
         cx = float(n.lx) + lane_w / 2.0
-        mat = _head_mat(n, cx, cy, *_sprite_box(ctx, sprite, n.col))
-        if mat is None:
-            feed.report['skipped'] += 1
-            continue
+        model = _head_model(n)
+        mat = _head_mat(n, cx, cy, *_sprite_box(ctx, sprite, n.col),
+                        model=model)
+        note_beat = _note_beat_of(feed, n)
         drawn = _add(feed, sprite, n.col, mat, float(n.alpha), 'taps',
-                     layer=_LAYER_HEAD)
-        _emit_glow(feed, n, sprite, mat)
+                     layer=_LAYER_HEAD, model=model, shader_cat='arrow',
+                     note_beat=note_beat)
+        _emit_glow(feed, n, sprite, mat, model=model, shader_cat='arrow',
+                   note_beat=note_beat)
         if drawn:
             _emit_miss_x(feed, n, cx, cy)
 
@@ -364,13 +446,15 @@ def _emit_streams(feed):
         if sprite is None:
             continue
         cx = float(v.lx) + float(ctx.lane_width(v.col)) / 2.0
-        mat = _head_mat(v, cx, float(v.y), *_sprite_box(ctx, sprite, v.col))
-        if mat is None:
-            feed.report['skipped'] += 1
-            continue
+        model = _head_model(v)
+        mat = _head_mat(v, cx, float(v.y), *_sprite_box(ctx, sprite, v.col),
+                        model=model)
+        note_beat = _note_beat_of(feed, v)
         _add(feed, sprite, v.col, mat, float(v.alpha), 'streams',
-             stage=_STAGE_STREAM)
-        _emit_glow(feed, v, sprite, mat, stage=_STAGE_STREAM)
+             stage=_STAGE_STREAM, model=model, shader_cat='arrow',
+             note_beat=note_beat)
+        _emit_glow(feed, v, sprite, mat, stage=_STAGE_STREAM, model=model,
+                   shader_cat='arrow', note_beat=note_beat)
 
 
 def _emit_ln_body(feed, n):
@@ -405,7 +489,8 @@ def _emit_ln_body(feed, n):
         _add(feed, sprite, n.col,
              _place((x0 + x1) / 2.0, (y0 + y1) / 2.0, width, length,
                     math.degrees(math.atan2(dy, dx)) - 90.0),
-             float(n.alpha), 'ln_body_segments', layer=_LAYER_LN_BODY)
+             float(n.alpha), 'ln_body_segments', layer=_LAYER_LN_BODY,
+             shader_cat='hold', note_beat=_note_beat_of(feed, n))
 
 
 def _emit_ln_tail(feed, n, lane_w):
@@ -426,9 +511,10 @@ def _emit_ln_tail(feed, n, lane_w):
         return
     cx, cy, angle = end
     mat = _place(cx, cy, *_sprite_box(feed.ctx, sprite, n.col, n.zoom), angle)
+    note_beat = _note_beat_of(feed, n)
     _add(feed, sprite, n.col, mat, float(n.alpha), 'ln_tails',
-         layer=_LAYER_LN_TAIL)
-    _emit_glow(feed, n, sprite, mat)
+         layer=_LAYER_LN_TAIL, shader_cat='hold', note_beat=note_beat)
+    _emit_glow(feed, n, sprite, mat, shader_cat='hold', note_beat=note_beat)
 
 
 def _emit_press_mark(feed, n, lane_w):
@@ -508,7 +594,8 @@ def _emit_hold_mine_span(feed, v):
                _LAYER_LN_BODY, 'mine_spans')
     _emit_at(feed, 'mine', v.col, float(v.lx) + lane_w / 2.0, y_end,
              counter='mine_spans', stage=_STAGE_STREAM,
-             layer=_LAYER_LN_TAIL)
+             layer=_LAYER_LN_TAIL, shader_cat='arrow',
+             note_beat=_note_beat_of(feed, v))
 
 
 def _emit_ghosts(feed):
@@ -599,77 +686,31 @@ def _tail_end(n, lane_w):
     return (end.x, end.y, path.tangent_deg(-2, -1) - 90.0)
 
 
-def _head_mat(n, cx, cy, w, h):
-    """The item mat3 placing a `w` x `h` head centred on `(cx, cy)`: the plain
-    2D placement, or the field's perspective homography when the note carries
-    out-of-plane mods. None = fully behind the eye, which draws nothing.
+def _head_mat(n, cx, cy, w, h, model=None):
+    """The item mat3 placing a `w` x `h` head centred on `(cx, cy)`.
 
-    `zoom` scales the box here rather than at the call site because the 3D path
-    folds it into the model instead (see `_place_3d`)."""
-    if _is_3d(n):
-        return _place_3d(n, cx, cy, w, h)
-    return _place(cx, cy, w * n.zoom, h * n.zoom, n.rotation_deg)
-
-
-def _is_3d(n):
-    """Whether a head carries out-of-plane mods (z push / roll / twirl), so
-    its placement needs the field's perspective homography rather than the
-    plain 2D `_place`."""
-    return n.z != 0.0 or n.rot_x != 0.0 or n.rot_y != 0.0
+    A modeled head carries ALL its rotations on the model lanes - the
+    in-plane `rotation_deg` included, so the engine's X -> Y -> Z order
+    survives the fold - leaving the mat pure scale + position. A flat head
+    keeps its spin here and never touches the model path."""
+    rotation = 0.0 if model is not None else n.rotation_deg
+    return _place(cx, cy, w * n.zoom, h * n.zoom, rotation)
 
 
-# The per-note 3D model plane, mirroring notes._NOTE_CORNERS: the quad the
-# perspective verdict is classified against.
-_NOTE_HALF = 32.0
-_NOTE_CORNERS = ((-_NOTE_HALF, -_NOTE_HALF), (_NOTE_HALF, -_NOTE_HALF),
-                 (_NOTE_HALF, _NOTE_HALF), (-_NOTE_HALF, _NOTE_HALF))
+def _head_model(n):
+    """The head's `(z, rot_x, rot_y, rot_z)` 3D model, or None while it
+    sits flat on the field plane.
 
-
-def _place_3d(n, cx, cy, w, h):
-    """The projective mat3 for an out-of-plane head, or None when the note
-    is fully behind the eye (the raster path's 'gone' verdict, which draws
-    nothing).
-
-    Mirrors `notes._note_projection`: the model tilts/pushes the unit plane,
-    the field camera projects it, and the homography is conjugated back about
-    the note centre. Zoom and in-plane rotation live in the MODEL here, so the
-    base placement carries neither. `transform3d` returns a ROW-vector
-    homography while a fed mat3 is column-vector, hence the transpose."""
-    from analysis.player.render import transform3d as t3d
-
-    model = (t3d.scale(n.zoom, n.zoom, 1.0)
-             @ t3d.rotate_xyz(n.rot_x, n.rot_y, n.rotation_deg)
-             @ t3d.translate(0.0, 0.0, n.z))
-    verdict, homography, _clip = t3d.project_with_verdict(
-        model, _note_camera(), _NOTE_CORNERS)
-    if verdict == 'gone':
+    Separate from `_head_mat` because the two are consumed at different
+    points: the mat3 sizes and positions the note IN the field, the model
+    turns and lifts it OFF the plane so the field chain's own rotation
+    composes with it (projected once, with the chain, by the evaluator).
+    An in-plane spin alone stays in the mat - the flat path is the hot
+    one, and a z-rotation needs no 4D fold of its own."""
+    z = float(getattr(n, 'z', 0.0) or 0.0)
+    if z == 0.0 and n.rot_x == 0.0 and n.rot_y == 0.0:
         return None
-    conjugated = (_translate_row(-cx, -cy) @ np.asarray(homography, np.float64)
-                  @ _translate_row(cx, cy))
-    return (conjugated.T @ np.asarray(_place(cx, cy, w, h, 0.0),
-                                      np.float64).reshape(3, 3)).reshape(9)
-
-
-def _translate_row(tx, ty):
-    """A row-vector translation 3x3 (`[x y 1] @ M`), transform3d's
-    convention."""
-    return np.array([[1.0, 0.0, 0.0],
-                     [0.0, 1.0, 0.0],
-                     [float(tx), float(ty), 1.0]], dtype=np.float64)
-
-
-@lru_cache(maxsize=1)
-def _note_camera():
-    """The per-note perspective camera (notes._note_camera): the field's
-    LoadMenuPerspective at its fov/eye distance, centred on the origin, so a
-    note's z push scales by the same d/(d-z) the field uses.
-
-    Cached like its raster twin: this is called once per out-of-plane note per
-    frame, and the projection depends on nothing that varies."""
-    from analysis.player.render import transform3d as t3d
-    from analysis.games.notitg import field_projection
-    return t3d.projection(field_projection.FOV, field_projection.DESIGN_W,
-                          field_projection.DESIGN_W)
+    return (z, float(n.rot_x), float(n.rot_y), float(n.rotation_deg))
 
 
 def _head_visible(n):
@@ -683,19 +724,23 @@ def _glow_of(n) -> float:
     return float(getattr(n, 'glow', 0.0) or 0.0)
 
 
-def _emit_glow(feed, n, sprite, mat, stage=_STAGE_NOTE):
+def _emit_glow(feed, n, sprite, mat, stage=_STAGE_NOTE, model=None,
+               shader_cat=None, note_beat=0.0):
     """The stealthglow pass: a SECOND blit of the same sprite at the same
     placement, composited ADDITIVELY at `glow` strength.
 
     Mirrors the raster layer - a stealthed note's fill is hidden while the
     glow keeps it visible as light. `glow_rgb` tints only this pass (the fill
-    never sees it); absent, the glow keeps the sprite's own colours."""
+    never sees it); absent, the glow keeps the sprite's own colours. `model`
+    is the head's own, so the glow rides the same 3D placement, and
+    `shader_cat` the base item's, so a shaded note's glow deforms with it."""
     glow = _glow_of(n)
     if glow <= 0.0:
         return
     _add(feed, sprite, n.col, mat, glow, 'glows', stage=stage,
          layer=_LAYER_GLOW, tint=getattr(n, 'glow_rgb', None) or _WHITE,
-         additive=True)
+         additive=True, model=model, shader_cat=shader_cat,
+         note_beat=note_beat)
 
 
 # ── mat3 construction ────────────────────────────────────────────────
@@ -851,26 +896,37 @@ class _EmitBuffer:
     def __init__(self, to_design=None):
         # Rows land in the bucket they will be DRAWN from; `finish` just
         # concatenates the buckets in key order.
-        self._buckets: dict[int, tuple[list, list]] = {}
+        self._buckets: dict[int, tuple[list, list, list]] = {}
         self._to_design = to_design
         self.count = 0
 
-    # Lanes 13..17: every fed item is uncropped and carries no z - a
-    # receptor or note head is never cropped and never sorts.
+    # Lanes 13..17: every fed item is uncropped and never sorts.
     _TAIL = (*_NO_CROP, 0.0)
+    # Lanes 18..21: the flat item's rest model (no depth, no rotations).
+    _FLAT_MODEL = (0.0, 0.0, 0.0, 0.0)
 
     def add(self, image_id, mat, opacity, tint=_WHITE, additive=False,
-            frame=0, stage=_STAGE_NOTE, col=0, layer=0):
+            frame=0, stage=_STAGE_NOTE, col=0, layer=0, model=None,
+            shader=0, xvals=None):
         key = _sort_key(stage, col, layer)
         bucket = self._buckets.get(key)
         if bucket is None:
-            bucket = self._buckets[key] = ([], [])
-        u, f = bucket
-        u.extend((SRC_IMAGE, image_id, frame,
-                  _FEED_FLAG_ADDITIVE if additive else 0))
+            bucket = self._buckets[key] = ([], [], [])
+        u, f, x = bucket
+        flags = _FEED_FLAG_ADDITIVE if additive else 0
+        if model is not None:
+            # Flagged rather than always-on: a flat item must keep the
+            # fold-once path in the evaluator, which is the hot one.
+            flags |= _FEED_FLAG_HAS_MODEL
+        # Lanes 5/6 (this item's window into the x32 buffer) are patched
+        # in `finish`: bucketing reorders items, so offsets are only
+        # known once the draw order is.
+        u.extend((SRC_IMAGE, image_id, frame, flags, shader, 0, 0))
         f.extend(mat if self._to_design is None else
                  _to_design_mat(self._to_design, mat))
-        f.extend((opacity, tint[0], tint[1], tint[2], *self._TAIL))
+        f.extend((opacity, tint[0], tint[1], tint[2], *self._TAIL,
+                  *(model if model is not None else self._FLAT_MODEL)))
+        x.append(xvals)
         self.count += 1
 
     def finish(self):
@@ -893,12 +949,22 @@ class _EmitBuffer:
         nothing tuned to a cache size."""
         u_out: list = []
         f_out: list = []
+        x_out: list = []
         for key in sorted(self._buckets):
-            u, f = self._buckets[key]
+            u, f, x = self._buckets[key]
+            base = len(u_out)
             u_out.extend(u)
             f_out.extend(f)
+            for index, xvals in enumerate(x):
+                if xvals is None:
+                    continue
+                row = base + index * FEED_U_STRIDE
+                u_out[row + 5] = len(x_out)
+                u_out[row + 6] = len(xvals)
+                x_out.extend(xvals)
         return (np.asarray(u_out, dtype=np.uint32),
-                np.asarray(f_out, dtype=np.float32))
+                np.asarray(f_out, dtype=np.float32),
+                np.asarray(x_out, dtype=np.float32))
 
 
 # ── context resolution ───────────────────────────────────────────────
@@ -917,8 +983,10 @@ def _player_renderer(player):
     renderer = getattr(player, '_renderer', None)
     if renderer is not None:
         return renderer
-    from analysis.player.render.qt_renderer import QtRenderer
-    return QtRenderer()
+    # `build_context` reads the note prepass and never consults the plugin
+    # manager, so a renderer with none serves this read-only seam.
+    from analysis.player.render.qt_renderer import QtPlayerRenderer
+    return QtPlayerRenderer(None)
 
 
 # ── seam report ──────────────────────────────────────────────────────

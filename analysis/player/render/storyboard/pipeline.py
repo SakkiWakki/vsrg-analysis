@@ -244,12 +244,22 @@ class DrawablePipeline:
         self._unfed_logged = False
         self._live_prepare_n = 0
         self._assembly = None
+        self._assembly_last_advance = None
+        self._assembly_logged = 0.0
         self._signature = None
         self._res_scale = None
 
     @property
     def healthy(self) -> bool:
         return not self._disabled
+
+    @property
+    def doc_live(self) -> bool:
+        """Whether an assembled doc is drawing frames RIGHT NOW. False all
+        through prepare + assembly, when the legacy path still owns the
+        frame - the renderer must keep drawing everything it normally
+        would until this flips."""
+        return self._evaluator is not None
 
     def delegate(self, frame, ctx, painter, field_captures=None,
                  overscan=None, per_player=None) -> bool:
@@ -424,11 +434,24 @@ class DrawablePipeline:
         a non-GL painter disables the pipeline."""
         if self._advance_assembly():
             return True
+        if self._assembly is not None:
+            # A replay is in flight. It must finish before ANYTHING else
+            # starts - falling through here treated "no prepare thread" as
+            # "nothing happening" and spawned a duplicate 'superseded'
+            # prepare EVERY assembly window; each duplicate's result then
+            # sat in `_prepared` unconsumed (the live-doc early return sat
+            # above the check), which also blocked every future rebuild.
+            # The live doc, when there is one, keeps drawing meanwhile.
+            return self._evaluator is not None
+        if self._prepared is not None:
+            # Consume a finished prepare BEFORE the live-doc early return,
+            # or a supersede's result is never assembled.
+            self._start_assembly()
+            if self._advance_assembly():
+                return True
+            return self._evaluator is not None
         if self._evaluator is not None:
             return True
-        if self._prepared is not None:
-            self._start_assembly()
-            return self._advance_assembly()
         if self._prepare_thread is not None and self._prepare_thread.is_alive():
             return False
         if self._prepare_error is not None:
@@ -551,6 +574,16 @@ class DrawablePipeline:
     # Replay budget per frame: the full replay is ~1.3s of FFI on gat 1
     # (7k ops); this bound keeps each frame's share invisible.
     _REPLAY_BUDGET_S = 0.006
+    # The budget SCALES with the observed frame period, because until the
+    # doc is adopted every frame pays the legacy path - the slow one the
+    # pipeline exists to replace. A fixed 6ms is 40% of a 60fps frame but
+    # 2% of the 300ms frames a heavy chart draws at, which stretched a
+    # 20k-op assembly across ~600 frames: minutes of wall time stuck at
+    # the slow rate, adoption receding as the frames it needs get rarer.
+    # A quarter of the frame converges instead - the slower the legacy
+    # frames, the harder the replay pushes to escape them.
+    _REPLAY_BUDGET_SHARE = 0.25
+    _REPLAY_BUDGET_MAX_S = 0.120
 
     def _start_assembly(self) -> None:
         ops, id_maps, signature, run = self._prepared
@@ -562,6 +595,8 @@ class DrawablePipeline:
         import storyboard_native as sn
         builder = sn.DocBuilder(float(_SCREEN_W), float(_SCREEN_H))
         self._assembly = [builder, ops, 0, id_maps, signature]
+        self._assembly_last_advance = None
+        self._assembly_logged = 0.0
 
     def _advance_assembly(self) -> bool:
         """Replay a budget's worth of recorded ops; adopt the doc when the
@@ -571,7 +606,8 @@ class DrawablePipeline:
             return False
         import time as _time
         builder, ops, index, id_maps, signature = self._assembly
-        deadline = _time.perf_counter() + self._REPLAY_BUDGET_S
+        now = _time.perf_counter()
+        deadline = now + self._replay_budget(now)
         try:
             while index < len(ops) and _time.perf_counter() < deadline:
                 method, args, kwargs = ops[index]
@@ -579,6 +615,7 @@ class DrawablePipeline:
                 index += 1
             if index < len(ops):
                 self._assembly[2] = index
+                self._log_assembly_progress(index, len(ops))
                 return False
             evaluator = builder.finish()
         except Exception:
@@ -588,6 +625,31 @@ class DrawablePipeline:
         self._assembly = None
         self._adopt(evaluator, id_maps, signature)
         return True
+
+    def _replay_budget(self, now: float) -> float:
+        """This frame's replay slice: a share of the observed frame period
+        (the gap since the last advance), floored and capped. See
+        `_REPLAY_BUDGET_SHARE`."""
+        last = self._assembly_last_advance
+        self._assembly_last_advance = now
+        if last is None:
+            return self._REPLAY_BUDGET_S
+        return min(max(self._REPLAY_BUDGET_S,
+                       (now - last) * self._REPLAY_BUDGET_SHARE),
+                   self._REPLAY_BUDGET_MAX_S)
+
+    def _log_assembly_progress(self, index: int, total: int) -> None:
+        """A progress line every ~10s of ongoing assembly, so a slow
+        adoption reads as work advancing rather than as a prepare that
+        never ends (the heartbeat covers only the worker-side prepare)."""
+        import time as _time
+        now = _time.monotonic()
+        if now - self._assembly_logged < 10.0:
+            return
+        self._assembly_logged = now
+        logger.warning("DrawablePipeline: assembling prepare #%d - "
+                       "%d/%d ops replayed (frame-budgeted)",
+                       self._live_prepare_n, index, total)
 
     def _adopt(self, evaluator, id_maps, signature) -> None:
         """Swap the freshly assembled doc in: mint the GL executor, apply
@@ -611,7 +673,11 @@ class DrawablePipeline:
             image_grids=(id_maps.get('image_grids')
                          if isinstance(id_maps, dict) else None),
             image_specs=(id_maps.get('image_specs')
-                         if isinstance(id_maps, dict) else None))
+                         if isinstance(id_maps, dict) else None),
+            meshes=(id_maps.get('meshes')
+                    if isinstance(id_maps, dict) else None),
+            note_samplers=(_note_sampler_map(id_maps)
+                           if isinstance(id_maps, dict) else None))
         # The DOC says what its own screen surface is. A game whose doc holds
         # the whole scene declares an opaque clear (NotITG: the engine clears
         # its framebuffer black, and an AFT capture of a transparent screen
@@ -709,29 +775,110 @@ class DrawablePipeline:
             return None
         from analysis.player.render.storyboard import note_feed
 
-        def emit(c):
+        shader_ctx = self._note_shader_ctx(float(getattr(ctx, 't_now', 0.0)))
+
+        def emit(c, number=1):
             # The ctx's field geometry is in SCREEN px (the adapter already
             # stretched its design grid onto the chart rect); this doc's
             # screen is the design box the executor stretches at present
             # time, so the feed must convert or the stretch lands twice.
-            u_soa, f_soa, count, _report = note_feed.feed_from_context(
-                c, image_map, design=(_SCREEN_W, _SCREEN_H))
-            return int(count), u_soa.tobytes(), f_soa.tobytes()
+            u_soa, f_soa, x_soa, count, _report = note_feed.feed_from_context(
+                c, image_map, design=(_SCREEN_W, _SCREEN_H),
+                note_shader=shader_ctx(number))
+            return int(count), u_soa, f_soa.tobytes(), x_soa
 
-        emissions = per_player(emit) if per_player is not None \
-            else {_DEFAULT_SCOPE: emit(ctx)}
+        # An emission costs a whole per-player prepass rebuild, so ask the
+        # doc which slots' consumers can DRAW right now and pay only for
+        # those. A chart runs with up to 8 player fields but shows a
+        # couple at a time; emitting for hidden ones was most of the
+        # frame's Python (measured ~9ms/frame on gat 2, 5 players).
+        live = self._live_feed_slots(ctx)
+        wanted = frozenset(scope for scope, slot in slots.items()
+                           if live is None or int(slot) in live)
+        emissions = per_player(emit, wanted) if per_player is not None \
+            else ({_DEFAULT_SCOPE: emit(ctx)} if _DEFAULT_SCOPE in wanted
+                  or live is None else {})
         primary = emissions.get(_DEFAULT_SCOPE)
-        if not any(e[0] for e in emissions.values()):
+        if live is None and not any(e[0] for e in emissions.values()):
+            # Without liveness the all-empty frame is indistinguishable
+            # from a broken emitter, so decline it (the legacy path draws).
+            # WITH liveness, empty is an answer: nothing on screen wants
+            # notes, and the doc still owns the frame.
             return None
-        slot_ids, counts, u_parts, f_parts = [], [], [], []
+        empty = (0, None, b'', None)
+        slot_ids, counts, u_parts, f_parts, x_parts = [], [], [], [], []
+        x_base = 0
         for scope, slot in sorted(slots.items(), key=lambda kv: int(kv[1])):
-            count, u_bytes, f_bytes = emissions.get(scope) or primary \
-                or (0, b'', b'')
+            if scope in wanted:
+                count, u_soa, f_bytes, x_soa = emissions.get(scope) \
+                    or primary or empty
+            else:
+                count, u_soa, f_bytes, x_soa = empty
             slot_ids.append(int(slot))
             counts.append(count)
-            u_parts.append(u_bytes)
             f_parts.append(f_bytes)
-        return slot_ids, counts, b''.join(u_parts), b''.join(f_parts)
+            if count and x_soa is not None and len(x_soa):
+                # Each emission's x-window offsets are local to its own
+                # buffer; the evaluator sees ONE concatenated buffer, so
+                # rebase them here (a primary emission reused by several
+                # slots gets a fresh copy per slot).
+                rows = u_soa.reshape(count, note_feed.FEED_U_STRIDE).copy()
+                stamped = rows[:, 6] > 0
+                rows[stamped, 5] += x_base
+                u_parts.append(rows.tobytes())
+                x_parts.append(x_soa.tobytes())
+                x_base += len(x_soa)
+            else:
+                u_parts.append(u_soa.tobytes() if u_soa is not None else b'')
+        return (slot_ids, counts, b''.join(u_parts), b''.join(f_parts),
+                b''.join(x_parts))
+
+    def _note_shader_ctx(self, t):
+        """A per-player factory for this frame's note-shader stamp:
+        `shader_ctx(number)` -> the `note_shader` dict
+        `note_feed.feed_from_context` takes, or None while that player
+        has no live bind. Chart uniform values are sampled here, once
+        per player per frame - a handful of scalar curves."""
+        note_shaders = (self._id_maps or {}).get('note_shaders')
+
+        def dark(_number):
+            return None
+
+        if not note_shaders:
+            return dark
+        to_beat = note_shaders.get('to_beat')
+
+        def shader_ctx(number):
+            curves = note_shaders['players'].get(number)
+            if not curves:
+                return None
+            active = {}
+            for category, curve in curves.items():
+                src = int(round(float(curve.sample(t)[0])))
+                entry = (note_shaders['sources'].get(src)
+                         if src >= 0 else None)
+                if entry is None:
+                    continue
+                values = [float(entry['uniforms'][name].sample(t)[0])
+                          for name in entry['uniform_names']]
+                active[category] = (entry['shader_plus_one'], values)
+            if not active:
+                return None
+            active['time'] = t
+            active['beat'] = float(to_beat(t)) if to_beat is not None else 0.0
+            active['to_beat'] = to_beat
+            return active
+
+        return shader_ctx
+
+    def _live_feed_slots(self, ctx):
+        """The doc's feed slots whose consumers can draw at the ctx's time,
+        or None when the evaluator predates the query (feed everything -
+        correct, just unpriced)."""
+        query = getattr(self._evaluator, 'live_feed_slots', None)
+        if query is None:
+            return None
+        return frozenset(int(s) for s in query(float(ctx.t_now)))
 
     # The note sprites the feed resolves, as (feed key, sprite-cache name).
     # The receptor is not a cache sprite - the field layer strokes a plain
@@ -845,9 +992,9 @@ class DrawablePipeline:
             if self._has_note_slots():
                 return None, None, None
             return self._schedule(t)
-        slots, counts, u_bytes, f_bytes = fed
+        slots, counts, u_bytes, f_bytes, x_bytes = fed
         u_raw, f_raw, uf_raw, n = self._evaluator.frame_with_feeds(
-            float(t), slots, counts, u_bytes, f_bytes)
+            float(t), slots, counts, u_bytes, f_bytes, x_bytes)
         u = np.frombuffer(u_raw, dtype=np.uint32).reshape(
             n, self._evaluator.u_stride)
         f = np.frombuffer(f_raw, dtype=np.float32).reshape(
@@ -1151,6 +1298,17 @@ def _lazy_images(id_maps):
     texts = maps.get('text_images')
     return _LazyImages(paths if isinstance(paths, dict) else {},
                        texts if isinstance(texts, dict) else {})
+
+
+def _note_sampler_map(id_maps) -> dict | None:
+    """{shader id: {sampler name: file path}} for the doc's note-shader
+    sources (their uniformTexture file binds), or None."""
+    note_shaders = id_maps.get('note_shaders')
+    if not note_shaders:
+        return None
+    return {entry['shader_plus_one'] - 1: entry['samplers']
+            for entry in note_shaders['sources'].values()
+            if entry.get('samplers')}
 
 
 def _drawable_sizes_of(id_maps, evaluator) -> list:

@@ -1576,3 +1576,32 @@ def test_projected_z_matches_perspective_scale():
     px = t3d.project_corners(np.array(N._NOTE_CORNERS), H)
     scale = (px[1][0] - px[0][0]) / (2 * N._NOTE_HALF)
     assert abs(scale - float(ae.perspective_z_scale(np.array([100.0]))[0])) < 0.01
+
+
+def test_confusion_rotation_uses_the_field_frames_handedness():
+    """A note's confusion x/y turn must share the SIGN CONVENTION of a
+    field instance's rotation_x/y, or a chart cannot cancel one with the
+    other.
+
+    gat 2's revolt billboards its notes: while each proxy frame spins
+    `rotationy(ry)`, the update body feeds the notes
+    `confusionyoffset = -rad(ry)`. The two must annihilate. They only do
+    if the note's depth follows the frame's `r -> (r*cos, +r*sin)` - the
+    textbook `-r*sin` is the opposite handedness and ADDS to the frame's
+    rotation instead (an exact mirror at 90 degrees). `cos` is even, so
+    the in-plane half cannot catch this; only the depth shows it.
+    """
+    import numpy as np
+    from analysis.player.render.mods import arrow_effects as ae
+
+    cols = np.arange(4)
+    r = ae.column_offsets(4, ae.ARROW_SIZE)
+    for degrees in (30.0, 90.0, 196.0, 270.0):
+        theta = math.radians(degrees)
+        offs = ae.note_offsets({'confusionyoffset': theta}, cols,
+                               np.zeros(4), t_now=0.0, beat_now=0.0,
+                               keycount=4, project_3d=True)
+        # The frame's convention, measured off TransformChannel._local.
+        np.testing.assert_allclose(offs.dx, r * math.cos(theta) - r,
+                                   atol=1e-9)
+        np.testing.assert_allclose(offs.z, r * math.sin(theta), atol=1e-9)

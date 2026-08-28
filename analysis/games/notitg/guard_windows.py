@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from analysis.games.notitg.xml_actors import _lua50_compat, _strip_lua_wrapper
 from analysis.player.render.expr import ast
+from analysis.player.render.expr.eval_tree import tree_eval
 from analysis.player.render.expr.parser import parse_body
 from analysis.player.render.expr.surface import ConstSurface, Surface
 from analysis.player.render.expr.windows import guard_windows as _guard_windows
@@ -44,12 +45,21 @@ def windows_from_body(body: str,
     return _merge_spans(sorted(spans))
 
 
-def rearm_period(body: str, update_command: str = 'Update') -> float | None:
+def rearm_period(body: str, update_command: str = 'Update',
+                 const_surface: Surface | None = None) -> float | None:
     """Seconds between self-scheduled invocations, from a
     `self:sleep(X)` paired with a `self:queuecommand('<update_command>')`
     in the body - or None when the body never re-arms. Replaces the
-    `_REARM_RE` scrape: walk for a `sleep` method call whose numeric arg is
-    positive when a matching queuecommand is present."""
+    `_REARM_RE` scrape: walk for a `sleep` method call whose arg is a
+    positive number when a matching queuecommand is present.
+
+    `const_surface` resolves a period AUTHORED AS AN EXPRESSION - gat 2
+    re-arms with `self:sleep(1 / gf2_fps)` where `gf2_fps` is a chart
+    global set at load. Missing it is not a cosmetic default: the sim
+    then ticks the body at ITS rate instead of the chart's, and every
+    per-frame integrator (`ry = ry + rotspd` per tick) accumulates
+    proportionally too much - a spin phase that drifts off the engine's.
+    """
     stmts, _sink = parse_body(_prepare(body))
     has_rearm = False
     period: float | None = None
@@ -58,10 +68,29 @@ def rearm_period(body: str, update_command: str = 'Update') -> float | None:
             case ast.Method(name='queuecommand', args=(ast.Str(value=v), *_)) \
                     if v == update_command:
                 has_rearm = True
-            case ast.Method(name='sleep', args=(ast.Num(value=n), *_)) \
-                    if n > 0.0:
-                period = n
+            case ast.Method(name='sleep', args=(arg, *_)):
+                value = _positive_seconds(arg, const_surface)
+                if value is not None:
+                    period = value
     return period if has_rearm else None
+
+
+def _positive_seconds(arg, const_surface: Surface | None) -> float | None:
+    """`arg` as a positive number of seconds: a literal directly, any other
+    expression through the constant evaluator (None without a surface, or
+    when the expression reads something the surface cannot answer)."""
+    match arg:
+        case ast.Num(value=n):
+            return n if n > 0.0 else None
+    if const_surface is None:
+        return None
+    try:
+        value = tree_eval(arg, const_surface)
+    except Exception:
+        return None
+    if isinstance(value, (int, float)) and value > 0.0:
+        return float(value)
+    return None
 
 
 def bound_global_name(body: str) -> str | None:

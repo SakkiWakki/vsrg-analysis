@@ -63,8 +63,9 @@ pub const SRC_LINES: u32 = 4;
 /// count == 0 => the op binds no uniforms (offset is then unused).
 pub const U_STRIDE: usize = 11;
 /// f32 lanes per op record: mat3 (row-major) + opacity + tint rgb +
-/// crop ltrb + origin xy + size xy + fit (mode, w, h) + fade lrtb.
-pub const F_STRIDE: usize = 28;
+/// crop ltrb + origin xy + size xy + fit (mode, w, h) + fade lrtb +
+/// uv rect (u0, v0, u1, v1; u1/v1 may exceed 1 = tiling) + uv offset.
+pub const F_STRIDE: usize = 34;
 
 #[derive(Default)]
 pub struct DrawSchedule {
@@ -229,29 +230,45 @@ fn find_override(overrides: &[(u32, f32)], prop: u32) -> Option<f32> {
     overrides.iter().find(|(k, _)| *k == prop).map(|(_, v)| *v)
 }
 
-/// u32 lanes per fed item (FROZEN, drawable-port-wave1.md A5):
-///   [source_kind, source_id, frame, flags]
+/// u32 lanes per fed item (FEED V3, the per-note shader tier):
+///   [source_kind, source_id, frame, flags, shader_plus_one,
+///    x_offset, x_count]
 /// flags bit0 = additive, bit1 = screen_space, bit2 = has_z.
-pub const FEED_U_STRIDE: usize = 4;
+/// Lane 4 is the item's per-note shader program (0 = unshaded); lanes
+/// 5/6 window the feed's x32 buffer of PRE-SAMPLED uniform values
+/// (chart uniforms in desc-name order, then the six
+/// NOTE_SHADER_BUILTIN_NAMES) - fed items carry values, not channels.
+pub const FEED_U_STRIDE: usize = 7;
 /// f32 lanes per fed item (FEED V2, drawable-port-wave3.md C1): the
 /// mat3 crosses NATIVE - column-vector RECORD convention (translation
 /// in lanes 2/5, exactly the BLIT record's f-lanes 0..9), so a fed mat3
 /// is written to the BLIT record verbatim (homographies included). No
 /// affine decomposition, no projective skip.
 ///   [m00, m01, m02, m10, m11, m12, m20, m21, m22,
-///    opacity, r, g, b, crop_l, crop_t, crop_r, crop_b, z]
-pub const FEED_F_STRIDE: usize = 18;
+///    opacity, r, g, b, crop_l, crop_t, crop_r, crop_b, z,
+///    model_z, rot_x, rot_y, rot_z]
+///
+/// `z` (17) is the local SORT key. Lanes 18..22 are the item's 3D MODEL
+/// (field-space depth + engine-ordered rotations in degrees), gated by
+/// `FEED_FLAG_HAS_MODEL` - a different thing entirely, and the reason the
+/// stride grew: a 3x3 can carry neither depth nor a tilt's sign, so both
+/// used to die before the consuming chain saw them. A modeled item's mat3
+/// carries scale and field position ONLY; its rotations (the in-plane
+/// rot_z included, so the engine's X->Y->Z order survives) compose in
+/// `project_item_model`.
+pub const FEED_F_STRIDE: usize = 22;
 
 const FEED_FLAG_ADDITIVE: u32 = 1;
 const FEED_FLAG_SCREEN: u32 = 1 << 1;
 const FEED_FLAG_HAS_Z: u32 = 1 << 2;
+const FEED_FLAG_HAS_MODEL: u32 = 1 << 3;
 
 /// Decode one fed item's flat SoA lanes into an `Item`. Fed values are
 /// already sampled scalars, so every channel is a constant (rest-only)
 /// ChannelRef - no doc channel lookups happen for fed items. The fed
 /// mat3 rides `fed_mat` (already in the record's column-vector layout);
 /// emit_item writes it to the BLIT record verbatim.
-fn feed_item(u: &[u32], f: &[f32]) -> Item {
+fn feed_item(u: &[u32], f: &[f32], x: &[f32]) -> Item {
     let (source_kind, source_id, frame, flags) = (u[0], u[1], u[2], u[3]);
     let source = match source_kind {
         SRC_IMAGE => Source::Image {
@@ -287,6 +304,15 @@ fn feed_item(u: &[u32], f: &[f32]) -> Item {
         crate::doc::Space::Scene
     };
     item.z = (flags & FEED_FLAG_HAS_Z != 0).then(|| ChannelRef::constant(f[17]));
+    item.fed_model =
+        (flags & FEED_FLAG_HAS_MODEL != 0).then(|| [f[18], f[19], f[20], f[21]]);
+    if u[4] != 0 {
+        item.shader = Some(u[4] - 1);
+        let (off, count) = (u[5] as usize, u[6] as usize);
+        if count > 0 && off + count <= x.len() {
+            item.fed_uniforms = Some(x[off..off + count].to_vec());
+        }
+    }
     item
 }
 
@@ -306,6 +332,7 @@ pub fn parse_feeds(
     item_counts: &[u32],
     u: &[u32],
     f: &[f32],
+    x: &[f32],
 ) -> Vec<FeedItems> {
     let mut feeds = Vec::with_capacity(ids.len());
     let mut ui = 0usize;
@@ -313,13 +340,49 @@ pub fn parse_feeds(
     for (feed, &count) in ids.iter().zip(item_counts) {
         let mut items = Vec::with_capacity(count as usize);
         for _ in 0..count {
-            items.push(feed_item(&u[ui..ui + FEED_U_STRIDE], &f[fi..fi + FEED_F_STRIDE]));
+            items.push(feed_item(&u[ui..ui + FEED_U_STRIDE], &f[fi..fi + FEED_F_STRIDE], x));
             ui += FEED_U_STRIDE;
             fi += FEED_F_STRIDE;
         }
         feeds.push(FeedItems { drawable: *feed, items });
     }
     feeds
+}
+
+/// Feed slots whose `Cmd::Feed` would draw at `t`: the `visible` gate
+/// passes and the consumer chain (when any) composes to a live alpha -
+/// the same two gates `emit_feed` applies before touching items. The
+/// per-frame note emission is priced PER PLAYER on the Python side, so
+/// the producer asks this first and skips whole players nobody can see.
+pub fn live_feed_slots(doc: &DrawableDoc, t: f32) -> Vec<u32> {
+    let ch = &doc.channels;
+    let mut out: Vec<u32> = Vec::new();
+    for drawable in &doc.drawables {
+        for cmd in &drawable.commands {
+            let Cmd::Feed {
+                slot,
+                links,
+                flip_base_y,
+                visible,
+                ..
+            } = cmd
+            else {
+                continue;
+            };
+            if out.contains(slot) || ch.sample(*visible, t) < 0.5 {
+                continue;
+            }
+            if !links.is_empty() {
+                let states: Vec<crate::transform::TransformState> =
+                    links.iter().map(|l| sample_link(ch, l, t)).collect();
+                if crate::transform::compose_world(&states, *flip_base_y).is_none() {
+                    continue;
+                }
+            }
+            out.push(*slot);
+        }
+    }
+    out
 }
 
 pub fn evaluate(doc: &DrawableDoc, t: f32, feeds: &[Feed]) -> DrawSchedule {
@@ -653,6 +716,11 @@ fn sample_link(
 /// each opacity - so the consumer RE-RENDERS the same unclipped items
 /// instead of blitting a capture-boxed texture (the copy-render rule).
 #[allow(clippy::too_many_arguments)]
+/// The identity in the record's column-vector layout: a model item's own
+/// projection already carries its placement, so only the chain's ALPHA is
+/// still owed to `emit_item_folded`.
+const IDENT3: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+
 fn emit_feed(
     doc: &DrawableDoc,
     slot: u32,
@@ -674,8 +742,26 @@ fn emit_feed(
         return;
     };
     if links.is_empty() {
+        // No consuming chain, but an item may still carry depth (a bumpy
+        // note on the base field). There is nothing to compose with, so
+        // project it against the identity world - which is exactly the
+        // foreshortening the item used to bake locally.
+        let cam = projection.map(|c| c.matrix(ch, t));
         for item in feed.items {
-            emit_item(doc, item, t, events, cache, schedule);
+            match item.fed_model {
+                Some(model) => {
+                    let Some(mat) = item.fed_mat.as_ref().and_then(|m| {
+                        crate::transform::project_item_model(
+                            m, &model, &crate::camera::IDENTITY, cam.as_ref())
+                    }) else {
+                        continue;
+                    };
+                    let mut placed = item.clone();
+                    placed.fed_mat = Some(mat);
+                    emit_item_folded(doc, &placed, t, events, cache, schedule, None);
+                }
+                _ => emit_item(doc, item, t, events, cache, schedule),
+            }
         }
         return;
     }
@@ -683,6 +769,36 @@ fn emit_feed(
     let states: Vec<crate::transform::TransformState> =
         links.iter().map(|l| sample_link(ch, l, t)).collect();
     let cam = projection.map(|c| c.matrix(ch, t));
+
+    // An item carrying its own depth cannot ride a chain that has already
+    // been folded flat and projected - its z would have nothing left to
+    // act on. Those feeds take the chain's PRE-CAMERA world and project
+    // per item instead, so item depth and chain rotation meet in 4D.
+    // Feeds with no such item keep the fold-once path: this is the hot
+    // loop (thousands of notes a frame) and it must not grow work.
+    if feed.items.iter().any(|i| i.fed_model.is_some()) {
+        let Some((world, alpha, _crop)) =
+            crate::transform::compose_world(&states, flip_base_y)
+        else {
+            return;
+        };
+        const FLAT: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+        for item in feed.items {
+            // With a model the projected result IS the item's placement,
+            // so it replaces `fed_mat` instead of pre-multiplying it.
+            let model = item.fed_model.as_ref().unwrap_or(&FLAT);
+            let Some(mat) = item.fed_mat.as_ref().and_then(|m| {
+                crate::transform::project_item_model(m, model, &world, cam.as_ref())
+            }) else {
+                continue;
+            };
+            let mut placed = item.clone();
+            placed.fed_mat = Some(mat);
+            emit_item_folded(doc, &placed, t, events, cache, schedule, Some((&IDENT3, alpha)));
+        }
+        return;
+    }
+
     let Some((h, alpha, _crop)) =
         crate::transform::compose_links(&states, flip_base_y, cam.as_ref())
     else {
@@ -842,15 +958,29 @@ fn emit_item_folded(
     for (lane, fade) in item.fade.iter().enumerate() {
         f[24 + lane] = ch.sample(*fade, t);
     }
+    for (lane, uv) in item.uv_rect.iter().enumerate() {
+        f[28 + lane] = ch.sample(*uv, t);
+    }
+    for (lane, uv) in item.uv_offset.iter().enumerate() {
+        f[32 + lane] = ch.sample(*uv, t);
+    }
 
-    let (uniform_offset, uniform_count) = if item.shader.is_some() && !item.uniforms.is_empty() {
-        let offset = schedule.uf.len() as u32;
-        for (_name_idx, r) in &item.uniforms {
-            schedule.uf.push(ch.sample(*r, t));
+    let (uniform_offset, uniform_count) = match (&item.fed_uniforms, item.shader) {
+        // A fed item carries pre-sampled VALUES (the per-note tier);
+        // copy them verbatim.
+        (Some(values), Some(_)) => {
+            let offset = schedule.uf.len() as u32;
+            schedule.uf.extend_from_slice(values);
+            (offset, values.len() as u32)
         }
-        (offset, item.uniforms.len() as u32)
-    } else {
-        (0, 0)
+        _ if item.shader.is_some() && !item.uniforms.is_empty() => {
+            let offset = schedule.uf.len() as u32;
+            for (_name_idx, r) in &item.uniforms {
+                schedule.uf.push(ch.sample(*r, t));
+            }
+            (offset, item.uniforms.len() as u32)
+        }
+        _ => (0, 0),
     };
 
     let mut u = [0u32; U_STRIDE];
@@ -863,6 +993,12 @@ fn emit_item_folded(
     } else {
         crate::doc::Blend::SourceOver
     } as u32;
+    if item.fed_uniforms.is_some() && item.shader.is_some() {
+        // Bit 1 of the blend lane: NOTE_SHADED - the executor draws this
+        // record through the translated per-note program (blend readers
+        // mask with & 1).
+        u[4] |= 2;
+    }
     u[5] = item.shader.map(|s| s + 1).unwrap_or(0);
     u[6] = item.clip.map(|c| c + 1).unwrap_or(0);
     u[7] = matches!(item.space, crate::doc::Space::Screen) as u32;
@@ -960,6 +1096,7 @@ mod tests {
             into: slot,
             links: Vec::new(),
             flip_base_y: false,
+            z: None,
         });
         doc.drawables[0]
             .commands
@@ -1070,23 +1207,28 @@ mod tests {
     #[test]
     fn parse_feeds_decodes_frozen_soa_layout() {
         // Two fed items: an additive image and a screen-space fill w/ z.
-        // Feed v2: f32 lanes 0..9 are the mat3 in the record's
-        // column-vector layout, written to the BLIT record verbatim.
+        // Feed v3 u-lanes: [kind, id, frame, flags, shader+1, x_off,
+        // x_count]; item 0 is stamped with shader 2 and a 3-value
+        // uniform window, item 1 is unshaded.
         let u: Vec<u32> = vec![
-            SRC_IMAGE, 5, 3, FEED_FLAG_ADDITIVE, // item 0
-            SRC_FILL, 0, 0, FEED_FLAG_SCREEN | FEED_FLAG_HAS_Z, // item 1
+            SRC_IMAGE, 5, 3, FEED_FLAG_ADDITIVE, 3, 1, 3, // item 0
+            SRC_FILL, 0, 0, FEED_FLAG_SCREEN | FEED_FLAG_HAS_Z, 0, 0, 0, // item 1
         ];
+        let x: Vec<f32> = vec![9.0, 0.5, 1.5, 2.5, 9.0];
         // item 0 mat3: scale(2, 0.5) translate(10, 20) column-vector; item 1
         // mat3: a projective row (m20/m21 non-zero) proving homographies
         // cross verbatim, not just affine.
         let f: Vec<f32> = vec![
-            // m00..m22, opacity, r, g, b, crop l/t/r/b, z
+            // m00..m22, opacity, r, g, b, crop l/t/r/b, z,
+            // model_z, rot_x, rot_y, rot_z
             2.0, 0.0, 10.0, 0.0, 0.5, 20.0, 0.0, 0.0, 1.0, //
-            0.75, 1.0, 0.5, 0.25, 0.1, 0.2, 0.3, 0.4, 0.0, // 0
+            0.75, 1.0, 0.5, 0.25, 0.1, 0.2, 0.3, 0.4, 0.0, //
+            0.0, 0.0, 0.0, 0.0, // 0
             1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.001, 0.002, 1.0, //
-            1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 9.0, // 1
+            1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 9.0, //
+            0.0, 0.0, 0.0, 0.0, // 1
         ];
-        let feeds = parse_feeds(&[7], &[2], &u, &f);
+        let feeds = parse_feeds(&[7], &[2], &u, &f, &x);
         assert_eq!(feeds.len(), 1);
         assert_eq!(feeds[0].drawable, 7);
         let items = &feeds[0].items;
@@ -1099,6 +1241,10 @@ mod tests {
         assert_eq!(items[0].blend_add.rest, 1.0);
         assert!(matches!(items[0].space, crate::doc::Space::Scene));
         assert!(items[0].z.is_none());
+        assert_eq!(items[0].shader, Some(2));
+        assert_eq!(items[0].fed_uniforms, Some(vec![0.5, 1.5, 2.5]));
+        assert_eq!(items[1].shader, None);
+        assert!(items[1].fed_uniforms.is_none());
         assert_eq!(
             items[0].fed_mat,
             Some([2.0, 0.0, 10.0, 0.0, 0.5, 20.0, 0.0, 0.0, 1.0])
@@ -1153,6 +1299,7 @@ mod tests {
             flip_base_y: false,
             visible: ChannelRef::constant(1.0),
             projection: None,
+            z: None,
         });
         doc.drawables[0]
             .commands
@@ -1207,6 +1354,7 @@ mod tests {
             flip_base_y: false,
             visible: ChannelRef::constant(1.0),
             projection: None,
+            z: None,
         });
         let mut fed = Item::of(Source::Fill);
         fed.fed_mat = Some([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
@@ -1250,6 +1398,7 @@ mod tests {
                 flip_base_y: false,
                 visible: ChannelRef::constant(if hide_via_chain { 1.0 } else { 0.0 }),
                 projection: None,
+                z: None,
             });
             let mut fed = Item::of(Source::Fill);
             fed.fed_mat = Some([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
@@ -1327,6 +1476,7 @@ mod tests {
             scale_z: c(s.scale_z),
             base_scale_z: c(s.base_scale_z),
             rotation_order: s.rotation_order,
+            awake: c(1.0),
         }
     }
 

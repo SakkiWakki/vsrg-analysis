@@ -255,19 +255,24 @@ def local_matrix(pos=(0.0, 0.0, 0.0), rot=(0.0, 0.0, 0.0), scl=(1.0, 1.0, 1.0),
                  skewx=0.0, skewy=0.0, align=None):
     """A node's local matrix per Actor::BeginDraw (Actor.cpp L737-810).
 
-    The premult run there builds, in row-vector storage,
-        L = S(scl) @ Rxyz(rot) @ T(pos) @ [T(align)] @ [SkewX] @ [SkewY]
-    so that v @ L scales, then rotates, then translates to position -- the
-    SM sprite reading. `rot` should already include the m_baseRotation add
-    (angle = tween + baserotation per axis, L754-756). `align` is the
-    (dx, dy) alignment offset (default center = no offset)."""
-    L = scale(*scl) @ rotate_xyz(*rot) @ translate(*pos)
+    The post-mult run there (decompile Actor.clean.c @004a4c8a:
+    translate-and-zoom, then rotation, then skew, each PostMultMatrix)
+    reads, in row-vector storage,
+        L = [SkewX] @ [SkewY] @ Rxyz(rot) @ S(scl) @ T(pos) @ [T(align)]
+    so that v @ L skews (innermost), then rotates, then scales, then
+    translates - `field_compose._local`'s order. (The previous shape here,
+    scale-first with skew outermost, sheared along the parent's unrotated
+    axes: skewing a rotated screen visually reset the rotation.) `rot`
+    should already include the m_baseRotation add (angle = tween +
+    baserotation per axis). `align` is the (dx, dy) alignment offset
+    (default center = no offset)."""
+    L = rotate_xyz(*rot) @ scale(*scl) @ translate(*pos)
     if align is not None:
         L = L @ translate(align[0], align[1], 0.0)
     if skewx:
-        L = L @ skew_x(skewx)
+        L = skew_x(skewx) @ L
     if skewy:
-        L = L @ skew_y(skewy)
+        L = skew_y(skewy) @ L
     return L
 
 

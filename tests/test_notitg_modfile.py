@@ -280,9 +280,41 @@ def test_scroll_base_inferred_from_widest_xmod_window():
     sc, _skipped = compile_scroll_multipliers(events)
     tl = EventTimeline(keyframes_from_events(sc, ('multiplier',), (1.0,)),
                        rest=(1.0,))
-    # baseline holds at rest (1.0); the 5x burst is 5/2.5 = 2.0.
-    assert tl.sample(10.0)[0] == pytest.approx(1.0)
-    assert tl.sample(32.0)[0] == pytest.approx(2.0)
+    # ABSOLUTE speeds (reference density): the 2.5x baseline holds at
+    # 2.5; the unprefixed 5x burst chases at the default 1.0/s and
+    # arrives by t=32.5.
+    assert tl.sample(10.0)[0] == pytest.approx(2.5)
+    assert tl.sample(33.0)[0] == pytest.approx(5.0)
+
+
+def test_one_shot_applied_xmod_persists_and_sets_the_base():
+    """A sim-applied xmod is persistent PlayerOptions state: a mirin
+    chart applies `setdefault {2.5, 'xmod'}` ONCE (one burst-wide row)
+    and only touches it on change. The old burst-window model reverted
+    the scroll toward a 0.0 rest as soon as the burst ended - Funny
+    Funky Freaky's notes sagged to a standstill by 1:25. Each sim row
+    extends to the next application, the longest-HELD value is the
+    base, and any gap rests at base speed (multiplier 1)."""
+    from analysis.games.notitg.mod_channels import (
+        _infer_base_xmod, compile_scroll_multipliers)
+    from analysis.player.render.effects.timeline import (
+        EventTimeline, keyframes_from_events)
+
+    events = [
+        {'t_start': 0.0, 't_end': 0.02, 'modstring': '*-1 2.500000x',
+         'player': None, 'apply_type': 'sim'},
+        {'t_start': 60.0, 't_end': 60.02, 'modstring': '*-1 1.500000x',
+         'player': None, 'apply_type': 'sim'},
+        {'t_start': 70.0, 't_end': 70.02, 'modstring': '*-1 2.500000x',
+         'player': None, 'apply_type': 'sim'},
+    ]
+    assert _infer_base_xmod(events) == pytest.approx(2.5)
+    sc, _skipped = compile_scroll_multipliers(events)
+    tl = EventTimeline(keyframes_from_events(sc, ('multiplier',), (1.0,)),
+                       rest=(1.0,))
+    assert tl.sample(30.0)[0] == pytest.approx(2.5)
+    assert tl.sample(65.0)[0] == pytest.approx(1.5)
+    assert tl.sample(80.0)[0] == pytest.approx(2.5)
 
 
 def test_scroll_base_falls_back_to_engine_default_without_xmod():
@@ -312,9 +344,9 @@ def test_scroll_multipliers_relative_to_base_and_snap_holds():
     assert skipped_cm == 0
     tl = EventTimeline(keyframes_from_events(sc, ('multiplier',), (1.0,)),
                        rest=(1.0,))
-    assert tl.sample(5.0)[0] == pytest.approx(1.0)     # holds at base
-    assert tl.sample(15.0)[0] == pytest.approx(1.5)    # 3x / 2x base
-    assert tl.sample(25.0)[0] == pytest.approx(1.0)    # reverts to base
+    assert tl.sample(5.0)[0] == pytest.approx(2.0)     # holds at base
+    assert tl.sample(15.0)[0] == pytest.approx(3.0)    # the 3x window
+    assert tl.sample(25.0)[0] == pytest.approx(2.0)    # reverts to base
 
 
 def test_scroll_multipliers_persistent_window_holds_flat_over_bursts():
@@ -340,10 +372,10 @@ def test_scroll_multipliers_persistent_window_holds_flat_over_bursts():
     sc, _skipped = compile_scroll_multipliers(events)
     tl = EventTimeline(keyframes_from_events(sc, ('multiplier',), (1.0,)),
                        rest=(1.0,))
-    # 2.5x / 2.0 base = 1.25, held flat across every burst gap (a sawtooth
-    # would dip toward 1.0 at each 0.083s gap between reapplies).
+    # 2.5x absolute, held flat across every burst gap (a sawtooth would
+    # dip toward the 2x base at each 0.083s gap between reapplies).
     for t in (1.0, 2.0, 3.0, 4.0):
-        assert tl.sample(t)[0] == pytest.approx(1.25)
+        assert tl.sample(t)[0] == pytest.approx(2.5)
 
 
 def test_scroll_multipliers_fast_toggle_stays_monotonic():

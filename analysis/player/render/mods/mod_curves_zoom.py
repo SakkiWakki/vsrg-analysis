@@ -171,7 +171,12 @@ def zoom_curve(percents, cols, keycount, arrow_size=ARROW_SIZE,
     # numbered per-column variant (confusionx0..); the per-note offset is
     # the confusionxoffset plus those per-column values, exactly as
     # arrow_effects._zoom gates + builds it via _confusion_offset.
-    if (_get(percents, 'confusionx') or _get(percents, 'confusionxoffset')
+    #
+    # 2D FALLBACK ONLY (`z_push is None`), matching `arrow_effects._zoom`:
+    # the projected path renders confusionx as a real tilt with its own
+    # depth, so the flat cos-zoom stand-in would double it there.
+    if z_push is None and (
+            _get(percents, 'confusionx') or _get(percents, 'confusionxoffset')
             or _confusionx_active(percents, keycount)):
         offset = _confusion_offset(percents, 'confusionx', cols, keycount)
         folded = cv.mul(folded, confusionx_zoom(_get(percents, 'confusionx'), offset))

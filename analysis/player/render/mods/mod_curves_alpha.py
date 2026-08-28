@@ -17,8 +17,12 @@ in tests/test_mod_curves_alpha.py.
   blink                   -> alpha : a per-frame flicker scalar (quantized
                                      sine of t), y-independent, added to the
                                      same adjust.
-  stealth / stealthglow   -> alpha : a flat per-frame subtraction from the
-                                     adjust (the note fill fades out).
+  the stealth family     -> alpha : a flat per-frame subtraction from the
+                                     adjust (the fill fades out). WHICH names
+                                     that family holds is the caller's, so a
+                                     mine fades under `minestealth`/
+                                     `hidemines` on the same code path a tap
+                                     fades under `stealth`.
   boomerang               -> alpha : a fade WINDOW past the fold, multiplied
                                      onto the assembled alpha.
   stealthglow             -> glow  : the GLOW channel: flat `percent`,
@@ -45,7 +49,8 @@ import numpy as np
 from analysis.player.render.mods import curves as cv
 from analysis.player.render.mods.arrow_effects import (
     ARROW_SIZE, BOOMERANG_PEAK_PERCENTAGE, CENTER_LINE_Y, FADE_DIST_Y,
-    SCREEN_HEIGHT, _center_line, _hidden_sudden, _quantize, _scale)
+    MINE_STEALTH, SCREEN_HEIGHT, TAP_STEALTH, _center_line, _hidden_sudden,
+    _quantize, _scale)
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +91,7 @@ def _blink_adjust_scalar(percent, t_now) -> float:
     return percent * _scale(f, 0, 1, -1.0, 0.0)
 
 
-def _visibility_adjust(percents, t_now) -> cv.Curve:
+def _visibility_adjust(percents, t_now, stealth=TAP_STEALTH) -> cv.Curve:
     """The additive visibility ADJUST curve (ArrowGetPercentVisible body,
     ArrowEffects.cpp:441-484, minus the final `1 + adjust` clamp and the
     y<0 early-out): hidden + sudden fade windows + a flat stealth subtract +
@@ -95,7 +100,8 @@ def _visibility_adjust(percents, t_now) -> cv.Curve:
     Branch-for-branch with `percent_visible`: the fade windows only build
     when the center line is finite (an extreme mini drives it to +inf,
     collapsing the field to a point and skipping the windows to avoid
-    inf-inf NaN); stealth folds stealth + stealthglow (both hide the fill)."""
+    inf-inf NaN); `stealth` folds its whole family (each name hides the
+    fill)."""
     hidden = percents.get('hidden', 0.0)
     sudden = percents.get('sudden', 0.0)
     hidden_off = percents.get('hiddenoffset', 0.0)
@@ -118,8 +124,8 @@ def _visibility_adjust(percents, t_now) -> cv.Curve:
         if sudden != 0.0:
             terms.append(cv.scale(sudden, window_remap(sudden_start, sudden_end,
                                                        -1.0, 0.0, -1.0, 0.0)))
-    if _stealth_present(percents):
-        terms.append(lambda y, c: -_stealth_total(percents, c.cols)
+    if _stealth_present(percents, stealth):
+        terms.append(lambda y, c: -_stealth_total(percents, c.cols, stealth)
                      * np.ones(np.asarray(y).shape, dtype=np.float64))
     if blink != 0.0:
         terms.append(cv.const(blink))
@@ -127,44 +133,45 @@ def _visibility_adjust(percents, t_now) -> cv.Curve:
     return cv.add(*terms) if terms else cv.const(0.0)
 
 
-def _stealth_total(percents, cols):
-    """The per-note stealth subtraction: stealth + stealthglow, each with
-    its numbered per-column ADD variants folded (`column_add`)."""
+def _stealth_total(percents, cols, stealth=TAP_STEALTH):
+    """The per-note stealth subtraction for one family: every name in it,
+    each with its numbered per-column ADD variants folded (`column_add`)."""
     from analysis.player.render.mods.arrow_effects import column_add
-    return (column_add(percents, 'stealth', cols)
-            + column_add(percents, 'stealthglow', cols))
+    return sum(column_add(percents, base, cols) for base in stealth)
 
 
-def _stealth_present(percents) -> bool:
+def _stealth_present(percents, stealth=TAP_STEALTH) -> bool:
     for key, value in percents.items():
         if not value:
             continue
-        for base in ('stealth', 'stealthglow'):
+        for base in stealth:
             if key == base or (key.startswith(base)
                                and key[len(base):].isdigit()):
                 return True
     return False
 
 
-def percent_visible_curve(percents, t_now) -> cv.Curve:
+def percent_visible_curve(percents, t_now, stealth=TAP_STEALTH) -> cv.Curve:
     """ArrowGetPercentVisible (ArrowEffects.cpp:441-484) as a curve over
     vis_y: `clip(1 + adjust, 0, 1)`, with past-receptor notes (vis_y < 0)
     pinned to full visibility - unless stealthpastreceptors keeps the
     stealth subtraction live there (kernel `percent_visible`'s `past`
     term). Returns the per-note visible fraction."""
-    visible = cv.clamp01(cv.add(cv.const(1.0), _visibility_adjust(percents, t_now)))
+    visible = cv.clamp01(cv.add(cv.const(1.0),
+                                _visibility_adjust(percents, t_now, stealth)))
     if not percents.get('stealthpastreceptors', 0.0):
         return past_gate(1.0, visible)
 
     def gated(y, c):
         y = np.asarray(y, dtype=np.float64)
-        past = np.clip(1.0 - _stealth_total(percents, c.cols), 0.0, 1.0)
+        past = np.clip(1.0 - _stealth_total(percents, c.cols, stealth),
+                       0.0, 1.0)
         return np.where(y < 0.0, past, visible(y, c))
 
     return gated
 
 
-def alpha_curve(percents, t_now) -> cv.Curve:
+def alpha_curve(percents, t_now, stealth=TAP_STEALTH) -> cv.Curve:
     """`_alpha` (ArrowEffects.cpp) as a curve over vis_y: the visible
     fraction (identity `alpha_from_visible`), times the boomerang fade
     window when boomerang is on. Returns the per-note alpha multiplier.
@@ -172,7 +179,7 @@ def alpha_curve(percents, t_now) -> cv.Curve:
     Byte-equal drop-in for `arrow_effects._alpha(percents, cols, vis_y,
     t_now)` -- cols is unused by the alpha math (the fade windows key off
     vis_y alone), so the curve takes only (percents, t_now)."""
-    visible = percent_visible_curve(percents, t_now)
+    visible = percent_visible_curve(percents, t_now, stealth)
     boomerang = percents.get('boomerang', 0.0)
     if not boomerang:
         return visible

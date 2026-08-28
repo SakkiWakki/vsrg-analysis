@@ -276,19 +276,22 @@ def test_dual_player_fields_get_distinct_drawables(captured_notefield):
     assert rep['all_ok'], dd.format_parity_report(rep)
 
 
-def test_inline_notes_players_feed_and_per_player_scopes_blit():
-    # The default (inline-notes) path: a 'field'-scope consumer RE-RENDERS
-    # the shared fed note items under its own chain (no capture-boxed
-    # drawable to clip at), while a per-player 'field{N}' scope keeps the
-    # capture blit - the feed carries player 1's items only.
+def test_inline_notes_every_player_scope_feeds():
+    # The default (inline-notes) path is PLAYER-AGNOSTIC: every consumer
+    # RE-RENDERS fed note items under its own chain - a per-player
+    # 'field{N}' scope gets its own feed slot, filled with that player's
+    # emission by the pipeline. No scope keeps a capture blit: a capture
+    # cannot carry per-note 3D through the chain, and one rule for player
+    # 1 with another for player N left the two halves of one effect on
+    # different geometry (gat 2's revolt).
     p1 = fc.player_instance(1, {'x': _instant(160.0), 'y': _instant(240.0)})
     p2 = fc.player_instance(2, {'x': _instant(480.0), 'y': _instant(240.0)})
     pr2 = fc.instance('pr2', 'proxy', 2, [_link(x=300.0, y=240.0)])
     spec = PlayerFieldsSpec({2: object()})
     compiled = _compiled([p1, p2, pr2], player_fields=spec)
     _evaluator, id_maps, _report = dd.build_static_doc(compiled)
-    assert set(id_maps['fields']) == {'field2'}
-    assert set(id_maps['note_feeds']) == {'field'}
+    assert not id_maps['fields'], 'no capture drawables on the inline path'
+    assert set(id_maps['note_feeds']) == {'field', 'field2'}
     assert id_maps['notes_slot'] == id_maps['note_feeds']['field']
 
 

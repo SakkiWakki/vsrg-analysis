@@ -33,15 +33,21 @@ FAR_SLACK = 1000.0
 def local_matrix(pos, rot, scl, skew, order):
     """local_matrix with a rotation ORDER (the fork's SetRotationOrder).
 
+    Order per the decompile's BeginDraw post-mult run (Actor.clean.c
+    @004a4c8a: translate-and-zoom, then rotation, then skew): a row
+    point skews (innermost), then rotates, then scales, then
+    translates - `field_compose._local`'s order. The previous shape
+    (scale-first, skew-outermost) sheared along the parent's unrotated
+    axes, so skewing a rotated screen visually reset the rotation.
+
     transform3d.local_matrix hardcodes rotate_xyz; the frozen Rust
-    local_matrix takes a RotOrder, so drive the ordered rotation here and
-    reproduce the same premult run (scale @ rot @ translate @ skewx @
-    skewy) that Actor::BeginDraw builds."""
-    L = t3.scale(*scl) @ t3.rotate_ordered(rot[0], rot[1], rot[2], order) @ t3.translate(*pos)
+    local_matrix takes a RotOrder, so drive the ordered rotation here."""
+    L = t3.rotate_ordered(rot[0], rot[1], rot[2], order) @ t3.scale(*scl) \
+        @ t3.translate(*pos)
     if skew[0]:
-        L = L @ t3.skew_x(skew[0])
+        L = t3.skew_x(skew[0]) @ L
     if skew[1]:
-        L = L @ t3.skew_y(skew[1])
+        L = t3.skew_y(skew[1]) @ L
     return L
 
 

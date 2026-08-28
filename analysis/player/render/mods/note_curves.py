@@ -243,8 +243,19 @@ def assemble(percents, cols, y_offset, t_now, beat_now, keycount,
                  y_offset, ctx)
     z = rot_x = rot_y = None
     if project_3d:
-        z = np.broadcast_to(z_sum, (n,)).astype(np.float64)
-        rot_x, rot_y = _note_tilt(percents, y_offset, n)
+        # The confusion x/y rotations carry their own depth and turn the
+        # note quad; only the projected path can render either, so neither
+        # joins `z_sum` (which the 2D path reprojects to zoom).
+        z = np.broadcast_to(
+            z_sum + ae.confusion_tilt_z(percents, cols, y_offset, keycount,
+                                        beat_now, arrow_size),
+            (n,)).astype(np.float64)
+        rot_x, rot_y = _note_tilt(percents, y_offset, n, cols, keycount,
+                                  beat_now)
+        angle_x = ae.confusion_axis_rad(percents, 'x', cols, keycount,
+                                        beat_now)
+        if angle_x is not None:
+            dy = dy + y_offset * (np.cos(angle_x) - 1.0)
     zoom = mzoom.zoom_curve(percents, cols, keycount, arrow_size,
                             beat_now=beat_now, z_push=z,
                             waveform_push=z_sum)(y_offset, ctx)
@@ -254,6 +265,14 @@ def assemble(percents, cols, y_offset, t_now, beat_now, keycount,
     vis_y = y_offset + _sum(_tipsy_curves(percents, cols, kc=keycount,
                                           size=arrow_size), y_offset, ctx)
     alpha = mca.alpha_curve(percents, t_now)(vis_y, ctx)
+    # A chart-stream record fades under the MINE family, so a chart can
+    # stealth the taps and leave the mines standing (or the reverse) -
+    # gat 2's revolt runs both halves at once on two of its playfields.
+    # Same curve, different channel names; skipped when neither is driven.
+    stream_alpha = None
+    if ae.stream_stealth_active(percents, keycount):
+        stream_alpha = mca.alpha_curve(
+            percents, t_now, mca.MINE_STEALTH)(vis_y, ctx)
     glow = None
     if is_active(percents, 'stealthglow', keycount):
         glow = mca.glow_curve(
@@ -263,18 +282,30 @@ def assemble(percents, cols, y_offset, t_now, beat_now, keycount,
 
     return ae.NoteOffsets(dx=dx, dy=dy, rotation_deg=rotation,
                           alpha_mult=alpha, zoom=zoom, z=z, rot_x=rot_x,
-                          rot_y=rot_y, glow=glow)
+                          rot_y=rot_y, glow=glow, stream_alpha=stream_alpha)
 
 
-def _note_tilt(percents, y_offset, n):
-    """(rot_x, rot_y) out-of-plane tilt in degrees: roll -> RotationX,
-    twirl -> RotationY (GetRotationX/Y = effect * yOffset/2), rest 0."""
+def _note_tilt(percents, y_offset, n, cols=None, keycount=4, beat_now=0.0):
+    """(rot_x, rot_y) out-of-plane tilt in degrees: roll -> RotationX and
+    twirl -> RotationY scale with the note's own scroll offset
+    (GetRotationX/Y = effect * yOffset/2); confusionx / confusiony turn the
+    whole field about those same axes. Rest 0."""
     roll, twirl = _g(percents, 'roll'), _g(percents, 'twirl')
     y = np.asarray(y_offset, dtype=np.float64)
     rot_x = roll * y / 2.0 if roll else np.zeros(n)
     rot_y = twirl * y / 2.0 if twirl else np.zeros(n)
-    return (np.broadcast_to(rot_x, (n,)).astype(np.float64),
-            np.broadcast_to(rot_y, (n,)).astype(np.float64))
+    rot_x = np.broadcast_to(rot_x, (n,)).astype(np.float64)
+    rot_y = np.broadcast_to(rot_y, (n,)).astype(np.float64)
+    if cols is not None:
+        angle_x = ae.confusion_axis_rad(percents, 'x', cols, keycount,
+                                        beat_now)
+        if angle_x is not None:
+            rot_x = rot_x + np.broadcast_to(angle_x * 180.0 / ae.PI, (n,))
+        angle_y = ae.confusion_axis_rad(percents, 'y', cols, keycount,
+                                        beat_now)
+        if angle_y is not None:
+            rot_y = rot_y + np.broadcast_to(angle_y * 180.0 / ae.PI, (n,))
+    return rot_x, rot_y
 
 
 def _tipsy_curves(percents, cols, kc, size):

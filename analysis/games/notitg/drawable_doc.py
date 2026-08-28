@@ -551,6 +551,12 @@ class _Unit(NamedTuple):
     seq: int
     kind: str
     payload: object
+    # SetDrawByZPosition membership (the flagged frame's rec id): units
+    # sharing a group fold into ONE SortSpan after the tree sort, field
+    # instances and plain elements alike - the engine z-sorts a flagged
+    # frame's direct children whatever they are (FFF weaves its player
+    # proxies through six stripe sprites).
+    group: object = None
 
 
 # The band/z/z_index a FIELD INSTANCE sorts at: the notefield's own, which is
@@ -558,7 +564,7 @@ class _Unit(NamedTuple):
 _FIELD_BAND = (0.0, 0, 0)
 
 
-def _tree_order_units(elements, instances):
+def _tree_order_units(elements, instances, z_spans=()):
     """Elements and field instances as ONE stream, in the order the engine
     draws them.
 
@@ -590,7 +596,8 @@ def _tree_order_units(elements, instances):
     seq = 0
     for leaf, ancestors in elements:
         units.append(_Unit(_band_z((leaf, ancestors)), leaf.z, leaf.z_index,
-                           leaf.tree_index, seq, 'element', (leaf, ancestors)))
+                           leaf.tree_index, seq, 'element', (leaf, ancestors),
+                           group=_span_group(z_spans, leaf.tree_index)))
         seq += 1
 
     # The base field is legacy's prepended `(None, 1.0, 'field')` entry, so it
@@ -599,33 +606,56 @@ def _tree_order_units(elements, instances):
     seq += 1
 
     index = -1
-    run: list = []
+    for inst in instances:
+        index = _instance_index(inst, index)
+        units.append(_Unit(*_FIELD_BAND, index, seq, 'instance', inst,
+                           group=inst.get('z_group')))
+        seq += 1
+
+    units.sort(key=_unit_order)
+    return _fold_z_runs(units)
+
+
+def _span_group(z_spans, tree_index):
+    """The SetDrawByZPosition frame owning `tree_index`, or None."""
+    if tree_index is None:
+        return None
+    for group, lo, hi in z_spans:
+        if lo <= tree_index <= hi:
+            return group
+    return None
+
+
+def _fold_z_runs(units) -> list:
+    """Consecutive sorted units sharing a `group` collapse into ONE
+    'z_run' unit (payload = the member units, elements and instances
+    mixed) so the emitter can wrap them in a single SortSpan. Run
+    members are contiguous after the tree sort because a flagged
+    frame's subtree is a contiguous tree-index span."""
+    folded: list[_Unit] = []
+    run: list[_Unit] = []
     run_group = None
 
     def close_run():
-        nonlocal run, run_group, seq
+        nonlocal run, run_group
         if run:
-            units.append(_Unit(*_FIELD_BAND, _instance_index(run[0], index),
-                               seq, 'z_run', run))
-            seq += 1
+            first = run[0]
+            folded.append(_Unit(first.band, first.z, first.z_index,
+                                first.tree_index, first.seq, 'z_run',
+                                tuple(run), group=run_group))
         run, run_group = [], None
 
-    for inst in instances:
-        index = _instance_index(inst, index)
-        group = inst.get('z_group')
-        if group is not None and group == run_group:
-            run.append(inst)
+    for unit in units:
+        if unit.group is not None and unit.group == run_group:
+            run.append(unit)
             continue
         close_run()
-        if group is not None:
-            run, run_group = [inst], group
+        if unit.group is not None:
+            run, run_group = [unit], unit.group
             continue
-        units.append(_Unit(*_FIELD_BAND, index, seq, 'instance', inst))
-        seq += 1
+        folded.append(unit)
     close_run()
-
-    units.sort(key=_unit_order)
-    return units
+    return folded
 
 
 def _unit_order(unit):
@@ -943,6 +973,11 @@ class _Builder:
         # with the descs exported positionally for GLExecutor.set_shaders.
         self._shader_ids: dict[tuple, int] = {}
         self._shader_descs: list[tuple] = []
+        # Polygon mesh payloads by minted mesh id, exported for the
+        # executor's SRC_MESH draws; `_mesh_ids` dedupes by vertex-array
+        # identity (the payload persists on its instance).
+        self._mesh_ids: dict[int, int] = {}
+        self._mesh_payloads: dict[int, dict] = {}
 
     # -- drawable minting -------------------------------------------------
 
@@ -975,6 +1010,34 @@ class _Builder:
             drawable = self._new_drawable(persistent=True)
             self._slot_ids[name] = drawable
         return drawable
+
+    def _mesh_id(self, mesh, slot, inst) -> int:
+        """Register a Polygon mesh once per payload (keyed by vertex-array
+        identity, which persists on its instance) and stash the EXECUTOR
+        payload - geometry, mode, the texture source, and the instance's
+        uniformTexture FILE binds (crumple's samplerRandom noise page) -
+        under the minted id. The native doc holds only the id (the
+        record carries it to the executor); the GL draw is the executor
+        tier.
+
+        The texture source is the `slot` drawable whose capture the
+        mesh samples (a Polygon sampler), or with slot None the
+        payload's own `texture` FILE (a Model actor's material)."""
+        key = id(mesh['vertices'])
+        minted = self._mesh_ids.get(key)
+        if minted is not None:
+            return minted
+        minted = self._builder.mesh([])
+        self._mesh_ids[key] = minted
+        # The Vert= program is NOT here: it rides the item's shader desc
+        # (`_shader_for` registers frag+vert together), so the executor
+        # has one authority for both program halves.
+        payload = dict(mesh)
+        if slot is not None:
+            payload['texture_drawable'] = int(slot)
+        payload['samplers'] = dict(inst.get('frag_samplers') or {})
+        self._mesh_payloads[minted] = payload
+        return minted
 
     def _notes_slot_for(self, scope: str) -> int:
         slot = self._notes_slots.get(scope)
@@ -1222,7 +1285,10 @@ class _Builder:
                     if elements_in_doc() else ())
 
         below = above = 0
-        for unit in _tree_order_units(elements, instances):
+        z_spans = self._compiled.get('z_frame_spans')
+        if callable(z_spans):
+            z_spans = z_spans()
+        for unit in _tree_order_units(elements, instances, z_spans or ()):
             match unit.kind:
                 case 'element':
                     if self._emit_element(*unit.payload):
@@ -1236,8 +1302,10 @@ class _Builder:
                     self._emit_instance(unit.payload)
         self._elem_below, self._elem_above = below, above
 
+        note_shaders = self._note_shader_map()
         evaluator = self._builder.finish()
         id_maps = {'screen': _SCREEN_ID,
+                   'note_shaders': note_shaders,
                    'screen_clear': (_CLEAR_OPAQUE if opaque_screen()
                                     else _CLEAR_TRANSPARENT),
                    'slots': dict(self._slot_ids),
@@ -1248,12 +1316,56 @@ class _Builder:
                                       for i in sorted(self._drawable_sizes)],
                    'notes_slot': self._notes_slots.get('field'),
                    'note_feeds': dict(self._notes_slots),
+                   'meshes': dict(self._mesh_payloads),
                    'shaders': list(self._shader_descs),
                    'text_images': dict(self._text_images),
                    'image_specs': dict(self._image_specs),
                    'element_order': list(self._element_order),
                    'instance_order': list(self._instance_order)}
         return evaluator, id_maps
+
+    def _note_shader_map(self):
+        """Register every note-shader source program and export the
+        pipeline's stamping map, or None when the chart binds none.
+
+        The per-player curves carry SOURCE recorder ids over time; each
+        source's Frag=/Vert= registers ONE desc whose uniform-name list
+        is the chart's names (sorted) plus the frozen per-note builtin
+        block (note_feed.NOTE_SHADER_BUILTINS) - the executor recognizes
+        note descs by that block and the feed supplies the VALUES
+        per item, so no uniform channels bind doc-side."""
+        note_shaders = self._compiled.get('note_shaders')
+        if callable(note_shaders):
+            note_shaders = note_shaders()
+        if not note_shaders:
+            return None
+        from analysis.player.render.storyboard.note_feed import (
+            NOTE_SHADER_BUILTIN_NAMES)
+        sources = {}
+        for rec_id, source in note_shaders['sources'].items():
+            frag_src = _read_shader_source(source['frag'])
+            vert_src = _read_shader_source(source['vert'])
+            if frag_src is None and vert_src is None:
+                self._elem_skips['shader_unreadable'] = (
+                    self._elem_skips.get('shader_unreadable', 0) + 1)
+                continue
+            names = sorted(source['uniforms'])
+            shader_id = self._builder.shader(
+                frag_src or '', vert=vert_src,
+                uniform_names=names + list(NOTE_SHADER_BUILTIN_NAMES))
+            self._shader_descs.append(
+                (frag_src, vert_src,
+                 names + list(NOTE_SHADER_BUILTIN_NAMES)))
+            sources[rec_id] = {
+                'shader_plus_one': shader_id + 1,
+                'uniform_names': names,
+                'uniforms': source['uniforms'],
+                'samplers': dict(source['samplers']),
+            }
+        if not sources:
+            return None
+        return {'players': note_shaders['players'], 'sources': sources,
+                'to_beat': note_shaders.get('to_beat')}
 
     def _owned_elements(self, instances):
         """The `(leaf, ancestors)` pairs the DOC draws, from `compiled['tree']`.
@@ -1355,17 +1467,73 @@ class _Builder:
                      and (player := inst.get('player') or 1) > 1})
 
     def _emit_z_run_units(self, members) -> None:
-        """Emit a SortSpan wrapping one z_group run, then its members.
+        """Emit a SortSpan wrapping one z run, then its members - field
+        instances and plain ELEMENTS alike (the engine z-sorts a flagged
+        frame's direct children whatever they are).
 
-        `_tree_order_units` keeps a run contiguous precisely so this can
-        work: the SortSpan precedes its members and names how many commands
-        follow, so anything sorted into the middle would be swept into the
-        span's z ordering. The length counts only members that actually emit
-        a command - a 'stage' emits none; captures/fills/blits emit one."""
-        span_len = sum(1 for inst in members if inst.get('kind') != 'stage')
-        self._builder.sort_span(_SCREEN_ID, span_len)
-        for inst in members:
-            self._emit_instance(inst)
+        `_fold_z_runs` keeps a run contiguous precisely so this can
+        work: the SortSpan precedes its members and names how many
+        commands follow, so anything sorted into the middle would be
+        swept into the span's z ordering. The length is predicted per
+        member (`_z_member_commands` for elements; instances emit one
+        command per drawn thing). An element kind whose command count is
+        not statically simple (bitmaptext's glyph fan-out) is DEMOTED:
+        drawn before the span in tree order rather than sorted - none
+        sit inside a corpus z-frame today."""
+        demoted = []
+        counted = []
+        for unit in members:
+            if unit.kind == 'element':
+                count = self._z_member_commands(unit.payload[0])
+                if count is None:
+                    demoted.append(unit)
+                else:
+                    counted.append((unit, count))
+            else:
+                counted.append((unit, self._instance_commands(unit.payload)))
+
+        for unit in demoted:
+            self._emit_element(*unit.payload)
+        self._builder.sort_span(_SCREEN_ID,
+                                sum(count for _unit, count in counted))
+        for unit, _count in counted:
+            if unit.kind == 'element':
+                self._emit_element(*unit.payload, z_bind=True)
+            else:
+                self._emit_instance(unit.payload)
+
+    @staticmethod
+    def _instance_commands(inst) -> int:
+        """Commands `_emit_instance` pushes for `inst`, for SortSpan
+        sizing: one per drawn thing ('stage' draws nothing, a model
+        draws one mesh blit per material mesh)."""
+        kind = inst.get('kind')
+        if kind == 'stage':
+            return 0
+        if kind == 'model':
+            return len(inst.get('models') or ())
+        return 1
+
+    def _z_member_commands(self, element):
+        """Commands `_emit_element` pushes for `element` inside a z run,
+        or None when the count is not statically simple (the caller
+        demotes it out of the span). Mirrors `_emit_element`'s decisions
+        for the simple kinds ONLY: a fill or an asset-backed image
+        sprite pushes one content item plus the additive glow pass when
+        the glow curve ever leaves rest; an image kind with no asset
+        draws nothing (untextured)."""
+        if element.kind in _FILL_KINDS:
+            base = 1
+        elif element.kind in _IMAGE_KINDS:
+            path = element.asset or (element.frames[0] if element.frames
+                                     else None)
+            if not path:
+                return 0
+            base = 1
+        else:
+            return None
+        glow = element.timelines.get('glow')
+        return base + (1 if _moves_off(glow, _GLOW_OFF, prop=3) else 0)
 
     def _emit_instance(self, inst) -> None:
         sn = self._sn
@@ -1391,11 +1559,32 @@ class _Builder:
                 self._emit_links(_SCREEN_ID, inst, camera=False)
             case 'fill':
                 self._emit_blit(sn.SRC_FILL, 0, inst)
+            case 'model':
+                # A Model actor (`File="models/x.txt"`): one SRC_MESH
+                # blit per material mesh, textured by its own material
+                # file rather than a capture slot. All meshes share the
+                # instance's record (the actor's chain places the whole
+                # model).
+                for mesh in inst['models']:
+                    self._emit_blit(sn.SRC_MESH,
+                                    self._mesh_id(mesh, None, inst),
+                                    inst, visible=self._cull_gate(inst))
             case 'aft':
                 slot = self._slot_drawable(
                     _aft_slot_key(inst, self._captured_nodes))
-                self._emit_blit(sn.SRC_DRAWABLE, slot, inst,
-                                visible=self._cull_gate(inst))
+                mesh = inst.get('mesh')
+                if mesh is not None:
+                    # A Polygon sampler draws its RECORDED GEOMETRY over
+                    # the slot's capture (through the translated Vert=
+                    # riding the item's shader desc) instead of a quad.
+                    # The item carries the same links/uniforms/tint the
+                    # quad path would; the executor supplies the draw.
+                    self._emit_blit(sn.SRC_MESH,
+                                    self._mesh_id(mesh, slot, inst),
+                                    inst, visible=self._cull_gate(inst))
+                else:
+                    self._emit_blit(sn.SRC_DRAWABLE, slot, inst,
+                                    visible=self._cull_gate(inst))
             case 'player' | 'proxy':
                 scope = self._field_scope(inst)
                 # A 'player' instance IS the base field, so it disappears
@@ -1406,14 +1595,18 @@ class _Builder:
                 # rather than a per-frame skip.
                 visible = (self._base_hidden_gate() if kind == 'player'
                            else (-1, 1.0))
-                if notes_inline() and scope == 'field':
+                if notes_inline():
                     # RE-RENDER, don't blit (the copy-render rule): the
-                    # consumer's chain composes over the shared fed note
-                    # items, so a mod-displaced note survives where a
-                    # capture-boxed texture would have clipped it. A
-                    # per-player 'field{N}' scope keeps the capture blit -
-                    # its content differs per player and the feed carries
-                    # player 1's items only.
+                    # consumer's chain composes over the fed note items, so
+                    # a mod-displaced note survives where a capture-boxed
+                    # texture would have clipped it. One rule for EVERY
+                    # player: a per-player 'field{N}' scope gets its own
+                    # feed slot, which the pipeline fills with that
+                    # player's emission (`_per_player_notes`) - a capture
+                    # cannot carry per-note 3D through the chain, so
+                    # blitting one for player N > 1 while player 1
+                    # re-rendered left the two halves of one effect on
+                    # different geometry.
                     z_id, z_rest, has_z = self._z_channel(inst)
                     self._builder.feed_inline(
                         _SCREEN_ID, self._notes_slot_for(scope),
@@ -1510,7 +1703,7 @@ class _Builder:
 
     # -- storyboard element emission --------------------------------------
 
-    def _emit_element(self, element, ancestors=()) -> bool:
+    def _emit_element(self, element, ancestors=(), z_bind=False) -> bool:
         """Emit one leaf element as an item, or count it as a per-kind skip.
         Returns True when an item was emitted.
 
@@ -1528,7 +1721,8 @@ class _Builder:
         otherwise. A runtime `Sprite:Load` is a different thing entirely: that
         arrives as an `asset_swap` timeline, and none of these carry one."""
         if element.kind in _FILL_KINDS:
-            self._sn_element_item(self._sn.SRC_FILL, 0, element, ancestors)
+            self._sn_element_item(self._sn.SRC_FILL, 0, element, ancestors,
+                                  z_bind=z_bind)
             return True
         if element.kind == 'bitmaptext':
             return self._emit_bitmaptext(element, ancestors)
@@ -1538,7 +1732,7 @@ class _Builder:
                 self._count_skip('text')
                 return False
             self._sn_element_item(self._sn.SRC_IMAGE, image_id, element,
-                                  ancestors)
+                                  ancestors, z_bind=z_bind)
             return True
         if element.kind not in _IMAGE_KINDS:
             self._count_skip(element.kind)
@@ -1547,7 +1741,8 @@ class _Builder:
         if image_id is None:
             self._count_skip('untextured')
             return False
-        self._sn_element_item(self._sn.SRC_IMAGE, image_id, element, ancestors)
+        self._sn_element_item(self._sn.SRC_IMAGE, image_id, element,
+                              ancestors, z_bind=z_bind)
         return True
 
     def _count_skip(self, kind: str) -> None:
@@ -1597,7 +1792,7 @@ class _Builder:
         )
 
     def _sn_element_item(self, source_kind: int, image_id: int, element,
-                         ancestors=()) -> None:
+                         ancestors=(), z_bind=False) -> None:
         """Push one element item: the element's scalar transform timelines on
         the item's own lanes (export_channel each), the inverted `hidden` gate
         on `visible`, and the sheet-frame channel on `frame`.
@@ -1610,16 +1805,85 @@ class _Builder:
         kwargs = self._element_transform_kwargs(element)
         kwargs.update(self._element_frame_kwarg(element))
         kwargs.update(self._element_visible_kwarg(element))
+        if z_bind:
+            # Inside a SortSpan the item's z channel IS its sort key
+            # (the actor's z pokes; rest 0 for the never-poked).
+            z_timeline = element.timelines.get('z')
+            if z_timeline is not None:
+                z_id, z_rest = self._channel(z_timeline)
+                kwargs.update(z_id=z_id, z_rest=z_rest, has_z=True)
+            else:
+                kwargs.update(z_id=-1, z_rest=0.0, has_z=True)
         self._builder.item(_SCREEN_ID, source_kind, image_id,
                            additive=bool(element.additive), **kwargs)
         self._builder.item_tag(
             _SCREEN_ID, self._tag_element(element, 'content', ancestors))
         self._emit_element_box(element)
         self._emit_element_tint(element)
+        self._emit_element_uv(element)
         if ancestors:
             self._emit_element_links(element, ancestors)
         self._emit_element_glow(source_kind, image_id, element, kwargs,
                                 ancestors)
+
+    def _emit_element_uv(self, element) -> None:
+        """Attach the custom UV window (customtexturerect) and the UV
+        scroll offset (SetTexCoordVelocity) to the item just pushed.
+
+        The window binds only when it ever leaves the full-texture rest
+        (FFF's tiling orb/stripe pages set 5x/10x repeats - drawn
+        stretched at 1x they read as GIANT circles). The scroll's
+        closed form (t0, ou, ov, vu, vv) is exact piecewise-linear in t
+        between its anchors, so it lowers to plain linear ramp
+        keyframes, the last anchor running to the doc's end; the
+        executor wraps mod 1 at draw."""
+        uv_rect = element.timelines.get('uv_rect')
+        rect_moves = uv_rect is not None and any(
+            _moves_off(uv_rect, rest, prop=prop)
+            for prop, rest in enumerate((0.0, 0.0, 1.0, 1.0)))
+        if rect_moves:
+            binds = {}
+            for prefix, prop, rest in (('u0', 0, 0.0), ('v0', 1, 0.0),
+                                       ('u1', 2, 1.0), ('v1', 3, 1.0)):
+                chan_id, chan_rest = self._channel(uv_rect, prop)
+                binds[f'{prefix}_id'] = chan_id
+                binds[f'{prefix}_rest'] = chan_rest
+            self._builder.item_uv_rect(_SCREEN_ID, **binds)
+        offsets = self._uv_offset_timelines(element)
+        if offsets is not None:
+            u_tl, v_tl = offsets
+            u_id, u_rest = self._channel(u_tl)
+            v_id, v_rest = self._channel(v_tl)
+            self._builder.item_uv_offset(_SCREEN_ID, u_id=u_id,
+                                         u_rest=u_rest, v_id=v_id,
+                                         v_rest=v_rest)
+
+    def _uv_offset_timelines(self, element):
+        """(offset_u, offset_v) EventTimelines lowered from the
+        element's `texcoord_scroll` closed form, or None when it never
+        scrolls. Anchor rows step only at pokes; between anchors the
+        offset is offset + vel * (t - anchor_t), a linear ramp."""
+        timeline = element.timelines.get('texcoord_scroll')
+        if timeline is None:
+            return None
+        anchor_ts = sorted({self._t0, *(k.t for k in
+                                        getattr(timeline, '_kf', ())
+                                        if self._t0 <= k.t <= self._t1)})
+        if all(tuple(timeline.sample(t))[1:] == (0.0, 0.0, 0.0, 0.0)
+               for t in anchor_ts):
+            return None
+        lanes: tuple[list, list] = ([], [])
+        for ta, tb in zip(anchor_ts, [*anchor_ts[1:], self._t1]):
+            t0, ou, ov, vu, vv = timeline.sample(ta)
+            span = max(0.0, tb - ta)
+            for keyframes, offset, vel in ((lanes[0], ou, vu),
+                                           (lanes[1], ov, vv)):
+                at_start = offset + vel * (ta - t0)
+                keyframes.append(Keyframe(
+                    ta, (at_start + vel * span,), span, _EASE_LINEAR,
+                    start=(at_start,)))
+        return (EventTimeline(lanes[0], rest=(0.0,)),
+                EventTimeline(lanes[1], rest=(0.0,)))
 
     def _emit_element_glow(self, source_kind: int, image_id: int, element,
                            kwargs, ancestors=()) -> None:

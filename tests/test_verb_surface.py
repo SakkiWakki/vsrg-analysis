@@ -84,7 +84,16 @@ _POKE_ARGS = {
 # bridge routes playcommand/queuecommand named-dispatch and Actor:cmd
 # through the environment (env._actor_command / env._actor_poke's cmd
 # branch, covered by tests/test_notitg_sim_load.py).
-_ENV_ROUTED = {'playcommand', 'cmd'}
+_ENV_ROUTED = {'playcommand', 'cmd',
+               # note-shader binds resolve their actor-table argument in
+               # env._actor_poke; SimActor sees set_note_shader directly.
+               'SetArrowShader', 'SetHoldShader', 'SetReceptorShader',
+               'ClearArrowShader', 'ClearHoldShader',
+               'ClearReceptorShader',
+               # command-registry writes resolve their Lua-function
+               # argument in env._actor_poke.
+               'addcommand', 'removecommand', 'luaeffect',
+               'PushNoteData'}
 
 
 def test_every_handled_claim_actually_routes():

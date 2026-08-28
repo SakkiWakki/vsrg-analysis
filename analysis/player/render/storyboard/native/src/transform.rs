@@ -297,11 +297,17 @@ fn local(link: &TransformState, flip: bool, leaf: bool) -> Mat3 {
 /// mapping capture coords onto the design screen; crop is the leaf's
 /// `(left, top, right, bottom)` insets (top/bottom swapped under flip),
 /// or None when no edge is cropped.
-pub fn compose_links(
-    links: &[TransformState],
-    flip_base_y: bool,
-    projection: Option<&crate::camera::Mat4>,
-) -> Option<(Mat3, f32, [f32; 4])> {
+/// One chain's accumulated world, before any content centring or camera.
+/// Factored out of `compose_links` so `compose_world` can reach the same
+/// numbers without duplicating the walk; the accumulation is pure, so
+/// sharing it cannot move `compose_links`' results.
+struct ChainWorld {
+    world: Option<Mat3>,
+    world4: Option<crate::camera::Mat4>,
+    alpha: f32,
+}
+
+fn accumulate(links: &[TransformState], flip_base_y: bool) -> Option<ChainWorld> {
     if links.is_empty() {
         return None;
     }
@@ -340,6 +346,123 @@ pub fn compose_links(
     if alpha < MIN_ALPHA {
         return None;
     }
+    Some(ChainWorld { world, world4, alpha })
+}
+
+/// The chain's composed MODEL in 4D - content centring innermost, no
+/// camera - plus its alpha and leaf crop.
+///
+/// `compose_links` projects this and collapses it. A FED ITEM carrying
+/// its own 3D model composes onto it first, so the item's rotation and
+/// the chain's meet before the perspective divide. That ordering is the
+/// whole point: only the depth half of a rotation carries its sign
+/// (`cos` is even), so a chain folded and projected first can never be
+/// cancelled by a per-item counter-rotation - which is exactly what a
+/// billboarding chart asks for. See notitg-note-model-z.md.
+pub fn compose_world(
+    links: &[TransformState],
+    flip_base_y: bool,
+) -> Option<(crate::camera::Mat4, f32, [f32; 4])> {
+    let acc = accumulate(links, flip_base_y)?;
+    let leaf = links.len() - 1;
+    let leaf_link = &links[leaf];
+    let (tcx, tcy) = (-(leaf_link.natural_w / 2.0), -(leaf_link.natural_h / 2.0));
+    let w4 = acc
+        .world4
+        .or_else(|| acc.world.as_ref().map(mat3_to_mat4))?;
+    let model = crate::camera::mat_mul(&translate4(tcx, tcy), &w4);
+    Some((model, acc.alpha, leaf_crop(leaf_link, flip_base_y)))
+}
+
+/// One fed item's placement through the chain: turn it by its own model
+/// rotations, lift it to its own depth, compose the chain's model, then
+/// project ONCE. Returns the record's column-vector mat3, or None when
+/// the result is degenerate.
+///
+/// `model` is `[z, rot_x, rot_y, rot_z]` - field-space depth plus the
+/// item's engine-ordered rotations in degrees. Both are INNERMOST: they
+/// apply after the item's own 2D mat3 has sized it and before the chain
+/// rotates the field - the ordering that lets the two rotations meet in
+/// 4D instead of the item's being flattened first.
+pub fn project_item_model(
+    mat: &Mat3,
+    model: &[f32; 4],
+    world: &crate::camera::Mat4,
+    projection: Option<&crate::camera::Mat4>,
+) -> Option<Mat3> {
+    // Split the item's own placement into WHERE it sits and WHAT it looks
+    // like. The position is a POSITION IN THE FIELD, so it has to ride
+    // the world and meet the camera once; the scale is about the item's
+    // own centre and must not. Composing the whole placement after the
+    // chain was already projected is what sent a note pushed far outside
+    // the field's 640-wide box across the vanishing line and out the
+    // other side, instead of simply landing that far out.
+    //
+    // The split point is the item's CENTRE - the unit box's (0.5, 0.5)
+    // through the mat - not the mat's own translation lanes: the model's
+    // rotations pivot about the split point, and the emitter centres its
+    // unit box, so the translation lanes name a corner-offset point that
+    // would orbit the quad instead of turning it.
+    let [z, rot_x, rot_y, rot_z] = *model;
+    let (cx, cy) = (
+        0.5 * (mat[0] + mat[1]) + mat[2],
+        0.5 * (mat[3] + mat[4]) + mat[5],
+    );
+    let local = [
+        mat[0], mat[1], mat[2] - cx, //
+        mat[3], mat[4], mat[5] - cy, //
+        mat[6], mat[7], mat[8],
+    ];
+    // `mat` is column-vector; the 4x4 fold is row-vector.
+    let local_row = [
+        local[0], local[3], local[6], //
+        local[1], local[4], local[7], //
+        local[2], local[5], local[8],
+    ];
+    // A modeled item's mat carries scale + position only; its rotations
+    // (rot_z included, so the engine's X -> Y -> Z order survives) compose
+    // here, through the SAME rotation build the chain's links use - which
+    // is what makes a counter-rotation cancel a chain rotation exactly.
+    let mut model4 = mat3_to_mat4(&local_row);
+    if rot_x != 0.0 || rot_y != 0.0 || rot_z != 0.0 {
+        let rot = crate::camera::rotate_ordered(
+            rot_x, rot_y, rot_z, crate::camera::RotOrder::Xyz);
+        model4 = crate::camera::mat_mul(&model4, &rot);
+    }
+    let placed = crate::camera::mat_mul(
+        &crate::camera::mat_mul(&model4, &translate4_xyz(cx, cy, z)),
+        world,
+    );
+    let h = match projection {
+        Some(proj) => mat4_to_mat3(&crate::camera::mat_mul(&placed, proj)),
+        None => mat4_to_mat3(&placed),
+    };
+    if det3(&h).abs() < MIN_DET {
+        return None;
+    }
+    // Row-vector out of the fold; the record is column-vector.
+    Some([h[0], h[3], h[6], h[1], h[4], h[7], h[2], h[5], h[8]])
+}
+
+fn translate4_xyz(x: f32, y: f32, z: f32) -> crate::camera::Mat4 {
+    let mut m = crate::camera::IDENTITY;
+    m[12] = x;
+    m[13] = y;
+    m[14] = z;
+    m
+}
+
+pub fn compose_links(
+    links: &[TransformState],
+    flip_base_y: bool,
+    projection: Option<&crate::camera::Mat4>,
+) -> Option<(Mat3, f32, [f32; 4])> {
+    let ChainWorld {
+        world,
+        world4,
+        alpha,
+    } = accumulate(links, flip_base_y)?;
+    let leaf = links.len() - 1;
 
     // Content is centred about its OWN box, so the offset is the leaf's
     // natural size - a drawable sized to what it draws still composes

@@ -394,6 +394,11 @@ class NotitgFieldInstances:
                 continue
             if kind == 'player' and base_hidden:
                 continue
+            if kind == 'model':
+                # The legacy path has no model tier: falling through
+                # would blit the FIELD capture at the model's transform.
+                # The drawable doc owns Model actors (SRC_MESH).
+                continue
             sampled = inst['transform'].at(t)
             if sampled is None:
                 continue

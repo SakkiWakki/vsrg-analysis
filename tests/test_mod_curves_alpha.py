@@ -103,3 +103,78 @@ def test_blink_scalar_equals_kernel():
             got = mca._blink_adjust_scalar(percent, t_now)
             want = ae.blink_adjust(percent, t_now)
             np.testing.assert_allclose(got, want, rtol=RTOL, atol=0.0)
+
+
+# ── the mine stealth family ──────────────────────────────────────────
+#
+# The engine gives each note kind its own stealth channel (stealth /
+# holdstealth+hideholds / minestealth+hidemines). A kind is therefore
+# not a branch in the alpha math - it is which family the caller passes -
+# so both the curve and the kernel must honour an arbitrary one.
+
+MINE_CASES = [
+    {'stealth': 1.0},
+    {'hidemines': 1.0},
+    {'minestealth': 0.4},
+    {'stealth': 1.0, 'hidemines': -0.01},
+    {'stealth': 0.5, 'minestealth': 0.5, 'hidden': 0.5},
+    {'hidemines0': 1.0},
+]
+
+
+@pytest.mark.parametrize('percents', MINE_CASES)
+def test_mine_family_curve_equals_kernel(percents):
+    curve = mca.alpha_curve(percents, 0.0, mca.MINE_STEALTH)(VISY, _ctx())
+    kernel = ae._alpha(percents, COLS, VISY, 0.0, ae.MINE_STEALTH)
+    np.testing.assert_allclose(curve, kernel, rtol=RTOL)
+
+
+def _tap_and_mine(percents):
+    """(tap alpha, mine alpha) over VISY through the real kernel."""
+    offs = ae.note_offsets(percents, COLS, VISY, t_now=0.0, beat_now=0.0,
+                           keycount=4)
+    return offs.alpha_mult, offs.stream_alpha
+
+
+def test_stealth_moves_taps_and_hidemines_moves_mines():
+    # gat 2's revolt drives both halves at once: `*1000 stealth,
+    # *1000 -1 hidemines` on one playfield (mines only) and `*1000
+    # hidemines` on another (notes only). Each must move ONLY its own
+    # kind or the two playfields collapse into one.
+    # Approaching notes only for stealth: a note PAST the receptor is
+    # exempt from every APPEARANCE term (`past_gate`).
+    ahead = VISY > 0.0
+    tap, mine = _tap_and_mine({'stealth': 1.0, 'hidemines': -0.01})
+    assert np.all(tap[ahead] == 0.0), 'stealth hides the taps'
+    assert np.all(mine == 1.0), 'and leaves every mine standing'
+
+    tap, mine = _tap_and_mine({'hidemines': 1.0})
+    assert np.all(tap == 1.0), 'hidemines never touches a tap'
+    assert np.all(mine == 0.0), 'and hides every mine'
+
+
+def test_the_mine_hide_is_flat_where_stealth_is_positional():
+    # The whole reason they are two mechanisms and not one family with a
+    # swapped name list: stealth behaves like `hidden` (fades with
+    # position, exempts past-receptor notes), hidemines is an
+    # unconditional toggle with none of that.
+    ahead = VISY > 0.0
+    tap, _mine = _tap_and_mine({'stealth': 1.0})
+    assert np.any(tap[~ahead] > 0.0), 'stealth spares past-receptor notes'
+
+    _tap, mine = _tap_and_mine({'hidemines': 1.0})
+    assert np.all(mine == 0.0), 'hidemines spares nothing, past or not'
+
+
+def test_stream_alpha_is_none_until_a_stealth_family_is_driven():
+    # An unmodded chart must not pay for a second alpha pass, and its
+    # consumer then shares the tap alpha.
+    cols = np.zeros(4, dtype=np.int64)
+    y = np.zeros(4)
+    quiet = ae.note_offsets({}, cols, y, t_now=0.0, beat_now=0.0, keycount=4)
+    assert quiet.stream_alpha is None
+    driven = ae.note_offsets({'hidemines': 1.0}, cols, y, t_now=0.0,
+                             beat_now=0.0, keycount=4)
+    assert driven.stream_alpha is not None
+    assert np.all(driven.stream_alpha == 0.0)
+    assert np.all(driven.alpha_mult == 1.0), 'taps untouched by hidemines'

@@ -369,7 +369,12 @@ def _build_stream_views(ctx) -> list:
     base = len(ctx.candidates)
     heads = getattr(ctx, 'stream_head_in_window', None)
     mod_dx = getattr(ctx, 'candidate_dx', None)
-    mod_alpha = getattr(ctx, 'candidate_alpha', None)
+    # A stream record fades under the mine stealth family, not the tap
+    # one, so it prefers the alpha computed for that family when a chart
+    # drives either (see arrow_effects.stream_stealth_active).
+    mod_alpha = getattr(ctx, 'candidate_stream_alpha', None)
+    if mod_alpha is None:
+        mod_alpha = getattr(ctx, 'candidate_alpha', None)
     mod_glow = getattr(ctx, 'candidate_glow', None)
     mod_glow_rgb = getattr(ctx, 'candidate_glow_rgb', None)
     mod_rot = getattr(ctx, 'candidate_rot_deg', None)

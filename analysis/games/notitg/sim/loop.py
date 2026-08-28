@@ -111,6 +111,9 @@ class ChartDocument:
     lua_dir: object
     rng_seed: int
     end_seconds: float
+    # (beat, column) per tap/hold-head, for PushNoteData (the fork fills
+    # a chart-named Lua global with a beat-range slice of the notes).
+    note_rows: tuple = ()
 
 
 def load_chart(sm_path) -> ChartDocument | None:
@@ -137,7 +140,24 @@ def load_chart(sm_path) -> ChartDocument | None:
     measures = str(chart.get('notedata', '')).count(',') + 1
     end_seconds = to_seconds(4.0 * measures) + _END_TAIL_S
     return ChartDocument(root, classic, to_seconds, start_beat, lua_dir,
-                         modfile._chart_rng_seed(lua_dir), end_seconds)
+                         modfile._chart_rng_seed(lua_dir), end_seconds,
+                         note_rows=chart_note_rows(chart))
+
+
+def chart_note_rows(chart) -> tuple:
+    """((beat, column), ...) for every tap or hold/roll HEAD in the .sm
+    chart's notedata, in time order. What PushNoteData slices into a
+    chart-named Lua global (Government Knows' parappa dancer mimics the
+    player's steps from it)."""
+    rows = []
+    for index, measure in enumerate(str(chart.get('notedata', '')).split(',')):
+        lines = [line.strip() for line in measure.strip().splitlines()
+                 if line.strip()]
+        for line_index, line in enumerate(lines):
+            beat = 4.0 * index + 4.0 * line_index / len(lines)
+            rows.extend((beat, column) for column, ch in enumerate(line)
+                        if ch in '124')
+    return tuple(rows)
 
 
 def run_chart_sim(sm_path, end_seconds: float,
@@ -174,7 +194,8 @@ def run_sim(root, to_seconds, start_beat, end_seconds,
 def run_declarative(root, to_seconds, start_beat, end_seconds,
                     rng_seed: int = 0, tick_hz: float = _TICK_HZ,
                     song_dir=None, use_compiled_body: bool = False,
-                    use_native_body: bool = False) -> SimResult:
+                    use_native_body: bool = False,
+                    note_rows: tuple = ()) -> SimResult:
     """The fast compile: load the actors, fire the scheduled
     `mod_actions`, and tick the `UpdateCommand` per-frame body at its own
     re-arm cadence across the song.
@@ -195,6 +216,7 @@ def run_declarative(root, to_seconds, start_beat, end_seconds,
     to_beats = beat_inverter(to_seconds, end_seconds)
     env = SimEnvironment(load_s, rng_seed, to_seconds=to_seconds,
                          song_dir=song_dir)
+    env.note_rows = tuple(note_rows)
     env.set_time(load_s, to_beats(load_s))
     warnings = env.load_actors(root)
     # Opt-in: drive the per-frame Update body through the AST interpreter
@@ -217,12 +239,19 @@ def run_declarative(root, to_seconds, start_beat, end_seconds,
 
     body, body_name, update_actor = update_integrator._update_source(root)
     update_rec = getattr(update_actor, '_sim_id', None)
+    runtime_rig = False
     if body:
         # The raw attr is `%function(self) ... end`; the runnable chunk
         # is the inner statements (`self` falls to the permissive stub,
         # so the rig's own re-arm tail no-ops - the sweep drives time
         # instead).
         body = _strip_lua_wrapper(body)
+    else:
+        # No XML UpdateCommand: a mirin-style chart registers its rig at
+        # load (addcommand + luaeffect). Its driver fires every frame,
+        # so the sweep tick IS its cadence.
+        body, body_name, update_rec = env.runtime_update_rig()
+        runtime_rig = body is not None
     # Queue drains run at FULL rate over the whole song - the engine
     # drains every frame, and the intro's chained zero-tweens (sleep(0)
     # links) smear if drains lag. Cheap: the queued set holds only actors
@@ -240,8 +269,8 @@ def run_declarative(root, to_seconds, start_beat, end_seconds,
     # (a sin(beat) alternate/invert) stays smooth instead of degrading to
     # the old ~10Hz coarse rate. Cost is negligible - ~6k body runs over a
     # 2-min chart at 50Hz.
-    body_step = (update_integrator._body_rearm_period(body) or step) \
-        if body else step
+    body_step = (update_integrator._body_rearm_period(body, env=env) or step) \
+        if body and not runtime_rig else step
     body_step = max(body_step, step)
     ticks = 0
     t = load_s
@@ -294,7 +323,7 @@ class LiveSim:
 
     def __init__(self, root, to_seconds, start_beat, end_seconds,
                  rng_seed=0, tick_hz=_TICK_HZ, song_dir=None,
-                 use_compiled_body=False):
+                 use_compiled_body=False, note_rows: tuple = ()):
         # `load_actors` MUTATES the tree it loads (tags nodes with _sim_id /
         # _recorder_id, expands includes, removes Condition-falsy children). The
         # element-tree compiler keys its LiveCurves off those SAME tags on this
@@ -317,6 +346,7 @@ class LiveSim:
         self._tick_hz = float(tick_hz)
         self._song_dir = song_dir
         self._use_compiled_body = use_compiled_body
+        self._note_rows = tuple(note_rows)
         self.warnings = []
         self._build()
 
@@ -337,6 +367,7 @@ class LiveSim:
         env = SimEnvironment(self._load_s, self._rng_seed,
                              to_seconds=self._to_seconds,
                              song_dir=self._song_dir)
+        env.note_rows = self._note_rows
         env.set_time(self._load_s, self._to_beats(self._load_s))
         self.warnings = env.load_actors(self._root)
         env.use_compiled_body = self._use_compiled_body
@@ -362,9 +393,17 @@ class LiveSim:
         self._update_rec = getattr(update_actor, '_sim_id', None)
         self._body = _strip_lua_wrapper(body) if body else None
         self._body_name = body_name
+        runtime_rig = False
+        if self._body is None:
+            # A mirin-style chart registers its rig at load (addcommand +
+            # luaeffect); the driver fires every frame at the sweep tick.
+            self._body, self._body_name, self._update_rec = \
+                env.runtime_update_rig()
+            runtime_rig = self._body is not None
         self._step = 1.0 / self._tick_hz
-        body_step = (update_integrator._body_rearm_period(self._body)
-                     or self._step) if self._body else self._step
+        body_step = (update_integrator._body_rearm_period(self._body, env=env)
+                     or self._step) if self._body and not runtime_rig \
+            else self._step
         self._body_step = max(body_step, self._step)
 
         self.env = env

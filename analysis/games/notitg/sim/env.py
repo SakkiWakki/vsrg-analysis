@@ -22,14 +22,15 @@ SimActors and ONE timeline:
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 
 from analysis.games.notitg.lua_api import (
     COMMAND_NAMES, GETTER_NAMES, SIM_GETTER_NAMES, _PERMISSIVE_BOOTSTRAP,
-    _as_int, _lua_name_set)
+    _as_float, _as_int, _lua_name_set)
 from analysis.games.notitg.sim.actor import SimActor
 from analysis.games.notitg.xml_actors import (
-    _lua50_compat, _lua_expr_body, _strip_lua_wrapper,
+    _callable_lua_body, _lua50_compat, _lua_expr_body, _strip_lua_wrapper,
     is_lua_function_literal, parse_command_string)
 from analysis.player.render.expr.surface import UNRESOLVED
 from analysis.player.render.lua import LuaHost
@@ -92,6 +93,23 @@ _MAX_TICK_DISPATCHES = 20000
 # classic versus split is center +-160 in the 640 design space).
 _PLAYER_START_X = {'PlayerP1': 160.0, 'PlayerP2': 480.0}
 
+# Sentinel `body` for a per-frame rig REGISTERED at load rather than
+# authored as an XML UpdateCommand attr (the mirin template's
+# `addcommand('Update', fn)` + `luaeffect('Update')`). The loop passes
+# it back to `run_update_body`, which resolves the registered callable
+# PER CALL - mirin's skip_first_update swaps the registration on its
+# first run, so caching the resolution would freeze the stub.
+RUNTIME_UPDATE_BODY = '__runtime_registered_update__'
+
+# Player note-shader bind verbs -> the notefield element they shade
+# (LunaPlayer SetArrowShader @0x00533740 / SetHoldShader @0x00533aa0 /
+# SetReceptorShader @0x00535a40 and their Clear* unbinds).
+_NOTE_SHADER_VERBS = {
+    'SetArrowShader': 'arrow', 'ClearArrowShader': 'arrow',
+    'SetHoldShader': 'hold', 'ClearHoldShader': 'hold',
+    'SetReceptorShader': 'receptor', 'ClearReceptorShader': 'receptor',
+}
+
 # The sim bridge routes two extra getters (GetSecsIntoEffect/GetText)
 # the harvest path leaves unrouted; swap the generated __GETTER set
 # literal inside the shared bootstrap. The guard catches literal drift -
@@ -119,6 +137,9 @@ function __make_recorder(id)
     setmetatable(t, {__index = function(_, key)
         if key == 'GetChild' then
             return function(_self, name) return __actor_get_child(id, name) end
+        end
+        if key == 'GetChildAt' then
+            return function(_self, i) return __actor_get_child_at(id, i) end
         end
         if __GETTER[key] then
             return function(_self, ...) return __actor_get(id, key) end
@@ -182,6 +203,21 @@ class SimEnvironment:
         self._active: list = []
         self._applied_mods: list = []
         self._shader_flags: list = []
+        # Recorder ids of actors whose Frag=/Vert= program a player note
+        # bind referenced (SetArrowShader et al.) - the producers export
+        # each one's shader sources for the doc to register.
+        self.note_shader_sources: set = set()
+        # rec_id -> command name for `luaeffect(name)` per-frame drivers
+        # (SetEffectLua @Actor.cpp:763): the fork runs the named command
+        # every frame. The mirin template's whole runtime is one of
+        # these plus runtime `addcommand` registrations.
+        self._lua_effects: dict = {}
+        # rec_id -> XML Name ('' unnamed), for GetName - the mirin
+        # template's named-actor scan reads it across the whole tree.
+        self._actor_names: dict = {}
+        # The chart's (beat, column) note rows, set by the loop from the
+        # .sm parse; PushNoteData slices them into a Lua global.
+        self.note_rows: tuple = ()
         self._warnings: list = []
         self._faults = 0
         self._fault_messages: list = []
@@ -209,6 +245,9 @@ class SimEnvironment:
         # classic-command args, keyed by raw arg text (False = does not
         # compile). Evaluated at fire time so globals are current.
         self._arg_chunks: dict = {}
+        # Compiled `tween(t, 'formula over %f')` custom eases, keyed by
+        # formula text (a chart re-fires the same handful per section).
+        self._ease_formulas: dict = {}
         self._queued: set = set()
         self._include_expansions = 0
         # Phase 3 opt-in: run the per-frame Update body through the AST
@@ -300,6 +339,17 @@ class SimEnvironment:
         `mod_time`/`GetSongBeat` see this tick. The mod_actions cursor
         inside the body no-ops (already fired in the replay pass). Faults
         are swallowed and counted."""
+        if body == RUNTIME_UPDATE_BODY:
+            # A registered rig (luaeffect + addcommand): resolve the
+            # callable PER CALL - the registration is chart state and
+            # mirin swaps it on its first run - and dispatch through the
+            # command path. Never the compiled tier: there is no source
+            # to compile.
+            command = self._lua_effects.get(rec_id)
+            fn = self._named_commands.get(rec_id, {}).get(command)
+            if callable(fn):
+                self._run_command_body(rec_id, fn, name)
+            return
         if self.use_compiled_body:
             self._run_update_body_compiled(body, name, rec_id)
             return
@@ -654,7 +704,43 @@ class SimEnvironment:
         lands on the real queue)."""
         self._load_actor(root)
         self._run_load(root, 'OnCommand')
+        self._fire_registered_load_commands(root)
         return self._warnings
+
+    def _fire_registered_load_commands(self, root) -> None:
+        """Play load-phase commands actors REGISTERED at load
+        (`addcommand`): the engine plays On at screen start whether the
+        command came from an XML attribute or a registration, and
+        ScreenReady when gameplay begins - the mirin template registers
+        all of its entry points this way. An actor whose On came from
+        its attr already fired in the pass above, so only attr-less
+        registrations fire here."""
+        for phase, skip_attr in (('On', 'OnCommand'), ('ScreenReady', None)):
+            self._fire_registered(root, phase, skip_attr)
+
+    def _fire_registered(self, actor, phase, skip_attr) -> None:
+        rec_id = self._id_for(actor)
+        registered = self._named_commands.get(rec_id, {}).get(phase)
+        fire = (registered is not None
+                and not (skip_attr and actor.attrs.get(skip_attr)))
+        if fire:
+            self._run_command_body(rec_id, registered,
+                                   f'{self._label(rec_id)}.{phase}')
+        for child in actor.children:
+            self._fire_registered(child, phase, skip_attr)
+
+    def runtime_update_rig(self):
+        """`(RUNTIME_UPDATE_BODY, label, rec_id)` for an actor whose
+        per-frame driver was registered at load (`luaeffect(name)` +
+        `addcommand(name, fn)`), or (None, None, None). The loop uses
+        this only when no XML UpdateCommand rig exists - the classic
+        template's rig is discovered from source."""
+        for rec_id, name in self._lua_effects.items():
+            fn = self._named_commands.get(rec_id, {}).get(name)
+            if callable(fn):
+                return (RUNTIME_UPDATE_BODY,
+                        f'{self._label(rec_id)}.{name}(luaeffect)', rec_id)
+        return None, None, None
 
     def _load_actor(self, actor) -> bool:
         """Create one actor and its subtree; False when the actor's
@@ -680,7 +766,7 @@ class SimEnvironment:
         if value:
             self._load_bodies.append((rec_id, value))
         if value.startswith('%'):
-            self._run_lua_body(rec_id, _strip_lua_wrapper(value),
+            self._run_lua_body(rec_id, _callable_lua_body(value),
                                f'{self._label(rec_id)}.InitCommand',
                                load=True)
         elif value:
@@ -703,6 +789,15 @@ class SimEnvironment:
         name = f'{self._actor_label(actor, "?")}.Condition'
         result, error = self._native.eval_expr(expr)
         if error is not None or result is UNRESOLVED:
+            # LOAD-TIME fallback to the real Lua host: the mirin
+            # template's gates run `xero(function() ... end)()`, whose
+            # __call setfenv's the passed closure - the AST interpreter
+            # can only hand that metamethod a FOREIGN callable
+            # (userdata), so setfenv rejects it and every template
+            # plugin (the whole modfile) unresolved away. Conditions
+            # evaluate once at load; the interpreter stays primary.
+            result, error = self._host_eval(expr, name)
+        if error is not None or result is UNRESOLVED:
             self._warnings.append(f'{name}: {error or "unresolved"}')
             # A gate the host cannot ANSWER keeps a plain actor (a permissive-
             # stub gap must not drop real content) but DROPS a looped include -
@@ -714,6 +809,64 @@ class SimEnvironment:
             return getattr(actor, '_expand_include', None) is not None
         return result is None or result is False
 
+    def _host_eval(self, expr, name):
+        """`(value, error)` for a Lua EXPRESSION evaluated by the real
+        host (lupa), the load-pass fallback where the AST interpreter
+        cannot answer."""
+        try:
+            return self._host.run(f'return ({expr})', name=name), None
+        except Exception as exc:
+            return None, str(exc)
+
+    def _push_note_data(self, args) -> None:
+        """LunaPlayer PushNoteData @0x0052dc60, as the corpus uses it:
+        fill the chart-NAMED Lua global with the player's note rows in
+        the beat range - Government Knows initializes
+        `govParappaNotedata = {}`, calls
+        `PushNoteData('govParappaNotedata', 420, 452)`, and its parappa
+        dancer reads back `{beat, column}` rows (`setstate(v[2])` per
+        column). Rows come from the .sm parse (`env.note_rows`); an
+        unresolvable call leaves the chart's own empty table in place,
+        which reads as no notes rather than a fault."""
+        name = args[0] if args and isinstance(args[0], str) else None
+        bounds = [value for value in (_as_float(a) for a in args[1:])
+                  if value is not None]
+        if name is None or len(bounds) < 2:
+            return
+        start, end = bounds[0], bounds[1]
+        rows = [[float(beat), float(column)] for beat, column in
+                self.note_rows if start <= beat < end]
+        self._host.env[name] = self._host.to_lua(rows)
+
+    def _sandbox_loadstring(self, code, chunkname=None):
+        """Lua `loadstring` against the sandbox env: the compiled chunk,
+        or (nil, error) - the standard contract."""
+        if not isinstance(code, str):
+            return None, 'loadstring: string expected'
+        try:
+            return self._host.compile(code,
+                                      name=str(chunkname or 'loadstring'))
+        except Exception as exc:
+            return None, str(exc)
+
+    def _file_structure(self, path) -> list:
+        """Entry NAMES under `path`, confined to the song dir (the
+        engine lists the requested directory; charts only ever ask for
+        their own)."""
+        if self._song_dir is None or not isinstance(path, str):
+            return []
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            candidate = self._song_dir / path
+        try:
+            candidate = candidate.resolve()
+            if not (candidate.is_relative_to(self._song_dir.resolve())
+                    and candidate.is_dir()):
+                return []
+            return sorted(entry.name for entry in candidate.iterdir())
+        except OSError:
+            return []
+
     def _resolve_at_attrs(self, actor) -> None:
         """`@expr` attribute values evaluate as Lua at actor load
         (actorgen's `Type="@actorgen.Type()"`); the result replaces the
@@ -724,6 +877,11 @@ class SimEnvironment:
                 continue
             name = f'{self._actor_label(actor, "?")}.{attr}@'
             result, error = self._native.eval_expr(value[1:].strip())
+            if error is not None or result is UNRESOLVED:
+                # Same load-time host fallback as _condition_falsy: the
+                # mirin plugin loop's `File="@xero.__PLUGINS:file()"`
+                # reads state its Condition built through the host.
+                result, error = self._host_eval(value[1:].strip(), name)
             if error is not None or result is UNRESOLVED:
                 self._warnings.append(f'{name}: {error or "unresolved"}')
                 continue
@@ -761,6 +919,7 @@ class SimEnvironment:
     def _register_one(self, actor) -> int:
         rec_id = self._id_for(actor)
         self._labels[rec_id] = self._actor_label(actor, rec_id)
+        self._actor_names[rec_id] = actor.attrs.get('Name', '')
         base_dir = getattr(actor, '_base_dir', None)
         if base_dir is not None:
             self._xml_dirs[rec_id] = f'{base_dir}/'
@@ -817,7 +976,7 @@ class SimEnvironment:
         if value:
             self._load_bodies.append((rec_id, value))
         if value.startswith('%'):
-            self._run_lua_body(rec_id, _strip_lua_wrapper(value),
+            self._run_lua_body(rec_id, _callable_lua_body(value),
                                f'{self._label(rec_id)}.{attr}', load=True)
         elif value:
             self._run_classic_body(rec_id, value)
@@ -891,10 +1050,27 @@ class SimEnvironment:
         actor.dropped_notify = lambda verb: self._verb_dropped(rec_id, verb)
         actor.deferred_notify = self._verb_deferred
         actor.asset_resolver = lambda raw: self._resolve_asset(rec_id, raw)
+        actor.ease_compiler = self._compile_tween_ease
         self._actors[rec_id] = actor
         self._tables[rec_id] = self._host.env["__make_recorder"](rec_id)
         self._active.append(rec_id)
         return rec_id
+
+    def _compile_tween_ease(self, formula: str):
+        """A callable `u -> eased fraction` for the fork's
+        `tween(t, 'formula over %f')` custom ease, compiled through the
+        chart's own Lua sandbox so the formula means exactly what the
+        engine ran (the `%f` placeholder is the tween's raw progress).
+        Cached per text; a chart re-fires the same handful per section.
+        Raises on an uncompilable formula - the actor's caller reports
+        it and falls back to linear."""
+        fn = self._ease_formulas.get(formula)
+        if fn is None:
+            source = ('return function(u) return (%s) end'
+                      % formula.replace('%f', '(u)'))
+            fn = self._host.run(source, name='tween-ease')
+            self._ease_formulas[formula] = fn
+        return fn
 
     # -- time --------------------------------------------------------------
 
@@ -1149,6 +1325,43 @@ class SimEnvironment:
             if target_id is not None and target_id in self._actors:
                 actor.proxy_target = target_id
             return
+        if verb in ('addcommand', 'removecommand'):
+            # Runtime command-registry writes (Actor::AddCommand): the
+            # registered value is a Lua FUNCTION, dispatched by the same
+            # `_named_commands` path a load-resolved `%expr` command
+            # takes. The mirin template registers On / ScreenReady /
+            # Update this way and swaps Update mid-run.
+            command = args[0] if args else None
+            if isinstance(command, str):
+                registered = self._named_commands.setdefault(rec_id, {})
+                if verb == 'addcommand':
+                    fn = args[1] if len(args) > 1 else None
+                    if fn is not None:
+                        registered[command] = fn
+                else:
+                    registered.pop(command, None)
+            return
+        if verb == 'luaeffect':
+            if args and isinstance(args[0], str):
+                self._lua_effects[rec_id] = args[0]
+            return
+        if verb == 'PushNoteData':
+            self._push_note_data(args)
+            return
+        category = _NOTE_SHADER_VERBS.get(verb)
+        if category is not None:
+            # SetArrowShader(handle)/Clear*: the handle is the SOURCE
+            # actor's table (GetShader chains self). Recorded as that
+            # actor's recorder id on the player's note_shader channel;
+            # the doc later registers the source's Frag=/Vert= program.
+            src = self._table_rec_id(args[0]) if args else None
+            if verb.startswith('Set') and src is None:
+                return
+            if src is not None:
+                self.note_shader_sources.add(src)
+            self._sync(rec_id)
+            actor.set_note_shader(category, src)
+            return
         if verb == 'cmd':
             # Actor:cmd(s) parses s as an actor-command string and runs it
             # NOW (Actor::RunCommands @0075b280) - the same dispatch as a
@@ -1169,6 +1382,16 @@ class SimEnvironment:
             return 0.0
         if verb == 'GetXMLDir':
             return self._xml_dirs.get(_as_int(rec_id), '')
+        if verb == 'GetName':
+            # The XML Name (or ''), as the engine answers: the mirin
+            # named-actor scan sweeps every actor and a permissive-table
+            # answer read as a name corrupted its generated code.
+            return self._actor_names.get(_as_int(rec_id), '')
+        if verb == 'IsAwake':
+            # A real BOOLEAN (a 0.0 float is truthy in Lua): the mirin
+            # update gates every player's mod apply on it per frame.
+            actor = self._actors.get(_as_int(rec_id))
+            return actor is not None and float(actor.get('awake')) >= 0.5
         actor = self._actors.get(_as_int(rec_id))
         if actor is None:
             return self._host.env['__permissive']()
@@ -1192,6 +1415,17 @@ class SimEnvironment:
             child_id = self._new_actor()
             self._synthetic_children[(parent_id, name)] = child_id
         return self._tables[child_id]
+
+    def _actor_get_child_at(self, rec_id, index=None):
+        """`actor:GetChildAt(i)` - the 0-based XML child, or nil past the
+        end (the mirin template's named-actor scan sweeps
+        `0 .. GetNumChildren()-1` and recurses on each; answering the
+        PARENT here recursed forever)."""
+        children = self._children.get(_as_int(rec_id), ())
+        i = _as_int(index) if index is not None else None
+        if i is None or not 0 <= i < len(children):
+            return None
+        return self._tables.get(children[i])
 
     def synthetic_child_ids(self) -> dict:
         """(parent recorder id, child name) -> recorder id, for the
@@ -1283,6 +1517,7 @@ class SimEnvironment:
         host.expose('__actor_get', self._actor_get)
         host.expose('__actor_command', self._actor_command)
         host.expose('__actor_get_child', self._actor_get_child)
+        host.expose('__actor_get_child_at', self._actor_get_child_at)
         host.expose('__screen_get_child', self._screen_get_child)
 
         host.expose('loadfile', self._loadfile)
@@ -1292,6 +1527,23 @@ class SimEnvironment:
         # chart assigning its own `os` global simply shadows this.
         host.expose('os', host.to_lua({'clock': lambda: self._now,
                                        'time': lambda: self._now}))
+        # The DateTime.cpp wall-clock globals (Government Knows renders a
+        # live clock+date overlay from them). Anchored at env creation and
+        # advanced by SIM time, so the recording is deterministic within a
+        # compile and the on-screen clock ticks with the song, as it does
+        # in the engine. Semantics per OpenITG DateTime.cpp:286-293:
+        # MonthOfYear is 1-12 (tm_mon+1), Weekday is C tm_wday (Sunday=0),
+        # DayOfYear is 0-based tm_yday.
+        anchor = time.time()
+        local = lambda: time.localtime(anchor + self._now)
+        host.expose('Year', lambda: local().tm_year)
+        host.expose('MonthOfYear', lambda: local().tm_mon)
+        host.expose('DayOfMonth', lambda: local().tm_mday)
+        host.expose('Hour', lambda: local().tm_hour)
+        host.expose('Minute', lambda: local().tm_min)
+        host.expose('Second', lambda: local().tm_sec)
+        host.expose('Weekday', lambda: (local().tm_wday + 1) % 7)
+        host.expose('DayOfYear', lambda: local().tm_yday - 1)
         host.expose('SOUND', singleton(host.to_lua({
             'PlayOnce': lambda _self, *_a: None,
             'PlayMusicPart': lambda _self, *_a: None,
@@ -1300,6 +1552,11 @@ class SimEnvironment:
         song = singleton(host.to_lua({
             'GetSongDir': lambda _self: (
                 f'{self._song_dir}/' if self._song_dir else ''),
+            # Real chart timing (the mirin template timestamps every
+            # ease row through it and sorts by the result - a permissive
+            # answer faulted the comparator).
+            'GetElapsedTimeFromBeat': lambda _self, beat=0.0: float(
+                self._to_seconds(_as_float(beat) or 0.0)),
         }))
         host.expose('GAMESTATE', singleton(host.to_lua({
             'GetCurrentSong': lambda _self: song,
@@ -1321,6 +1578,15 @@ class SimEnvironment:
             # Charts gate their whole modfile on a minimum engine build
             # (tonumber(GetVersionDate()) >= ...); report a modern one.
             'GetVersionDate': lambda _self: '20990101',
+            # Directory listing (the fork's GameState thunk): the mirin
+            # template's plugin loader enumerates `<song>/plugins/` with
+            # it and includes every .xml it returns. MULTIPLE return
+            # values, not a table - the template collects them with a
+            # trailing call in a table constructor (a tuple crosses
+            # lupa as a multi-return). Sorted for determinism; a path
+            # outside the song dir answers nothing.
+            'GetFileStructure': lambda _self, path='': tuple(
+                self._file_structure(path)),
             'SetShaderFlag': self._set_shader_flag,
             'SetShaderFlagNum': self._set_shader_flag_num,
             'ApplyGameCommand': self._apply_game_command,
@@ -1341,6 +1607,16 @@ class SimEnvironment:
             'PostScreenMessage': lambda _self, *_a: None,
             'GetTopScreen': lambda _self, *_a: top_screen,
         })))
+        # NotITG's `SCREENMAN(name)` call shorthand for a top-screen
+        # child (the mirin template hides theme elements through it).
+        host.run("getmetatable(SCREENMAN).__call = "
+                 "function(_, name) return __screen_get_child(name) end",
+                 name='screenman-call')
+        # Sandboxed loadstring: compiles against the sandbox env (the
+        # host's own compile), so a chart can only reach what it already
+        # reaches. The mirin template both validates actor names with it
+        # and executes its generated named-actor table through it.
+        host.expose('loadstring', self._sandbox_loadstring)
         host.expose('DISPLAY', singleton(host.to_lua({
             'GetDisplayWidth': lambda _self: 640.0,
             'GetDisplayHeight': lambda _self: 480.0,

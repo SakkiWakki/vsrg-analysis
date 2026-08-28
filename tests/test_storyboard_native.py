@@ -111,21 +111,22 @@ def test_frame_with_feeds_ingests_soa_and_matches_static():
     b.item(0, sn.SRC_DRAWABLE, notes)
     ev = b.finish()
 
-    # Two fed items in the frozen feed v2 SoA layout: u32 stride 4, f32
-    # stride 18 (mat3 lanes 0..9, then opacity, tint, crop, z).
+    # Two fed items in the frozen feed v3 SoA layout: u32 stride 7 (kind,
+    # id, frame, flags, shader+1, x window), f32 stride 22 (mat3 lanes
+    # 0..9, then opacity, tint, crop, z, and the model lanes).
     fu = ev.feed_u_stride
     ff = ev.feed_f_stride
-    assert (fu, ff) == (4, 18)
+    assert (fu, ff) == (7, 22)
     ADDITIVE = 1
     u = np.zeros((2, fu), dtype=np.uint32)
     f = np.zeros((2, ff), dtype=np.float32)
     # item 0: image 5, additive, opacity 0.5, mat3 translate(10, 20) in the
     # record's column-vector layout (tx/ty in lanes 2/5).
-    u[0] = [sn.SRC_IMAGE, 5, 0, ADDITIVE]
+    u[0, :4] = [sn.SRC_IMAGE, 5, 0, ADDITIVE]
     f[0, :9] = [1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]
     f[0, 9] = 0.5   # opacity
     # item 1: image 6, plain, identity mat3, opacity 1.0.
-    u[1] = [sn.SRC_IMAGE, 6, 0, 0]
+    u[1, :4] = [sn.SRC_IMAGE, 6, 0, 0]
     f[1, :9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
     f[1, 9] = 1.0   # opacity
 
@@ -207,6 +208,45 @@ def test_item_link_flip_swaps_leaf_crop():
     blit = f[u[:, 0] == sn.OP_BLIT][0]
     assert blit[14] == pytest.approx(0.3)  # crop top <- bottom
     assert blit[16] == pytest.approx(0.1)  # crop bottom <- top
+
+
+def test_fed_model_counter_rotation_cancels_the_chain_rotation():
+    """The billboard invariant (gat 2's revolt): a note tilted -A inside a
+    chain turned +A draws exactly as an untilted note in an unturned
+    chain, because the two rotations meet in 4D before the one
+    projection. A pre-projected tilt can never satisfy this - cos is
+    even, so flattening drops the sign of the depth half."""
+    HAS_MODEL = 1 << 3
+
+    def head_mat(chain_roty, note_roty):
+        b = sn.DocBuilder(640.0, 480.0)
+        slot = b.feed_slot()
+        b.feed_inline(0, slot)
+        b.item_link(0, x_rest=320.0, y_rest=240.0,
+                    rotation_y_rest=chain_roty)
+        b.item_projection(0, fov_rest=45.0, vanish_x_rest=320.0,
+                          vanish_y_rest=240.0)
+        ev = b.finish()
+        u = np.zeros((1, ev.feed_u_stride), dtype=np.uint32)
+        f = np.zeros((1, ev.feed_f_stride), dtype=np.float32)
+        u[0, :4] = [sn.SRC_IMAGE, 7, 0, HAS_MODEL if note_roty else 0]
+        # A 64px head centred on the chain's pivot (the content centre),
+        # where the cancellation is exact everywhere, not just in shape.
+        f[0, :9] = [64.0, 0.0, 288.0, 0.0, 64.0, 208.0, 0.0, 0.0, 1.0]
+        f[0, 9] = 1.0
+        f[0, 20] = note_roty  # rot_y model lane
+        u_raw, f_raw, _uf, n = ev.frame_with_feeds(
+            0.0, [slot], [1], u.tobytes(), f.tobytes())
+        uu = np.frombuffer(u_raw, dtype=np.uint32).reshape(n, ev.u_stride)
+        fo = np.frombuffer(f_raw, dtype=np.float32).reshape(n, ev.f_stride)
+        rows = fo[(uu[:, 0] == sn.OP_BLIT) & (uu[:, 1] == sn.SRC_IMAGE)]
+        assert len(rows) == 1
+        m = rows[0][:9].astype(np.float64)
+        return m / m[8]
+
+    billboard = head_mat(60.0, -60.0)
+    flat = head_mat(0.0, 0.0)
+    np.testing.assert_allclose(billboard, flat, atol=1e-3)
 
 
 def test_item_projection_centered_fov45_is_identity():

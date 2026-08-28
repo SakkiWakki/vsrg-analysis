@@ -365,6 +365,47 @@ impl DocBuilder {
         ];
     }
 
+    /// Custom UV window (SM customtexturerect) on the item most recently
+    /// pushed onto `target`: [u0, v0, u1, v1] in texture-uv units, u1/v1
+    /// free to exceed 1 for a tiling draw. Rest (0, 0, 1, 1).
+    #[pyo3(signature = (target, u0_id=-1, u0_rest=0.0, v0_id=-1, v0_rest=0.0,
+                        u1_id=-1, u1_rest=1.0, v1_id=-1, v1_rest=1.0))]
+    #[allow(clippy::too_many_arguments)]
+    fn item_uv_rect(
+        &mut self,
+        target: u32,
+        u0_id: i64,
+        u0_rest: f32,
+        v0_id: i64,
+        v0_rest: f32,
+        u1_id: i64,
+        u1_rest: f32,
+        v1_id: i64,
+        v1_rest: f32,
+    ) {
+        self.last_item(target).uv_rect = [
+            chan(u0_id, u0_rest),
+            chan(v0_id, v0_rest),
+            chan(u1_id, u1_rest),
+            chan(v1_id, v1_rest),
+        ];
+    }
+
+    /// UV scroll offset (SetTexCoordVelocity's closed form sampled per
+    /// frame) on the item most recently pushed onto `target`.
+    #[pyo3(signature = (target, u_id=-1, u_rest=0.0, v_id=-1, v_rest=0.0))]
+    fn item_uv_offset(
+        &mut self,
+        target: u32,
+        u_id: i64,
+        u_rest: f32,
+        v_id: i64,
+        v_rest: f32,
+    ) {
+        self.last_item(target).uv_offset = [chan(u_id, u_rest),
+                                            chan(v_id, v_rest)];
+    }
+
     /// ScaleToCover / ScaleToFitInside on the item most recently pushed onto
     /// `target`: the uniform zoom that fits the source's natural box to a
     /// recorded rect. `mode` < 0.5 is off, 1.0 is cover, else fit-inside.
@@ -819,6 +860,14 @@ struct Evaluator {
 
 #[pymethods]
 impl Evaluator {
+    /// Feed slot ids whose `Cmd::Feed` would draw at `t` (visible gate +
+    /// live consumer chain). The per-frame note emission costs the
+    /// producer per PLAYER, so it asks this first and emits only for
+    /// consumers someone can see.
+    fn live_feed_slots(&self, t: f32) -> Vec<u32> {
+        crate::evaluate::live_feed_slots(&self.doc, t)
+    }
+
     /// Evaluate one frame; returns (u32_records_bytes, f32_records_bytes,
     /// uniform_values_bytes, op_count). Fixed strides: U_STRIDE u32 lanes
     /// + F_STRIDE f32 lanes per op - view with
@@ -858,7 +907,9 @@ impl Evaluator {
     /// from flat SoA buffers (frozen strides FEED_U_STRIDE / FEED_F_STRIDE).
     /// `feed_ids[i]` is the target drawable, `feed_item_counts[i]` its item
     /// count; `feed_u` / `feed_f` are the concatenated lane buffers.
-    #[pyo3(signature = (t, feed_ids, feed_item_counts, feed_u, feed_f))]
+    /// `feed_x` is the pre-sampled uniform-value buffer stamped items
+    /// window with their u-lanes 5/6 (offsets are GLOBAL across feeds).
+    #[pyo3(signature = (t, feed_ids, feed_item_counts, feed_u, feed_f, feed_x=None))]
     fn frame_with_feeds<'py>(
         &self,
         py: Python<'py>,
@@ -867,10 +918,12 @@ impl Evaluator {
         feed_item_counts: Vec<u32>,
         feed_u: &[u8],
         feed_f: &[u8],
+        feed_x: Option<&[u8]>,
     ) -> (Bound<'py, PyBytes>, Bound<'py, PyBytes>, Bound<'py, PyBytes>, usize) {
         let u32s = cast_bytes_u32(feed_u);
         let f32s = cast_bytes_f32(feed_f);
-        let owned = parse_feeds(&feed_ids, &feed_item_counts, &u32s, &f32s);
+        let x32s = feed_x.map(cast_bytes_f32).unwrap_or_default();
+        let owned = parse_feeds(&feed_ids, &feed_item_counts, &u32s, &f32s, &x32s);
         let feeds: Vec<Feed> = owned
             .iter()
             .map(|fi| Feed {

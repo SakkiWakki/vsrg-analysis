@@ -401,6 +401,8 @@ class NotitgNoteMods:
         ctx.candidate_press_y = axis[2] + bend.dy[press]
         ctx.candidate_dx = bend.dx[head]
         ctx.candidate_alpha = offs.alpha_mult[head]
+        ctx.candidate_stream_alpha = (None if offs.stream_alpha is None
+                                      else offs.stream_alpha[head])
         ctx.candidate_rot_deg = offs.rotation_deg[head]
         ctx.candidate_zoom = offs.zoom[head]
         # Per-note 3D: real depth (engine px) + out-of-plane tilt (deg).

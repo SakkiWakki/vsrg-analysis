@@ -222,7 +222,6 @@ IGNORED: dict = {
     'SetName': 'renames the actor - identity, no transform',
     'GetHidden': 'visibility readback - the sim answers GetHidden via '
                  'its own read path when a chart needs it',
-    'customtexturerect': 'custom UV rect - sheet cropping already sets UVs',
     # halign/valign/align are recorded scalars (SCALAR_SETTERS); only the
     # string-argument forms stay ignored here.
     'horizalign': 'horizontal align string - load-time layout',
@@ -288,47 +287,16 @@ DEFERRED: dict = {
     # actor's natural size the sim does not carry.
     'position': 'SetPosition - spline path time, not an x/y write '
                 '(Actor.h:494); no spline model',
-    # (scaletocover/scaletofit, diffuse gradients / glow / edge fades, and
-    # crop composites now implemented - see HANDLED_BY_NAME / CROP_COMPOSITES.)
-    # primitives + live tiers already deferred in lua_api.
-    'luaeffect': 'arbitrary per-frame Lua effect (SetEffectLua) - live '
-                 'channel tier, chart Lua owns it',
-    # runtime command-registry mutation: the load pass registers XML
-    # command attributes once; adding/removing/querying entries at play
-    # time needs a registry write path plus the engine's name-suffix
-    # semantics pinned from the decompile (Mod Rush charts use these).
-    'addcommand': 'runtime AddCommand registry write - not modeled',
-    'removecommand': 'runtime RemoveCommand registry write - not modeled',
+    # (scaletocover/scaletofit, diffuse gradients / glow / edge fades,
+    # crop composites, and the command registry (addcommand/
+    # removecommand/luaeffect) now implemented - see HANDLED_BY_NAME.)
     'hascommand': 'HasCommand query - needs a value-returning route with '
                   'an argument (the getter bridge passes none)',
-    # Per-player notefield shader binds (LunaPlayer<Player> fork
-    # additions: SetArrowShader @0x00533740, SetHoldShader @0x00533aa0,
-    # SetReceptorShader @0x00535a40, Clear* @0x005278xx, Get* variants;
-    # Government Knows' signature tier). A RageShaderProgram is stored
-    # on the Player and the note/hold/receptor draws render through it
-    # - the per-NOTE sibling of the per-actor shaded-blit tier. The
-    # draw-site consumption is not in the extracted decompile yet; pin
-    # it before building (addresses are trustworthy, adjacent callee
-    # names are not).
-    'SetArrowShader': 'per-player arrow shader bind @0x00533740 - '
-                      'per-note shader tier, not built',
-    'SetHoldShader': 'per-player hold shader bind @0x00533aa0 - '
-                     'per-note shader tier, not built',
-    'SetReceptorShader': 'per-player receptor shader bind @0x00535a40 - '
-                         'per-note shader tier, not built',
-    'ClearArrowShader': 'per-player arrow shader unbind @0x00527870',
-    'ClearHoldShader': 'per-player hold shader unbind @0x005278e0',
-    'ClearReceptorShader': 'per-player receptor shader unbind @0x00527950',
-    # Runtime notedata injection (Player::PushNoteData @0x0052dc60: the
-    # Lua thunk parses an SM notedata STRING plus (bool, float, float);
-    # PushNoteDataTime is the COMDAT-folded time variant). The chart
-    # rewrites the player's notes mid-song; our note streams are
-    # compiled from the .sm ahead of time, so injection needs a
-    # note-stream mutation path.
-    'PushNoteData': 'runtime notedata injection @0x0052dc60 - compiled '
-                    'note streams cannot mutate yet',
-    'PushNoteDataTime': 'time-variant of PushNoteData @0x0052de20',
-    'tween': 'tween with a custom Lua easing function - live channel tier',
+    # PushNoteDataTime (@0x0052de20): the seconds-range variant of
+    # PushNoteData. No corpus caller yet; deferring beats guessing its
+    # unit conversion (PushNoteData itself is HANDLED_BY_NAME).
+    'PushNoteDataTime': 'time-variant of PushNoteData @0x0052de20 - no '
+                        'corpus caller to pin the range units against',
     'floorwag': 'fork wag variant (Effect not in openitg; Actor.clean.c '
                 'apply-math is COMDAT-folded so its offset/floor behavior '
                 'cannot be pinned) - recorded as an oscillator span, '
@@ -377,6 +345,11 @@ HANDLED_BY_NAME: dict = {
     'bouncebegin': 'tween-queue', 'bounceend': 'tween-queue',
     'sleep': 'tween-queue', 'stoptweening': 'tween-queue',
     'finishtweening': 'tween-queue', 'hurrytweening': 'tween-queue',
+    # The fork's custom-ease tween: `tween(t, 'formula over %f')` (also a
+    # named SM curve). Queued like any ease verb; the formula compiles to
+    # a callable through the env's Lua host (gat 2's revolt bounces its
+    # fields with 'math.max(math.sin(math.pi*(%f*6)),0)').
+    'tween': 'tween-queue',
     # mechanism 7: effect span kinds + params
     'vibrate': 'effect-span', 'wag': 'effect-span', 'bob': 'effect-span',
     'bounce': 'effect-span', 'spin': 'effect-span', 'stopeffect': 'effect-span',
@@ -417,11 +390,42 @@ HANDLED_BY_NAME: dict = {
     # Sprite.cpp:346): UV units/sec, recorded as a closed-form scroll
     # anchor on the `texcoord_scroll` channel.
     'texcoordvelocity': 'uv-scroll',
+    # SetCustomTextureRect (openitg Sprite.h:63): the sampled UV
+    # window, u1/v1 past 1 tiling (GL REPEAT). Recorded onto the
+    # `uv_rect` channel; the doc binds it to the item's uv lanes.
+    'customtexturerect': 'uv-window',
     # Fork Player hibernate gate (LunaPlayer::SetAwake @0x00533780): an
     # asleep player neither updates nor draws. Recorded onto the `awake`
     # channel (rest 1); the field-instance chain treats awake 0 as
     # hidden.
     'SetAwake': 'awake',
+    # Per-player notefield shader binds (LunaPlayer<Player> fork
+    # additions: SetArrowShader @0x00533740, SetHoldShader @0x00533aa0,
+    # SetReceptorShader @0x00535a40, Clear* @0x005278xx; Government
+    # Knows' signature tier). The chart passes a source actor's
+    # GetShader() handle - our GetShader chains self, so the argument IS
+    # the source actor's table and the env resolves it to a recorder id.
+    # Recorded onto the player's `note_shader:{arrow,hold,receptor}`
+    # step channels (rest -1 = none); the drawable doc registers each
+    # source's Frag=/Vert= program and the note feed stamps items.
+    'SetArrowShader': 'note-shader', 'SetHoldShader': 'note-shader',
+    'SetReceptorShader': 'note-shader',
+    'ClearArrowShader': 'note-shader', 'ClearHoldShader': 'note-shader',
+    'ClearReceptorShader': 'note-shader',
+    # Runtime command-registry writes (Actor::AddCommand) and the fork's
+    # per-frame Lua effect (SetEffectLua @Actor.cpp:763). Env-routed:
+    # addcommand stores the passed Lua function in _named_commands (the
+    # same registry XML command attrs resolve into); luaeffect marks the
+    # actor as a per-frame rig the loop drives (the mirin template's
+    # whole runtime is addcommand('Update', fn) + luaeffect('Update')).
+    'addcommand': 'command-registry', 'removecommand': 'command-registry',
+    'luaeffect': 'command-registry',
+    # PushNoteData (@0x0052dc60), as the corpus uses it: fills the
+    # chart-NAMED Lua global with the player's (beat, column) note rows
+    # in the given beat range (Government Knows' parappa dancer mimics
+    # the steps from it). Env-routed: env._push_note_data slices the
+    # .sm-parsed rows.
+    'PushNoteData': 'note-rows-export',
     # GetShader():uniformTexture(name, tex) - a sampler bind onto the
     # actor's shader program (RageShaderProgram::SetUniformTexture
     # @0x0046e870, cached and flushed at Apply). Recorded as static

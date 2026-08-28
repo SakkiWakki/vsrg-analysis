@@ -245,15 +245,25 @@ vec4 _vs_texcoord[2];
 #define gl_TexCoord _vs_texcoord
 """
 
+# The per-note quad tier's variant: geometry is a shared UNIT-CENTERED
+# quad (a_pos in -0.5..0.5), scaled to the note's model-space pixels by
+# u_note_size - so gl_Vertex reads in model px exactly as the engine's
+# arrow verts do, and one VBO serves every note size.
+_NOTE_VERT_GEOMETRY = """uniform vec2 u_note_size;
+#define gl_Vertex vec4(a_pos * u_note_size, 0.0, 1.0)
+"""
+
 _VERT_WRAPPER = """
 void main(void) { _vs_chart_main(); v_uv = a_uv; }
 """
 
 
-def translate_vert(glsl: str) -> str:
+def translate_vert(glsl: str, note_quad: bool = False) -> str:
     """Return a contract vertex shader for the raw NotITG chart vert
     `glsl` (see the section comment). Raises ValueError when the source
-    has no main to wrap."""
+    has no main to wrap. `note_quad` swaps the mesh tier's absolute
+    `a_pos` for the note tier's unit-centered quad scaled by
+    `u_note_size` (see _NOTE_VERT_GEOMETRY)."""
     if not _VERT_MAIN_RE.search(glsl):
         raise ValueError('NotITG vert has no main to translate')
     body = _VERSION_RE.sub('', glsl)
@@ -261,7 +271,12 @@ def translate_vert(glsl: str) -> str:
     body = _VARYING_KEYWORD_RE.sub('out', body)
     body = _TEXTURE_MATRIX_RE.sub('mat4(1.0)', body)
     body = _VERT_MAIN_RE.sub('void _vs_chart_main()', body, count=1)
-    return _VERT_PREAMBLE + body + _VERT_WRAPPER
+    preamble = _VERT_PREAMBLE
+    if note_quad:
+        preamble = (preamble.replace(
+            '#define gl_Vertex vec4(a_pos, 0.0, 1.0)\n', '')
+            + _NOTE_VERT_GEOMETRY)
+    return preamble + body + _VERT_WRAPPER
 
 
 # NotITG compiles chart shaders as desktop GLSL 1.20, which has

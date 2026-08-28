@@ -27,9 +27,10 @@ from pathlib import Path
 
 import numpy as np
 
-from analysis.games.notitg import aft_chains, field_compose, modfile
+from analysis.games.notitg import (aft_chains, field_compose, model_txt,
+                                   modfile)
 from analysis.games.notitg.sim.loop import (
-    load_chart, run_declarative, run_sim)
+    beat_inverter, load_chart, run_declarative, run_sim)
 from analysis.games.notitg.sim.record import chase_events, coalesce_applied
 from analysis.player.render.effects.timeline import EventTimeline
 from analysis.player.render.mods.channels import ModChannels
@@ -57,6 +58,18 @@ _NUDGE_SHARE = 0.5
 _NUDGE_CAP_S = 0.003
 _NUDGE_FLOOR_S = 0.0005
 _NUDGE_STALE_S = 0.5
+# The LOST-frame regime: past this multiple of the frame target the frame
+# is not salvageable, and the floor's "do not deepen the miss" caution
+# inverts into a trap - the frames are slow BECAUSE the sweep has not
+# finished (legacy path until the doc adopts), the sweep only advances by
+# these slices while frames keep arriving (the worker parks), so the
+# floor locks the slow regime in permanently. A gat-2 sweep that takes
+# 16s idle stretched past an hour at the floor. A share of the whole
+# interval, capped, ends the regime in about a minute instead; healthy
+# machines never enter this branch.
+_NUDGE_LOST_X = 2.0
+_NUDGE_LOST_SHARE = 0.25
+_NUDGE_LOST_CAP_S = 0.080
 
 
 def _compiled_body_flag() -> bool:
@@ -158,6 +171,7 @@ def _compile_live(sm_path, end_seconds) -> dict | None:
         return None
     end = doc.end_seconds if end_seconds is None else end_seconds
     live = LiveSim(doc.root, doc.to_seconds, doc.start_beat, end,
+                   note_rows=doc.note_rows,
                    rng_seed=doc.rng_seed, song_dir=doc.lua_dir.parent,
                    use_compiled_body=_compiled_body_flag())
     fonts = modfile._font_resolver(doc.lua_dir)
@@ -227,6 +241,13 @@ def _compile_live(sm_path, end_seconds) -> dict | None:
         'field_instances': field_instances, 'screen_transform': screen_transform,
         'screen_oscillator': screen_shake, 'field_oscillators': [],
         'field_vanish': None,
+        # A PROVIDER, not a value: the binds and their sources appear as
+        # the background sweep reaches them, so the doc build reads the
+        # current set each time it runs (the post-upgrade rebuild sees
+        # the full chart's).
+        'note_shaders': lambda: note_shader_export(doc, live.env,
+                                                   live_sim=live),
+        'z_frame_spans': lambda: z_frame_spans(doc, live.env),
         'scroll_multiplier_timeline': scroll_mult,
         'note_path': note_path_handle,
         'aft_bg_visible': None,
@@ -356,9 +377,16 @@ class _LiveFieldInstances:
         """Seconds of sweep this frame may afford: a share of the frame time
         NOT already spent, where "everything else" is the last frame's
         interval minus our own last slice. A first frame (no interval yet)
-        gets the cap, matching the old fixed budget."""
+        gets the cap, matching the old fixed budget.
+
+        A frame LOST past recovery (`_NUDGE_LOST_X` times the target)
+        flips the goal: those frames are slow because the sweep is
+        unfinished, so the budget becomes a share of the whole interval to
+        end that regime rather than a floor that preserves it."""
         if frame <= 0.0 or frame > _NUDGE_STALE_S:
             return _NUDGE_CAP_S
+        if frame > _NUDGE_LOST_X * _NUDGE_FRAME_S:
+            return min(_NUDGE_LOST_CAP_S, _NUDGE_LOST_SHARE * frame)
         spare = _NUDGE_FRAME_S - (frame - self._nudge_spent)
         return min(_NUDGE_CAP_S, max(_NUDGE_FLOOR_S, _NUDGE_SHARE * spare))
 
@@ -624,7 +652,8 @@ def _spawn_background_upgrade(mod_channels, tree, field_provider,
                             sweep_doc.start_beat, end_seconds,
                             rng_seed=sweep_doc.rng_seed,
                             song_dir=sweep_doc.lua_dir.parent,
-                            use_compiled_body=_compiled_body_flag())
+                            use_compiled_body=_compiled_body_flag(),
+                            note_rows=sweep_doc.note_rows)
             sweep_seconds = sweep_doc.to_seconds
         # Chunked advance with progress to stderr: on a loaded machine
         # the sweep can take minutes, and "still compiling to X" vs
@@ -851,7 +880,8 @@ def _compile_via_sim(sm_path, end_seconds):
     result = run_declarative(doc.root, doc.to_seconds, doc.start_beat,
                              end_seconds, rng_seed=doc.rng_seed,
                              song_dir=doc.lua_dir.parent,
-                             use_compiled_body=_compiled_body_flag())
+                             use_compiled_body=_compiled_body_flag(),
+                             note_rows=doc.note_rows)
     env = result.env
 
     named_keyframes = env.named_actor_keyframes()
@@ -912,6 +942,9 @@ def _compile_via_sim(sm_path, end_seconds):
         # Per-player note-path splines + arrowpath gradient (SetXSpline
         # family), consumed by note_mods and the arrowpath ribbon.
         'note_path': _note_path_handle(env),
+        'note_shaders': note_shader_export(
+            doc, env, actor_keyframes=actor_keyframes),
+        'z_frame_spans': z_frame_spans(doc, env),
         'named_actors': len(named_keyframes),
         'recorded_keyframes': sum(
             len(kfs) for frames in actor_keyframes.values()
@@ -1143,6 +1176,7 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
                         if a.aft_source}
     slot_nodes = _chain_slot_nodes(chain_graph, aft_nodes, consumed_sources)
     seen_actors: dict = {}
+    model_cache: dict = {}
 
     instances = []
     base_players = _base_players(mod_channels)
@@ -1238,6 +1272,8 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
                 color = EventTimeline(
                     (actor_keyframes.get(rec_id) or {}).get('color', []),
                     rest=(1.0, 1.0, 1.0))
+        elif (models := _model_meshes(actor, model_cache)) is not None:
+            kind, player = 'model', 0
         else:
             continue
         chain = _chain(actor, parents)
@@ -1303,17 +1339,81 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
                 # uniform pokes and uniformTexture binds ride the same
                 # frag_* slots the shaded-quad path uses.
                 inst['mesh'] = mesh
+                # A Polygon actor has NO size - its vertices are absolute
+                # local coordinates - so the engine's halign/valign anchor
+                # offset scales by ZERO and align pokes are no-ops on it
+                # (gat 2 even pokes halign(10) on the crumple ball). Our
+                # chain scales that offset by the capture box instead,
+                # which slung the ball (0.5-10)*640*zoom px off screen;
+                # the align channels drop to their centred rest.
+                leaf = dict(links[-1])
+                leaf.pop('halign', None)
+                leaf.pop('valign', None)
+                transform = inst['transform']
+                transform._links = (*transform._links[:-1], leaf)
                 if frag_path is None:
                     inst['frag_uniforms'] = _uniform_curves(
                         sim, rec_id, live_sim, actor_keyframes,
                         mesh.get('vert') or '')
                     inst['frag_samplers'] = _file_sampler_binds(sim)
+        if kind == 'model':
+            inst['models'] = models
+            # Model vertices are absolute local coordinates, exactly
+            # like a Polygon's - align pokes are engine no-ops on them
+            # (see the mesh branch above).
+            leaf = dict(links[-1])
+            leaf.pop('halign', None)
+            leaf.pop('valign', None)
+            transform = inst['transform']
+            transform._links = (*transform._links[:-1], leaf)
         z_group, z_link = _z_sort_group(chain, links, env)
         if z_group is not None:
             inst['z_group'] = z_group
             inst['z_sort'] = z_link['z']
         instances.append(inst)
     return instances
+
+
+def z_frame_spans(doc, env) -> list:
+    """`[(group rec_id, lo, hi)]` tree-index spans of SetDrawByZPosition
+    frames. The engine z-sorts each flagged frame's DIRECT children -
+    field instances and plain sprites alike (FFF weaves its player
+    proxies through six stripe sprites) - so the doc pulls a span's
+    ELEMENTS into the same SortSpan as its instances."""
+    spans = []
+    for actor in _iter_xml(doc.root):
+        sim = env.actors.get(env.actor_id(actor))
+        if sim is None:
+            continue
+        flag = sim.keyframes().get('draw_by_z')
+        if not flag or flag[-1].values[0] < 0.5:
+            continue
+        indexes = [index for child in _iter_xml(actor)
+                   if (index := modfile._tree_index_of(child)) is not None]
+        if indexes:
+            spans.append((env.actor_id(actor), min(indexes), max(indexes)))
+    return spans
+
+
+def _model_meshes(actor, cache):
+    """The actor's Milkshape model meshes when its `File=` names one
+    (`models/x.txt`), else None: `[{vertices (n, 8), texture,
+    spheremap, mode, vert, design_size}]`, executor-payload-shaped.
+    Parsed once per resolved path - Government Knows lays six dick.txt
+    columns from one file."""
+    file_attr = actor.attrs.get('File')
+    if not model_txt.is_model_reference(file_attr):
+        return None
+    resolved = _resolve_frag(actor, file_attr)
+    if resolved is None:
+        return None
+    key = str(resolved)
+    if key not in cache:
+        meshes = model_txt.load_model(resolved)
+        cache[key] = None if meshes is None else [
+            {**mesh, 'mode': 'triangles', 'vert': None,
+             'design_size': (640.0, 480.0)} for mesh in meshes]
+    return cache[key]
 
 
 def _z_sort_group(chain, links, env):
@@ -1335,15 +1435,19 @@ def _z_sort_group(chain, links, env):
 
 
 def _uniform_curves(sim, rec_id, live_sim, actor_keyframes,
-                    frag_path) -> dict:
+                    frag_path, vert_path=None) -> dict:
     """{uniform name: value timeline} from the actor's recorded
     `GetShader():uniform*` pokes. The REST value is the .frag's own
     declared initializer when it has one (GLSL 1.2 allows
     `uniform float pixelSize = 0.00001;` and NotITG honours it; the
     translation strips initializers for ES compatibility, and a 0.0
     rest turned lumikey's pre-poke frames into floor(x/0) NaN black -
-    "notes only appear when the pixelation activates"), else 0.0."""
+    "notes only appear when the pixelation activates"), else 0.0.
+    A note-shader source's VERT declares uniforms of its own
+    (note-drop.vert's beatscale), so its defaults join the frag's."""
     defaults = _frag_uniform_defaults(frag_path)
+    if vert_path is not None:
+        defaults = {**_frag_uniform_defaults(vert_path), **defaults}
     names = {prop[len('uniform:'):] for prop in sim.keyframes()
              if prop.startswith('uniform:')} | set(defaults)
     if live_sim is not None:
@@ -1382,8 +1486,10 @@ class _RestUntil:
 
 @lru_cache(maxsize=64)
 def _frag_uniform_defaults(frag_path) -> dict:
-    """{name: value} for every scalar uniform the .frag declares WITH an
-    initializer."""
+    """{name: value} for every scalar uniform the shader source declares
+    WITH an initializer ({} for no path - a vert-only source)."""
+    if frag_path is None:
+        return {}
     try:
         src = Path(frag_path).read_text(encoding='utf-8', errors='replace')
     except OSError:
@@ -1656,6 +1762,77 @@ def _file_sampler_binds(sim) -> dict:
     return {name: marker[len('file:'):]
             for name, marker in getattr(sim, 'sampler_binds', {}).items()
             if marker.startswith('file:')}
+
+
+_NOTE_SHADER_CATEGORIES = ('arrow', 'hold', 'receptor')
+
+
+def note_shader_export(doc, env, live_sim=None, actor_keyframes=None):
+    """The chart's per-player note-shader binds plus every referenced
+    source program, or None when no bind was recorded.
+
+    Shape: {'players': {number: {category: curve of source rec_id}},
+    'sources': {rec_id: {'frag', 'vert', 'uniforms', 'samplers'}}}. The
+    curves carry the SOURCE actor's recorder id over time (-1 =
+    unbound); the drawable doc registers each source's program and the
+    note feed stamps items with the active one. Sources resolve their
+    Frag=/Vert= against their own XML dir, uniforms ride the recorded
+    poke streams (vert-declared defaults included), samplers are the
+    uniformTexture file binds."""
+    if not env.note_shader_sources:
+        return None
+
+    from analysis.games.notitg.sim.seg_read import curve_for
+    keyframes = actor_keyframes or {}
+
+    def channel_curve(sim, rec_id, prop):
+        recorded = (sim.keyframes().get(prop) if live_sim is not None
+                    else keyframes.get(rec_id, {}).get(prop))
+        if not recorded:
+            return None
+        if live_sim is not None:
+            return curve_for(live_sim, rec_id, prop, (-1.0,))
+        return EventTimeline(recorded, rest=(-1.0,))
+
+    players = {}
+    for child_name, rec_id in env.screen_child_ids().items():
+        number = _player_number(child_name)
+        sim = env.actors.get(rec_id)
+        if number is None or sim is None:
+            continue
+        curves = {}
+        for category in _NOTE_SHADER_CATEGORIES:
+            curve = channel_curve(sim, rec_id, f'note_shader:{category}')
+            if curve is not None:
+                curves[category] = curve
+        if curves:
+            players[number] = curves
+
+    sources = {}
+    by_id = {env.actor_id(a): a for a in _iter_xml(doc.root)}
+    for rec_id in env.note_shader_sources:
+        actor, sim = by_id.get(rec_id), env.actors.get(rec_id)
+        if actor is None or sim is None:
+            continue
+        frag, vert = actor.attrs.get('Frag'), actor.attrs.get('Vert')
+        frag_path = _resolve_frag(actor, frag) if frag else None
+        vert_path = _resolve_frag(actor, vert) if vert else None
+        if frag_path is None and vert_path is None:
+            continue
+        sources[rec_id] = {
+            'frag': str(frag_path) if frag_path else None,
+            'vert': str(vert_path) if vert_path else None,
+            'uniforms': _uniform_curves(sim, rec_id, live_sim, keyframes,
+                                        frag_path, vert_path=vert_path),
+            'samplers': _file_sampler_binds(sim),
+        }
+
+    if not (players and sources):
+        return None
+    return {'players': players, 'sources': sources,
+            # seconds -> beat, for the feed's `beat` uniform and the
+            # exact per-note fNoteBeat (suzumebachi targets one).
+            'to_beat': beat_inverter(doc.to_seconds, doc.end_seconds)}
 
 
 def _resolve_frag(actor, frag) -> Path | None:

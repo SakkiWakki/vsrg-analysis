@@ -144,7 +144,8 @@ def gl_executor(images, sizes, id_maps):
     executor = GLExecutor(
         images, sizes,
         image_grids=id_maps.get('image_grids'),
-        image_specs=id_maps.get('image_specs'))
+        image_specs=id_maps.get('image_specs'),
+        meshes=id_maps.get('meshes'))
     # Positional by the shader id the BLIT lanes carry. Without it every
     # shader lane resolves to None and a shaded sampler blits through the
     # plain textured program - the exact failure this backend exists to see.

@@ -855,10 +855,15 @@ def _emissions_for(monkeypatch, scopes, per_player):
     monkeypatch.setattr(pipe, '_ensure_note_images', lambda ctx: {'x': (0, 1, 1)})
     monkeypatch.setattr(
         'analysis.player.render.storyboard.note_feed.feed_from_context',
-        lambda c, image_map, design=None: (
+        lambda c, image_map, design=None, note_shader=None: (
             np.frombuffer(bytes([c.tag]) * 4, dtype=np.uint8),
-            np.frombuffer(bytes([c.tag]) * 4, dtype=np.uint8), 1, {}))
-    return pipe._note_feed(SimpleNamespace(tag=1), per_player)
+            np.frombuffer(bytes([c.tag]) * 4, dtype=np.uint8),
+            np.zeros(0, dtype=np.float32), 1, {}))
+    fed = pipe._note_feed(SimpleNamespace(tag=1), per_player)
+    if fed is None:
+        return None
+    slots, counts, u_bytes, f_bytes, _x_bytes = fed
+    return slots, counts, u_bytes, f_bytes
 
 
 def test_each_player_slot_is_fed_its_own_notes(monkeypatch):
@@ -867,7 +872,7 @@ def test_each_player_slot_is_fed_its_own_notes(monkeypatch):
     independently-modded fields with the same notes."""
     from types import SimpleNamespace
 
-    def per_player(emit):
+    def per_player(emit, scopes=None):
         return {'field': emit(SimpleNamespace(tag=1)),
                 'field2': emit(SimpleNamespace(tag=2))}
 
@@ -885,9 +890,52 @@ def test_a_slot_with_no_emission_of_its_own_falls_back_to_the_primary(
     from types import SimpleNamespace
     slots, counts, u_bytes, _f = _emissions_for(
         monkeypatch, ('field', 'field3'),
-        lambda emit: {'field': emit(SimpleNamespace(tag=7))})
+        lambda emit, scopes=None: {'field': emit(SimpleNamespace(tag=7))})
     assert slots == [1, 2] and counts == [1, 1]
     assert u_bytes == bytes([7] * 8)
+
+
+def test_dead_feed_slots_are_not_emitted_for(monkeypatch):
+    """The doc's liveness query prices the frame: a scope whose consumer
+    cannot draw at `t` gets a zero-count feed and its player's emission
+    is never produced (each one costs a whole per-player prepass
+    rebuild - most of a heavy chart's frame Python)."""
+    from types import SimpleNamespace
+    asked = []
+
+    def per_player(emit, scopes=None):
+        asked.append(scopes)
+        out = {}
+        if scopes is None or 'field' in scopes:
+            out['field'] = emit(SimpleNamespace(tag=1))
+        if scopes is None or 'field2' in scopes:
+            out['field2'] = emit(SimpleNamespace(tag=2))
+        return out
+
+    def run(live):
+        _player, pipe = _build_pipeline(monkeypatch,
+                                        _feed_doc(('field', 'field2')))
+        pipe._id_maps = {'note_feeds': {'field': 1, 'field2': 2}}
+        pipe._evaluator = SimpleNamespace(live_feed_slots=lambda t: live)
+        monkeypatch.setattr(pipe, '_ensure_note_images',
+                            lambda ctx: {'x': (0, 1, 1)})
+        monkeypatch.setattr(
+            'analysis.player.render.storyboard.note_feed.feed_from_context',
+            lambda c, image_map, design=None, note_shader=None: (
+                np.frombuffer(bytes([c.tag]) * 4, dtype=np.uint8),
+                np.frombuffer(bytes([c.tag]) * 4, dtype=np.uint8),
+                np.zeros(0, dtype=np.float32), 1, {}))
+        return pipe._note_feed(SimpleNamespace(tag=1, t_now=0.0), per_player)
+
+    slots, counts, u_bytes, _f, _x = run(live=[2])
+    assert asked[-1] == frozenset({'field2'})
+    assert slots == [1, 2] and counts == [0, 1]
+    assert u_bytes == bytes([2] * 4), 'dead slot fed nothing, live slot fed'
+
+    # Everything dead is an ANSWER, not a failure: the frame still runs
+    # (zero-count feeds), where an unpriced all-empty frame declines.
+    slots, counts, _u, _f, _x = run(live=[])
+    assert counts == [0, 0]
 
 
 def test_the_prepare_gate_waits_for_the_handover_not_the_frontier():

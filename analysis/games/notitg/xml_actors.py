@@ -163,6 +163,26 @@ _LUA50_ESCAPES = frozenset("abfnrtv\\\"'\n0123456789")
 _ZERO_STEP_FOR_RE = re.compile(
     r'(\bfor\b[^\n;]*?=[^\n;]*?,[^\n;]*?,\s*)0(?:\.0*)?(\s+do\b)')
 
+# A GENERIC for over a bare table: Lua 5.0's deprecated sugar for
+# `pairs(t)` (`for j, v in colpairs do` - the mirin corpus writes it),
+# which LuaJIT reads as calling the table. Wrapping every generic-for
+# iterator in __iter50 is neutral for real iterators (a function first
+# value passes through, extra state values included) and restores the
+# 5.0 sugar for tables. The numeric form (`for i = a, b`) has an `=`
+# before `in` can appear, so the match excludes it.
+_GENERIC_FOR_RE = re.compile(
+    r'(\bfor\b[^\n;=]*?\bin\b\s*)(.+?)(\s+do\b)')
+
+# The swap-remove idiom `t[i] = table.remove(t)` at the TERMINAL index:
+# Lua 5.0's `#`/getn reads the n-field table.remove decremented, so the
+# re-assigned slot sits invisibly past the length and the enclosing
+# scan terminates; a recomputing 5.1 `#` sees it again FOREVER (old
+# bundled mirin templates spin in run_eases exactly here - upstream
+# later added the guard this rewrite reproduces).
+_SWAP_REMOVE_RE = re.compile(
+    r'\b([A-Za-z_]\w*)\s*\[\s*([A-Za-z_]\w*)\s*\]\s*=\s*'
+    r'table\.remove\(\s*\1\s*\)')
+
 
 def _lua50_compat(source: str) -> str:
     """Rewrite Lua source so LuaJIT (5.1 lexer) reads it exactly as
@@ -258,6 +278,22 @@ def _lua50_compat(source: str) -> str:
         rewritten = (rewritten[:s] + match.group(1)
                      + '(error("\'for\' step is zero"))'
                      + match.group(2) + rewritten[e:])
+        masked = (masked[:s] + match.group(1)
+                  + '(error("\'for\' step is zero"))'
+                  + match.group(2) + masked[e:])
+    for match in reversed(list(_GENERIC_FOR_RE.finditer(masked))):
+        s, e = match.span()
+        expr = rewritten[s + len(match.group(1)):e - len(match.group(3))]
+        rewritten = (rewritten[:s] + match.group(1)
+                     + f'__iter50({expr})' + match.group(3) + rewritten[e:])
+        masked = (masked[:s] + match.group(1)
+                  + f'__iter50({expr})' + match.group(3) + masked[e:])
+    for match in reversed(list(_SWAP_REMOVE_RE.finditer(masked))):
+        s, e = match.span()
+        t, i = match.group(1), match.group(2)
+        rewritten = (rewritten[:s]
+                     + f'if {i} ~= #{t} then {t}[{i}] = table.remove({t}) '
+                     + f'else table.remove({t}) end' + rewritten[e:])
     return rewritten
 
 
@@ -304,6 +340,22 @@ def is_lua_function_literal(value: str) -> bool:
     literal shape, as opposed to a `%expr` expression command."""
     body = _lua_expr_body(value)
     return bool(re.match(r'function\s*\(', body)) and body.endswith('end')
+
+
+def _callable_lua_body(value: str) -> str:
+    """Like `_strip_lua_wrapper`, but a `%function(self) ...` literal
+    KEEPS its function form and is called with the sandbox `self` as a
+    real PARAMETER. A closure the body registers for later then holds
+    its actor as an upvalue - engine semantics. The stripped statement
+    form re-resolves `self` through the globals at FIRE time, which is
+    whichever actor ran last: Government Knows' suzumebachi CatEvent
+    handler bound `self:GetShader()` and recorded the master updater
+    frame instead of the Frag= actor. Only the load-pass RUNTIME uses
+    this; the AST consumers (guard windows, schedule lowering, the
+    compiled body) keep `_strip_lua_wrapper`'s top-level statements."""
+    body = _lua_expr_body(value)
+    return (f'local __cmd = ({body})\n'
+            "if type(__cmd) == 'function' then __cmd(self) end")
 
 
 def _strip_lua_wrapper(value: str) -> str:

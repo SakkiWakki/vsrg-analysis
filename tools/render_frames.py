@@ -93,7 +93,7 @@ def _advance_live_sim(replay, target: float, wait_sweep: bool) -> None:
     live = compiled.get('_live_sim')
     if live is None:
         return
-    end = getattr(live, '_end_s', None)
+    end = getattr(live, '_end_seconds', None)
     goal = end if wait_sweep and end is not None else min(
         target + 1.0, end if end is not None else target + 1.0)
     print(f'advancing live sim to {goal:.1f}s ...', flush=True)

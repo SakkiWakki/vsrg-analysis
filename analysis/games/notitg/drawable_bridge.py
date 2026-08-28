@@ -21,8 +21,8 @@ compiled chart onto that model:
 - `feed_frame(compiled, t, id_maps)` samples the SAME `NotitgFieldInstances`
   effect the renderer samples (`effect.at(ctx)` over a design `chart_rect` of
   (0, 0, 640, 480)) and routes each field entry to its inter-capture segment's
-  feed, translating it into the FROZEN feed v2 record layout (u32 stride 4,
-  f32 stride 18). It returns the four flat SoA feed buffers
+  feed, translating it into the FROZEN feed v3 record layout (u32 stride 7,
+  f32 stride 22). It returns the four flat SoA feed buffers
   `Evaluator.frame_with_feeds` ingests.
 
 Translation rules (per the wave-3 spec section C1 - feed v2):
@@ -79,13 +79,18 @@ _SCREEN_H = 480.0
 _SCREEN_ID = 0
 
 # Feed v2 record layout (frozen; mirrors native/src/evaluate.rs FEED_*_STRIDE):
-#   u32 stride 4: [source_kind, source_id, frame, flags]
-#   f32 stride 18: [m00, m01, m02, m10, m11, m12, m20, m21, m22,
-#                   opacity, r, g, b, crop_l, crop_t, crop_r, crop_b, z]
-# The mat3 lanes 0..9 are in the BLIT record's column-vector convention and are
-# written to the record verbatim.
-_FEED_U_STRIDE = 4
-_FEED_F_STRIDE = 18
+#   u32 stride 7: [source_kind, source_id, frame, flags, shader+1,
+#                  x_offset, x_count] (the bridge stamps no note
+#                  shaders; lanes 4..6 stay 0)
+#   f32 stride 22: [m00, m01, m02, m10, m11, m12, m20, m21, m22,
+#                   opacity, r, g, b, crop_l, crop_t, crop_r, crop_b, z,
+#                   model_z, rot_x, rot_y, rot_z]
+# `z` is the local SORT key; lanes 18..22 are the item's 3D model, gated by
+# the HAS_MODEL flag. The bridge feeds flat quads, so it always writes 0
+# there. The mat3 lanes 0..9 are in the BLIT record's column-vector
+# convention and are written to the record verbatim.
+_FEED_U_STRIDE = 7
+_FEED_F_STRIDE = 22
 _FEED_FLAG_ADDITIVE = 1 << 0
 
 # The identity mat3 in the record's column-vector layout (an untouched original
@@ -329,10 +334,12 @@ def feed_frame(compiled, t, id_maps):
         crop = _unpack_crop(entry)
         source_kind, source_id, tint, additive = _source_lanes(source)
         flags = _FEED_FLAG_ADDITIVE if additive else 0
-        seg_u[seg_idx].append((source_kind, source_id, 0, flags))
+        seg_u[seg_idx].append((source_kind, source_id, 0, flags,
+                               0, 0, 0))
         seg_f[seg_idx].append([*mat, float(alpha),
                                tint[0], tint[1], tint[2],
-                               crop[0], crop[1], crop[2], crop[3], 0.0])
+                               crop[0], crop[1], crop[2], crop[3], 0.0,
+                               0.0, 0.0, 0.0, 0.0])
         translated += 1
 
     feed_ids, counts, u_all, f_all = _pack_segments(segments, seg_u, seg_f)

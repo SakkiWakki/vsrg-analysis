@@ -219,6 +219,15 @@ pub struct Item {
     /// happens. Static (doc-built) items leave this None and go through
     /// the TRS or link chain.
     pub fed_mat: Option<[f32; 9]>,
+    /// A fed item's 3D model `[z, rot_x, rot_y, rot_z]` (depth in field
+    /// px, tilts in degrees), when it has one. `fed_mat` then carries the
+    /// item's scale and field position ONLY; the rotations compose here,
+    /// engine-ordered, so the consuming chain's own rotation can meet them
+    /// in 4D. Kept off the mat3 because a 3x3 can carry neither depth nor
+    /// the sign of a tilt - which is precisely why a per-item
+    /// counter-rotation could not cancel a chain's rotation before
+    /// (see .claude/plans/notitg-note-model-z.md).
+    pub fed_model: Option<[f32; 4]>,
     /// Optional per-item camera projection folded onto the item's mat3
     /// (None = the parent's/no projection, a plain 2D blit).
     pub projection: Option<CameraRef>,
@@ -251,6 +260,13 @@ pub struct Item {
     /// (Sprite.cpp:560). Rests at 0 - a hard edge. The four ramps MULTIPLY
     /// where they overlap, matching the painter's DestinationIn mask.
     pub fade: [ChannelRef; 4],
+    /// Custom UV window (SM customtexturerect) as [u0, v0, u1, v1] in
+    /// texture-uv units, sampled each frame; u1/v1 may exceed 1 for a
+    /// TILING draw (GL REPEAT). Rest (0, 0, 1, 1) = plain full texture.
+    pub uv_rect: [ChannelRef; 4],
+    /// UV scroll offset (SetTexCoordVelocity's closed form) added to
+    /// the window and wrapped mod 1 at draw. Rest (0, 0).
+    pub uv_offset: [ChannelRef; 2],
     pub opacity: ChannelRef,
     pub tint: [ChannelRef; 3],
     /// Additive-blend gate, sampled every frame: >= 0.5 draws Additive,
@@ -265,6 +281,12 @@ pub struct Item {
     /// Sampled each frame; the values ride the schedule's uniform buffer
     /// (see evaluate.rs). Empty when no shader / no bound uniforms.
     pub uniforms: Vec<(u16, ChannelRef)>,
+    /// A FED item's pre-sampled uniform VALUES (feed v3, the per-note
+    /// shader tier): copied to the schedule's uniform buffer verbatim
+    /// instead of sampling `uniforms` channels. The emit also flags the
+    /// record NOTE_SHADED so the executor routes it through the
+    /// translated per-note program rather than the plain shaded quad.
+    pub fed_uniforms: Option<Vec<f32>>,
     pub clip: Option<u32>,     // ClipId into DrawableDoc.clips
     pub z: Option<ChannelRef>, // local sort key, read inside SortSpan only
     /// Event-driven drawing responses: on a matching event, a reaction's
@@ -282,6 +304,7 @@ impl Item {
             links: Vec::new(),
             flip_base_y: false,
             fed_mat: None,
+            fed_model: None,
             projection: None,
             space: Space::Scene,
             tag: 0,
@@ -289,6 +312,13 @@ impl Item {
             size: [ChannelRef::constant(-1.0); 2],
             fit: [ChannelRef::constant(0.0); 3],
             fade: [ChannelRef::constant(0.0); 4],
+            uv_rect: [
+                ChannelRef::constant(0.0),
+                ChannelRef::constant(0.0),
+                ChannelRef::constant(1.0),
+                ChannelRef::constant(1.0),
+            ],
+            uv_offset: [ChannelRef::constant(0.0); 2],
             opacity: ChannelRef::constant(1.0),
             tint: [ChannelRef::constant(1.0); 3],
             blend_add: ChannelRef::constant(0.0),
@@ -296,6 +326,7 @@ impl Item {
             visible: ChannelRef::constant(1.0),
             shader: None,
             uniforms: Vec::new(),
+            fed_uniforms: None,
             clip: None,
             z: None,
             reactions: Vec::new(),
@@ -526,6 +557,7 @@ mod tests {
             into: slot,
             links: Vec::new(),
             flip_base_y: false,
+            z: None,
         });
         assert!(doc.find_nested_sort_span().is_ok());
     }

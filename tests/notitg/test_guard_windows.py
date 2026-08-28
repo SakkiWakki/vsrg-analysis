@@ -146,6 +146,24 @@ def test_rearm_period(body, expected):
     assert guard_windows.rearm_period(body) == expected
 
 
+def test_rearm_period_resolves_an_expression_over_chart_globals():
+    """gat 2 re-arms with `self:sleep(1 / gf2_fps)` (`gf2_fps = 50` set at
+    load). Missing it ran the body at the sweep's 60Hz instead of the
+    chart's 50Hz, and every per-frame integrator (revolt's spin
+    `ry = ry + rotspd` per tick) accumulated 20% too much - a phase that
+    drifts off the engine's, parking fields off screen at instants the
+    reference shows them."""
+    from analysis.player.render.expr.surface import ConstSurface
+
+    body = ("%function(self) self:sleep(1 / gf2_fps); "
+            "self:queuecommand('Update') end")
+    assert guard_windows.rearm_period(body) is None, \
+        'no surface, no guess - the caller must not tick at a wrong rate'
+    surface = ConstSurface({'gf2_fps': 50})
+    assert guard_windows.rearm_period(body, const_surface=surface) \
+        == pytest.approx(0.02)
+
+
 # -- guards survive intervening unmodeled constructs -------------------------
 
 def test_guard_found_after_generic_for():

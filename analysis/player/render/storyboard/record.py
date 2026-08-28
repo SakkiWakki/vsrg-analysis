@@ -21,7 +21,7 @@ from __future__ import annotations
 
 # Record strides. Checked against `evaluator.u_stride` / `f_stride`.
 U_STRIDE = 11
-F_STRIDE = 28
+F_STRIDE = 34
 
 # u32 lanes.
 U_KIND = 0
@@ -45,6 +45,13 @@ F_ORIGIN = 17   # ..19 (x, y as fractions of the item's own drawn size)
 F_SIZE = 19     # ..21 (absolute w, h replacing the natural box; < 0 = natural)
 F_FIT = 21      # ..24 (ScaleToCover/FitInside: mode, rect w, rect h)
 F_FADE = 24     # ..28 (SetFade l, r, t, b as fractions of the drawn box)
+# Custom UV window (SM customtexturerect): the SOURCE rect in texture-uv
+# units, u1/v1 free to exceed 1 for a TILING draw (GL REPEAT). Rest
+# (0, 0, 1, 1) = the plain full-texture window.
+F_UV_RECT = 28  # ..32 (u0, v0, u1, v1)
+# UV scroll offset (SetTexCoordVelocity's closed form sampled at t),
+# added to the window and wrapped mod 1 at draw. Rest (0, 0).
+F_UV_OFFSET = 32  # ..34 (u, v)
 
 # Op kinds.
 OP_BEGIN = 0

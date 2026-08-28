@@ -190,13 +190,17 @@ class SegmentTimeline:
     def add_ramp(self, t0: float, t1: float, v0: float, v1: float,
                  ease_id: int = _EASE_LINEAR) -> None:
         """A structural tween: eases v0 -> v1 over [t0, t1], holds v1
-        after. Kept verbatim, never merged."""
+        after. Kept verbatim, never merged. Arguments convert BEFORE any
+        lane appends: the four parallel lists must grow together, and a
+        conversion raising midway (a non-numeric ease once did) leaves
+        the lane permanently desynced - every later read an IndexError."""
+        t1, v0, v1, ease_id = float(t1), float(v0), float(v1), int(ease_id)
         self._seal_run()
         self._push_dir(t0, KIND_RAMP, len(self._ramp_t1))
-        self._ramp_t1.append(float(t1))
-        self._ramp_v0.append(float(v0))
-        self._ramp_v1.append(float(v1))
-        self._ramp_ease.append(int(ease_id))
+        self._ramp_t1.append(t1)
+        self._ramp_v0.append(v0)
+        self._ramp_v1.append(v1)
+        self._ramp_ease.append(ease_id)
 
     def add_hold(self, t: float, v: float) -> None:
         """A structural instant: recorded verbatim, never merged into a
@@ -245,6 +249,44 @@ class SegmentTimeline:
         complete and fully readable."""
         self._seal_run()
         self.frontier = float('inf')
+
+    def truncate_after(self, t: float) -> None:
+        """Drop every segment starting strictly after `t`: a tween
+        retarget rewriting future the writer emitted ahead of its clock
+        but no reader has consumed. Appends are strictly sequential, so
+        the directory tail and each kind's column tail correspond 1:1
+        and popping in reverse keeps the parallel lists in sync. A
+        segment starting at or before `t` survives even when its span
+        extends past it - the replacement appended at `t` shadows it
+        from there on, exactly as `sample`'s bisect resolves any
+        interrupted span."""
+        t = float(t)
+        if self._run_n:
+            if self._run_th > t:
+                self._run_n = 0
+            elif self._run_tl > t:
+                self._seal_run()
+
+        while self._dir_t0 and self._dir_t0[-1] > t:
+            self._dir_t0.pop()
+            self._dir_row.pop()
+            kind = self._dir_kind.pop()
+            if kind == KIND_HOLD:
+                self._hold_v.pop()
+            elif kind == KIND_RAMP:
+                for col in (self._ramp_t1, self._ramp_v0,
+                            self._ramp_v1, self._ramp_ease):
+                    col.pop()
+            elif kind == KIND_OSC:
+                for col in (self._osc_t1, self._osc_base, self._osc_mag,
+                            self._osc_period, self._osc_phase,
+                            self._osc_shape):
+                    col.pop()
+            else:
+                self._slab_t1.pop()
+                self._slab_hz.pop()
+                self._slab_n.pop()
+                del self._slab_pool[self._slab_off.pop():]
 
     def _start_run(self, t: float, v: float) -> None:
         self._run_th = self._run_tl = float(t)

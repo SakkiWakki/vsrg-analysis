@@ -58,6 +58,7 @@ with no change to their shape.
 from __future__ import annotations
 
 from analysis.games.notitg import guard_windows
+from analysis.player.render.expr.surface import UNRESOLVED, ConstSurface
 
 # Song-time tick rate. ~60Hz tracks the source quad eases finely and, per
 # the template's own `self:sleep(0.02)` (50Hz) loop, over-samples the real
@@ -156,7 +157,7 @@ def _update_source(root):
     return None, None, None
 
 
-def _body_rearm_period(body: str) -> float | None:
+def _body_rearm_period(body: str, env=None) -> float | None:
     """Seconds between update-body invocations, from the rig's own
     re-arm tail (`self:sleep(X); self:queuecommand('Update')`), or None
     when the body never self-schedules. The engine runs the body at
@@ -164,8 +165,31 @@ def _body_rearm_period(body: str) -> float | None:
     `addx(xspd); yspd = yspd + fall` Euler steps, a walker's per-call
     scroll add) carry no dt - running them at the sweep's tick rate
     instead integrates visibly fast (60/50 = 20% at the template's
-    0.02s re-arm)."""
-    return guard_windows.rearm_period(body, _UPDATE_COMMAND)
+    0.02s re-arm).
+
+    `env` (a loaded SimEnvironment) resolves a period authored as an
+    expression over chart globals - gat 2's `self:sleep(1 / gf2_fps)`
+    with `gf2_fps = 50` set at load. Without it only literal periods
+    resolve."""
+    surface = _EnvGlobalsSurface(env) if env is not None else None
+    return guard_windows.rearm_period(body, _UPDATE_COMMAND, surface)
+
+
+class _EnvGlobalsSurface(ConstSurface):
+    """Constant resolution against a LOADED env's Lua globals, for the
+    re-arm walk: the chart computes its own cadence at load time, so the
+    number exists only in the env, not in the body text. Non-numeric
+    globals stay UNRESOLVED - this answers arithmetic, not tables."""
+
+    def __init__(self, env):
+        super().__init__()
+        self._read = env._host.global_value
+
+    def symbol(self, name: str):
+        value = self._read(name)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value
+        return UNRESOLVED
 
 
 def _live_windows(body: str):

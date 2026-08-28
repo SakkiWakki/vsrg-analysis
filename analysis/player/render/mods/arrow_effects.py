@@ -868,6 +868,62 @@ def confusion_rotation(percent, beat_now, offset=0.0):
     return _confusion_axis_degrees(percent, beat_now, offset)
 
 
+def confusion_axis_rad(percents, axis, cols, keycount, beat_now):
+    """The confusion angle about `axis` ('x' or 'y') in RADIANS, per note.
+
+    Folds the scalar magnitude with its `<name>offset` companion and the
+    numbered per-column variants, so a chart driving `confusiony2` alone
+    tilts only that column. Zero everywhere the family rests."""
+    name = f'confusion{axis}'
+    percent = _per_note(percents, name, cols, keycount)
+    offset = _confusion_offset(percents, name, cols, keycount)
+    if not np.any(percent) and not np.any(offset):
+        return None
+    return _confusion_axis_degrees(percent, beat_now, offset) * PI / 180.0
+
+
+def confusion_tilt_z(percents, cols, y_offset, keycount, beat_now,
+                     arrow_size=ARROW_SIZE):
+    """The DEPTH half of the confusion x/y field rotations, engine px.
+
+    A rotation about an axis through the field centre carries the note out
+    of the z=0 plane: turning about Y sends a column at x-offset `r` to
+    `z = +r*sin(theta)`, turning about X sends a note at scroll offset `y`
+    to `z = +y*sin(theta)`. The in-plane halves (`r*cos`, `y*cos`) are the
+    dx/dy kernels; this is what makes the pair an actual rotation rather
+    than a horizontal squash, and it is what lets a chart CANCEL a frame's
+    rotationy with a counter `confusionyoffset` (gat 2's revolt billboards
+    its notes that way).
+
+    THE SIGN IS THE FRAME'S, NOT TEXTBOOK. A field instance's rotation_y
+    maps an x-offset `r` to `(r*cos, +r*sin)` - measured off
+    `TransformChannel._local`, not derived - so the standard `-r*sin` puts
+    the note in the opposite handedness and a counter-rotation ADDS to the
+    frame's instead of cancelling it (an exact mirror at 90 degrees). cos
+    is even, so the in-plane half hides the error: it only shows once
+    depth is composed."""
+    z = np.zeros(np.shape(y_offset) if np.ndim(y_offset) else len(cols))
+    angle_y = confusion_axis_rad(percents, 'y', cols, keycount, beat_now)
+    if angle_y is not None:
+        xoff = column_offsets(keycount, arrow_size)[cols.astype(np.int64)]
+        z = z + xoff * np.sin(angle_y)
+    angle_x = confusion_axis_rad(percents, 'x', cols, keycount, beat_now)
+    if angle_x is not None:
+        z = z + y_offset * np.sin(angle_x)
+    return z
+
+
+def confusionx_dy(percent, beat_now, y_offset, offset=0.0):
+    """confusionx's in-plane half: a rotation about the HORIZONTAL axis
+    pulls a note at scroll offset `y` toward the centre by `y*(cos-1)`.
+
+    This replaces the uniform `confusionx_zoom` on the projected path. The
+    zoom was the fov->0 limit of the tilt - correct only for a field seen
+    flat-on, and it cannot carry the note's depth or turn its quad."""
+    angle = _confusion_axis_degrees(percent, beat_now, offset) * PI / 180.0
+    return y_offset * (np.cos(angle) - 1.0)
+
+
 def confusionx_zoom(percent, beat_now, offset=0.0):
     """confusionx / confusionxoffset reprojected to 2D zoom.
 
@@ -955,7 +1011,45 @@ def _hidden_sudden(hidden, sudden):
     return hidden * sudden
 
 
-def percent_visible(percents, cols, y_pos):
+# `stealth` is an APPEARANCE mod - it behaves like `hidden`, fading with
+# position and exempting notes past the receptor - and it moves taps only.
+# `hidemines` / `minestealth` are a different animal: a flat unconditional
+# hide of every mine, with none of that positional behaviour. So they are
+# not one family with a swapped name list; they are two mechanisms, and a
+# mine's alpha is the positional curve MINUS the tap stealth, TIMES the
+# flat hide (`mine_hide_factor`).
+#
+# Evidence that stealth does not reach a mine: gat 2's revolt puts one
+# playfield on `*1000 stealth, *1000 -1 hidemines` and another on `*1000
+# hidemines`, and the reference frame at chart t=86.25 shows the first
+# field's mines beside the second field's notes.
+#
+# `stealthglow` stays in both: it is a draw MODE (hide the fill, keep an
+# additive glow pass), so it hides a mine's fill exactly as it does a tap's.
+TAP_STEALTH = ('stealth', 'stealthglow')
+MINE_STEALTH = ('stealthglow',)
+MINE_HIDE = ('hidemines', 'minestealth')
+
+
+def mine_hide_factor(percents, cols):
+    """The flat mine-hide multiplier in [0, 1]: 1 shows, 0 hides.
+
+    Unconditional by design - no fade window, no past-receptor exemption,
+    nothing positional. A chart drives it past 100% or below 0 freely
+    (gat 2 parks it at -1% to mean 'plainly visible'), so it clamps."""
+    hidden = sum(column_add(percents, base, cols) for base in MINE_HIDE)
+    return np.clip(1.0 - hidden, 0.0, 1.0)
+
+
+def stream_stealth_active(percents, keycount) -> bool:
+    """Whether a chart-stream record's alpha can differ from a tap's: the
+    flat hide is driven, or the tap stealth is (which the record does not
+    take). False keeps an unmodded chart on one alpha pass."""
+    return any(_active(percents, base, keycount)
+               for base in MINE_HIDE + TAP_STEALTH)
+
+
+def percent_visible(percents, cols, y_pos, stealth_family=TAP_STEALTH):
     """ArrowGetPercentVisible (ArrowEffects.cpp:441-484). `y_pos` is the
     post-tipsy y position (host supplies; = y_offset when tipsy is off).
     Returns per-note visibility in [0, 1]. WALLCLOCK for blink -> handled
@@ -964,10 +1058,10 @@ def percent_visible(percents, cols, y_pos):
     sudden = percents.get('sudden', 0.0)
     # stealthglow hides the note FILL exactly like stealth (both subtract
     # from the visibility adjust, ArrowEffects.cpp:468-469); stealthglow
-    # additionally keeps a glow pass (see `stealthglow_amount`). Both fold
-    # their numbered per-column variants per note (see `column_add`).
-    stealth = (column_add(percents, 'stealth', cols)
-               + column_add(percents, 'stealthglow', cols))
+    # additionally keeps a glow pass (see `stealthglow_amount`). Each folds
+    # its numbered per-column variants per note (see `column_add`).
+    stealth = sum(column_add(percents, base, cols)
+                  for base in stealth_family)
     hidden_off = percents.get('hiddenoffset', 0.0)
     sudden_off = percents.get('suddenoffset', 0.0)
     blink_adjust = percents.get('_blink_adjust', 0.0)
@@ -1210,6 +1304,11 @@ class NoteOffsets:
     # Per-note glow tint, (n, 3) rgb from the stealthglow color
     # companions (`stealthglow_rgb`). None = untinted glow.
     glow_rgb: np.ndarray = None
+    # `alpha_mult` recomputed under the MINE stealth family
+    # (`minestealth`/`hidemines`) instead of the tap one, for the
+    # chart-stream records that fade under their own channel. None when
+    # neither family is driven, and the consumer then shares `alpha_mult`.
+    stream_alpha: np.ndarray = None
 
 
 def _get(p, name):
@@ -1398,6 +1497,11 @@ def _dy(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size):
         dy += attenuate(_get(percents, 'attenuatey'), cols, y_offset, keycount, arrow_size)
     if _active(percents, 'movey', keycount):
         dy += movey_y(_per_note(percents, 'movey', cols, keycount), arrow_size)
+    for name, tan in (('bumpyy', False), ('tanbumpyy', True)):
+        if _get(percents, name):
+            dy += bumpy_x(_get(percents, name), y_offset,
+                          _get(percents, f'{name}offset'),
+                          _get(percents, f'{name}period'), is_tan=tan)
     return dy
 
 
@@ -1405,9 +1509,10 @@ def _rotation(percents, note_beats, beat_now, n):
     rot = np.zeros(n, dtype=np.float64)
     if _get(percents, 'dizzy'):
         rot += dizzy_rotation(_get(percents, 'dizzy'), note_beats, beat_now)
-    if _get(percents, 'confusion') or _get(percents, 'confusionoffset'):
-        rot += confusion_rotation(_get(percents, 'confusion'), beat_now,
-                                  _get(percents, 'confusionoffset'))
+    for name in ('confusion', 'confusionz'):
+        if _get(percents, name) or _get(percents, f'{name}offset'):
+            rot += confusion_rotation(_get(percents, name), beat_now,
+                                      _get(percents, f'{name}offset'))
     return rot
 
 
@@ -1427,6 +1532,11 @@ def _z_push(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size):
         z += bumpy_z(_get(percents, 'tanbumpy'), y_offset,
                      _get(percents, 'tanbumpyoffset'), _get(percents, 'tanbumpyperiod'),
                      is_tan=True)
+    for name, tan in (('bumpyz', False), ('tanbumpyz', True)):
+        if _get(percents, name):
+            z += bumpy_z(_get(percents, name), y_offset,
+                         _get(percents, f'{name}offset'),
+                         _get(percents, f'{name}period'), is_tan=tan)
     z += _drunk_pair(percents, cols, y_offset, t_now, keycount, arrow_size, suffix='z')
     z += _tornado_pair(percents, cols, y_offset, keycount, arrow_size, suffix='z')
     if _get(percents, 'beatz'):
@@ -1467,30 +1577,47 @@ def _zoom(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size, n,
         if np.any(z_push):
             zoom = zoom * waveform_z_zoom(z_push)
 
-    if (_get(percents, 'confusionx') or _get(percents, 'confusionxoffset')
-            or _active(percents, 'confusionx', keycount)):
-        offset = _confusion_offset(percents, 'confusionx', cols, keycount)
-        zoom = zoom * confusionx_zoom(_get(percents, 'confusionx'), beat_now, offset)
+        if (_get(percents, 'confusionx') or _get(percents, 'confusionxoffset')
+                or _active(percents, 'confusionx', keycount)):
+            # 2D FALLBACK ONLY. The projected path turns the note quad
+            # (`_note_tilt`) and carries its depth (`confusion_tilt_z`), so
+            # applying the flat cos-zoom there would double the tilt and
+            # still lose the rotation the chart is actually asking for.
+            offset = _confusion_offset(percents, 'confusionx', cols, keycount)
+            zoom = zoom * confusionx_zoom(_get(percents, 'confusionx'),
+                                          beat_now, offset)
     return zoom
 
 
-def _note_tilt(percents, y_offset, n):
-    """(rot_x, rot_y) per-note out-of-plane tilt in degrees: roll ->
-    RotationX, twirl -> RotationY (ArrowEffects GetRotationX/Y = effect *
-    yOffset/2). These need the projected note path; a flat draw drops
-    them (a 2D sprite cannot tilt out of plane). Rest 0 -> no tilt."""
+def _note_tilt(percents, y_offset, n, cols=None, keycount=4, beat_now=0.0):
+    """(rot_x, rot_y) per-note out-of-plane tilt in degrees.
+
+    Two sources, same axes: roll -> RotationX and twirl -> RotationY scale
+    with the note's own scroll offset (ArrowEffects GetRotationX/Y =
+    effect * yOffset/2), while confusionx / confusiony turn the WHOLE field
+    about those axes by a shared angle. Both need the projected note path;
+    a flat draw drops them (a 2D sprite cannot tilt out of plane)."""
     roll = _get(percents, 'roll')
     twirl = _get(percents, 'twirl')
     rot_x = roll * y_offset / 2.0 if roll else np.zeros(n)
     rot_y = twirl * y_offset / 2.0 if twirl else np.zeros(n)
-    return (np.broadcast_to(rot_x, (n,)).astype(np.float64),
-            np.broadcast_to(rot_y, (n,)).astype(np.float64))
+    rot_x = np.broadcast_to(rot_x, (n,)).astype(np.float64)
+    rot_y = np.broadcast_to(rot_y, (n,)).astype(np.float64)
+    if cols is not None:
+        angle_x = confusion_axis_rad(percents, 'x', cols, keycount, beat_now)
+        if angle_x is not None:
+            rot_x = rot_x + np.broadcast_to(angle_x * 180.0 / PI, (n,))
+        angle_y = confusion_axis_rad(percents, 'y', cols, keycount, beat_now)
+        if angle_y is not None:
+            rot_y = rot_y + np.broadcast_to(angle_y * 180.0 / PI, (n,))
+    return rot_x, rot_y
 
 
-def _alpha(percents, cols, y_pos, t_now):
+def _alpha(percents, cols, y_pos, t_now, stealth_family=TAP_STEALTH):
     vis = dict(percents)
     vis['_blink_adjust'] = blink_adjust(_get(percents, 'blink'), t_now)
-    alpha = alpha_from_visible(percent_visible(vis, cols, y_pos))
+    alpha = alpha_from_visible(
+        percent_visible(vis, cols, y_pos, stealth_family))
     if _get(percents, 'boomerang'):
         alpha = alpha * boomerang_visibility(_get(percents, 'boomerang'), y_pos)
     return alpha
@@ -1555,6 +1682,10 @@ def note_offsets(percents: dict, cols: np.ndarray, y_offset: np.ndarray,
 
     dx = _dx(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size)
     dy = _dy(percents, cols, y_offset, t_now, beat_now, keycount, arrow_size)
+    if project_3d:
+        angle_x = confusion_axis_rad(percents, 'x', cols, keycount, beat_now)
+        if angle_x is not None:
+            dy = dy + y_offset * (np.cos(angle_x) - 1.0)
     rotation = _rotation(percents, note_beats, beat_now, n)
     # The projected note path takes real per-note depth (z) + out-of-
     # plane tilt (roll/twirl) and lets the camera do the perspective; the
@@ -1563,8 +1694,15 @@ def note_offsets(percents: dict, cols: np.ndarray, y_offset: np.ndarray,
     if project_3d:
         z = _z_push(percents, cols, y_offset, t_now, beat_now, keycount,
                     arrow_size)
+        # The confusion x/y rotations carry their own depth, and only the
+        # projected path can render it - the 2D fallback stands them up as
+        # a flat zoom instead, so this must not reach `_zoom`'s
+        # reprojection of the waveform push.
+        z = z + confusion_tilt_z(percents, cols, y_offset, keycount,
+                                 beat_now, arrow_size)
         z = np.broadcast_to(z, (n,)).astype(np.float64)
-        rot_x, rot_y = _note_tilt(percents, y_offset, n)
+        rot_x, rot_y = _note_tilt(percents, y_offset, n, cols, keycount,
+                                  beat_now)
     zoom = _zoom(percents, cols, y_offset, t_now, beat_now, keycount,
                  arrow_size, n, z_push=z)
     # Visibility samples GetYPos(..., WithReverse=false): the raw scroll
@@ -1573,6 +1711,14 @@ def note_offsets(percents: dict, cols: np.ndarray, y_offset: np.ndarray,
     # but never move it through the hidden/sudden windows.
     vis_y = y_offset + _tipsy_dy(percents, cols, t_now, keycount, arrow_size)
     alpha = _alpha(percents, cols, vis_y, t_now)
+    # A chart-stream record (mine / lift / fake) fades under the MINE
+    # family, so a chart can stealth the taps and leave the mines standing
+    # or the reverse - gat 2's revolt runs both halves at once, one on each
+    # of two playfields. Same call, different channel names.
+    stream_alpha = None
+    if stream_stealth_active(percents, keycount):
+        stream_alpha = (_alpha(percents, cols, vis_y, t_now, MINE_STEALTH)
+                        * mine_hide_factor(percents, cols))
     glow = glow_rgb = None
     if _active(percents, 'stealthglow', keycount):
         glow = stealthglow_amount(
@@ -1582,7 +1728,8 @@ def note_offsets(percents: dict, cols: np.ndarray, y_offset: np.ndarray,
 
     return NoteOffsets(dx=dx, dy=dy, rotation_deg=rotation,
                        alpha_mult=alpha, zoom=zoom, z=z, rot_x=rot_x,
-                       rot_y=rot_y, glow=glow, glow_rgb=glow_rgb)
+                       rot_y=rot_y, glow=glow, glow_rgb=glow_rgb,
+                       stream_alpha=stream_alpha)
 
 
 def receptor_offsets(percents: dict, cols: np.ndarray, t_now: float,

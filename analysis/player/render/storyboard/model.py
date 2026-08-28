@@ -121,6 +121,9 @@ _COLOR_RESTS = {
 _SPRITE_RESTS = {
     'texcoord_scroll': (0.0, 0.0, 0.0, 0.0, 0.0),
     'asset_swap': ('', 1.0, 1.0),
+    # SM customtexturerect: the sampled UV window (u0, v0, u1, v1);
+    # u1/v1 past 1 tiles. Rest = the plain full texture.
+    'uv_rect': (0.0, 0.0, 1.0, 1.0),
 }
 
 

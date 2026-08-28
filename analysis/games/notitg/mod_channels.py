@@ -177,31 +177,70 @@ def parse_speed_mods(modstring: str) -> list:
 
 
 def _infer_base_xmod(mod_events):
-    """The chart's persistent baseline xmod - the always-on window every
-    dynamic change is relative to.
+    """The chart's persistent baseline xmod - the value in force the
+    longest, which every dynamic change is relative to.
 
     A modchart pins its resting scroll with one wide window (gat's
-    `{0, 9000, '2x'}`): the burst/slow windows over it are meant as
-    multiples of THAT rate, not of a fixed engine default, so the base
-    must come from the chart. We take the player-0 xmod window with the
-    widest span (ties broken by earliest start, so a `t=0` baseline wins
-    over an equally-long later one). Charts with no xmod window at all
-    fall back to the engine default (1x) - an unmodified field."""
-    best_span = -1.0
-    best_start = float('inf')
-    base = _DEFAULT_BASE_XMOD
-    for row in mod_events:
+    `{0, 9000, '2x'}`); a mirin chart applies its `setdefault {2.5,
+    'xmod'}` ONCE and the persistence extension makes that one burst the
+    longest-held span. Ties break by earliest start, so a `t=0` baseline
+    wins over an equally-long later one. Charts with no xmod at all fall
+    back to the engine default (1x) - an unmodified field."""
+    spans, _skipped = _xmod_spans(mod_events)
+    return _base_from_spans(spans)
+
+
+# How far past its application a final persistent xmod stays in force:
+# effectively the rest of any song (seconds).
+_SCROLL_HORIZON_S = 10.0 ** 7
+
+
+def _xmod_spans(mod_events):
+    """`([[start, end, value, speed, order], ...], skipped_cm)`: player-0
+    xmod applications in start order.
+
+    A SIM-APPLIED row (`apply_type: 'sim'` - the ApplyModifiers stream)
+    is PERSISTENT PlayerOptions state, so its span extends to the NEXT
+    application (the last to the horizon): a mirin-style chart applies
+    each value once, and its burst-wide window would otherwise revert
+    the scroll toward rest across the whole song (Funny Funky Freaky's
+    notes sagged to a standstill by 1:25). A per-tick re-applier (gat)
+    extends by at most one tick. Declarative windows keep their authored
+    spans - their template's reader owns the revert."""
+    spans = []
+    skipped = 0
+    for order, row in enumerate(mod_events):
         if _row_player(row) != 0:
             continue
         start = float(row['t_start'])
-        span = float(row['t_end']) - start
-        if span <= 0.0:
+        end = float(row['t_end'])
+        if end < start:
             continue
+        persistent = row.get('apply_type') == 'sim'
         for speed, kind, value in parse_speed_mods(row['modstring']):
             if kind != 'x':
+                skipped += 1
                 continue
-            if span > best_span or (span == best_span and start < best_start):
-                best_span, best_start, base = span, start, value
+            spans.append([start, end, value, speed, order, persistent])
+    spans.sort(key=lambda s: (s[0], s[4]))
+    for span, successor in zip(spans, [*spans[1:], None]):
+        if not span[5]:
+            continue
+        until = _SCROLL_HORIZON_S if successor is None else successor[0]
+        span[1] = max(span[1], until)
+    return spans, skipped
+
+
+def _base_from_spans(spans) -> float:
+    best_span = -1.0
+    best_start = float('inf')
+    base = _DEFAULT_BASE_XMOD
+    for start, end, value, _speed, _order, _persistent in spans:
+        span = end - start
+        if span <= 0.0:
+            continue
+        if span > best_span or (span == best_span and start < best_start):
+            best_span, best_start, base = span, start, value
     return base
 
 
@@ -210,46 +249,47 @@ def compile_scroll_multipliers(mod_events, base_xmod=None):
     (`{time, duration, multiplier, ease}`, ms-keyed) for
     `GameAdapter.scroll_multipliers`.
 
-    `base_xmod` is the chart's persistent baseline; passing None infers it
-    from the widest always-on xmod window (see `_infer_base_xmod`), so a
-    chart whose baseline is `3x` rests at the user's speed rather than
-    1.5x too fast. Each xmod window drives the field's scroll to
-    `xmod / base_xmod` over its span (chasing at the `*S` approach speed);
-    where no window is active the scroll rests at base (1.0), reverting at
-    clearall speed
-    (the float, so a `*100000` burst eases back over ~1s, it does not
-    snap). Overlapping windows resolve exactly like the per-note mod
-    channels through `_resolve_windows`: the highest-order active window
-    wins and an end another window still covers never dips - so a
-    persistent `{0, 9999, '2.5x'}` baseline (re-applied as per-frame
-    bursts by the reader) holds a FLAT rate instead of sawtoothing to
-    base between the bursts. Player-0 windows only, matching the note-mod
-    consumer. C/M-mods pin an absolute rate our user-scroll model cannot
-    express; they are skipped (their count is returned for the caller to
-    log)."""
+    Multipliers are the chart's ABSOLUTE xmod: a `2.5x` chart scrolls at
+    2.5x the renderer's unit speed, matching the reference videos'
+    density (an earlier design normalized to the baseline - "rest at
+    the user's speed" - and every NotITG chart read denser than its
+    reference). Each window drives its value over its span (chasing at
+    the `*S` approach speed); where no window is active the scroll
+    rests at `base_xmod` - the inferred persistent baseline (the
+    longest-held value; pass it to override), reverting at clearall
+    speed (the float, so a `*100000` burst eases back over ~1s, it does
+    not snap). Overlapping windows resolve exactly like the per-note
+    mod channels through `_resolve_windows`: the highest-order active
+    window wins and an end another window still covers never dips.
+    Player-0 windows only, matching the note-mod consumer. C/M-mods pin
+    an absolute rate our user-scroll model cannot express; they are
+    skipped (their count is returned for the caller to log)."""
+    spans, skipped_cm = _xmod_spans(mod_events)
     if base_xmod is None:
-        base_xmod = _infer_base_xmod(mod_events)
+        base_xmod = _base_from_spans(spans)
 
-    windows = []
-    skipped_cm = 0
-    for order, row in enumerate(mod_events):
-        if _row_player(row) != 0:
-            continue
-        start = float(row['t_start'])
-        end = float(row['t_end'])
-        if end < start:
-            continue
-        for speed, kind, value in parse_speed_mods(row['modstring']):
-            if kind != 'x':
-                skipped_cm += 1
-                continue
-            mult = value / base_xmod if base_xmod else 1.0
-            windows.append(_Window(start, end, mult, speed, order))
+    windows = [_Window(start, end, value, speed, order)
+               for start, end, value, speed, order, _persistent in spans]
 
     events = [ModEvent(t, value, speed, 'xmod', 0)
-              for t, value, speed in _resolve_windows(windows)]
-    breakpoints = _xmod_breakpoints(events)
-    return _breakpoints_to_scroll_events(breakpoints), skipped_cm
+              for t, value, speed in _resolve_windows(windows,
+                                                      rest=base_xmod)]
+    breakpoints = _xmod_breakpoints(events, rest=base_xmod)
+    scroll_events = _breakpoints_to_scroll_events(breakpoints)
+    # Downstream timelines rest at 1.0 and ease INTO their first
+    # keyframe, so a non-1 base needs an INSTANT anchor event before
+    # anything else - without one, everything up to the first CHANGE
+    # (which _resolve_windows elides when the first window IS the base)
+    # rides the wrong speed, then eases out of it.
+    anchor_ms = max(0.0, min((span[0] for span in spans),
+                             default=0.0)) * 1000.0
+    anchored = (scroll_events
+                and scroll_events[0]['time'] <= anchor_ms
+                and scroll_events[0]['duration'] == 0.0)
+    if base_xmod != 1.0 and not anchored:
+        scroll_events.insert(0, {'time': anchor_ms, 'duration': 0.0,
+                                 'multiplier': base_xmod, 'ease': 0})
+    return scroll_events, skipped_cm
 
 
 def _row_player(row) -> int:
@@ -257,9 +297,9 @@ def _row_player(row) -> int:
     return 0 if raw is None else max(0, int(raw) - 1)
 
 
-def _xmod_breakpoints(events):
+def _xmod_breakpoints(events, rest=1.0):
     """(times, values) of the resolved xmod-multiplier curve, resting at
-    1.0 (the always-on base window).
+    `rest` before/without events (the chart's persistent base speed).
 
     Walks the events in time order applying the same approach semantics
     as the mod channels (snap `*-1` vs constant-rate chase) but emits a
@@ -279,7 +319,7 @@ def _xmod_breakpoints(events):
     values: list = []
 
     def sample(t):
-        return _piecewise_at(times, values, t, rest=1.0)
+        return _piecewise_at(times, values, t, rest=rest)
 
     ordered = sorted(events, key=lambda e: e.beat)
     next_times = [ordered[j].beat for j in range(1, len(ordered))]
@@ -340,7 +380,10 @@ def _breakpoints_to_scroll_events(breakpoints):
     END value and its duration is the segment length. The trailing
     breakpoint (final held value) is an instant keyframe."""
     times, values = breakpoints
-    kept = [(t, v) for t, v in zip(times, values) if t >= 0.0]
+    # Load-time points (the sim anchors slightly before beat 0) CLAMP to
+    # 0 rather than drop: dropping them lost the baseline snap and the
+    # first real segment then eased out of the timeline rest.
+    kept = [(max(t, 0.0), v) for t, v in zip(times, values)]
     out = []
     for i, (t, v) in enumerate(kept):
         if i + 1 < len(kept):
@@ -354,10 +397,23 @@ def _breakpoints_to_scroll_events(breakpoints):
     return out
 
 
+def _every_player(mod_events) -> tuple:
+    """The 0-based fan-out set for a declarative row naming NO player.
+    Mirrors `sim.record._player_universe` for the rows that reach here
+    with `player=None` instead of pre-expanded."""
+    players = {0, 1}
+    for row in mod_events:
+        raw = row.get('player')
+        if raw is not None:
+            players.add(max(0, int(raw) - 1))
+    return tuple(sorted(players))
+
+
 def compile_mod_channels(mod_events) -> ModChannels:
     """Compile `compile_modfile`'s normalized mod-window dicts
     (`t_start`/`t_end` seconds, `modstring`, `player`) into sampled
     channels."""
+    everyone = _every_player(mod_events)
     windows = defaultdict(list)
     for order, row in enumerate(mod_events):
         start = float(row['t_start'])
@@ -365,10 +421,7 @@ def compile_mod_channels(mod_events) -> ModChannels:
         if end < start:
             continue
         raw_player = row.get('player')
-        # An absent player number means the classic reader applies the
-        # mod to BOTH players (ApplyGameCommand without a pn arg), so
-        # the window lands on both channels, not just player 0.
-        players = ((0, 1) if raw_player is None
+        players = (everyone if raw_player is None
                    else (max(0, int(raw_player) - 1),))
         for percent, speed, name in parse_modstring(row['modstring']):
             for player in players:

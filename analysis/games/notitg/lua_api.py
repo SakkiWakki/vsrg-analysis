@@ -48,9 +48,15 @@ from analysis.player.render.expr import surface as _expr_surface
 
 # Tween verb -> easing id (osu.Framework Easing enum shared by the
 # storyboard timelines). SM's accelerate = ease-in quad, decelerate =
-# ease-out quad, smooth = in-out cubic; linear/tween are linear.
+# ease-out quad, smooth = in-out cubic; linear is linear. `tween` is NOT
+# here: bare `tween(t)` is linear, but the fork also takes a custom-ease
+# second arg (`tween(t, 'formula over %f')`, or a named curve), so the
+# verb routes through the tween-queue stage that resolves the arg
+# (SimActor._tween_ease_arg) - a plain id entry here consumed the verb
+# first and silently discarded the formula (revolt's z bounce played as
+# a straight zoom).
 _TWEEN_EASING = {
-    'linear': 0, 'tween': 0, 'accelerate': 3, 'decelerate': 4,
+    'linear': 0, 'accelerate': 3, 'decelerate': 4,
     'smooth': 8,
 }
 _FALLBACK_TWEEN_EASING = 0
@@ -333,6 +339,10 @@ VERB_REGISTRY.update(_table_entries(_SIZE_AXIS_SETTERS, SIZE_SETTER, IMPLEMENTED
 VERB_REGISTRY.update(_entries(_SIZE_PAIR_SETTERS, SIZE_SETTER, IMPLEMENTED,
                               native=('size_x', 'size_y')))
 VERB_REGISTRY.update(_entries(_TWEEN_EASING, TWEEN_VERB, IMPLEMENTED))
+# The custom-ease tween: `tween(t[, named curve | 'formula over %f'])`.
+# Routed through the tween-queue stage (not the plain easing-id table) so
+# the second arg is resolved; see verb_surface.HANDLED_BY_NAME.
+VERB_REGISTRY.update(_entries(('tween',), TWEEN_VERB, IMPLEMENTED))
 VERB_REGISTRY.update(_table_entries(_SCALAR_GETTERS, GETTER, IMPLEMENTED))
 
 # Tween-interval control (no channel value).
@@ -605,7 +615,7 @@ GETTER_NAMES = tuple(sorted((*_SCALAR_GETTERS, 'GetTexture', 'getrotation')))
 SIM_GETTER_NAMES = tuple(sorted(
     (*GETTER_NAMES, 'GetSecsIntoEffect', 'GetText', 'getaux',
      'GetTweenTimeLeft', 'GetNumChildren', 'GetNumTapsInRange',
-     'GetNumVertices', 'GetXMLDir')))
+     'GetNumVertices', 'GetXMLDir', 'GetName', 'IsAwake')))
 # `__COMMAND` = the actor commands whose dispatch runs the actor's
 # `<Name>Command` on its own recorder (`__actor_command`): playcommand runs
 # it now, queuecommand after the pending tween. `queuemessage` is a message
@@ -743,6 +753,15 @@ end
 -- their renamed forms. The template calls the 5.0 names.
 if math.mod == nil then math.mod = math.fmod end
 if table.getn == nil then table.getn = function(t) return #t end end
+
+-- Lua 5.0's deprecated `for k, v in t do` sugar (pairs implied): the
+-- compat pass wraps every generic-for iterator in this. A real
+-- iterator (function first value, state args included) passes through
+-- untouched; a bare table iterates as pairs, as 5.0 read it.
+function __iter50(a, b, c)
+    if type(a) == 'table' and b == nil then return pairs(a) end
+    return a, b, c
+end
 """
 
 # The `__GETTER` / `__COMMAND` routing sets are the registry's name lists,

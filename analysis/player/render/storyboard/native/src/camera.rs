@@ -198,11 +198,17 @@ pub fn skew_y(amount: f32) -> Mat4 {
     m
 }
 
-/// A node's local matrix per Actor::BeginDraw:
-///   L = S(scl) @ R(rot, order) @ T(pos) @ SkewX @ SkewY
-/// so v @ L scales, then rotates, then translates (the SM sprite
-/// reading). Skews are applied only when nonzero (matching the Python
-/// guard). `skew` is (skewx, skewy).
+/// A node's local matrix per Actor::BeginDraw, mirroring
+/// `field_compose._local` (the battle-tested authority) exactly:
+///   L = SkewX @ SkewY @ R(rot, order) @ Scale @ T(pos)
+/// so a row point v @ L skews (innermost), then rotates, then scales,
+/// then translates. Both orderings matter visibly and both were wrong
+/// here before: skew POST-multiplied sheared along the parent's
+/// unrotated axes, so a chart skewing a rotated screen watched the
+/// rotation visually reset; scale BEFORE rotation diverges whenever a
+/// spun link zooms non-uniformly (uniform zooms commute, which is why
+/// the parity tests never caught it). Skews apply only when nonzero
+/// (matching the Python guard). `skew` is (skewx, skewy).
 pub fn local_matrix(
     pos: [f32; 3],
     rot: [f32; 3],
@@ -212,16 +218,16 @@ pub fn local_matrix(
 ) -> Mat4 {
     let mut l = mat_mul(
         &mat_mul(
-            &scale(scl[0], scl[1], scl[2]),
             &rotate_ordered(rot[0], rot[1], rot[2], order),
+            &scale(scl[0], scl[1], scl[2]),
         ),
         &translate(pos[0], pos[1], pos[2]),
     );
     if skew[0] != 0.0 {
-        l = mat_mul(&l, &skew_x(skew[0]));
+        l = mat_mul(&skew_x(skew[0]), &l);
     }
     if skew[1] != 0.0 {
-        l = mat_mul(&l, &skew_y(skew[1]));
+        l = mat_mul(&skew_y(skew[1]), &l);
     }
     l
 }

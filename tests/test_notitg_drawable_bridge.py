@@ -11,7 +11,7 @@ the real bridge). A skippable smoke test exercises the real gat 2 chart when it
 is present on disk.
 
 Feed v2 (wave-3 C1): every entry crosses as a mat3 in the record's
-column-vector layout (f32 stride 18); there is no affine decomposition and no
+column-vector layout (f32 stride 19); there is no affine decomposition and no
 projective skip, so coverage is `{translated, total}` with translated == total.
 """
 import os
@@ -49,7 +49,7 @@ def _synthetic_compiled(instances):
 
 
 def _seg_f(feed, drawable_bridge_mod=drawable_bridge):
-    """The concatenated f32 feed rows as an (N, 18) view."""
+    """The concatenated f32 feed rows as an (N, 19) view."""
     _ids, counts, _u, feed_f_bytes, _cov = feed
     n = int(sum(counts))
     return np.frombuffer(feed_f_bytes, dtype=np.float32).reshape(

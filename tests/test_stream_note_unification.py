@@ -5,10 +5,12 @@ Covers:
 - the NotesModel stream table (kind column, time-sorted merge, fills);
 - pixel-level parity of the unified draw path with the pre-refactor
   stream blits for a chart without mods (positions, sprites, order);
-- the capabilities that unification makes free for streams:
-  stealth/glow visibility (a stealthed mine renders through the same
-  additive glow pass as a tap) and per-column reverse (a mine in a
-  reversed column lands exactly where that column's taps do);
+- the capabilities that unification makes free for streams: glow
+  visibility (a stealthglow'd mine renders through the same additive
+  glow pass as a tap) and per-column reverse (a mine in a reversed
+  column lands exactly where that column's taps do);
+- which stealth family reaches a mine - `hidemines`/`minestealth`, not
+  the taps' `stealth` (see arrow_effects.MINE_STEALTH);
 - hold-mine span endpoints coming from the unified kernel;
 - a QImage smoke render through a real QPainter.
 """
@@ -390,18 +392,38 @@ def test_stealthglow_mine_draws_additive_glow_exactly_like_tap():
         == [(b[2], b[3]) for b in painter.blits]
 
 
-def test_stealth_only_mine_draws_nothing():
+def _mine_blits(mods):
     player = _mod_player(stream_cols=(0,), kinds=(KIND_MINE,))
     ctx = _mod_ctx(player, head_y=40.0, n_taps=0)
-    _apply_mods(ctx, [ModEvent(0.0, 1.0, -1, 'stealth')])
+    _apply_mods(ctx, [ModEvent(0.0, value, -1, name)
+                      for name, value in mods])
     ctx.sprite_cache = _RecordCache()
     ctx.screen_margin = 80
     player.H = 400
     _notes.prepare(ctx)
-
     painter = _RecordPainter()
     _notes.draw_mines(ctx, painter)
-    assert painter.blits == []
+    return painter.blits
+
+
+def test_stealth_alone_leaves_a_mine_standing():
+    """`stealth` is the TAP family; a mine fades under `hidemines` /
+    `minestealth` (arrow_effects.MINE_STEALTH).
+
+    This test used to assert the opposite. The reference footage settles
+    it: gat 2's revolt runs `*1000 stealth, *1000 -1 hidemines` on one
+    playfield and `*1000 hidemines` on another, and the frame at chart
+    t=86.25 shows the first field's MINES alongside the second field's
+    NOTES. Were stealth to reach mines, that frame would have none."""
+    assert _mine_blits([('stealth', 1.0)]) != []
+
+
+def test_hidemines_draws_nothing():
+    assert _mine_blits([('hidemines', 1.0)]) == []
+    assert _mine_blits([('minestealth', 1.0)]) == []
+    # And the mine family leaves the taps alone: a chart hides one kind
+    # at a time, which is the whole point of separate channels.
+    assert _mine_blits([('hidemines', 1.0), ('stealth', 0.0)]) == []
 
 
 def test_reversed_column_mine_lands_on_its_taps():

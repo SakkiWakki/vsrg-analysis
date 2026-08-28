@@ -87,3 +87,41 @@ def test_clearall_reverts_the_scale_family_to_full_size():
     assert zoomx[0].value == pytest.approx(0.4)
     assert zoomx[-1].value == pytest.approx(1.0), 'zoomx clears to 100%'
     assert drunk[-1].value == 0.0, 'everything else still clears to 0'
+
+
+def test_player_less_row_reaches_every_player_the_chart_mods():
+    # `ApplyModifiers` with no `pn` is `ApplyToAllPlayers` -
+    # FOREACH_PlayerNumber, and the fork's slot count runs past two. A
+    # chart that mods P4 must get the player-less window on P4 too:
+    # gat 2's revolt drove `invert`/`beat` player-less over four
+    # playfields, and pinning the fan-out at (0, 1) left P3/P4 without
+    # mods their siblings had.
+    rows = (_rows('*1000 50 drunk', ticks=60)
+            + _rows('*1000 20 dizzy', ticks=60, player=4))
+    drunk = [w for w in coalesce_applied(rows) if w.name == 'drunk']
+    assert {w.player for w in drunk} == {0, 1, 3}
+
+
+def test_player_less_row_stays_on_both_sides_when_no_player_is_named():
+    rows = _rows('*1000 50 drunk', ticks=60)
+    drunk = [w for w in coalesce_applied(rows) if w.name == 'drunk']
+    assert {w.player for w in drunk} == {0, 1}, 'two sides always exist'
+
+
+def test_named_row_stays_on_its_own_channel():
+    rows = (_rows('*1000 50 drunk', ticks=60, player=3)
+            + _rows('*1000 20 dizzy', ticks=60, player=5))
+    drunk = [w for w in coalesce_applied(rows) if w.name == 'drunk']
+    assert {w.player for w in drunk} == {2}, 'a named row fans out to nobody'
+
+
+def test_per_player_clearall_still_meets_the_all_players_window():
+    # Why the expansion lives at ingestion: a player-less window and a
+    # per-player clearall have to land on ONE key inside a frame so the
+    # last call wins, as in the engine. P4 clears; P3 keeps its value.
+    rows = (_rows('*1000 50 drunk', ticks=60)
+            + _rows('*1000 20 dizzy', ticks=60, player=3)
+            + _rows('clearall', ticks=60, player=4, start=1.0))
+    drunk = {e.player: e.value for e in chase_events(rows) if e.mod == 'drunk'}
+    assert drunk[3] == 0.0, 'P4 cleared the window it received player-less'
+    assert drunk[2] == pytest.approx(0.5), 'P3 never cleared'

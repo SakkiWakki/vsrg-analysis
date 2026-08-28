@@ -54,12 +54,13 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import struct
 
 import numpy as np
 from shiboken6 import VoidPtr
 
-from PySide6.QtGui import QImage, QMatrix3x3, QOpenGLContext
+from PySide6.QtGui import QImage, QMatrix3x3, QMatrix4x4, QOpenGLContext
 from PySide6.QtOpenGL import (QOpenGLBuffer, QOpenGLFramebufferObject,
                               QOpenGLShader, QOpenGLShaderProgram,
                               QOpenGLVertexArrayObject)
@@ -78,6 +79,105 @@ from PySide6.QtOpenGL import QOpenGLPaintDevice
 from analysis.player.render.shaders.library import notitg_compat
 from analysis.player.render.storyboard import record as _rec
 from analysis.player.render.storyboard.asset_size import AssetSizeSpec, resolve
+
+# Mesh primitive modes (payload vocabulary -> GL). FAN/LINE_STRIP are core
+# enums gl_pipeline does not re-export.
+_GL_TRIANGLE_FAN = 0x0006
+_GL_LINE_STRIP = 0x0003
+_MESH_GL_MODES = {'triangles': GL_TRIANGLES,
+                  'trianglestrip': GL_TRIANGLE_STRIP,
+                  'trianglefan': _GL_TRIANGLE_FAN,
+                  'linestrip': _GL_LINE_STRIP}
+
+# Bit 1 of a record's blend lane: a fed note carrying pre-sampled
+# uniforms for its per-note program (evaluate.rs sets it; blend readers
+# mask with & 1).
+_NOTE_SHADED_BIT = 2
+
+# `uniform bool isHold;` / `uniform int iCol;` declarations in a note
+# shader's sources: these bind via glUniform1i - 1f onto an int/bool
+# uniform is a GL error that silently drops the value.
+_INT_UNIFORM_RE = re.compile(
+    r'^\s*uniform\s+(?:bool|int)\s+([A-Za-z_]\w*)', re.MULTILINE)
+
+
+def _int_uniform_names(src) -> set:
+    return set(_INT_UNIFORM_RE.findall(src)) if src else set()
+
+
+def _uv_window(frec):
+    """The record's custom UV window (u0, v0, u1, v1) plus its live
+    scroll offset, or None at the plain full-texture rest with no
+    scroll (the hot path)."""
+    u0, v0, u1, v1 = (float(v) for v in
+                      frec[_F_UV_RECT:_F_UV_RECT + 4])
+    ou, ov = (float(v) for v in frec[_F_UV_OFFSET:_F_UV_OFFSET + 2])
+    if (u0, v0, u1, v1) == (0.0, 0.0, 1.0, 1.0) and (ou, ov) == (0.0, 0.0):
+        return None
+    ou %= 1.0
+    ov %= 1.0
+    return u0 + ou, v0 + ov, u1 + ou, v1 + ov
+
+# Default mesh vertex stage (a Polygon without a Vert= draws its grid
+# undisplaced) and the plain textured mesh frag. The mesh vertex format is
+# interleaved (x, y, u, v) in actor-local design px; u_mvp maps local ->
+# clip with depth dropped (the engine mesh projection is orthographic, so
+# a Vert= z displacement never perspective-divides).
+_MESH_VERT_SRC = """#version 150
+in vec2 a_pos;
+in vec2 a_uv;
+uniform mat4 u_mvp;
+out vec2 v_uv;
+void main(void) {
+    v_uv = a_uv;
+    gl_Position = u_mvp * vec4(a_pos, 0.0, 1.0);
+}
+"""
+
+_MESH_FRAG_SRC = """#version 150
+uniform sampler2D u_tex;
+uniform float u_opacity;
+uniform vec3 u_tint;
+in vec2 v_uv;
+out vec4 fragColor;
+void main(void) {
+    vec4 c = texture(u_tex, v_uv);
+    fragColor = vec4(c.rgb * u_tint, c.a) * u_opacity;
+}
+"""
+
+# Model vertex stage (a Milkshape `.txt` Model actor): 3D vertices whose
+# xy map through the item's 2D homography (the engine model projection
+# collapses onto the actor plane here) while z becomes DEPTH, so a
+# model self-occludes. Spheremapped materials (SM's `*sphere.png`
+# convention - Government Knows' models shade entirely this way)
+# generate UVs from the vertex normals.
+_MODEL_VERT_SRC = """#version 150
+in vec3 a_pos;
+in vec2 a_uv;
+in vec3 a_normal;
+uniform mat4 u_mvp;
+uniform float u_depth_scale;
+uniform int u_spheremap;
+out vec2 v_uv;
+void main(void) {
+    gl_Position = u_mvp * vec4(a_pos.xy, 0.0, 1.0);
+    gl_Position.z = -a_pos.z * u_depth_scale * gl_Position.w;
+    v_uv = (u_spheremap != 0)
+        ? vec2(0.5 + 0.5 * a_normal.x, 0.5 - 0.5 * a_normal.y)
+        : a_uv;
+}
+"""
+
+# Clip-depth per model-local z unit: model coordinates run a few hundred
+# design px either way, so this keeps every plausible model inside the
+# clip volume while preserving ordering.
+_MODEL_DEPTH_SCALE = 1.0 / 2048.0
+
+# Interleaved float lanes per mesh vertex: a Polygon payload is
+# (x, y, u, v); a Model payload is (x, y, z, u, v, nx, ny, nz).
+_MESH_LANES_2D = 4
+_MESH_LANES_MODEL = 8
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +200,9 @@ _U_UF_OFFSET, _U_UF_COUNT = _rec.U_UF_OFFSET, _rec.U_UF_COUNT
 _F_OPACITY, _F_TINT, _F_CROP = _rec.F_OPACITY, _rec.F_TINT, _rec.F_CROP
 _F_ORIGIN, _F_SIZE = _rec.F_ORIGIN, _rec.F_SIZE
 _F_FIT, _F_FADE = _rec.F_FIT, _rec.F_FADE
+_F_UV_RECT, _F_UV_OFFSET = _rec.F_UV_RECT, _rec.F_UV_OFFSET
+
+GL_REPEAT = 0x2901
 _FIT_COVER = _rec.FIT_COVER
 
 _U_STRIDE_LANES, _F_STRIDE_LANES = _rec.U_STRIDE, _rec.F_STRIDE
@@ -493,6 +596,8 @@ class GLExecutor:
         image_grids: dict[int, tuple] | None = None,
         image_natural: dict[int, tuple] | None = None,
         image_specs: dict[int, tuple] | None = None,
+        meshes: dict[int, dict] | None = None,
+        note_samplers: dict[int, dict] | None = None,
     ) -> None:
         self._images = images
         self._sizes = drawable_sizes
@@ -521,6 +626,26 @@ class GLExecutor:
         # a build has been attempted and failed -> that item blits unshaded).
         self._shader_descs: dict[int, tuple] = {}
         self._shader_programs: dict[int, tuple | None] = {}
+        # MeshId -> payload for SRC_MESH draws (the doc's Polygon tier):
+        # {'vertices': (n, 4) float32 (x, y, u, v), 'mode': str,
+        #  'vert': raw Vert= source or None, 'design_size': (dw, dh),
+        #  'texture_drawable': the slot whose capture the mesh samples}.
+        self._meshes: dict[int, dict] = dict(meshes or {})
+        # Mesh programs keyed by the item's SHADER lane (its desc carries
+        # the raw Vert= source); -1 keys the undisplaced default.
+        self._mesh_programs: dict[int, tuple | None] = {}
+        self._mesh_buffers: dict[int, tuple] = {}
+        # Per-note shader tier (Government Knows' SetArrowShader family):
+        # shader id -> {glsl sampler name: image file path} for the
+        # source actor's uniformTexture binds, and the lazily built
+        # translated frag+vert programs for NOTE_SHADED records.
+        self._note_samplers: dict[int, dict] = dict(note_samplers or {})
+        self._note_programs: dict[int, tuple | None] = {}
+        self._note_vao = None
+        self._note_vbo = None
+        # uniformTexture FILE binds (path -> uploaded texture or None once
+        # a load has failed), for mesh sampler uniforms.
+        self._file_textures: dict[str, tuple | None] = {}
 
         # Lazily built GL objects (need a current context, which the ctor
         # may not have; built on first execute()).
@@ -790,7 +915,8 @@ class GLExecutor:
             if (frec[_F_FIT] >= _rec.FIT_OFF_BELOW
                     or frec[_F_SIZE] >= 0.0 or frec[_F_SIZE + 1] >= 0.0
                     or float(np.max(np.abs(frec[_F_CROP:_F_CROP + 4]))) > 0.0
-                    or float(np.max(np.abs(frec[_F_FADE:_F_FADE + 4]))) > 0.0):
+                    or float(np.max(np.abs(frec[_F_FADE:_F_FADE + 4]))) > 0.0
+                    or _uv_window(frec) is not None):
                 break
             end += 1
         return end - start
@@ -1160,7 +1286,11 @@ class GLExecutor:
         src_kind = int(urec[_U_A])
         opacity = _clamp01(float(frec[_F_OPACITY]))
         tint = (float(frec[_F_TINT]), float(frec[_F_TINT + 1]), float(frec[_F_TINT + 2]))
-        additive = int(urec[_U_BLEND]) == _BLEND_ADDITIVE
+        # Bit 1 of the blend lane flags a NOTE_SHADED record (a fed note
+        # carrying pre-sampled uniforms for a per-note program); blend
+        # itself is bit 0.
+        additive = (int(urec[_U_BLEND]) & 1) == _BLEND_ADDITIVE
+        note_shaded = bool(int(urec[_U_BLEND]) & _NOTE_SHADED_BIT)
 
         target_id = target_stack[-1]
         if self._targets.get(target_id) is None:
@@ -1173,7 +1303,9 @@ class GLExecutor:
         # A per-item frag program shades IMAGE / DRAWABLE source draws; Fill
         # and Lines/Mesh keep the default path (the shaded blit is a textured
         # pass over the item's OWN source, drawable-ir.md attach point #1).
-        shaded = self._resolve_shader(gf, urec)
+        # A note-shaded record binds its own program (its uniform block is
+        # not the 1f-per-name shape _resolve_shader zips).
+        shaded = None if note_shaded else self._resolve_shader(gf, urec)
 
         clipped = self._apply_scissor(gf, urec, target_id, tw, th)
         if additive:
@@ -1204,9 +1336,12 @@ class GLExecutor:
                                else self._logical_of(image_id, uploaded[1],
                                                      uploaded[2], cols, rows))
                 # Uploaded QImages are top-down already - no FBO v-flip.
-                self._draw_texture(gf, mat3, tw, th, frec, tint, opacity,
-                                   uploaded, logical, shaded,
-                                   flip_v=False, cell=cell)
+                if not (note_shaded and uploaded is not None
+                        and self._draw_note_shaded(gf, urec, mat3, tw, th,
+                                                   tint, opacity, uploaded)):
+                    self._draw_texture(gf, mat3, tw, th, frec, tint, opacity,
+                                       uploaded, logical, shaded,
+                                       flip_v=False, cell=cell)
             case n if n == _SRC_DRAWABLE:
                 # SOURCE NORMALIZATION (drawable-ir.md rule 5): the source
                 # drawable's content covers its LOGICAL box regardless of its
@@ -1221,7 +1356,7 @@ class GLExecutor:
             case n if n == _SRC_LINES:
                 self._log_once('lines', 'GLExecutor: Lines source not implemented (TODO), skipped')
             case n if n == _SRC_MESH:
-                self._log_once('mesh', 'GLExecutor: Mesh source not implemented (TODO), skipped')
+                self._draw_mesh(gf, urec, mat3, tw, th, frec, tint, opacity)
         if additive:
             gf.glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
         if clipped:
@@ -1295,6 +1430,420 @@ class GLExecutor:
         if fbo is None:
             return None
         return fbo.texture(), fbo.width(), fbo.height(), None
+
+    def _draw_mesh(self, gf, urec, mat3, tw, th, frec, tint, opacity) -> None:
+        """One Polygon mesh draw (gat 2's crumple): the slot's capture
+        sampled over the payload's vertex grid, displaced by the item's
+        translated Vert= shader, with the item's sampled uniforms (amp)
+        bound by name. Ports gl_capture._draw_mesh onto the record
+        vocabulary: the record mat3 maps the SLOT's logical box to the
+        target, the payload's local basis maps mesh-local design px into
+        that box, and depth drops out (the engine mesh projection is
+        orthographic). Degrades to the plain textured quad when the
+        payload or program is missing - the mesh at rest IS the quad."""
+        mesh = self._meshes.get(int(urec[_U_B]))
+        if mesh is None:
+            self._log_once(f'mesh_{int(urec[_U_B])}',
+                           'GLExecutor: mesh payload missing, skipped')
+            return
+        is_model = mesh['vertices'].shape[1] >= _MESH_LANES_MODEL
+        if 'texture_drawable' in mesh:
+            tex_id = int(mesh['texture_drawable'])
+            uploaded = self._drawable_texture(tex_id)
+            lw, lh = self._sizes[tex_id]
+        else:
+            # A Model actor's material file; its "logical box" IS the
+            # design box (vertices are design-px local coordinates).
+            texture_file = mesh.get('texture')
+            uploaded = (self._file_texture(gf, texture_file)
+                        if texture_file else None)
+            lw, lh = mesh.get('design_size', (640.0, 480.0))
+        if uploaded is None:
+            return
+        entry = (self._model_program(gf) if is_model
+                 else self._mesh_program(gf, int(urec[_U_SHADER]), mesh))
+        if entry is None:
+            if not is_model:
+                self._draw_texture(gf, mat3, tw, th, frec, tint, opacity,
+                                   uploaded, (float(lw), float(lh)), None)
+            return
+        program, locs, names = entry
+        vao, _vbo, count = self._mesh_buffer(gf, int(urec[_U_B]), mesh)
+
+        dw, dh = mesh.get('design_size', (640.0, 480.0))
+        local = np.array([[lw / dw, 0.0, lw / 2.0],
+                          [0.0, lh / dh, lh / 2.0],
+                          [0.0, 0.0, 1.0]])
+        rec = np.asarray(mat3, dtype=np.float64).reshape(3, 3)
+        ndc = np.array([[2.0 / tw, 0.0, -1.0],
+                        [0.0, -2.0 / th, 1.0],
+                        [0.0, 0.0, 1.0]])
+        m = ndc @ rec @ local
+        mvp = QMatrix4x4(
+            float(m[0, 0]), float(m[0, 1]), 0.0, float(m[0, 2]),
+            float(m[1, 0]), float(m[1, 1]), 0.0, float(m[1, 2]),
+            0.0, 0.0, 0.0, 0.0,
+            float(m[2, 0]), float(m[2, 1]), 0.0, float(m[2, 2]))
+
+        program.bind()
+        self._bound_program = None  # foreign program: force the next _use
+        program.setUniformValue(locs['u_mvp'], mvp)
+        gf.glUniform3f(locs['u_tint'], tint[0], tint[1], tint[2])
+        gf.glUniform1f(locs['u_opacity'], opacity)
+        if is_model:
+            gf.glUniform1f(locs['u_depth_scale'], _MODEL_DEPTH_SCALE)
+            gf.glUniform1i(locs['u_spheremap'],
+                           1 if mesh.get('spheremap') else 0)
+        shader_id = int(urec[_U_SHADER]) - 1
+        desc = self._shader_descs.get(shader_id)
+        if desc is not None:
+            values = self.shader_uniforms.get(shader_id, [])
+            for name, value in zip(list(desc[2] or []), values):
+                loc = program.uniformLocation(name)
+                if loc != -1:
+                    gf.glUniform1f(loc, float(value))
+        for unit, (name, path) in enumerate(
+                (mesh.get('samplers') or {}).items(), start=1):
+            loc = program.uniformLocation(name)
+            texture = self._file_texture(gf, path)
+            if loc == -1 or texture is None:
+                continue
+            gf.glActiveTexture(GL_TEXTURE0 + unit)
+            gf.glBindTexture(GL_TEXTURE_2D, texture[0])
+            gf.glUniform1i(loc, unit)
+        gf.glActiveTexture(GL_TEXTURE0)
+        gf.glBindTexture(GL_TEXTURE_2D, uploaded[0])
+        gf.glUniform1i(locs['u_tex'], 0)
+        if is_model:
+            # Self-occlusion: model triangles depth-test against each
+            # other (the target FBO carries CombinedDepthStencil and the
+            # BEGIN clear includes depth). Everything 2D ignores depth.
+            gf.glEnable(GL_DEPTH_TEST)
+        vao.bind()
+        gf.glDrawArrays(_MESH_GL_MODES[mesh['mode']], 0, count)
+        vao.release()
+        if is_model:
+            gf.glDisable(GL_DEPTH_TEST)
+        program.release()
+        # Restore the walk's shared quad geometry for the next plain blit.
+        if self._vao is not None:
+            self._vao.bind()
+
+    def _draw_note_shaded(self, gf, urec, mat3, tw, th, tint, opacity,
+                          uploaded) -> bool:
+        """One per-note shaded quad (Government Knows' SetArrowShader
+        tier), or False to fall back to the plain blit.
+
+        The engine hands its note programs the note's modelMatrix and
+        per-note uniforms and lets the vert deform in model space
+        (`vert = mat * gl_Vertex; ...; inverse(mat) * vert`). Here the
+        fed record's mat3 maps the unit box to the target, so: the note's
+        size is the linear columns' norms, gl_Vertex is the shared
+        unit-centered quad scaled by that size (u_note_size), the mvp is
+        the record homography over the model->unit basis, and
+        modelMatrix is that same basis WITHOUT the NDC map - target px
+        rather than engine field px, which keeps the deformation
+        riding any consumer chain the item composed through. The
+        uniform block (chart values + the six builtins) was pre-sampled
+        at emission and stashed from this record's uf window."""
+        shader_id = int(urec[_U_SHADER]) - 1
+        entry = self._note_program(gf, shader_id)
+        if entry is None:
+            return False
+        program, locs, names, int_names = entry
+
+        rec = np.asarray(mat3, dtype=np.float64).reshape(3, 3)
+        w = float(np.hypot(rec[0, 0], rec[1, 0]))
+        h = float(np.hypot(rec[0, 1], rec[1, 1]))
+        if w <= 1e-6 or h <= 1e-6:
+            return True   # degenerate: nothing to draw, nothing to fall to
+        unit_from_model = np.array([[1.0 / w, 0.0, 0.5],
+                                    [0.0, 1.0 / h, 0.5],
+                                    [0.0, 0.0, 1.0]])
+        model = rec @ unit_from_model
+        ndc = np.array([[2.0 / tw, 0.0, -1.0],
+                        [0.0, -2.0 / th, 1.0],
+                        [0.0, 0.0, 1.0]])
+        m = ndc @ model
+
+        def mat4_of(m3):
+            return QMatrix4x4(
+                float(m3[0, 0]), float(m3[0, 1]), 0.0, float(m3[0, 2]),
+                float(m3[1, 0]), float(m3[1, 1]), 0.0, float(m3[1, 2]),
+                0.0, 0.0, 1.0, 0.0,
+                float(m3[2, 0]), float(m3[2, 1]), 0.0, float(m3[2, 2]))
+
+        program.bind()
+        self._bound_program = None  # foreign program: force the next _use
+        program.setUniformValue(locs['u_mvp'], mat4_of(m))
+        self._set_loc(gf, program, 'modelMatrix', mat4_of(model))
+        self._set_loc(gf, program, 'textureMatrix', QMatrix4x4())
+        self._set_loc2f(gf, program, 'u_note_size', w, h)
+        self._set_loc2f(gf, program, 'textureSize',
+                        float(uploaded[1]), float(uploaded[2]))
+        self._set_loc2f(gf, program, 'resolution', float(tw), float(th))
+        if locs.get('u_tint', -1) != -1:
+            gf.glUniform3f(locs['u_tint'], tint[0], tint[1], tint[2])
+        if locs.get('u_opacity', -1) != -1:
+            gf.glUniform1f(locs['u_opacity'], opacity)
+        values = self.shader_uniforms.get(shader_id, [])
+        for name, value in zip(names, values):
+            loc = program.uniformLocation(name)
+            if loc == -1:
+                continue
+            if name in int_names:
+                gf.glUniform1i(loc, int(round(float(value))))
+            else:
+                gf.glUniform1f(loc, float(value))
+        for unit, (name, path) in enumerate(
+                self._note_samplers.get(shader_id, {}).items(), start=1):
+            loc = program.uniformLocation(name)
+            texture = self._file_texture(gf, path)
+            if loc == -1 or texture is None:
+                continue
+            gf.glActiveTexture(GL_TEXTURE0 + unit)
+            gf.glBindTexture(GL_TEXTURE_2D, texture[0])
+            gf.glUniform1i(loc, unit)
+        gf.glActiveTexture(GL_TEXTURE0)
+        gf.glBindTexture(GL_TEXTURE_2D, uploaded[0])
+        self._set_loc_i(gf, program, 'sampler0', 0)
+        if locs.get('u_tex', -1) != -1:
+            gf.glUniform1i(locs['u_tex'], 0)
+
+        vao = self._note_quad(gf)
+        vao.bind()
+        gf.glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
+        vao.release()
+        program.release()
+        if self._vao is not None:
+            self._vao.bind()
+        return True
+
+    @staticmethod
+    def _set_loc(gf, program, name, matrix) -> None:
+        loc = program.uniformLocation(name)
+        if loc != -1:
+            program.setUniformValue(loc, matrix)
+
+    @staticmethod
+    def _set_loc2f(gf, program, name, a, b) -> None:
+        loc = program.uniformLocation(name)
+        if loc != -1:
+            gf.glUniform2f(loc, a, b)
+
+    @staticmethod
+    def _set_loc_i(gf, program, name, value) -> None:
+        loc = program.uniformLocation(name)
+        if loc != -1:
+            gf.glUniform1i(loc, value)
+
+    def _note_program(self, gf, shader_id: int):
+        """(program, locs, uniform names, int-typed names) for a note
+        desc, or None once a build attempt failed (the item falls back
+        to its plain blit). The chart's vert translates with the note-
+        quad geometry contract; the chart's frag with the varying uv
+        source (absent one, the plain mesh frag - a vert-only note
+        shader still deforms). Uniform TYPES come from the sources'
+        own declarations: binding 1f onto a bool/int uniform is a GL
+        error that silently drops the value."""
+        if shader_id in self._note_programs:
+            return self._note_programs[shader_id]
+        desc = self._shader_descs.get(shader_id)
+        entry = None
+        if desc is not None:
+            frag_src, vert_src, names = desc[0], desc[1], list(desc[2] or [])
+            entry = self._build_note_program(frag_src, vert_src, names)
+        self._note_programs[shader_id] = entry
+        return entry
+
+    def _build_note_program(self, frag_src, vert_src, names):
+        vert = _MESH_VERT_SRC
+        if vert_src:
+            try:
+                vert = notitg_compat.translate_vert(vert_src, note_quad=True)
+            except ValueError as exc:
+                self._log_once(f'note_vert_{id(vert_src)}',
+                               f'GLExecutor: note Vert= translation failed '
+                               f'({exc}); notes draw undeformed')
+        base = ('u_mvp', 'u_tex', 'u_tint', 'u_opacity')
+        try:
+            sources = [frag_src] if frag_src else []
+            if frag_src and _is_gles():
+                sources.insert(0, notitg_compat.promote_int_literals(frag_src))
+            built = None
+            for index, source in enumerate(sources):
+                built = _build_program(
+                    notitg_compat.translate(source, uv_source='varying'),
+                    base + tuple(names), vert_src=vert,
+                    quiet=index < len(sources) - 1)
+                if built is not None:
+                    break
+            if built is None:
+                built = _build_program(_MESH_FRAG_SRC, base, vert_src=vert)
+        except (ValueError, OSError) as exc:
+            self._log_once('note_prog', f'GLExecutor: note program failed to '
+                                        f'translate ({exc})')
+            return None
+        if built is None:
+            self._log_once('note_prog',
+                           'GLExecutor: note program failed to build')
+            return None
+        program, locs = built
+        int_names = frozenset(_int_uniform_names(frag_src)
+                              | _int_uniform_names(vert_src))
+        return program, locs, names, int_names
+
+    def _note_quad(self, gf):
+        """The shared unit-centered note quad (a_pos in -0.5..0.5, y
+        down; a_uv 0..1 top-down, matching uploaded QImage rows)."""
+        if self._note_vao is not None:
+            return self._note_vao
+        verts = np.array([[-0.5, -0.5, 0.0, 0.0],
+                          [0.5, -0.5, 1.0, 0.0],
+                          [-0.5, 0.5, 0.0, 1.0],
+                          [0.5, 0.5, 1.0, 1.0]], dtype=np.float32)
+        data = verts.tobytes()
+        vbo = QOpenGLBuffer(QOpenGLBuffer.Type.VertexBuffer)
+        vbo.create()
+        vbo.bind()
+        vbo.allocate(data, len(data))
+        vao = QOpenGLVertexArrayObject()
+        vao.create()
+        vao.bind()
+        stride = 4 * 4
+        gf.glEnableVertexAttribArray(0)
+        gf.glVertexAttribPointer(0, 2, GL_FLOAT, 0, stride, VoidPtr(0))
+        gf.glEnableVertexAttribArray(1)
+        gf.glVertexAttribPointer(1, 2, GL_FLOAT, 0, stride, VoidPtr(8))
+        vao.release()
+        vbo.release()
+        self._note_vao, self._note_vbo = vao, vbo
+        return vao
+
+    def _file_texture(self, gf, path: str):
+        """An uploaded (texture, w, h) for an image FILE a mesh sampler
+        binds, cached per path; None once a load has failed (logged)."""
+        if path in self._file_textures:
+            return self._file_textures[path]
+        image = QImage(str(path))
+        entry = None if image.isNull() else _upload_image(gf, image)
+        if entry is None:
+            self._log_once(f'file_tex_{path}',
+                           f'GLExecutor: sampler file {path} did not load')
+        self._file_textures[path] = entry
+        return entry
+
+    def _mesh_program(self, gf, shader_plus_one: int, mesh):
+        """The mesh program: the item's translated Vert= source (riding
+        its shader desc) over the plain textured mesh frag, or the
+        undisplaced default when the item carries none / translation
+        fails. Cached by the shader lane; None only when even the default
+        fails to build."""
+        key = shader_plus_one
+        if key in self._mesh_programs:
+            return self._mesh_programs[key]
+        vert_src = _MESH_VERT_SRC
+        desc = self._shader_descs.get(shader_plus_one - 1)
+        raw_vert = desc[1] if desc is not None else None
+        if raw_vert:
+            try:
+                vert_src = notitg_compat.translate_vert(raw_vert)
+            except ValueError as exc:
+                self._log_once(f'mesh_vert_{key}',
+                               f'GLExecutor: Vert= translation failed '
+                               f'({exc}); mesh draws undisplaced')
+        entry = self._build_mesh_program(vert_src)
+        if entry is None and vert_src is not _MESH_VERT_SRC:
+            self._log_once(f'mesh_prog_{key}',
+                           'GLExecutor: translated Vert= did not build; '
+                           'mesh draws undisplaced')
+            entry = self._build_mesh_program(_MESH_VERT_SRC)
+        self._mesh_programs[key] = entry
+        return entry
+
+    @staticmethod
+    def _build_mesh_program(vert_src):
+        """(program, {name: loc}, ()) for the mesh pair, or None."""
+        program = QOpenGLShaderProgram()
+        built = (program.addShaderFromSourceCode(
+                     QOpenGLShader.ShaderTypeBit.Vertex,
+                     _adapt_dialect(vert_src))
+                 and program.addShaderFromSourceCode(
+                     QOpenGLShader.ShaderTypeBit.Fragment,
+                     _adapt_dialect(_MESH_FRAG_SRC)))
+        program.bindAttributeLocation('a_pos', 0)
+        program.bindAttributeLocation('a_uv', 1)
+        if not built or not program.link():
+            logger.warning('GLExecutor: mesh program failed to build: %s',
+                           program.log())
+            return None
+        locs = {name: program.uniformLocation(name)
+                for name in ('u_mvp', 'u_tex', 'u_tint', 'u_opacity')}
+        return program, locs, ()
+
+    def _model_program(self, gf):
+        """The shared Model program: 3D vertices + depth + spheremap UV
+        generation over the plain textured frag. Built once; None only
+        when the build fails (the model is then skipped, logged)."""
+        if 'model' in self._mesh_programs:
+            return self._mesh_programs['model']
+        program = QOpenGLShaderProgram()
+        built = (program.addShaderFromSourceCode(
+                     QOpenGLShader.ShaderTypeBit.Vertex,
+                     _adapt_dialect(_MODEL_VERT_SRC))
+                 and program.addShaderFromSourceCode(
+                     QOpenGLShader.ShaderTypeBit.Fragment,
+                     _adapt_dialect(_MESH_FRAG_SRC)))
+        program.bindAttributeLocation('a_pos', 0)
+        program.bindAttributeLocation('a_uv', 1)
+        program.bindAttributeLocation('a_normal', 2)
+        entry = None
+        if built and program.link():
+            locs = {name: program.uniformLocation(name)
+                    for name in ('u_mvp', 'u_tex', 'u_tint', 'u_opacity',
+                                 'u_depth_scale', 'u_spheremap')}
+            entry = (program, locs, ())
+        else:
+            logger.warning('GLExecutor: model program failed to build: %s',
+                           program.log())
+        self._mesh_programs['model'] = entry
+        return entry
+
+    def _mesh_buffer(self, gf, mesh_id: int, mesh):
+        """(vao, vbo, vertex count) for a payload's static interleaved
+        float32 vertices, uploaded once per mesh id. A Polygon's lanes
+        are (x, y, u, v); a Model's are (x, y, z, u, v, nx, ny, nz)."""
+        cached = self._mesh_buffers.get(mesh_id)
+        if cached is not None:
+            return cached
+        vertices = np.ascontiguousarray(mesh['vertices'], dtype=np.float32)
+        data = vertices.tobytes()
+        vbo = QOpenGLBuffer(QOpenGLBuffer.Type.VertexBuffer)
+        vbo.create()
+        vbo.bind()
+        vbo.allocate(data, len(data))
+        vao = QOpenGLVertexArrayObject()
+        vao.create()
+        vao.bind()
+        lanes = vertices.shape[1]
+        stride = lanes * 4
+        if lanes >= _MESH_LANES_MODEL:
+            gf.glEnableVertexAttribArray(0)
+            gf.glVertexAttribPointer(0, 3, GL_FLOAT, 0, stride, VoidPtr(0))
+            gf.glEnableVertexAttribArray(1)
+            gf.glVertexAttribPointer(1, 2, GL_FLOAT, 0, stride, VoidPtr(12))
+            gf.glEnableVertexAttribArray(2)
+            gf.glVertexAttribPointer(2, 3, GL_FLOAT, 0, stride, VoidPtr(20))
+        else:
+            gf.glEnableVertexAttribArray(0)
+            gf.glVertexAttribPointer(0, 2, GL_FLOAT, 0, stride, VoidPtr(0))
+            gf.glEnableVertexAttribArray(1)
+            gf.glVertexAttribPointer(1, 2, GL_FLOAT, 0, stride, VoidPtr(8))
+        vao.release()
+        vbo.release()
+        entry = (vao, vbo, len(vertices))
+        self._mesh_buffers[mesh_id] = entry
+        return entry
 
     def _draw_fill(self, gf, mat3, tw, th, tint, opacity, frec=None) -> None:
         """One solid-colour quad (an AFT-rig curtain), inset by the item's crop.
@@ -1410,6 +1959,35 @@ class GLExecutor:
         off_y = float(frec[_F_ORIGIN + 1]) * lh
         x0, y0 = crop_l * lw - off_x, crop_t * lh - off_y
         x1, y1 = x0 + vis_fw * lw, y0 + vis_fh * lh
+        window = _uv_window(frec)
+        if window is not None and cell is None:
+            # Custom UV window (customtexturerect, u1/v1 past 1 = a
+            # TILING draw) plus the live scroll offset: the window
+            # replaces the base source rect, crops inset INTO it, and
+            # the texture samples with REPEAT wrap (no half-texel inset
+            # - the seam IS the tiling). FFF's orb/stripe pages repeat
+            # 5-10x across the screen; drawn 1x-stretched they read as
+            # giant circles.
+            wu0, wv0, wu1, wv1 = window
+            u0 = wu0 + crop_l * (wu1 - wu0)
+            u1 = wu0 + (crop_l + vis_fw) * (wu1 - wu0)
+            v0 = wv0 + crop_t * (wv1 - wv0)
+            v1 = wv0 + (crop_t + vis_fh) * (wv1 - wv0)
+            if flip_v:
+                v0, v1 = 1.0 - v0, 1.0 - v1
+            gf.glBindTexture(GL_TEXTURE_2D, texture)
+            gf.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
+            gf.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
+            self._textured_quad(gf, mat3, tw, th, tint, opacity, texture,
+                                sw, sh, shaded, (x0, y0, x1, y1),
+                                (u0, v0, u1, v1),
+                                fade=tuple(frec[_F_FADE:_F_FADE + 4]))
+            gf.glBindTexture(GL_TEXTURE_2D, texture)
+            gf.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,
+                               GL_CLAMP_TO_EDGE)
+            gf.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
+                               GL_CLAMP_TO_EDGE)
+            return
         # Sample fractions compose into the bound sub-rect (an overscanned
         # capture's design-box region); the flip to the y-up FBO texture
         # convention happens last.
@@ -1510,8 +2088,14 @@ class GLExecutor:
         shader_id = shader_plus_one - 1
         entry = self._shader_program(gf, shader_id)
         if entry is None:
-            self._log_once(f'shader_{shader_id}',
-                           f'GLExecutor: shader {shader_id} unavailable, drawn unshaded')
+            desc = self._shader_descs.get(shader_id)
+            if desc is None or desc[0]:
+                # Vert-only descs (a mesh's Vert=) have no frag by design;
+                # anything else missing here is a real degradation.
+                self._log_once(
+                    f'shader_{shader_id}',
+                    f'GLExecutor: shader {shader_id} unavailable, '
+                    'drawn unshaded')
             return None
         program, locs, names = entry
         self._use(entry)
@@ -1534,7 +2118,10 @@ class GLExecutor:
             return self._shader_programs[shader_id]
         desc = self._shader_descs.get(shader_id)
         entry = None
-        if desc is not None:
+        # A VERT-ONLY desc (a Polygon's Vert= with no Frag=) has no frag
+        # program to build - its vert half is the MESH program's
+        # (`_mesh_program`), and regexing the absent frag crashed here.
+        if desc is not None and desc[0]:
             frag_src, _vert_src, names = desc[0], desc[1], list(desc[2] or [])
             entry = self._build_frag(frag_src, names)
         self._shader_programs[shader_id] = entry

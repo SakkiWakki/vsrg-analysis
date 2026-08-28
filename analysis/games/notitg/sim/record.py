@@ -94,12 +94,36 @@ _clearall_target = MOD_INIT_DEFAULTS.get
 _row_t = itemgetter(2)
 
 
-def _player_indexes(raw) -> tuple:
-    """A row's raw player (1/2 from the chart, None = both) as engine
-    channel indexes. Expansion happens at INGESTION so a per-player
-    clearall and a both-players window meet on the same key inside one
-    frame (last call wins there, as in the engine)."""
-    return (0, 1) if raw is None else (max(0, int(raw) - 1),)
+def _player_universe(applied) -> tuple:
+    """The 0-based fan-out set for a row that names NO player: every
+    player this chart mods, and never fewer than the two sides.
+
+    `ApplyModifiers` without a `pn` reaches every player slot in the
+    engine (`GameCommand::ApplyToAllPlayers` is `FOREACH_PlayerNumber`),
+    and the NotITG fork's slot count runs well past two - the SRT charts
+    mod P1-P5 as independent fields. Hard-coding `(0, 1)` here left every
+    player-less window off P3+, so those fields silently missed whole
+    mods their siblings got (gat 2's revolt: `invert`, `beat` and the
+    drunk wiggle landed on two of its four playfields).
+
+    UNSETTLED: whether Lua's `ApplyModifiers(str)` means every slot or
+    only the JOINED players. Reverting this to `(0, 1)` was measured
+    WORSE (gat 2 chart t=115 lost 14 on-screen notes and the blank frames
+    at t=106/110 did not come back), so the widened set stands until the
+    fork's own binding is read."""
+    players = {0, 1}
+    for _t, _beat, _modstring, player in applied:
+        if player is not None:
+            players.add(max(0, int(player) - 1))
+    return tuple(sorted(players))
+
+
+def _player_indexes(raw, universe) -> tuple:
+    """A row's raw player (1-based from the chart, None = every player in
+    `universe`) as engine channel indexes. Expansion happens at INGESTION
+    so a per-player clearall and an all-players window meet on the same
+    key inside one frame (last call wins there, as in the engine)."""
+    return universe if raw is None else (max(0, int(raw) - 1),)
 
 
 def _frame_resolved(applied) -> list:
@@ -113,6 +137,9 @@ def _frame_resolved(applied) -> list:
     sites (a closure call per key was ~3M of them) and the hot names are
     locals. Flushing does not `del pending[key]`: every site overwrites the
     key on the next statement, so the delete only ever undid itself."""
+    # The universe is a pre-pass, so the rows must survive a second walk.
+    applied = applied if isinstance(applied, (list, tuple)) else list(applied)
+    universe = _player_universe(applied)
     pending: dict = {}
     seen: dict = {}
     out: list = []
@@ -121,7 +148,7 @@ def _frame_resolved(applied) -> list:
     same_frame = _SAME_FRAME_S
 
     for t, beat, modstring, player in applied:
-        indexes = _player_indexes(player)
+        indexes = _player_indexes(player, universe)
         clears, mods, speed_mods, names = _row_plan(modstring)
 
         if clears:

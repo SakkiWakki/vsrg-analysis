@@ -101,7 +101,13 @@ _MAX_DRAIN_STEPS = 10000
 # invents values that were never written, and a fractional `hidden` reads as
 # hidden to every `>= 0.5` consumer. All are written via `_set_immediate`,
 # mirroring the engine fields that bypass SM's TweenState.
-_STEP_PROPS = frozenset({'hidden', 'awake', 'blend_add', 'frame', 'cull'})
+_STEP_PROPS = frozenset({'hidden', 'awake', 'blend_add', 'frame', 'cull',
+                         'note_shader:arrow', 'note_shader:hold',
+                         'note_shader:receptor'})
+
+# Player note-shader bind channels (SetArrowShader et al.): the value is
+# the SOURCE actor's recorder id, -1 = unbound (a Clear* or never set).
+_NOTE_SHADER_REST = -1.0
 
 # Face-culling state (SetCullMode / SetBackfaceCull): which projected
 # winding the engine drops. The two-sided-card idiom depends on it: a pair
@@ -249,17 +255,21 @@ _SIM_CROP_COMPOSITES = verb_surface.CROP_COMPOSITES
 # and the render must agree on rest.
 _COLOR_UNSET = (-1.0, -1.0, -1.0, -1.0)
 _TEXCOORD_SCROLL_REST = (0.0, 0.0, 0.0, 0.0, 0.0)
+_UV_RECT_REST = (0.0, 0.0, 1.0, 1.0)
 _COLOR_RESTS = {
     'color_ul': _COLOR_UNSET, 'color_ur': _COLOR_UNSET,
     'color_ll': _COLOR_UNSET, 'color_lr': _COLOR_UNSET,
     'glow': (1.0, 1.0, 1.0, 0.0),
     'texcoord_scroll': _TEXCOORD_SCROLL_REST,
+    'uv_rect': _UV_RECT_REST,
 }
 
 
 def _rest(prop):
     if prop in _COLOR_RESTS:
         return _COLOR_RESTS[prop]
+    if prop.startswith('note_shader:'):
+        return _NOTE_SHADER_REST
     return _REST.get(prop, 0.0)
 
 
@@ -451,6 +461,10 @@ class SimActor:
         # (Sprite:Load's argument) to an absolute file, or None when no
         # file exists there. The actor records only resolved swaps.
         self.asset_resolver = None
+        # Set by the environment: compiles a `tween(t, 'formula over %f')`
+        # custom-ease string to a callable u -> eased fraction, through
+        # the chart's own Lua so the formula means what the fork ran.
+        self.ease_compiler = None
 
     @property
     def now(self) -> float:
@@ -508,11 +522,59 @@ class SimActor:
         self._ease_start = dict(self._current)
         for prop, dest in head.state.items():
             start = self._ease_start.get(prop, _rest(prop))
-            if dest != start:
+            if dest == start:
+                continue
+            if callable(head.ease):
+                self._emit_formula(prop, start, dest, head)
+            else:
                 self._emit_at(self._now, prop, dest, head.dur, head.ease,
                               start=start)
         if head.command and run_command is not None:
             run_command(head.command)
+
+    def _emit_formula(self, prop, start, dest, head, t0=None) -> None:
+        """A formula-eased tween recorded as piecewise-LINEAR keyframes:
+        the keyframe vocabulary carries eases as IDs, and a chart formula
+        (revolt's 'math.max(math.sin(math.pi*(%f*6)),0)' - three bounces)
+        has none, so the curve is sampled. Density is one piece per
+        ~16ms, clamped [8, 48]: enough for the corpus's trig humps,
+        bounded so a long tween cannot flood the stream. Completion still
+        SNAPS to the queued target (Actor.cpp pops the tween and assigns
+        its state), so a formula ending off 1.0 gets the engine's own
+        final step.
+
+        `t0` is the tween's begin time (a retarget's progress is measured
+        from it), but emission covers the FUTURE only - `[now, end]` -
+        because the segment lanes are append-only and a retarget fires
+        after earlier pieces were appended; re-emitting from `t0` walked
+        time backwards and wedged the whole recording (the 'segment
+        starts must be appended in time order' fault that killed
+        Stuxnet's skew window)."""
+        t0 = self._now if t0 is None else t0
+        end = t0 + head.dur
+        begin = max(t0, self._now)
+        span = end - begin
+        if span <= 0.0 or head.dur <= 0.0:
+            self._emit_at(self._now, prop, dest, 0.0, 0, start=start)
+            return
+        pieces = max(2, min(48, int(span * 60.0)))
+        dt = span / pieces
+
+        def eased_at(u):
+            return self._lerp(start, dest, float(head.ease(u)))
+
+        try:
+            prev = eased_at((begin - t0) / head.dur)
+            for i in range(1, pieces + 1):
+                value = eased_at((begin - t0 + dt * i) / head.dur)
+                self._emit_at(begin + dt * (i - 1), prop, value, dt, 0,
+                              start=prev)
+                prev = value
+        except Exception:
+            self._emit_at(begin, prop, dest, span, 0, start=start)
+            return
+        if prev != dest:
+            self._emit_at(end, prop, dest, 0.0, 0, start=prev)
 
     def _complete_head(self, head) -> None:
         # Merge, not replace: tween states snowball every tween-managed
@@ -542,6 +604,10 @@ class SimActor:
         else:
             frac = (float(at_t) - self._head_begin_t) / head.dur
             frac = 0.0 if frac < 0.0 else (1.0 if frac > 1.0 else frac)
+        if callable(head.ease):
+            # A `tween(t, formula)` custom ease (compiled chart Lua).
+            # Output is deliberately unclamped, like the SM curves.
+            return float(head.ease(frac))
         return ease(head.ease, frac)
 
     def get(self, prop: str, at_t=None):
@@ -919,6 +985,9 @@ class SimActor:
         if verb == 'texcoordvelocity':
             self._texcoord_velocity(args)
             return True
+        if verb == 'customtexturerect':
+            self._custom_texture_rect(args)
+            return True
         if verb == 'SetDrawByZPosition':
             # ActorFrame.cpp:194-205: the frame draws its children
             # stable-sorted by GetZ ascending (ActorUtil.cpp:408-416)
@@ -1138,9 +1207,34 @@ class SimActor:
                 self._stop_tweening()
             case 'hurrytweening':
                 self._hurry_tweening(_arg_float(arg0, 1.0))
+            case 'tween':
+                self._begin_tweening(
+                    _arg_float(arg0, 0.0),
+                    self._tween_ease_arg(args[1] if len(args) > 1 else None))
             case _:
                 return False
         return True
+
+    def _tween_ease_arg(self, spec):
+        """The fork's `tween(t, ease)` second arg as an ease: a named SM
+        curve by its verb name, or a Lua FORMULA over `%f` (the tween's
+        raw progress) compiled to a callable by the environment. An arg
+        that resolves to neither falls to linear, reported via
+        `dropped_notify` so the gap is never silent."""
+        if spec is None:
+            return 0
+        name = str(spec).strip()
+        known = _SIM_TWEEN_EASING.get(name.lower())
+        if known is not None:
+            return known
+        if self.ease_compiler is not None:
+            try:
+                return self.ease_compiler(name)
+            except Exception:
+                pass
+        if self.dropped_notify is not None:
+            self.dropped_notify(f'tween-ease:{name[:48]}')
+        return 0
 
     # -- tween queue -----------------------------------------------------
 
@@ -1228,8 +1322,13 @@ class SimActor:
             tail.state[prop] = value
             start = self._ease_start.get(prop, _rest(prop))
             if tail.started and value != start:
-                self._emit_at(self._head_begin_t, prop, value, tail.dur,
-                              tail.ease, start=start)
+                if callable(tail.ease):
+                    self._trim_future(prop, self._now)
+                    self._emit_formula(prop, start, value, tail,
+                                       t0=self._head_begin_t)
+                else:
+                    self._emit_at(self._head_begin_t, prop, value, tail.dur,
+                                  tail.ease, start=start)
         else:
             self._current[prop] = value
             self._mirror_prop(prop, value)
@@ -1250,6 +1349,14 @@ class SimActor:
         self._current[prop] = value
         self._mirror_prop(prop, value)
         self._emit_at(self._now, prop, value, 0.0, 0)
+
+    def set_note_shader(self, category, src_rec_id) -> None:
+        """Bind (or with `src_rec_id` None, clear) this player's note
+        shader for `category` ('arrow'/'hold'/'receptor'). Program binds
+        are RageShaderProgram state, not TweenState - immediate, never
+        queued (like the uniform pokes)."""
+        value = _NOTE_SHADER_REST if src_rec_id is None else float(src_rec_id)
+        self._set_immediate(f'note_shader:{category}', value)
 
     # -- non-queue channels ---------------------------------------------
 
@@ -1397,6 +1504,17 @@ class SimActor:
             self._set_immediate('asset_swap',
                                 (str(resolved), float(cols), float(rows)))
 
+    def _custom_texture_rect(self, args) -> None:
+        """SetCustomTextureRect(u0, v0, u1, v1) in texture-uv units
+        (openitg Sprite.h:63): the drawn quad samples THIS window
+        instead of the full texture, and a u1/v1 past 1 TILES (GL
+        REPEAT) - FFF stretches 5x5-repeated orb/stripe pages across
+        the screen with it. Immediate, like the other sprite texture
+        state."""
+        values = tuple(_arg_float(args[i] if len(args) > i else None, rest)
+                       for i, rest in enumerate(_UV_RECT_REST))
+        self._set_immediate('uv_rect', values)
+
     def _texcoord_velocity(self, args) -> None:
         """SetTexCoordVelocity(vx, vy) in UV units/sec (openitg
         Sprite.h:62; Sprite::Update advances the UVs by delta*velocity,
@@ -1488,6 +1606,30 @@ class SimActor:
                     _arg_float(a, 0.0) for a in args)
 
     # -- emission --------------------------------------------------------
+
+    def _trim_future(self, prop, t) -> None:
+        """Retarget prep for a formula tween: drop this prop's emitted
+        keyframes dated strictly after `t`. The subdivision emits pieces
+        ahead of the clock, and a mid-flight retarget rewrites that
+        future; both substrates - the batch keyframe list (bisected by
+        time) and the append-only segment lanes - would otherwise keep
+        serving stale pieces dated later than anything the retarget can
+        append."""
+        frames = self._frames.get(prop)
+        if frames:
+            keep = len(frames)
+            while keep and frames[keep - 1].t > t:
+                keep -= 1
+            del frames[keep:]
+            self._kf_cache = None
+        for lane in self._seg.get(prop, ()):
+            lane.truncate_after(t)
+        tokens = self._seg_tokens.get(prop)
+        if tokens:
+            ts, vals = tokens
+            while ts and ts[-1] > t:
+                ts.pop()
+                vals.pop()
 
     def _emit_at(self, t, prop, values, dur, ease_id, start=None) -> None:
         """Record one keyframe. Eased emissions pin their ease-from via

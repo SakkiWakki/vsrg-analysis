@@ -74,6 +74,68 @@ def test_sm_bounce_and_spring_formulas():
             1 - math.cos(u * math.pi * 2.5) / (1 + u * 3))
 
 
+def test_tween_verb_with_formula_ease_bounces():
+    """The fork's `tween(t, 'formula over %f')` custom ease (gat 2's
+    revolt bounces its fields with 'math.max(math.sin(math.pi*(%f*6)),0)'
+    on z). The recorder used to defer the verb, so the queued setter
+    landed as an instant step - the field snapped toward the camera
+    ("zoomed in") instead of bouncing. Live reads evaluate the formula;
+    the recorded stream is a piecewise-linear sampling of it, ending on
+    the engine's own completion snap to the queued target."""
+    bounce = lambda u: max(math.sin(math.pi * (u * 6.0)), 0.0)
+    a = SimActor()
+    a.ease_compiler = lambda formula: bounce
+    a.poke('tween', [1.0, 'math.max(math.sin(math.pi*(%f*6)),0)'])
+    a.poke('z', [400])
+
+    a.update_to(1.0 / 12.0)   # first hump's peak: sin(pi/2) = 1
+    assert a.get('z') == pytest.approx(400.0, abs=1e-6)
+    a.update_to(3.0 / 12.0)   # second hump's trough: clipped to 0
+    assert a.get('z') == pytest.approx(0.0, abs=1e-6)
+    a.update_to(1.0)
+    assert a.get('z') == pytest.approx(400.0)  # completion snaps to target
+
+    tl = _timeline(a, 'z')
+    assert tl.sample(1.0 / 12.0)[0] == pytest.approx(400.0, abs=1.0)
+    assert tl.sample(3.0 / 12.0)[0] == pytest.approx(0.0, abs=1.0)
+    assert tl.sample(2.0)[0] == pytest.approx(400.0)
+
+
+def test_formula_tween_retarget_keeps_segment_lanes_ordered():
+    """gat 2's Stuxnet drives skewx via tween(t, formula) and retargets
+    mid-flight; a retarget must re-emit the FUTURE only - the segment
+    lanes are append-only, and re-sampling from the tween's begin walked
+    time backwards ('segment starts must be appended in time order'),
+    faulting the Update chunk for the rest of the section."""
+    a = SimActor()
+    a.ease_compiler = lambda formula: (lambda u: u * u)
+    a.poke('tween', [1.0, 'inOutQuad(%f, 0, 1, 1)'])
+    a.poke('x', [100])
+    a.update_to(0.5)
+    a.poke('x', [200])   # mid-flight retarget re-emits the curve
+    a.update_to(1.0)
+    assert a.get('x') == pytest.approx(200.0)
+    tl = _timeline(a, 'x')
+    assert tl.sample(2.0)[0] == pytest.approx(200.0)
+
+
+def test_tween_verb_with_named_ease_and_unknown_falls_to_linear():
+    a = SimActor()
+    a.poke('tween', [1.0, 'accelerate'])
+    a.poke('x', [100])
+    a.update_to(0.5)
+    assert a.get('x') == pytest.approx(25.0)
+
+    dropped = []
+    b = SimActor()
+    b.dropped_notify = dropped.append
+    b.poke('tween', [1.0, 'no_such_ease('])
+    b.poke('x', [100])
+    b.update_to(0.5)
+    assert b.get('x') == pytest.approx(50.0), 'unresolvable ease -> linear'
+    assert dropped and dropped[0].startswith('tween-ease:')
+
+
 def test_spring_verb_maps_to_sm_curve():
     # The old recorder silently dropped bouncebegin/bounceend/spring.
     a = SimActor()
