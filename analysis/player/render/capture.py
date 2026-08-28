@@ -1,7 +1,7 @@
 """Offscreen capture slots for the field-instance composite.
 
 The renderer captures layer groups into per-purpose offscreen targets
-(slots 'field', 'field2', 'backdrop', 'screen') and composites them
+(slots 'field', 'field2', 'screen') and composites them
 back as transformed per-instance blits. This module abstracts the
 render target + blit + snapshot operations behind one small interface
 so the composite step can run on either backend:

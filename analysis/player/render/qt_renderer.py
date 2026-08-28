@@ -21,7 +21,6 @@ _HUD_LAYERS = frozenset(('free_sections', 'hud'))
 # A field instance is `(transform, opacity)` or, for a per-copy capture
 # scope, `(transform, opacity, scope)`. A missing scope is 'field'
 # (transparent field-only capture) - the zero-cost path other games use.
-# 'full' additionally carries the backdrop (background + below-draws).
 # The screen scopes model SM's ActorFrameTexture: the AFT node captures
 # the chart area as drawn so far in the SAME frame (backdrop + field
 # blits, before any post-node sampler draws); 'screen' samplers show
@@ -336,8 +335,6 @@ class QtPlayerRenderer:
         # on every frame without one - the zero-cost path for other games.
         self._field_src = None
         self._player_field_src = {}
-        self._backdrop_src = None
-        self._backdrop_painter = None
         # Previous frame's AFT capture (the chart area as of the node's
         # draw position), retained for this frame's 'screen_prev' copies.
         # None until a frame with screen copies captures one, and dropped
@@ -530,20 +527,12 @@ class QtPlayerRenderer:
         # HUD never moves with the playfield. Below-draws (storyboards)
         # paint between the clear and the transformed field.
         #
-        # Field copies (EffectFrame.fields) come in two scopes. A 'field'
-        # copy replicates only the transparent field layers, so the shared
-        # background shows through every copy (fluXis extra playfields;
-        # NotITG ActorProxy copies). A 'full' copy replicates the whole
-        # chart region incl. background + below-draws (NotITG AFT copies
-        # whose ShowAFTBG grabs the background). To serve both from one
-        # frame, the field layers ALWAYS capture into a transparent
-        # the transparent field slot, and when any 'full' copy is present the
-        # background clear + below-draws capture into a separate
-        # a separate
-        # backdrop slot (also blitted to screen once as the real
-        # backdrop). A 'full' copy then blits backdrop+field under its
-        # transform; a 'field' copy blits only the field pixmap.
-        full_capture = self._full_field_capture(effect_frame, ctx)
+        # A field copy (EffectFrame.fields) replicates only the transparent
+        # field layers, so the shared background shows through every copy
+        # (fluXis extra playfields; NotITG ActorProxy copies). The field
+        # layers therefore ALWAYS capture into a transparent slot. A copy
+        # that needs the background too takes a 'screen' scope, which
+        # composites the whole chart region offscreen instead.
         # Settled once: the answer cannot change mid-frame, and it decides
         # whether the field layer group is drawn at all.
         unread_field = (self._delegating(ctx)
@@ -555,8 +544,7 @@ class QtPlayerRenderer:
         for name, fn, stage in self._layers:
             is_hud = name in _HUD_LAYERS and cache_enabled
             in_field = not is_hud and name != 'background'
-            captured = in_field or (full_capture and name == 'background')
-            if not captured and (chart_wrapped or field_painter is not None):
+            if not in_field and (chart_wrapped or field_painter is not None):
                 if chart_wrapped:
                     self._end_effect_transform(field_painter or chart_painter)
                     chart_wrapped = False
@@ -567,28 +555,14 @@ class QtPlayerRenderer:
                     self._blit_field_instances(effect_frame, ctx,
                                                chart_painter)
                     field_painter = None
-            if full_capture and name == 'background':
-                # A 'full' copy exists: redirect the background clear +
-                # below-draws into the backdrop pixmap (blitted to screen
-                # as the base backdrop by _blit_field_instances). A plain
-                # screen clear runs on the host first so the area outside
-                # the chart region (behind the HUD) is cleared; the
-                # background layer itself (this iteration's `fn`) then
-                # draws into the backdrop painter via `target` below.
-                _field_layer.draw_background(ctx, chart_painter)
-                self._begin_backdrop_capture(effect_frame, ctx, chart_painter)
             if in_field and not below_drawn:
                 # Scene (camera) bracket opens before the below-draws
                 # so background storyboards ride the camera; the
-                # canvas clear stays outside it in screen space. Under a
-                # 'full' capture the below-draws land in the backdrop
-                # pixmap alongside the background clear.
-                below_target = self._backdrop_painter or chart_painter
+                # canvas clear stays outside it in screen space.
                 scene_wrapped = self._begin_scene_transform(
-                    effect_frame, below_target)
-                self._draw_effect_below(effect_frame, ctx, below_target)
+                    effect_frame, chart_painter)
+                self._draw_effect_below(effect_frame, ctx, chart_painter)
                 below_drawn = True
-                self._end_backdrop_capture()
                 # Field instances: the field layer group (its own
                 # transform bracket included) renders once into a
                 # transparent offscreen buffer, then blits per instance.
@@ -603,12 +577,10 @@ class QtPlayerRenderer:
                 # the target is a capture slot that must bracket the
                 # host painter. Skipped entirely here.
                 continue
-            if captured:
-                # Captured layers draw into whichever offscreen buffer is
-                # open: the field pixmap for the field layers, or (for the
-                # background layer under a 'full' copy) the backdrop pixmap.
-                target = (field_painter or self._backdrop_painter
-                          or chart_painter)
+            if in_field:
+                # Field layers draw into the field pixmap while its
+                # capture bracket is open.
+                target = field_painter or chart_painter
             else:
                 target = chart_painter
             if in_field and unread_field:
@@ -725,28 +697,6 @@ class QtPlayerRenderer:
         painter.restore()
 
     @staticmethod
-    def _full_field_capture(frame, ctx) -> bool:
-        """True when any field copy this frame is 'full' scope (carries
-        the background), so the backdrop (background clear + below-draws)
-        must be captured for those copies to blit. The identity original
-        and 'field' copies never need it.
-
-        DORMANT - ALWAYS FALSE. Nothing produces a 'full' scope any more:
-        `NotitgFieldInstances._scope` returns only field / field{N} / screen /
-        screen_prev / fill / capture. The producer was
-        `NotitgAdapter.field_capture_scope` (added 6738397 for gat's ShowAFTBG
-        rig) and 7d16290 deleted it, replacing whole-screen capture with the
-        'screen' / 'screen_prev' retained-composite scopes - but left every
-        consumer branch here standing.
-
-        So this gate, `_begin_backdrop_capture`, `self._backdrop_src` and the
-        background/below-draw redirection are all unreachable. They READ as a
-        live feature, which has already cost review time chasing a stale-handle
-        bug that cannot execute. Do not revive 'full' to get a whole-screen
-        proxy copy - 'screen'/'screen_prev' are the supported route."""
-        return 'full' in _field_scopes(frame)
-
-    @staticmethod
     def _has_screen_copy(frame) -> bool:
         """True when any field copy this frame is a screen scope, so the
         whole chart region must composite offscreen and the node-point
@@ -765,11 +715,9 @@ class QtPlayerRenderer:
             if abort is not None:
                 abort()
         self._post_host = None
-        self._backdrop_painter = None
         self._screen_open = False
         self._field_src = None
         self._player_field_src = {}
-        self._backdrop_src = None
         self._hud_slot_open = False
         self._hud_painter = None
         self._capture.release(self._screen_capture)
@@ -808,7 +756,6 @@ class QtPlayerRenderer:
         self._aft_slots.clear()
         self._field_src = None
         self._player_field_src = {}
-        self._backdrop_src = None
         # The cached HUD target belongs to the old backend too; the
         # first-render trigger in _hud_redraw_due re-renders it.
         self._hud_src = None
@@ -875,26 +822,6 @@ class QtPlayerRenderer:
             self._prev_screen_t = float(ctx.t_now)
             self._screen_capture = None
 
-    def _begin_backdrop_capture(self, frame, ctx, painter) -> None:
-        """Open the backdrop slot capturing the background clear +
-        below-draws, used as the source for 'full' field copies (their
-        capture includes the background). No-op unless this frame has a
-        'full' copy. The captured backdrop also becomes the base backdrop
-        blitted to screen, so it is never double-drawn."""
-        self._backdrop_src = None
-        self._backdrop_painter = None
-        if (not self._full_field_capture(frame, ctx) or painter is None
-                or getattr(ctx, 'player', None) is None):
-            return
-        p = ctx.player
-        self._backdrop_painter = self._capture.open(
-            'backdrop', painter, p.W, p.H)
-
-    def _end_backdrop_capture(self) -> None:
-        if self._backdrop_painter is not None:
-            self._backdrop_src = self._capture.close('backdrop')
-            self._backdrop_painter = None
-
     def _delegating(self, ctx) -> bool:
         """Whether the Drawable pipeline draws this player's chart region.
 
@@ -929,11 +856,17 @@ class QtPlayerRenderer:
         changes no pixel and removes the frame's largest piece of dead
         work.
 
-        A doc that DOES name a scope (`VSRG_DRAWABLE_NOTES=0`, and the
-        per-player `field{N}` re-renders) still gets the capture."""
+        A doc that DOES name a scope (`VSRG_DRAWABLE_NOTES=0`) still gets
+        the capture. A pipeline whose doc is NOT LIVE YET reads as True:
+        legacy owns every frame until adoption, and skipping the field
+        group then would draw the chart with no notes at all while the
+        doc is still assembling."""
         pipeline = self._delegate_target(ctx)
-        scopes = pipeline.capture_scopes() if pipeline is not None else None
-        return bool(scopes)
+        if pipeline is None:
+            return False
+        if not pipeline.doc_live:
+            return True
+        return bool(pipeline.capture_scopes())
 
     def _begin_field_capture(self, frame, ctx, painter):
         """Redirect the field layer group into the transparent field slot
@@ -1036,20 +969,30 @@ class QtPlayerRenderer:
         spec = getattr(frame, 'second_field', None)
         note_mods = getattr(spec, 'note_mods', None) or {}
 
-        def per_player(emit):
-            emissions = {_DEFAULT_FIELD_SCOPE: emit(ctx)}
+        def per_player(emit, scopes=None):
+            """`scopes` is the set of scope names worth emitting (None =
+            all): each per-player emission costs a whole prepass rebuild,
+            and the pipeline knows which consumers can draw this frame,
+            so players nobody can see are never paid for."""
+            wanted = (lambda scope: scopes is None or scope in scopes)
+            emissions = {}
+            if wanted(_DEFAULT_FIELD_SCOPE):
+                emissions[_DEFAULT_FIELD_SCOPE] = emit(ctx)
             player = getattr(ctx, 'player', None)
             if player is None or not note_mods:
                 return emissions
+            numbers = [n for n in note_mods if wanted(f'field{n}')]
+            if not numbers:
+                return emissions
             primary = getattr(player, '_note_mods', None)
             try:
-                for number, mods in note_mods.items():
-                    player._note_mods = mods
+                for number in numbers:
+                    player._note_mods = note_mods[number]
                     self._rebuild_note_mods(ctx)
                     # The same `field{N}` naming `_capture_second_field`
                     # gives that player's capture slot: one scope vocabulary
                     # whether the notes arrive as a capture or as items.
-                    emissions[f'field{number}'] = emit(ctx)
+                    emissions[f'field{number}'] = emit(ctx, number)
             finally:
                 player._note_mods = primary
                 self._rebuild_note_mods(ctx)
@@ -1069,12 +1012,10 @@ class QtPlayerRenderer:
                 self._draw_layer(fn, ctx, painter, name, is_hud=False)
 
     def _blit_field_instances(self, frame, ctx, painter) -> None:
-        """Blit the base backdrop then one blit per field instance, each
-        clipped to the chart region so no copy lands on the sidebar.
+        """One blit per field instance, each clipped to the chart region
+        so no copy lands on the sidebar.
 
-        A 'full' copy blits the backdrop capture (background + below-draws)
-        then the field capture under its transform, so the whole screen is
-        replicated. A 'field' copy blits only the field capture, so the
+        A 'field' copy blits only the field capture, so the
         real backdrop shows through. The screen scopes model the AFT
         node's capture, snapshotted from the in-progress composite at
         the first 'screen' blit (or after all blits when only
@@ -1088,23 +1029,16 @@ class QtPlayerRenderer:
         retained yet (first frame after start or a seek), 'screen_prev'
         skips a frame and re-primes. Each copy is additionally clipped to
         the mapped design box in its own source space, so it shows only the
-        hard-cropped 640x480 screen (offscreen content never bleeds in).
-
-        The backdrop pixmap, when present, was captured in place of the
-        direct background/below-draws, so it is blitted here as the base
-        backdrop exactly once."""
+        hard-cropped 640x480 screen (offscreen content never bleeds in)."""
         if self._delegating(ctx):
             from analysis.player.render.storyboard.pipeline import pipeline_for
             _pipeline = pipeline_for(ctx.player)
             # Hand this frame's live GL capture handles (the transparent
-            # field-layers capture, any per-player field{N} captures, and the
-            # 'full'-scope backdrop capture) to the pipeline as the field-scope
-            # drawables' content. The GL executor binds their FBO textures
-            # directly (no readback), so its SRC_DRAWABLE blits draw real notes
-            # over the painted backdrop. A scope with no drawable in the doc is
-            # skipped, so handing 'full' is harmless when the doc lacks it.
-            captures = {'field': self._field_src, 'full': self._backdrop_src,
-                        **self._player_field_src}
+            # field-layers capture and any per-player field{N} captures) to
+            # the pipeline as the field-scope drawables' content. The GL
+            # executor binds their FBO textures directly (no readback), so its
+            # SRC_DRAWABLE blits draw real notes over the painted backdrop.
+            captures = {'field': self._field_src, **self._player_field_src}
             if (_pipeline is not None
                     and _pipeline.delegate(frame, ctx, painter, captures,
                                            dict(self._field_overscan),
@@ -1112,8 +1046,7 @@ class QtPlayerRenderer:
                 return
         from analysis.games.notitg.field_instances import design_box
         design = design_box(ctx.chart_rect)
-        box = (design if (self._full_field_capture(frame, ctx)
-                          or self._has_screen_copy(frame)) else None)
+        box = design if self._has_screen_copy(frame) else None
         entries = frame.fields if frame is not None else ()
         if not entries and self._field_src is not None:
             # The field layers captured for the DOC, and the doc did not
@@ -1121,8 +1054,6 @@ class QtPlayerRenderer:
             # capture back on screen 1:1 rather than losing the field.
             entries = ((None, 1.0, _DEFAULT_FIELD_SCOPE),)
         with self._capture.blits(painter, QRectF(*ctx.chart_rect)) as batch:
-            if self._backdrop_src is not None:
-                batch.blit(self._backdrop_src)
             for entry in entries:
                 self._blit_field_instance(batch, entry, box, design)
             if self._screen_open and self._screen_capture is None:
@@ -1131,7 +1062,6 @@ class QtPlayerRenderer:
                 # instance blits - so 'screen_prev' copies have next
                 # frame's source.
                 self._take_screen_capture()
-        self._backdrop_src = None
 
     def _take_screen_capture(self) -> None:
         """This frame's node-point AFT capture: the in-progress screen
@@ -1177,8 +1107,8 @@ class QtPlayerRenderer:
         crop = _field_crop(entry)
         if crop is not None:
             box = _crop_inset(design, crop)
-        is_player_field = scope.startswith('field') and scope not in (
-            _DEFAULT_FIELD_SCOPE, 'full')
+        is_player_field = (scope.startswith('field')
+                           and scope != _DEFAULT_FIELD_SCOPE)
         if is_player_field and self._player_field_src.get(scope) is None:
             return
         if scope == _SCREEN_SCOPE and self._screen_capture is None:
@@ -1192,9 +1122,6 @@ class QtPlayerRenderer:
             # (field2, field3, ...): the proxy re-renders THAT player.
             source = self._player_field_src[scope]
         else:
-            if scope == 'full' and self._backdrop_src is not None:
-                batch.blit(self._backdrop_src, transform=transform,
-                           src_box=box, opacity=opacity)
             source = self._field_src
         if source is None:
             return

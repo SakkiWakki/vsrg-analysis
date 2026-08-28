@@ -35,9 +35,6 @@ class EffectFrame:
       field, drawn direct. `scope` (default 'field'):
         - 'field'  blits the transparent notefield capture (the shared
           background shows through every copy).
-        - 'full'   also blits a backdrop capture (background clear +
-          below-draws) under the copy transform, replicating the whole
-          chart region incl. background.
         - 'screen'/'screen_prev' model SM's ActorFrameTexture: the AFT
           node captures the chart area at its draw position each frame
           (backdrop + field blits, never the screen blits made after
