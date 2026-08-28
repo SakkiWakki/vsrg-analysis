@@ -9,16 +9,13 @@ __pycache__/
 *.so
 
 # Native build outputs
+# lib/, lib64/ and target/ are covered by the packaging section below.
 analysis/games/osu/gamescope_overlay/osu_overlay
-analysis/games/osu/gl_layer/lib/
 analysis/games/osu/gl_layer/lib32/
-analysis/games/osu/gl_layer/lib64/
 analysis/games/osu/gl_layer/.build/
 analysis/games/osu/vulkan_layer/VkLayer_vsrg_overlay.json
 analysis/games/osu/vulkan_layer/libVkLayer_vsrg_overlay.so
-analysis/games/osu/native/target/
-analysis/games/osu/native/.maturin-stamp
-analysis/games/notitg/native/.maturin-stamp
+.maturin-stamp
 
 # Distribution / packaging
 .Python
@@ -166,8 +163,16 @@ Thumbs.db
 .codex
 CLAUDE.md
 
-# For personal use
-tools
+# Personal scratch tools. Must be `tools/*`, not `tools/`: git never
+# descends into an excluded directory, so a `!tools/x` would never apply.
+tools/*
+!tools/doc_frames.py
+!tools/perf_replay_renderer.py
+!tools/render_frames.py
+
+# NotITG pipeline atlas: a local contributor map, not part of the repo.
+analysis/games/notitg/pipeline_map/
+analysis/games/notitg/PIPELINE_MAP.html
 
 # Community tosu overlays dropped in locally; not part of the repo.
 plugins/overlays/
@@ -176,3 +181,4 @@ analysis/games/fluxis/realmdump/obj/
 
 refs/
 tests/local/
+ml/
