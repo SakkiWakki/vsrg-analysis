@@ -281,6 +281,12 @@ def parse_ssc(path):
     }
 
 
+def parse_simfile(path):
+    """Parse a .sm or .ssc by extension."""
+    path = str(path)
+    return parse_ssc(path) if path.lower().endswith('.ssc') else parse_sm(path)
+
+
 def _parse_bpms(s):
     out = []
     for pair in (s or '').split(','):
@@ -723,37 +729,37 @@ def chart_hash(stepstype, notedata):
 _CHARTKEY_INDEX_CACHE = Cache('chartkey_index.pkl')
 
 
+def chart_keys(data, chart, path) -> list:
+    """Every chartkey one chart answers to: a .ssc's stored #CHARTKEY
+    tag when it has one, plus the key generated from the notedata. Real
+    files can carry stale tags after note edits, so both count as
+    identity."""
+    keys = []
+    stored = (chart.get('chartkey')
+              if str(path).lower().endswith('.ssc') else None)
+    if stored:
+        keys.append(stored)
+    try:
+        generated = generate_chartkey(chart['notedata'],
+                                      chart.get('bpms') or data['bpms'],
+                                      chart.get('stepstype', 'dance-single'))
+    except Exception:
+        generated = None
+    if generated and generated not in keys:
+        keys.append(generated)
+    return keys
+
+
 def _scan_one_chartfile(p):
     """Extract (path_str, [(chartkey, chart_index), ...]) for one .ssc or
-    .sm file. For .ssc, index the file's stored #CHARTKEY tag and also the
-    generated key when it differs; real files can carry stale tags after note
-    edits. .sm files and .ssc blocks missing the tag use the generated key.
-    Pure CPU/IO ; safe under ThreadPoolExecutor."""
+    .sm file. Pure CPU/IO ; safe under ThreadPoolExecutor."""
     p_str = str(p)
     try:
-        if p_str.endswith('.ssc'):
-            data = parse_ssc(p)
-        else:
-            data = parse_sm(p)
+        data = parse_simfile(p_str)
     except Exception:
         return None
-    out = []
-    for ci, ch in enumerate(data['charts']):
-        keys = []
-        stored_key = ch.get('chartkey') if p_str.endswith('.ssc') else None
-        if stored_key:
-            keys.append(stored_key)
-        bpms = ch.get('bpms') or data['bpms']
-        try:
-            generated_key = generate_chartkey(
-                ch['notedata'], bpms, ch.get('stepstype', 'dance-single'))
-        except Exception:
-            generated_key = None
-        if generated_key and generated_key not in keys:
-            keys.append(generated_key)
-        for key in keys:
-            out.append((key, ci))
-    return p_str, out
+    return p_str, [(key, ci) for ci, ch in enumerate(data['charts'])
+                   for key in chart_keys(data, ch, p_str)]
 
 
 def _build_chartkey_index(songs_dir, progress=None):
@@ -837,8 +843,7 @@ def find_chart_by_key(chartkey, songs_dir, progress=None):
         return None
     chart_file, chart_idx = hit
     try:
-        data = (parse_ssc(chart_file) if chart_file.endswith('.ssc')
-                else parse_sm(chart_file))
+        data = parse_simfile(chart_file)
     except Exception:
         return None
     if chart_idx >= len(data['charts']):
@@ -911,10 +916,7 @@ def _scan_one_chartfile_fp(p):
     .ssc/.sm file. Pure CPU/IO, safe under ThreadPoolExecutor."""
     try:
         p_str = str(p)
-        if p_str.endswith('.ssc'):
-            data = parse_ssc(p)
-        else:
-            data = parse_sm(p)
+        data = parse_simfile(p_str)
     except Exception:
         return None
     out = []
@@ -1000,7 +1002,7 @@ def find_chart_for_replay(replay_noterows, replay_columns, songs_dir,
     best = min(candidates, key=lambda c: abs(c[2] - replay_n))
     path_str, chart_idx, _ = best
     try:
-        data = parse_ssc(path_str) if path_str.endswith('.ssc') else parse_sm(path_str)
+        data = parse_simfile(path_str)
     except Exception:
         return None
     if chart_idx >= len(data['charts']):

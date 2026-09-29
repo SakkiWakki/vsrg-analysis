@@ -1,12 +1,4 @@
-This is entirely vibecoded because I'm just making this as a side project to analyze my own gameplay and what I can change to accommodate my RSI. Though I made the clanker model some of its code based off previous work I had made. I also designed the architecture for the program and just told the clanker what to do. Specifically I told the clanker to allow user analysis plugins using python files and also to make implementation game-agnostic.
-
-DO NOT USE THIS IN PRODUCTION SYSTEMS. I REPEAT, DO NOT USE THIS IN PRODUCTION SYSTEMS. THE CODE IS NOT VERY MODULAR AND PROBABLY HAS A TON OF BUGS FROM THE CLANKER VIBE CODING.
-
-Use it for personal use if you want lol. I might rewrite parts by hand if really necessary, I just wanted something working rather than clean and correct.
-
-Lemme know if the clanker somehow made a buffer overflow in python code lol
-
-Btw I added plugins but the plugins themselves are only cheaply sandboxed. This means you should not run arbitrary unsafe plugins from randos
+Currently in the process of rewriting this prototype!
 
 Long term goals:
 Finish roo, then port the GUI and overlay rendering over to it. 

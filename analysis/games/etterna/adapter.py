@@ -8,6 +8,12 @@ import numpy as np
 
 from analysis.core.cache import Cache
 from analysis.core.game import GameAdapter
+from analysis.core.unplayed import (has_unplayed, merge_unplayed,
+                                    unplayed_entries)
+from analysis.games.etterna import chart_cache
+from analysis.games.etterna.chart_ref import (autoplay_arrays, is_chart_ref,
+                                              load_chart)
+from analysis.games.etterna.sm_chart import stepstype_keycount
 from analysis.player import scroll
 
 
@@ -16,12 +22,37 @@ _LIBRARY_CACHE = Cache('etterna_library.pkl')
 
 class EtternaAdapter(GameAdapter):
     name = 'etterna'
+    unplayed_key = 'chart_key'
 
     def parse_replay(self, path, chart_path=None):
+        if is_chart_ref(path):
+            return self._autoplay(path)
         from analysis.games.etterna.replay import parse_replay
         return parse_replay(path)
 
+    def _autoplay(self, ref):
+        """A chart ref is a chart nobody has played: synthesize the
+        perfect replay of it - offsets 0, nothing missed - so the player
+        runs on it exactly as it would on a real score."""
+        sm_path, data, chart = load_chart(ref)
+        replay = autoplay_arrays(chart)
+        replay['filepath'] = str(ref)
+        replay['keycount'] = stepstype_keycount(chart.get('stepstype', ''))
+        self._remember_song(replay, {'file': str(sm_path), 'data': data,
+                                     'chart': chart})
+        return replay
+
     def _find_chart(self, replay, entry=None, progress=None):
+        # A chart ref IS the chart; never chartkey/fingerprint-search
+        # the songs folder for one.
+        ref = replay.get('filepath', '')
+        if is_chart_ref(ref):
+            try:
+                sm_path, data, chart = load_chart(ref)
+            except (OSError, LookupError):
+                return None
+            return {'file': str(sm_path), 'data': data, 'chart': chart}
+
         from analysis.games.etterna.replay import find_etterna_dirs
         from analysis.games.etterna.sm_chart import (find_chart_by_key,
                                                      find_chart_for_replay)
@@ -598,10 +629,6 @@ class EtternaAdapter(GameAdapter):
                           elements=tuple(elements), clip_design_box=ds.clip)
 
     # --- library scan -----------------------------------------------------
-    _STEPSTYPE_KEYCOUNT = {
-        'dance-single': 4, 'dance-solo': 6, 'dance-double': 8,
-        'pump-single': 5, 'pump-double': 10, 'kb7-single': 7,
-    }
     # Why not just do this in the first place wtf
     def scan_library(self, progress=None):
         from analysis.games.etterna.replay import find_etterna_dirs
@@ -611,7 +638,16 @@ class EtternaAdapter(GameAdapter):
         if not xmls or not replays:
             return []
         return self._entries_from_xmls(xmls, Path(replays),
-                                        ck2st=self._load_chartkey_stepstype(dirs))
+                                        ck2st=chart_cache.chartkey_stepstype(dirs))
+
+    def chart_catalogue(self, progress=None):
+        """Every chart in Etterna's own `Cache/cache.db` - the index the
+        game maintains as it loads songs, so the catalogue costs one
+        query and no chart parsing."""
+        from analysis.games.etterna.replay import find_etterna_dirs
+        if progress:
+            progress('etterna: reading chart cache…')
+        return chart_cache.catalogue(find_etterna_dirs())
 
     @staticmethod
     def _xml_paths(dirs):
@@ -623,34 +659,6 @@ class EtternaAdapter(GameAdapter):
         if not paths and dirs.get('xml_path'):
             paths = [dirs['xml_path']]
         return paths
-
-    @staticmethod
-    def _load_chartkey_stepstype(dirs) -> dict:
-        """Build a ``{chartkey: stepstype}`` map from Etterna's
-        ``Cache/cache.db`` so scores for non-4K keymodes (kb7, dance-solo,
-        pump, etc.) get the right keycount. Etterna.xml's ``<Chart>`` has
-        no StepsType attribute, so without this lookup every score ends
-        up labeled dance-single by default. Returns ``{}`` if the cache
-        is missing or unreadable ; callers fall back to dance-single for
-        each unresolved chartkey, matching the old behavior."""
-        save = dirs.get('save_dir')
-        if not save:
-            return {}
-        # Cache lives next to Save/ under the install root (one level up).
-        cache_db = Path(save).parent / 'Cache' / 'cache.db'
-        if not cache_db.is_file():
-            return {}
-        import sqlite3
-        try:
-            con = sqlite3.connect(f'file:{cache_db}?mode=ro', uri=True)
-            try:
-                cur = con.execute('SELECT CHARTKEY, STEPSTYPE FROM steps')
-                return {ck: st for ck, st in cur if ck and st}
-            finally:
-                con.close()
-        except sqlite3.DatabaseError as exc:
-            print(f'etterna cache.db unreadable: {exc}')
-            return {}
 
     def _score_to_entry(self, s, rdir: Path, ck2st=None):
         rp = rdir / s['scorekey']
@@ -680,7 +688,7 @@ class EtternaAdapter(GameAdapter):
             'maxcombo': s.get('maxcombo', 0),
             'chart_key': s.get('chartkey', ''),
             'stepstype': stepstype,
-            'keycount': self._STEPSTYPE_KEYCOUNT.get(stepstype, 4),
+            'keycount': stepstype_keycount(stepstype),
             'judgescale': float(s.get('judgescale', 1.0)),
             # Etterna.xml's TapNoteScores block; includes HitMine /
             # AvoidMine alongside the tap counts. The replay .bin
@@ -744,7 +752,8 @@ class EtternaAdapter(GameAdapter):
             progress(f'etterna: rebuilding from {len(xmls)} profile(s)…')
         entries = self._entries_from_xmls(
             xmls, Path(replays),
-            ck2st=self._load_chartkey_stepstype(dirs))
+            ck2st=chart_cache.chartkey_stepstype(dirs))
+        entries += unplayed_entries(self, entries, progress=progress)
         # Don't poison the cache with an empty result, e.g. if the XML was
         # unparseable
         if entries:
@@ -769,7 +778,7 @@ class EtternaAdapter(GameAdapter):
         known_keys = {e.get('scorekey') for e in cached if e.get('scorekey')}
         from analysis.games.etterna.replay import parse_etterna_xml
         rdir = Path(replays)
-        ck2st = self._load_chartkey_stepstype(dirs)
+        ck2st = chart_cache.chartkey_stepstype(dirs)
         new_entries = []
         seen_new: set[str] = set()
         for xml in xmls:
@@ -782,11 +791,11 @@ class EtternaAdapter(GameAdapter):
                     new_entries.append(entry)
                     seen_new.add(sk)
 
-        if not new_entries:
+        if not new_entries and has_unplayed(cached):
             return cached
         if progress:
             progress(f'etterna: {len(new_entries)} new score(s)')
-        merged = cached + new_entries
+        merged = merge_unplayed(self, cached, new_entries, progress=progress)
         _LIBRARY_CACHE.save(merged)
         return merged
 
@@ -797,18 +806,18 @@ class EtternaAdapter(GameAdapter):
         return not str(path).lower().endswith('.osr')
 
     def resolve_standalone(self, path, args=None):
-        from analysis.games.etterna.replay import parse_replay
         args = args or []
-        rep = parse_replay(path)
+        # Through the adapter, so a chart ref opens as autoplay here too.
+        rep = self.parse_replay(path)
         bpms = None
         sm_off = 0.0
         audio = None
         if '--bpm' in args:
             bpms = [(0.0, float(args[args.index('--bpm') + 1]))]
         if '--sm' in args:
-            from analysis.games.etterna.sm_chart import parse_sm, parse_ssc
+            from analysis.games.etterna.sm_chart import parse_simfile
             smp = args[args.index('--sm') + 1]
-            data = parse_ssc(smp) if smp.endswith('.ssc') else parse_sm(smp)
+            data = parse_simfile(smp)
             bpms = data['bpms']
             sm_off = data['offset']
             audio = EtternaAdapter._resolve_music_asset(smp, data['music'])

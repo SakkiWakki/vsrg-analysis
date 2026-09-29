@@ -249,6 +249,20 @@ class GameAdapter:
         `analysis.core.search.build_library()`."""
         return []
 
+    # --- unplayed charts --------------------------------------------------
+    # The entry field identifying a chart across plays ('beatmap_hash' for
+    # osu, 'chart_key' for Etterna). None disables the unplayed pass.
+    unplayed_key: str | None = None
+
+    def chart_catalogue(self, progress=None) -> list:
+        """Every chart this game has on disk, as partial entries: the
+        `unplayed_key` field, whatever the library columns show (song,
+        pack, steps, keycount, chart_path, mtime), and a `replay_path`
+        `parse_replay` can open. `analysis.core.unplayed` drops the ones
+        that already have a score and fills in `game`, `unplayed`, and
+        the zeroed score fields."""
+        return []
+
     # --- library cache lifecycle -----------------------------------------
     # Three entry points, all optional. Default impls fall back to
     # `scan_library` so an adapter that only implements the old hook still

@@ -7,26 +7,20 @@ registry name is what marks the split (library column, judge system,
 and the future home of modfile compilation).
 
 NotITG has no replay system. Library entries are the charts
-themselves (see library_scan) and `parse_replay` receives a chart ref
-(`<simfile>::<index>`), synthesizing a perfect autoplay replay:
-offsets 0, nothing missed. Everything downstream - player, judgments,
-SV, effects - runs unchanged on it. Chart lookups short-circuit to
-the referenced file, never the chartkey/fingerprint search.
+themselves (see library_scan), each a chart ref that EtternaAdapter
+opens as a perfect autoplay.
 
 Judgement windows are ITG's fixed set (Fantastic .. Way Off), not
 Etterna's Wife judges; the judge nudge is a no-op.
 """
 from __future__ import annotations
 
-import numpy as np
-
 from analysis.core.cache import Cache
+from analysis.core.unplayed import unplayed_entries
 from analysis.games.etterna.adapter import EtternaAdapter
-from analysis.games.etterna.sm_chart import (NT_HOLD_HEAD, NT_TAP, parse_sm,
-                                             stepstype_keycount)
-from analysis.games.notitg.library_scan import (HEAD_TYPES, judged_notes,
-                                                scan_songs, simfile_paths,
-                                                split_chart_ref)
+from analysis.games.etterna.chart_ref import split_chart_ref
+from analysis.games.etterna.sm_chart import parse_sm
+from analysis.games.notitg.library_scan import scan_songs, simfile_paths
 from analysis.games.notitg.paths import find_notitg_dirs
 
 _LIBRARY_CACHE = Cache('notitg_library.pkl')
@@ -48,55 +42,11 @@ _DESIGN_CENTER_X = 320.0
 _RECEPTOR_Y_STANDARD = 240.0 - 125.0
 _RECEPTOR_Y_REVERSE = 240.0 + 145.0
 
-def _autoplay_arrays(chart) -> dict:
-    judged = judged_notes(chart)
-    count = len(judged)
-    return {
-        'noterows': np.array([row for row, _c, _nt in judged],
-                             dtype=np.int64),
-        'offsets': np.zeros(count, dtype=np.float64),
-        'columns': np.array([col for _r, col, _nt in judged],
-                            dtype=np.int32),
-        'notetypes': np.array(
-            [NT_HOLD_HEAD if nt in HEAD_TYPES else NT_TAP
-             for _r, _c, nt in judged], dtype=np.int32),
-        'misses': np.zeros(count, dtype=bool),
-        'holds': [(row, col) for row, col, nt in judged
-                  if nt in HEAD_TYPES],
-        'dropped_holds': [],
-        'mine_hits': [],
-        'replay_version': 2,
-    }
-
-
 class NotitgAdapter(EtternaAdapter):
     name = 'notitg'
-
-    # --- chart-only playback ---------------------------------------------
-
-    def parse_replay(self, path, chart_path=None):
-        sm_path, index = split_chart_ref(path)
-        data = parse_sm(sm_path)
-        chart = data['charts'][index]
-
-        replay = _autoplay_arrays(chart)
-        replay['filepath'] = str(path)
-        replay['keycount'] = stepstype_keycount(chart.get('stepstype', ''))
-        self._remember_song(replay,
-                            {'file': str(sm_path), 'data': data,
-                             'chart': chart})
-        return replay
-
-    def _find_chart(self, replay, entry=None, progress=None):
-        """The chart ref IS the chart; never chartkey/fingerprint-search
-        the Etterna songs folder."""
-        sm_path, index = split_chart_ref(replay.get('filepath', ''))
-        try:
-            data = parse_sm(sm_path)
-            chart = data['charts'][index]
-        except (OSError, IndexError):
-            return None
-        return {'file': str(sm_path), 'data': data, 'chart': chart}
+    # NotITG has no replay format, so every entry is a chart ref and the
+    # ref is the identity; `chart_catalogue` is the whole library.
+    unplayed_key = 'replay_path'
 
     # --- judge system: fixed ITG windows ----------------------------------
 
@@ -421,6 +371,10 @@ class NotitgAdapter(EtternaAdapter):
     # --- library ----------------------------------------------------------
 
     def scan_library(self, progress=None):
+        return unplayed_entries(self, [], progress=progress)
+
+    def chart_catalogue(self, progress=None):
+        """One entry per difficulty of every simfile under `Songs/`."""
         songs = find_notitg_dirs().get('songs_dir')
         if not songs:
             return []

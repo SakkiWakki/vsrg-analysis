@@ -2,9 +2,9 @@
 import numpy as np
 import pytest
 
+from analysis.games.etterna.chart_ref import chart_ref, split_chart_ref
 from analysis.games.notitg.adapter import NotitgAdapter
-from analysis.games.notitg.library_scan import (chart_ref, scan_songs,
-                                                split_chart_ref)
+from analysis.games.notitg.library_scan import scan_songs
 
 _SM = """
 #TITLE:Testsong;
@@ -58,14 +58,18 @@ def test_chart_ref_roundtrip(tmp_path):
     assert index == 0
 
 
-def test_scan_produces_unplayed_entries(songs_dir):
-    entries = scan_songs(songs_dir)
+def test_scan_produces_unplayed_entries(songs_dir, monkeypatch):
+    from analysis.games.notitg import adapter as notitg_adapter
+    monkeypatch.setattr(notitg_adapter, 'find_notitg_dirs',
+                        lambda: {'songs_dir': str(songs_dir)})
+    entries = NotitgAdapter().scan_library()
     # Only the 4k chart: the empty 8k chart has nothing judgeable and
     # is skipped (UKSRT-style decoy difficulties).
     assert len(entries) == 1
     four_k = entries[0]
     assert four_k['game'] == 'notitg'
     assert four_k['unplayed'] is True
+    assert four_k['wife'] == 0.0
     assert four_k['song'] == 'Tester - Testsong'
     assert four_k['pack'] == 'Some Pack'
     assert four_k['steps'] == 'Challenge 10'

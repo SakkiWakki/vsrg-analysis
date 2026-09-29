@@ -359,6 +359,12 @@ def _compile_numeric_for(node, interp):
             child = Scope(scope)
             child.bindings[var] = i
             body(child)
+            # Lua 5.0 semantics: a body assignment to the control variable
+            # moves the iteration (see frame_eval._exec_numeric_for; the
+            # native_c slot loop behaves this way by construction).
+            moved = _num(child.bindings.get(var))
+            if moved is not None:
+                i = moved
             i += st
             count += 1
     return run_for

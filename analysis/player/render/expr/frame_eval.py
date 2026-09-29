@@ -361,6 +361,13 @@ class Interpreter:
             body_scope = Scope(scope)
             body_scope.set_local(node.var, i)
             self._exec_block(node.body, body_scope, depth + 1)
+            # Lua 5.0 (the NotITG embed) increments the control VARIABLE,
+            # so a body assignment moves the iteration - the chart idiom
+            # `table.remove(t, i) i = i - 1` counts on it. Read the
+            # variable back rather than the private counter.
+            moved = _num(body_scope.bindings.get(node.var))
+            if moved is not None:
+                i = moved
             i += step
             count += 1
 

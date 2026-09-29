@@ -13,8 +13,13 @@ from pathlib import Path
 
 from analysis.core.cache import Cache
 from analysis.core.game import GameAdapter
+from analysis.core.unplayed import has_unplayed, played_only, unplayed_entries
 
 _LIBRARY_CACHE = Cache('fluxis_library.pkl')
+# The realm dump costs a dotnet subprocess, and both the score scan and
+# the chart catalogue need it. Keyed on the database's mtime so a play
+# in between still refreshes it.
+_REALM_CACHE = Cache('fluxis_realm.pkl')
 
 # fluXis rate mods appear in RealmScore.Mods as e.g. "1.2x" tokens.
 _RATE_MOD_RE = re.compile(r'(\d+(?:\.\d+)?)x')
@@ -34,34 +39,82 @@ def _iso_datetime(raw: str) -> str:
     return (raw or '')[:19].replace('T', ' ')
 
 
-def _score_entry(score, maps, dirs):
-    m = maps.get(score.get('MapID'), {})
+def _realm_dump(dirs, progress=None):
+    """The realm tables, dumped at most once per revision of the
+    database."""
+    realm = dirs.get('realm_path')
+    if realm is None:
+        return None
+    try:
+        fingerprint = (str(realm), realm.stat().st_mtime)
+    except OSError:
+        return None
+    cached = _REALM_CACHE.load_fresh(fingerprint)
+    if cached is not None:
+        return cached
+
+    from analysis.games.fluxis.realm_reader import dump_realm
+    if progress:
+        progress('fluxis: reading realm database…')
+    dump = dump_realm(realm, progress=progress)
+    if dump is not None:
+        _REALM_CACHE.save(dump, fingerprint=fingerprint)
+    return dump
+
+
+def _map_chart_path(m, dirs):
+    """The `.fsc` a realm map row points at, or None when it's gone."""
     set_id = m.get('MapSetID')
     file_name = m.get('FileName')
-
-    chart_path = None
-    if set_id and file_name and dirs['maps_dir'] is not None:
-        candidate = dirs['maps_dir'] / str(set_id) / str(file_name)
-        chart_path = str(candidate) if candidate.is_file() else None
-
-    replay_path = dirs['replays_dir'] / f"{score['ID']}.frp"
-    if not replay_path.is_file():
+    if not set_id or not file_name or dirs['maps_dir'] is None:
         return None
+    candidate = dirs['maps_dir'] / str(set_id) / str(file_name)
+    return str(candidate) if candidate.is_file() else None
 
+
+def _map_fields(m) -> dict:
+    """The display fields a realm map row contributes; a score entry and
+    a catalogue entry show the same ones."""
     artist = m.get('Metadata.Artist') or '?'
     title = m.get('Metadata.Title') or '?'
-    judgments = {name.lower(): int(score.get(name) or 0)
-                 for name in _JUDGEMENT_FIELDS}
-
     return {
-        'game': 'fluxis',
-        'replay_path': str(replay_path),
         'beatmap_hash': m.get('Hash', ''),
         'song': f'{artist} - {title}',
         'pack': m.get('Metadata.Mapper', ''),
         'steps': m.get('Difficulty', ''),
         'keycount': int(m.get('KeyCount') or 0) or None,
+    }
+
+
+def _map_entry(m, dirs):
+    """A catalogue entry for one realm map. Its `replay_path` is the
+    `.fsc`, which `parse_replay` turns into a perfect autoplay."""
+    chart_path = _map_chart_path(m, dirs)
+    if chart_path is None:
+        return None
+    return {
+        **_map_fields(m),
+        'replay_path': chart_path,
         'chart_path': chart_path,
+        'modifiers': None,
+        'mtime': Path(chart_path).stat().st_mtime,
+    }
+
+
+def _score_entry(score, maps, dirs):
+    m = maps.get(score.get('MapID'), {})
+    replay_path = dirs['replays_dir'] / f"{score['ID']}.frp"
+    if not replay_path.is_file():
+        return None
+
+    judgments = {name.lower(): int(score.get(name) or 0)
+                 for name in _JUDGEMENT_FIELDS}
+
+    return {
+        **_map_fields(m),
+        'game': 'fluxis',
+        'replay_path': str(replay_path),
+        'chart_path': _map_chart_path(m, dirs),
         'rate': _rate_from_mods(score.get('Mods', '')),
         'modifiers': score.get('Mods') or None,
         'wife': float(score.get('Accuracy') or 0.0) / 100.0,
@@ -76,8 +129,15 @@ def _score_entry(score, maps, dirs):
 
 class FluxisAdapter(GameAdapter):
     name = 'fluxis'
+    unplayed_key = 'beatmap_hash'
 
     def parse_replay(self, path, chart_path=None):
+        # Unplayed-charts entries carry the `.fsc` chart itself as their
+        # replay_path; synthesize a perfect autoplay instead of decoding
+        # a `.frp`. Everything downstream sees the same replay dict shape.
+        if str(path).lower().endswith('.fsc'):
+            from analysis.games.fluxis.parse import autoplay_replay
+            return autoplay_replay(path)
         from analysis.games.fluxis.parse import parse_replay
         entry = self._cached_entry(path)
         if chart_path is None:
@@ -257,14 +317,9 @@ class FluxisAdapter(GameAdapter):
 
     def scan_library(self, progress=None):
         from analysis.games.fluxis.paths import find_fluxis_dirs
-        from analysis.games.fluxis.realm_reader import dump_realm
 
         dirs = find_fluxis_dirs()
-        if dirs['realm_path'] is None:
-            return []
-        if progress:
-            progress('fluxis: reading realm database…')
-        dump = dump_realm(dirs['realm_path'], progress=progress)
+        dump = _realm_dump(dirs, progress=progress)
         if dump is None:
             return []
 
@@ -276,6 +331,18 @@ class FluxisAdapter(GameAdapter):
                 entries.append(entry)
         return entries
 
+    def chart_catalogue(self, progress=None):
+        """Every map in the realm database. Free: the dump the score
+        scan already reads lists maps alongside scores."""
+        from analysis.games.fluxis.paths import find_fluxis_dirs
+
+        dirs = find_fluxis_dirs()
+        dump = _realm_dump(dirs, progress=progress)
+        if dump is None:
+            return []
+        entries = (_map_entry(m, dirs) for m in dump.get('RealmMap', []))
+        return [e for e in entries if e is not None]
+
     # --- library cache lifecycle ----------------------------------------
 
     def load_cached(self):
@@ -286,7 +353,9 @@ class FluxisAdapter(GameAdapter):
 
     def rebuild(self, progress=None):
         _LIBRARY_CACHE.clear()
+        _REALM_CACHE.clear()
         entries = self.scan_library(progress=progress)
+        entries += unplayed_entries(self, entries, progress=progress)
         if entries:
             _LIBRARY_CACHE.save(entries)
         return entries
@@ -303,8 +372,8 @@ class FluxisAdapter(GameAdapter):
         replays_dir = find_fluxis_dirs()['replays_dir']
         on_disk = (sorted(str(p) for p in replays_dir.glob('*.frp'))
                    if replays_dir is not None else [])
-        known = sorted(e['replay_path'] for e in cached)
-        if on_disk == known:
+        known = sorted(e['replay_path'] for e in played_only(cached))
+        if on_disk == known and has_unplayed(cached):
             return cached
         return self.rebuild(progress=progress)
 

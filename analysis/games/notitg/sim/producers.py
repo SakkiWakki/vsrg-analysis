@@ -1339,18 +1339,7 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
                 # uniform pokes and uniformTexture binds ride the same
                 # frag_* slots the shaded-quad path uses.
                 inst['mesh'] = mesh
-                # A Polygon actor has NO size - its vertices are absolute
-                # local coordinates - so the engine's halign/valign anchor
-                # offset scales by ZERO and align pokes are no-ops on it
-                # (gat 2 even pokes halign(10) on the crumple ball). Our
-                # chain scales that offset by the capture box instead,
-                # which slung the ball (0.5-10)*640*zoom px off screen;
-                # the align channels drop to their centred rest.
-                leaf = dict(links[-1])
-                leaf.pop('halign', None)
-                leaf.pop('valign', None)
-                transform = inst['transform']
-                transform._links = (*transform._links[:-1], leaf)
+                inst['transform'].center_leaf_align()
                 if frag_path is None:
                     inst['frag_uniforms'] = _uniform_curves(
                         sim, rec_id, live_sim, actor_keyframes,
@@ -1358,14 +1347,7 @@ def _sim_field_instances(doc, env, actor_keyframes, osc_context,
                     inst['frag_samplers'] = _file_sampler_binds(sim)
         if kind == 'model':
             inst['models'] = models
-            # Model vertices are absolute local coordinates, exactly
-            # like a Polygon's - align pokes are engine no-ops on them
-            # (see the mesh branch above).
-            leaf = dict(links[-1])
-            leaf.pop('halign', None)
-            leaf.pop('valign', None)
-            transform = inst['transform']
-            transform._links = (*transform._links[:-1], leaf)
+            inst['transform'].center_leaf_align()
         z_group, z_link = _z_sort_group(chain, links, env)
         if z_group is not None:
             inst['z_group'] = z_group

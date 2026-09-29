@@ -28,6 +28,14 @@ class Cache:
             return None
         return blob.get('data')
 
+    def load_fresh(self, fingerprint):
+        """Stored data if it was saved under `fingerprint`, else None.
+        One read, where `fingerprint()` then `load()` costs two."""
+        blob = self._read()
+        if blob is None or blob.get('fingerprint') != fingerprint:
+            return None
+        return blob.get('data')
+
     def fingerprint(self):
         """Return stored fingerprint without touching data. Still pays an
         unpickle cost ; Python's pickle format is not random-access ; but

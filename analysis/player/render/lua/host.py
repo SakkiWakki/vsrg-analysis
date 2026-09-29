@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import lupa
 
+from analysis.player.render.lua import for50
+
 _SAFE_BUILTINS = (
     'assert', 'error', 'ipairs', 'next', 'pairs', 'pcall', 'select',
     'tonumber', 'tostring', 'type', 'unpack', 'xpcall',
@@ -108,7 +110,14 @@ class LuaScriptError(Exception):
 
 
 class LuaHost:
-    def __init__(self, dialect: str = 'lua54', observe_globals: bool = False):
+    def __init__(self, dialect: str = 'lua54', observe_globals: bool = False,
+                 lua50_numeric_for: bool = False):
+        # Lua 5.0 embeds (StepMania 3.95 / NotITG) let a body assignment
+        # to a numeric-for control variable move the iteration; every
+        # bundled runtime here is 5.1+, where it silently does nothing.
+        # The flag lowers such loops to their 5.0 while-form on every
+        # chunk load (see `for50`).
+        self._for50 = bool(lua50_numeric_for)
         runtime = getattr(lupa, dialect)
         # Each bundled dialect module carries its own LuaError class.
         self._lua_error = runtime.LuaError
@@ -241,7 +250,7 @@ class LuaHost:
         Raises LuaScriptError on compile or runtime errors (untrusted
         input is an expected failure mode, not a crash)."""
         try:
-            return self._load_in_env(source, '@' + name)
+            return self._load_in_env(self._lower(source), '@' + name)
         except self._lua_error as exc:
             raise LuaScriptError(str(exc)) from exc
 
@@ -250,9 +259,12 @@ class LuaHost:
         running it - for chunks executed many times (a per-frame driver
         body), where per-call recompilation would dominate."""
         try:
-            return self._compile_in_env(source, '@' + name)
+            return self._compile_in_env(self._lower(source), '@' + name)
         except self._lua_error as exc:
             raise LuaScriptError(str(exc)) from exc
+
+    def _lower(self, source: str) -> str:
+        return for50.lower(source) if self._for50 else source
 
     def call(self, name: str, *args):
         """Call a sandbox global function; None if it isn't defined."""

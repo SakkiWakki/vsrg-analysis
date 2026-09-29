@@ -155,8 +155,7 @@ class LibraryTab(QWidget):
         self.group_cbx.setChecked(True)
         row.addWidget(self.group_cbx)
 
-        # Chart-only entries (games without replays, e.g. NotITG, or
-        # future unplayed-chart scans) carry entry['unplayed'].
+        # Chart-only entries carry entry['unplayed'] (analysis.core.unplayed).
         self.unplayed_cbx = QCheckBox('unplayed charts')
         self.unplayed_cbx.setChecked(True)
         row.addWidget(self.unplayed_cbx)

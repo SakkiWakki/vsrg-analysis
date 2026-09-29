@@ -220,6 +220,9 @@ def _patch_osu(monkeypatch, iso_cache_dir):
                         lambda: iso_cache_dir)
     monkeypatch.setattr(oa, '_LIBRARY_CACHE', Cache('osu_library.pkl'))
     monkeypatch.setattr(oa, '_CHART_INDEX_CACHE', Cache('osu_chart_index.pkl'))
+    # No songs folder: the unplayed pass reads the chart index straight
+    # off disk, so without this the tests scan the real osu! install.
+    monkeypatch.setattr(oa, '_chart_index', lambda progress=None: {})
 
 
 def test_osu_incremental_no_new_replays(tmp_path, monkeypatch):

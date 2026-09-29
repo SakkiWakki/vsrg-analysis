@@ -44,18 +44,10 @@ def parse_replay(frp_path, fsc_path, rate=1.0):
         mines_by_col, key_events, mine_miss_w)
     mine_arrays = _build_mine_arrays(mines_by_col, mine_hits)
 
-    sv_doc = SvReplayDoc(
-        engine_kind=KIND_TIME_SPACE,
-        engine_key='quaver_time',
-        sections=[(t_ms / 1000.0, mult)
-                  for t_ms, mult in chart['scroll_velocities']],
-        initial_velocity=1.0,
-        bpms=_quaver_bpms_to_beat_space(chart['timing_points']),
-    )
     return {
         **arrays,
         **mine_arrays,
-        'sv': sv_doc,
+        'sv': _sv_doc(chart),
         'keycount': keycount,
         'rate': float(rate),
         'accuracy_difficulty': difficulty,
@@ -63,6 +55,25 @@ def parse_replay(frp_path, fsc_path, rate=1.0):
         'chart_path': str(fsc_path),
         'meta': {'player_id': player_id,
                  'mines_avoided': mines_avoided},
+        **_chart_context(chart, keycount),
+    }
+
+
+def _sv_doc(chart):
+    return SvReplayDoc(
+        engine_kind=KIND_TIME_SPACE,
+        engine_key='quaver_time',
+        sections=[(t_ms / 1000.0, mult)
+                  for t_ms, mult in chart['scroll_velocities']],
+        initial_velocity=1.0,
+        bpms=_quaver_bpms_to_beat_space(chart['timing_points']),
+    )
+
+
+def _chart_context(chart, keycount):
+    """The chart-side half of a replay dict: display metadata plus the
+    raw streams the renderer and the future modchart path read."""
+    return {
         'chart_meta': {
             'title': chart['title'], 'artist': chart['artist'],
             'creator': chart['mapper'], 'version': chart['difficulty'],
@@ -80,6 +91,59 @@ def parse_replay(frp_path, fsc_path, rate=1.0):
         '_fluxis_scroll_velocities': chart['scroll_velocities'],
         '_fluxis_end_time': _chart_end_ms(chart['hitobjects']),
     }
+
+
+def autoplay_replay(fsc_path):
+    """Synthesize a perfect autoplay replay from a `.fsc` chart alone -
+    no `.frp` decode, no judge sim. Powers the library's unplayed-charts
+    feature: the entry's `replay_path` is the chart file, and this fills
+    the same dict `parse_replay` returns. Landmines are charted but
+    never detonated (a flawless play hits none)."""
+    chart = parse_fsc(fsc_path)
+    keycount = chart['keycount']
+
+    notes_by_col, ticks_by_col, mines_by_col = _split_hitobjects(
+        chart['hitobjects'], keycount)
+    arrays = _build_arrays(_perfect_sim(notes_by_col, ticks_by_col))
+    return {
+        **arrays,
+        **_build_mine_arrays(mines_by_col, []),
+        'sv': _sv_doc(chart),
+        'keycount': keycount,
+        'rate': 1.0,
+        'accuracy_difficulty': chart['accuracy_difficulty'],
+        'filepath': str(fsc_path),
+        'chart_path': str(fsc_path),
+        'meta': {'player_id': None,
+                 'mines_avoided': sum(len(col) for col in mines_by_col)},
+        **_chart_context(chart, keycount),
+    }
+
+
+def _perfect_sim(notes_by_col, ticks_by_col):
+    """Autoplay sim records: every note hit dead-on and every hold held
+    through its ticks. Mirrors the dict shape `simulate_mania` produces
+    so `_build_arrays` treats a synth identically to a real play."""
+    sim = []
+    for col, notes in enumerate(notes_by_col):
+        for note in notes:
+            sim.append({
+                'time': note['time'], 'col': col,
+                'head_off': 0.0, 'judgement': 'flawless',
+                'is_hold': bool(note['is_hold']),
+                'end_time': note['end_time'],
+                'tail_off': 0.0 if note['is_hold'] else None,
+                'is_tick': False,
+            })
+    for col, ticks in enumerate(ticks_by_col):
+        for tick in ticks:
+            sim.append({
+                'time': tick['time'], 'col': col,
+                'head_off': 0.0, 'judgement': 'flawless',
+                'is_hold': False, 'end_time': tick['end_time'],
+                'tail_off': None, 'is_tick': True,
+            })
+    return sim
 
 
 def _chart_end_ms(hitobjects):

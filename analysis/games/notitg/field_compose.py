@@ -486,6 +486,20 @@ class TransformChannel:
             alpha *= link['alpha'].sample(t)[0]
         return alpha >= _MIN_ALPHA
 
+    def center_leaf_align(self):
+        """Pin the leaf's anchor lanes at their centred rest. An actor
+        whose vertices are absolute local coordinates has no size, so
+        the engine scales its anchor offset by ZERO and align pokes are
+        no-ops on it - while `_local` scales the offset by the design
+        screen, which would sling the draw off screen.
+
+        Examples: Polygon meshes, Model actors (gat 2 pokes halign(10)
+        on the crumple ball)."""
+        leaf = dict(self._links[-1])
+        for prop in ('halign', 'valign'):
+            leaf[prop] = EventTimeline([], rest=(_LINK_RESTS[prop],))
+        self._links = (*self._links[:-1], leaf)
+
     def crop_at(self, t):
         """The instance's crop insets `(left, top, right, bottom)` as
         fractions of its texture, or None at rest (no crop - today's

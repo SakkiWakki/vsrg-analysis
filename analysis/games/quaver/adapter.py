@@ -5,6 +5,8 @@ from pathlib import Path
 
 from analysis.core.cache import Cache
 from analysis.core.game import GameAdapter
+from analysis.core.unplayed import (has_unplayed, merge_unplayed,
+                                    unplayed_entries)
 from analysis.player import scroll
 
 
@@ -16,6 +18,7 @@ _CHART_INDEX_CACHE = Cache('quaver_chart_index.pkl')
 
 class QuaverAdapter(GameAdapter):
     name = 'quaver'
+    unplayed_key = 'beatmap_hash'
 
     def parse_replay(self, path, chart_path=None):
         # Unplayed-charts entries carry the `.qua` chart itself as their
@@ -122,6 +125,15 @@ class QuaverAdapter(GameAdapter):
         paths = _qr_paths()
         return _parse_qr_batch(paths, progress=progress)
 
+    def chart_catalogue(self, progress=None):
+        """Every `.qua` in the songs folder, read out of the same chart
+        index the replay scan hashes - no extra hashing. Every Quaver
+        chart is mania, so nothing is filtered out."""
+        return [_catalogue_entry(path_str, md5, mtime, meta)
+                for path_str, (mtime, _size, md5, meta)
+                in _chart_index(progress=progress).items()
+                if meta is not None]
+
     # --- library cache lifecycle -----------------------------------------
     def load_cached(self):
         cached = _LIBRARY_CACHE.load()
@@ -159,7 +171,7 @@ class QuaverAdapter(GameAdapter):
         _CHART_INDEX_CACHE.clear()
         paths = _qr_paths()
         entries = _parse_qr_batch(paths, progress=progress)
-        entries += _unplayed_entries(entries, progress=progress)
+        entries += unplayed_entries(self, entries, progress=progress)
         # Persist only when we found something so the next click retries
         # cleanly when the install folder isn't configured yet.
         if entries:
@@ -176,13 +188,13 @@ class QuaverAdapter(GameAdapter):
         # Nothing new and the unplayed set is already materialized: the
         # cache is current. Skip re-deriving so the common launch path
         # never re-loads the chart index.
-        if not new_paths and any(e.get('unplayed') for e in cached):
+        if not new_paths and has_unplayed(cached):
             return cached
 
         if new_paths and progress:
             progress(f'quaver: {len(new_paths)} new replay(s)…')
         new_plays = _parse_qr_batch(new_paths, progress=progress)
-        merged = _remerge_unplayed(cached, new_plays, progress=progress)
+        merged = merge_unplayed(self, cached, new_plays, progress=progress)
         _LIBRARY_CACHE.save(merged)
         return merged
 
@@ -344,44 +356,8 @@ def _parse_qr_batch(paths, progress=None):
     return out
 
 
-def _remerge_unplayed(cached, new_plays, progress=None):
-    """Played entries (cached + freshly parsed) followed by a freshly
-    derived unplayed set. New plays can retire a chart from the unplayed
-    set, and a cache predating this feature has no unplayed entries yet,
-    so the set is always re-derived rather than carried forward."""
-    played = [e for e in cached if not e.get('unplayed')] + new_plays
-    return played + _unplayed_entries(played, progress=progress)
-
-
-def _unplayed_entries(played, progress=None):
-    """One chart-only entry per `.qua` with no score in `played`.
-
-    A cheap post-pass: it reads the chart-hash index the replay scan
-    already built (no extra hashing) and skips every chart whose md5
-    appears on a played replay. The entry's `replay_path` is the `.qua`
-    itself, which `QuaverAdapter.parse_replay` recognizes and turns into
-    a perfect autoplay - so the rest of the pipeline never special-cases
-    it. Every Quaver chart is mania; score-ish fields zeroed."""
-    index = _CHART_INDEX_CACHE.load() or {}
-    if not index:
-        return []
-    played_hashes = {e.get('beatmap_hash') for e in played
-                     if e.get('beatmap_hash')}
-    if progress:
-        progress('quaver: collecting unplayed charts…')
-    return [_unplayed_entry(path_str, md5, mtime, meta)
-            for path_str, (mtime, _size, md5, meta) in index.items()
-            if _is_unplayed(md5, meta, played_hashes)]
-
-
-def _is_unplayed(md5, meta, played_hashes):
-    return bool(md5) and md5 not in played_hashes and meta is not None
-
-
-def _unplayed_entry(path_str, md5, mtime, meta):
+def _catalogue_entry(path_str, md5, mtime, meta):
     return {
-        'game': 'quaver',
-        'unplayed': True,
         'replay_path': path_str,
         'beatmap_hash': md5,
         'chart_path': path_str,
@@ -389,27 +365,26 @@ def _unplayed_entry(path_str, md5, mtime, meta):
         'pack': meta.get('creator', ''),
         'steps': meta.get('steps', ''),
         'keycount': meta.get('keycount'),
-        'rate': 1.0,
         'mods': 0,
-        'wife': 0.0,
-        'grade': '',
-        'judgments': {},
-        'datetime': '',
         'mtime': mtime,
-        'ssrs': {},
-        'maxcombo': 0,
     }
+
+
+def _chart_index(progress=None):
+    """`{path_str: (mtime, size, md5, meta)}` for the user's songs dir,
+    or `{}` when none is configured."""
+    songs_dir = _quaver_songs_dir()
+    if not songs_dir:
+        return {}
+    return _build_chart_index(songs_dir, progress=progress)
 
 
 def _build_chart_hash_lookup(progress=None):
     """`md5 -> (chart_path_str, meta)` for every parseable .qua in the
     user's songs dir. Empty when no songs dir is configured."""
-    songs_dir = _quaver_songs_dir()
-    if not songs_dir:
-        return {}
-    index = _build_chart_index(songs_dir, progress=progress)
     return {md5: (path_str, meta)
-            for path_str, (_m, _s, md5, meta) in index.items()
+            for path_str, (_m, _s, md5, meta)
+            in _chart_index(progress=progress).items()
             if md5 and meta is not None}
 
 

@@ -176,7 +176,13 @@ class SimEnvironment:
         # bodies and mod-action payloads that Python never sees into.
         # Raw table ops on `_host.env` no longer see anything: use
         # `_host.has_global` / `_host.global_items`.
-        self._host = LuaHost(dialect='luajit21', observe_globals=True)
+        # lua50_numeric_for: NotITG embeds Lua 5.0, where `i = i - 1` in a
+        # numeric-for body rewinds the loop (charts' remove-compensation
+        # idiom). LuaJIT ignores it, which silently skipped an element
+        # after every removal - The Government Knows lost ~160 CatCommand
+        # one-shots (stuck sections, cues that never fired).
+        self._host = LuaHost(dialect='luajit21', observe_globals=True,
+                             lua50_numeric_for=True)
         # Fan-out for global-write notifications. The host reports one
         # callback; several consumers want the signal (each compiled body
         # caching symbols), so the env owns the list.
